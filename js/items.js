@@ -1,9 +1,19 @@
 // items.js — the shape of a saved item and how to order items.
 
-export function makeItem(title, date, meta) {
-  const clean = (title || '').trim();
-  if (!clean) throw new Error('Title is required');
-  return { id: meta.id, title: clean, date, createdAt: meta.createdAt };
+export function makeItem(fields, meta) {
+  const title = (fields.title || '').trim();
+  if (!title) throw new Error('Title is required');
+  if (!fields.date) throw new Error('Date is required');
+  return {
+    id: meta.id,
+    title,
+    date: fields.date,
+    createdAt: meta.createdAt,
+    type: fields.type || 'general',
+    project: fields.project || null,
+    subject: fields.subject || null,
+    category: fields.category || null,
+  };
 }
 
 export function sortItemsByDate(items) {
