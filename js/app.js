@@ -151,3 +151,10 @@ els.next.addEventListener('click', () => {
 });
 
 render();
+
+// Register the service worker so the app can be installed to the home screen.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('service-worker.js');
+  });
+}
