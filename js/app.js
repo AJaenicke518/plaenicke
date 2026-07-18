@@ -4,13 +4,11 @@ import { toISO } from './dateparse.js';
 import { buildMonthGrid, groupItemsByDate } from './calendar.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
 import { renderPreview } from './preview.js';
-import { getPassphrase, setPassphrase } from './config.js';
 import { isVoiceSupported, dictate } from './voice.js';
 
 const els = {
   text: document.getElementById('entry-text'),
   mic: document.getElementById('mic-btn'),
-  pass: document.getElementById('passphrase'),
   date: document.getElementById('entry-date'),
   add: document.getElementById('add-btn'),
   message: document.getElementById('message'),
@@ -31,11 +29,6 @@ const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
 
 let items = loadItems();
 let viewMonth = new Date();
-
-if (els.pass) {
-  els.pass.value = getPassphrase();
-  els.pass.addEventListener('change', () => setPassphrase(els.pass.value));
-}
 
 // In-app dictation — only surface the mic where the browser supports it.
 // (On iPhone, the keyboard's own mic is always available regardless.)
@@ -88,8 +81,7 @@ async function handleAdd() {
   try {
     result = await parseViaWorker(raw);
   } catch (e) {
-    if (e.message === 'unauthorized') setMessage('Wrong or missing passphrase — check the field above.');
-    else if (e.message === 'too_long') setMessage('That was a lot at once — try adding fewer items in one go.');
+    if (e.message === 'too_long') setMessage('That was a lot at once — try adding fewer items in one go.');
     else setMessage('Smart add is unavailable — pick a date below and tap Add to add it manually.');
     return;
   }

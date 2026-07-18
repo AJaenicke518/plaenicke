@@ -40,14 +40,9 @@ export default {
       return json({ error: 'bad_json' }, 400);
     }
 
-    // Fail CLOSED: reject if the secret is unset or the passphrase is missing/wrong.
-    if (!env.APP_PASSPHRASE ||
-        typeof payload?.passphrase !== 'string' ||
-        payload.passphrase !== env.APP_PASSPHRASE) {
-      return json({ error: 'unauthorized' }, 401);
-    }
-
-    const text = typeof payload.text === 'string' ? payload.text.trim() : '';
+    // No passphrase (personal use). Abuse of this public endpoint is bounded
+    // by the monthly spend cap set in the Anthropic Console.
+    const text = payload && typeof payload.text === 'string' ? payload.text.trim() : '';
     if (!text) return json({ error: 'empty_text' }, 400);
 
     const today = ISO.test(payload.today) ? payload.today : utcTodayISO();
