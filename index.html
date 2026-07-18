@@ -18,12 +18,16 @@
   <section class="add-box">
     <input id="entry-text" type="text" autocomplete="off"
            placeholder="e.g. physics assignment due July second" />
+    <input id="passphrase" type="password" autocomplete="off" placeholder="Smart-add passphrase" />
     <div class="add-row">
       <input id="entry-date" type="date" />
       <button id="add-btn" type="button">Add</button>
     </div>
+    <p class="hint">Pick a date and tap Add to add it manually (no smart-add).</p>
     <p id="message" class="message" role="status"></p>
   </section>
+
+  <section id="preview" hidden></section>
 
   <nav class="view-toggle">
     <button id="show-list" type="button" class="active">List</button>
