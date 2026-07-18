@@ -1,0 +1,3 @@
+name = "plaenicke-worker"
+main = "src/index.js"
+compatibility_date = "2026-07-18"
