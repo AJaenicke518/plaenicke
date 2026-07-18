@@ -16,8 +16,11 @@
   </header>
 
   <section class="add-box">
-    <input id="entry-text" type="text" autocomplete="off"
-           placeholder="e.g. physics assignment due July second" />
+    <div class="text-row">
+      <input id="entry-text" type="text" autocomplete="off"
+             placeholder="e.g. physics assignment due July second" />
+      <button id="mic-btn" type="button" hidden aria-label="Dictate">&#127908;</button>
+    </div>
     <input id="passphrase" type="password" autocomplete="off" placeholder="Smart-add passphrase" />
     <div class="add-row">
       <input id="entry-date" type="date" />

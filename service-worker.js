@@ -7,7 +7,7 @@ const CACHE = 'plaenicke-v1';
 const ASSETS = [
   '.', 'index.html', 'styles.css', 'manifest.json',
   'js/app.js', 'js/storage.js', 'js/items.js', 'js/dateparse.js', 'js/calendar.js',
-  'js/config.js', 'js/smartadd.js', 'js/preview.js',
+  'js/config.js', 'js/smartadd.js', 'js/preview.js', 'js/voice.js',
   'icons/icon-192.png', 'icons/icon-512.png',
 ];
 

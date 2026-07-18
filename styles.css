@@ -36,6 +36,17 @@ header h1 { font-size: 1.6rem; margin: 16px 0; }
   border-radius: 8px;
 }
 
+.text-row { display: flex; gap: 8px; align-items: stretch; }
+.text-row #entry-text { flex: 1; }
+#mic-btn {
+  flex: 0 0 auto;
+  background: var(--card);
+  border: 1px solid var(--line);
+  font-size: 1.2rem;
+  padding: 0 14px;
+}
+#mic-btn.listening { background: var(--danger); border-color: var(--danger); }
+
 #passphrase { margin-top: 8px; }
 .hint { color: var(--muted); font-size: 0.8rem; margin: 8px 0 0; }
 

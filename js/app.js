@@ -5,9 +5,11 @@ import { buildMonthGrid, groupItemsByDate } from './calendar.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
 import { renderPreview } from './preview.js';
 import { getPassphrase, setPassphrase } from './config.js';
+import { isVoiceSupported, dictate } from './voice.js';
 
 const els = {
   text: document.getElementById('entry-text'),
+  mic: document.getElementById('mic-btn'),
   pass: document.getElementById('passphrase'),
   date: document.getElementById('entry-date'),
   add: document.getElementById('add-btn'),
@@ -33,6 +35,22 @@ let viewMonth = new Date();
 if (els.pass) {
   els.pass.value = getPassphrase();
   els.pass.addEventListener('change', () => setPassphrase(els.pass.value));
+}
+
+// In-app dictation — only surface the mic where the browser supports it.
+// (On iPhone, the keyboard's own mic is always available regardless.)
+if (els.mic && isVoiceSupported()) {
+  els.mic.hidden = false;
+  let listening = false;
+  els.mic.addEventListener('click', () => {
+    if (listening) return;
+    dictate({
+      onStart: () => { listening = true; els.mic.classList.add('listening'); setMessage('Listening — speak now.'); },
+      onResult: (text) => { els.text.value = text; },
+      onEnd: () => { listening = false; els.mic.classList.remove('listening'); if (els.text.value) setMessage('Got it — tap Add.'); },
+      onError: () => { listening = false; els.mic.classList.remove('listening'); setMessage("Didn't catch that — try again or type it."); },
+    });
+  });
 }
 
 function uid() { return 'id-' + Date.now() + '-' + Math.floor(Math.random() * 1e6); }
