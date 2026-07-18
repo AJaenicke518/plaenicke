@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <title>plaenicke</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <h1>plaenicke</h1>
+  </header>
+
+  <section class="add-box">
+    <input id="entry-text" type="text" autocomplete="off"
+           placeholder="e.g. physics assignment due July second" />
+    <div class="add-row">
+      <input id="entry-date" type="date" />
+      <button id="add-btn" type="button">Add</button>
+    </div>
+    <p id="message" class="message" role="status"></p>
+  </section>
+
+  <nav class="view-toggle">
+    <button id="show-list" type="button" class="active">List</button>
+    <button id="show-calendar" type="button">Calendar</button>
+  </nav>
+
+  <section id="list-view">
+    <ul id="item-list"></ul>
+  </section>
+
+  <section id="calendar-view" hidden>
+    <div class="cal-controls">
+      <button id="prev-month" type="button">&larr;</button>
+      <span id="calendar-label"></span>
+      <button id="next-month" type="button">&rarr;</button>
+    </div>
+    <div id="calendar-grid" class="calendar-grid"></div>
+  </section>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
