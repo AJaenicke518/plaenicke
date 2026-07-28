@@ -24,3 +24,8 @@ export function groupItemsByDate(items) {
   }
   return map;
 }
+
+export function monthCellSummary(dayItems, maxChips = 2) {
+  if (dayItems.length <= maxChips) return { chips: dayItems, more: 0 };
+  return { chips: dayItems.slice(0, maxChips), more: dayItems.length - maxChips };
+}

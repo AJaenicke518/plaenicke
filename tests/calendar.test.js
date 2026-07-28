@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildMonthGrid, groupItemsByDate } from '../js/calendar.js';
+import { buildMonthGrid, groupItemsByDate, monthCellSummary } from '../js/calendar.js';
 
 test('July 2026 grid starts on the right weekday', () => {
   // July 1 2026 is a Wednesday (index 3): three leading blanks.
@@ -31,4 +31,16 @@ test('groupItemsByDate buckets by date', () => {
   const grouped = groupItemsByDate(items);
   assert.equal(grouped['2026-07-02'].length, 2);
   assert.equal(grouped['2026-07-05'].length, 1);
+});
+
+test('monthCellSummary passes small days through with no overflow', () => {
+  const items = [{ id: 'a' }, { id: 'b' }];
+  assert.deepEqual(monthCellSummary(items), { chips: items, more: 0 });
+});
+
+test('monthCellSummary caps at maxChips and counts the rest', () => {
+  const items = [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }];
+  const s = monthCellSummary(items);
+  assert.deepEqual(s.chips.map(i => i.id), ['a', 'b']);
+  assert.equal(s.more, 2);
 });
