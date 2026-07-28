@@ -5,6 +5,7 @@ import { buildMonthGrid, groupItemsByDate, monthCellSummary } from './calendar.j
 import { startOfWeek, addDays } from './timegrid.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
 import { renderDayView } from './dayview.js';
+import { renderWeekView } from './weekview.js';
 import { renderPreview } from './preview.js';
 import { isVoiceSupported, dictate } from './voice.js';
 import { initSettings } from './settings.js';
@@ -207,6 +208,13 @@ function renderCalendar() {
   }
 }
 
+function renderWeek() {
+  const end = addDays(viewWeekStart, 6);
+  els.weekLabel.textContent = `${viewWeekStart.slice(5).replace('-', '/')} – ${end.slice(5).replace('-', '/')}`;
+  renderWeekView(els.weekGrid, viewWeekStart, groupItemsByDate(sortItemsByDate(items)), toISO(new Date()),
+    { onSelectDay: openDay });
+}
+
 let lastDayRendered = null;
 
 function renderDay() {
@@ -222,7 +230,7 @@ function renderDay() {
   lastDayRendered = viewDay;
 }
 
-function render() { renderList(); renderCalendar(); renderDay(); }
+function render() { renderList(); renderCalendar(); renderWeek(); renderDay(); }
 
 function showView(which) {
   const views = { list: els.listView, month: els.calView, week: els.weekView, day: els.dayView };
