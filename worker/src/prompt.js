@@ -14,12 +14,14 @@ const SCHEMA = {
         properties: {
           title: { type: 'string' },
           date: { type: 'string' }, // YYYY-MM-DD
+          time: { anyOf: [{ type: 'string' }, { type: 'null' }] },    // HH:MM 24h
+          endTime: { anyOf: [{ type: 'string' }, { type: 'null' }] }, // HH:MM 24h
           type: { type: 'string', enum: ['due', 'start', 'milestone', 'event'] },
           project: { anyOf: [{ type: 'string' }, { type: 'null' }] },
           subject: { anyOf: [{ type: 'string' }, { type: 'null' }] },
           category: { anyOf: [{ type: 'string', enum: ['School', 'Work', 'Personal'] }, { type: 'null' }] },
         },
-        required: ['title', 'date', 'type', 'project', 'subject', 'category'],
+        required: ['title', 'date', 'time', 'endTime', 'type', 'project', 'subject', 'category'],
       },
     },
   },
@@ -30,6 +32,8 @@ const SYSTEM = `You extract calendar items from a person's note.
 Return one or more items. For each item set:
 - title: a short label (do not include the date words).
 - date: resolve to YYYY-MM-DD using the provided "today". If a plain month/day has already passed this year, use next year.
+- time: the start time as 24-hour "HH:MM" when the note states one (e.g. "at 2pm" -> "14:00"); null when no time is mentioned. Never invent a time. A deadline "at midnight" means "23:59".
+- endTime: the end as "HH:MM" when stated or clearly implied ("2 to 3pm", "meeting 9-10:30"); null otherwise. Only set endTime when time is set.
 - type: "due" for a hard deadline (words like due, submit, deadline); "start" for begin/start-working reminders; "milestone" for a draft/checkpoint/partial step; "event" for anything else (meetings, appointments, personal to-dos).
 - project: the overarching thing several items belong to (e.g. "Physics paper"); null if none. Items from ONE note that clearly belong together share the same project.
 - subject: the topic/course (e.g. "Physics"); null if unknown.

@@ -17,3 +17,18 @@ test('injects the raw text and today into the user message', () => {
   assert.ok(userText.includes('call mom tomorrow'));
   assert.ok(userText.includes('2026-05-01'));
 });
+
+test('schema includes nullable time and endTime on items', () => {
+  const body = buildRequestBody('x', '2026-05-01');
+  const props = body.output_config.format.schema.properties.items.items.properties;
+  assert.ok(props.time, 'schema has time');
+  assert.ok(props.endTime, 'schema has endTime');
+  const req = body.output_config.format.schema.properties.items.items.required;
+  assert.ok(req.includes('time') && req.includes('endTime'));
+});
+
+test('system prompt teaches time extraction without inventing times', () => {
+  const body = buildRequestBody('x', '2026-05-01');
+  assert.ok(body.system.includes('time'));
+  assert.ok(/never (guess|invent)/i.test(body.system));
+});
