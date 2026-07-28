@@ -97,7 +97,7 @@ test('sortItemsByDate: same date puts untimed first, then timed by time', () => 
 - [ ] **Step 2: Run tests to verify the new ones fail**
 
 Run: `npm test`
-Expected: the 4 new tests FAIL (time fields undefined / no throw / wrong order); all pre-existing tests still PASS.
+Expected: the 4 new tests FAIL (time fields undefined / no throw / wrong order); all pre-existing tests still PASS. **Note:** after Step 3's implementation lands, the existing fixture test `makeItem builds an item with type and tags, trims title` will ALSO fail (strict `deepEqual` rejects the new keys) — Step 3 updates it. Do not "fix" anything else to make it pass.
 
 - [ ] **Step 3: Implement** — in `js/items.js`, add before `makeItem`:
 
@@ -128,6 +128,8 @@ Add `time` and `endTime` to the returned object (after `date`). In `sortItemsByD
 ```
 
 (String compare is safe: zero-padded `"HH:MM"` sorts chronologically.)
+
+Finally, update the existing fixture test `makeItem builds an item with type and tags, trims title` in `tests/items.test.js`: its `assert.deepEqual` expected object must gain `time: null, endTime: null` (node's strict deepEqual fails on extra own properties).
 
 - [ ] **Step 4: Run tests to verify all pass**
 
@@ -228,6 +230,11 @@ test('layoutDayBlocks: no endTime pins a default-duration chip', () => {
   assert.equal(rows[0].pinned, true);
   assert.equal(rows[0].endMin, 570); // 09:00 + 30min default
 });
+
+test('layoutDayBlocks clamps a late pin to midnight', () => {
+  const rows = layoutDayBlocks([{ id: 'a', time: '23:59' }]); // "due at midnight" case
+  assert.equal(rows[0].endMin, 1440);
+});
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -282,7 +289,7 @@ export function layoutDayBlocks(timedItems, defaultDurationMin = 30) {
     .map((item) => {
       const startMin = minutesOf(item.time);
       const pinned = !item.endTime;
-      const endMin = pinned ? startMin + defaultDurationMin : minutesOf(item.endTime);
+      const endMin = Math.min(pinned ? startMin + defaultDurationMin : minutesOf(item.endTime), 1440);
       return { item, startMin, endMin, pinned, col: 0, cols: 1 };
     })
     .sort((a, b) => a.startMin - b.startMin || a.endMin - b.endMin);
@@ -512,7 +519,7 @@ git commit -m "feat: smart-add extracts start and end times"
 - Modify: `index.html` (head only), `manifest.json`
 
 **Interfaces:**
-- Produces: `resolveTheme(setting, systemPrefersDark)` → `'light'|'dark'` (`'auto'`/unknown follow the flag); `THEME_KEY = 'plaenicke.theme'`. Theme applies via `document.documentElement.dataset.theme = 'dark'` (absent = light). All later tasks style exclusively with the CSS variables defined here, and use these class names for new UI: `.cal-more`, `.day-grid`, `.day-hours`, `.day-hour`, `.day-canvas`, `.day-block`, `.day-pin`, `.other-tasks`, `.week-grid`, `.week-col`, `.week-head`, `.week-block`, `.settings-panel`, `.settings-backdrop`, `.settings-section`, `.seg`, `.seg button`, `.icon-btn`, `.time-line`.
+- Produces: `resolveTheme(setting, systemPrefersDark)` → `'light'|'dark'` (`'auto'`/unknown follow the flag); `THEME_KEY = 'plaenicke.theme'`. Theme applies via `document.documentElement.dataset.theme = 'dark'` (absent = light). All later tasks style exclusively with the CSS variables defined here, and use these class names for new UI: `.cal-more`, `.day-grid`, `.day-hours`, `.day-hour`, `.day-canvas`, `.day-block`, `.day-pin`, `.other-tasks`, `.week-grid`, `.week-col`, `.week-head`, `.week-block`, `.week-more`, `.day-del`, `.day-other-list`, `.preview-fields`, `.settings-panel`, `.settings-backdrop`, `.settings-section`, `.seg`, `.seg button`, `.icon-btn`, `.time-line`.
 
 - [ ] **Step 1: Write the failing tests** — create `tests/theme.test.js`:
 
@@ -579,6 +586,9 @@ export function resolveTheme(setting, systemPrefersDark) {
   --type-milestone: #c8963e;
   --type-event: #4a7a54;
   --type-general: #8a8070;
+  --on-type: #fffdf8;               /* text on type-colored blocks */
+  --shade: rgba(0, 0, 0, 0.25);     /* subtle overlay accents */
+  --scrim: rgba(0, 0, 0, 0.35);     /* modal backdrop */
   --serif: Georgia, 'Times New Roman', serif;
 }
 
@@ -600,6 +610,7 @@ export function resolveTheme(setting, systemPrefersDark) {
   --type-milestone: #e0b356;
   --type-event: #63b57e;
   --type-general: #7d828c;
+  --on-type: #14161a;
 }
 
 /* ---------- base ---------- */
@@ -697,9 +708,9 @@ button {
 }
 .view-toggle button.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 
-/* ---------- list ---------- */
-#item-list { list-style: none; padding: 0; margin: 0; }
-#item-list li {
+/* ---------- list (shared with day view's "Other tasks") ---------- */
+#item-list, .day-other-list { list-style: none; padding: 0; margin: 0; }
+#item-list li, .day-other-list li {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -740,7 +751,7 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 .cal-day { font-weight: 700; margin-bottom: 2px; }
 .cal-item {
   background: var(--type, var(--type-general));
-  color: var(--accent-ink);
+  color: var(--on-type);
   border-radius: 3px;
   padding: 1px 4px;
   margin-top: 2px;
@@ -748,7 +759,6 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-[data-theme="dark"] .cal-item { color: #14161a; }
 .cal-more { color: var(--muted); margin-top: 2px; }
 
 /* ---------- week ---------- */
@@ -764,6 +774,7 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 .week-head { text-align: center; font-size: 0.7rem; color: var(--muted); margin-bottom: 4px; }
 .week-head b { display: block; font-size: 0.85rem; color: var(--ink); }
 .week-block { height: 8px; border-radius: 2px; margin-top: 3px; background: var(--type, var(--type-general)); }
+.week-more { font-size: 0.65rem; color: var(--muted); text-align: center; margin-top: 3px; }
 
 /* ---------- day ---------- */
 .day-grid {
@@ -788,21 +799,31 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 .day-block, .day-pin {
   position: absolute;
   border-radius: 4px;
-  padding: 2px 6px;
+  padding: 2px 18px 2px 6px; /* right padding clears the × button */
   font-size: 0.75rem;
   overflow: hidden;
-  color: #fffdf8;
+  color: var(--on-type);
   background: var(--type, var(--type-general));
 }
-[data-theme="dark"] .day-block, [data-theme="dark"] .day-pin { color: #14161a; }
-.day-pin { border-left: 3px solid rgba(0,0,0,0.25); }
+.day-pin { border-left: 3px solid var(--shade); }
+.day-del {
+  position: absolute;
+  top: 0;
+  right: 0;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 2px 5px;
+}
 .other-tasks { margin-top: 12px; }
 .other-tasks h3 { font-size: 0.9rem; font-style: italic; margin: 0 0 6px; }
 
 /* ---------- settings ---------- */
 .settings-backdrop {
   position: fixed; inset: 0;
-  background: rgba(0,0,0,0.35);
+  background: var(--scrim);
   display: flex; align-items: flex-start; justify-content: center;
   padding-top: 15vh;
   z-index: 10;
@@ -841,12 +862,16 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 .tag { font-size: 0.7rem; background: var(--chip-bg); color: var(--chip-ink); border-radius: 999px; padding: 1px 8px; }
 
 #preview { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 14px; margin-bottom: 16px; }
-.preview-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; margin-bottom: 8px; }
+/* Stacked per-item card: title full-width, then date/type/times wrapping below.
+   Five controls in one row measure ~112px too wide for an iPhone — don't regress this. */
+.preview-row { border-bottom: 1px solid var(--line); padding-bottom: 8px; margin-bottom: 10px; }
 .preview-row input, .preview-row select {
   padding: 8px; border: 1px solid var(--line); border-radius: 6px;
   font-size: 0.9rem; font-family: inherit; background: var(--card); color: var(--ink);
 }
-.preview-times { display: flex; gap: 6px; }
+.preview-row input[type="text"] { width: 100%; margin-bottom: 6px; }
+.preview-fields { display: flex; flex-wrap: wrap; gap: 6px; }
+.preview-fields input, .preview-fields select { min-width: 0; flex: 1 1 90px; }
 .preview-actions { display: flex; gap: 8px; margin-top: 10px; }
 .preview-actions .cancel { background: var(--card); color: var(--ink); border: 1px solid var(--line); }
 
@@ -864,6 +889,7 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 ```html
   <script>
     // Apply the saved theme before first paint so dark mode doesn't flash light.
+    // Mirrors resolveTheme() in js/theme.js — that module is the spec; keep in sync.
     (function () {
       var t = null;
       try { t = localStorage.getItem('plaenicke.theme'); } catch (e) {}
@@ -876,7 +902,7 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 
 - [ ] **Step 7: Manifest colors** — in `manifest.json` set `"background_color": "#f4f1ea"` and `"theme_color": "#f4f1ea"`.
 
-- [ ] **Step 8: Verify** — `npm test` (still green), `node --check js/theme.js`, then open the app locally (`python3 -m http.server` or any static server) and confirm: paper look on all existing views, and with `localStorage.setItem('plaenicke.theme','dark')` + reload, the dark look everywhere. (Settings UI comes next task; this manual toggle is just for verification.)
+- [ ] **Step 8: Verify** — `npm test` (still green), `node --check js/theme.js`, then open the app locally (`python3 -m http.server` or any static server) and confirm: paper look on all existing views, and with `localStorage.setItem('plaenicke.theme','dark')` + reload, the dark look everywhere. (Settings UI comes next task; this manual toggle is just for verification.) **Known interim state:** busy month cells clip silently — the fixed `height: 72px` lands here but `+N more` isn't wired until Task 8. Expected; do not fix it in this task.
 
 - [ ] **Step 9: Commit**
 
@@ -941,11 +967,20 @@ export function initSettings({ button, host }) {
   window.matchMedia('(prefers-color-scheme: dark)')
     .addEventListener('change', () => applyTheme(getSetting()));
 
-  function close() { host.innerHTML = ''; }
+  function onKey(e) { if (e.key === 'Escape') close(); }
+
+  function close() {
+    host.innerHTML = '';
+    document.body.style.overflow = '';
+    document.removeEventListener('keydown', onKey);
+  }
 
   function open() {
     const backdrop = document.createElement('div');
     backdrop.className = 'settings-backdrop';
+    backdrop.setAttribute('role', 'dialog');
+    backdrop.setAttribute('aria-modal', 'true');
+    backdrop.setAttribute('aria-label', 'Settings');
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
 
     const panel = document.createElement('div');
@@ -989,9 +1024,15 @@ export function initSettings({ button, host }) {
     panel.append(appearance, calendars);
     backdrop.appendChild(panel);
     host.appendChild(backdrop);
+    document.body.style.overflow = 'hidden'; // no scrolling behind the modal (iOS)
+    document.addEventListener('keydown', onKey);
   }
 
   button.addEventListener('click', () => { host.childElementCount ? close() : open(); });
+
+  // The inline pre-paint script already applied a theme from its own copy of this
+  // logic; re-apply through resolveTheme() so js/theme.js is the source of truth.
+  applyTheme(getSetting());
 }
 ```
 
@@ -1060,7 +1101,7 @@ Rename the existing `#show-calendar` references: the calendar section stays `id=
   </section>
 ```
 
-- [ ] **Step 2: app.js state + toggle** — update `els` (replace `showCal` with the four buttons + new nodes):
+- [ ] **Step 2: app.js state + toggle** — update `els`: **delete** the existing `showList` and `showCal` entries and add this block (pasting without deleting them first creates duplicate object keys):
 
 ```js
   showList: document.getElementById('show-list'),
@@ -1084,14 +1125,12 @@ Add imports `import { startOfWeek, addDays } from './timegrid.js';` and state:
 ```js
 let viewDay = toISO(new Date());
 let viewWeekStart = startOfWeek(viewDay);
-let currentView = 'list';
 ```
 
 Replace `showView` with:
 
 ```js
 function showView(which) {
-  currentView = which;
   const views = { list: els.listView, month: els.calView, week: els.weekView, day: els.dayView };
   const buttons = { list: els.showList, month: els.showMonth, week: els.showWeek, day: els.showDay };
   for (const [name, el] of Object.entries(views)) el.hidden = name !== which;
@@ -1117,7 +1156,13 @@ els.nextWeek.addEventListener('click', () => { viewWeekStart = addDays(viewWeekS
 
 (`render()` calls `renderList()`, `renderCalendar()`, and — after Tasks 9–10 — the day/week renders. Rendering hidden views is fine at this size; keep it simple.)
 
-- [ ] **Step 3: Fixed month cells** — in `renderCalendar`, add import `monthCellSummary` from `./calendar.js`, and replace the per-cell item loop with:
+- [ ] **Step 3: Fixed month cells** — in `renderCalendar`, add import `monthCellSummary` from `./calendar.js`. Change the grouping line to feed SORTED items (once cells truncate to 2 chips, which two you see becomes load-bearing — it must be the day's first items by time, not localStorage insertion order):
+
+```js
+  const byDate = groupItemsByDate(sortItemsByDate(items));
+```
+
+Then replace the per-cell item loop with:
 
 ```js
       const { chips, more } = monthCellSummary(byDate[cell.date] || []);
@@ -1155,7 +1200,7 @@ git commit -m "feat: four-way view toggle and fixed-height month cells"
 
 **Interfaces:**
 - Consumes: `bucketDayItems`, `layoutDayBlocks`, `formatTime`, `formatTimeRange`, `minutesOf` (Task 2); `.day-*` / `.other-tasks` CSS (Task 6); `viewDay` state + `els.dayBody`/`els.dayLabel` (Task 8).
-- Produces: `renderDayView(container, dateISO, dayItems, { onDelete })` — renders hour grid + Other tasks into `container`. Hour row height 48px ⇒ `top = startMin / 60 * 48`, `height = (endMin - startMin) / 60 * 48`.
+- Produces: `renderDayView(container, dateISO, dayItems, { onDelete, autoScroll = true })` — renders hour grid + Other tasks into `container`; scrolls to 07:00 only when `autoScroll` is true (the caller passes false on re-renders of the same day so deleting an item doesn't yank the scroll position). Hour row height 48px ⇒ `top = startMin / 60 * 48`, `height = (endMin - startMin) / 60 * 48`.
 
 - [ ] **Step 1: Implement `js/dayview.js`**
 
@@ -1166,7 +1211,7 @@ import { bucketDayItems, layoutDayBlocks, formatTime, formatTimeRange } from './
 const HOUR_PX = 48;
 const SCROLL_TO_HOUR = 7; // grid shows 24h; auto-scroll to 07:00
 
-export function renderDayView(container, dateISO, dayItems, { onDelete }) {
+export function renderDayView(container, dateISO, dayItems, { onDelete, autoScroll = true }) {
   container.innerHTML = '';
   const { untimed, timed } = bucketDayItems(dayItems);
 
@@ -1201,16 +1246,18 @@ export function renderDayView(container, dateISO, dayItems, { onDelete }) {
       ? formatTimeRange(row.item.time, row.item.endTime)
       : formatTime(row.item.time);
     el.textContent = `${when} ${row.item.title}`;
-    el.title = 'Tap to delete';
-    el.addEventListener('click', () => {
-      if (confirm(`Delete "${row.item.title}"?`)) onDelete(row.item.id);
-    });
+    const del = document.createElement('button');
+    del.className = 'day-del';
+    del.textContent = '×';
+    del.setAttribute('aria-label', `Delete ${row.item.title}`);
+    del.addEventListener('click', () => onDelete(row.item.id));
+    el.appendChild(del);
     canvas.appendChild(el);
   }
 
   grid.append(hours, canvas);
   container.appendChild(grid);
-  grid.scrollTop = SCROLL_TO_HOUR * HOUR_PX;
+  if (autoScroll) grid.scrollTop = SCROLL_TO_HOUR * HOUR_PX;
 
   if (untimed.length > 0) {
     const other = document.createElement('div');
@@ -1219,7 +1266,7 @@ export function renderDayView(container, dateISO, dayItems, { onDelete }) {
     h3.textContent = 'Other tasks';
     other.appendChild(h3);
     const ul = document.createElement('ul');
-    ul.id = 'item-list'; // reuse list styling
+    ul.className = 'day-other-list'; // shares the list styling via Task 6's selectors
     for (const it of untimed) {
       const li = document.createElement('li');
       li.classList.add('type-' + (it.type || 'general'));
@@ -1238,7 +1285,7 @@ export function renderDayView(container, dateISO, dayItems, { onDelete }) {
 }
 ```
 
-*(Note: reusing `id="item-list"` would duplicate an ID — use a class instead: set `ul.className = 'day-other-list'` and add `#item-list, .day-other-list { list-style: none; padding: 0; margin: 0; }` plus matching `li` rules to `styles.css` by extending the existing selectors: change `#item-list li` selectors to `#item-list li, .day-other-list li`, and `#item-list { … }` to `#item-list, .day-other-list { … }`.)*
+(The `.day-other-list` selectors already exist in Task 6's stylesheet — no CSS work in this task.)
 
 - [ ] **Step 2: Wire in `js/app.js`** — imports:
 
@@ -1249,13 +1296,19 @@ import { renderDayView } from './dayview.js';
 Add a `renderDay` function and call it from `render()`:
 
 ```js
+let lastDayRendered = null;
+
 function renderDay() {
   const [y, m, d] = viewDay.split('-').map(Number);
   const label = new Date(y, m - 1, d).toLocaleDateString('en-US',
     { weekday: 'short', month: 'short', day: 'numeric' });
   els.dayLabel.textContent = label;
-  const byDate = groupItemsByDate(items);
-  renderDayView(els.dayBody, viewDay, byDate[viewDay] || [], { onDelete: deleteItem });
+  const byDate = groupItemsByDate(sortItemsByDate(items));
+  renderDayView(els.dayBody, viewDay, byDate[viewDay] || [], {
+    onDelete: deleteItem,
+    autoScroll: viewDay !== lastDayRendered, // keep scroll position on same-day re-renders
+  });
+  lastDayRendered = viewDay;
 }
 
 function render() { renderList(); renderCalendar(); renderDay(); }
@@ -1286,6 +1339,7 @@ git commit -m "feat: day view — hour grid with Other tasks below"
 
 ```js
 // weekview.js — 7 squeezed columns of colored blocks; the "shape of your week".
+// Columns cap at 8 blocks + a "+N" marker so one busy day can't stretch the row.
 import { addDays } from './timegrid.js';
 
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -1306,10 +1360,17 @@ export function renderWeekView(container, weekStartISO, itemsByDate, todayISO, {
     head.appendChild(num);
     col.appendChild(head);
 
-    for (const it of itemsByDate[dateISO] || []) {
+    const dayItems = itemsByDate[dateISO] || [];
+    for (const it of dayItems.slice(0, 8)) {
       const block = document.createElement('div');
       block.className = 'week-block type-' + (it.type || 'general');
       col.appendChild(block);
+    }
+    if (dayItems.length > 8) {
+      const more = document.createElement('div');
+      more.className = 'week-more';
+      more.textContent = `+${dayItems.length - 8}`;
+      col.appendChild(more);
     }
 
     col.addEventListener('click', () => onSelectDay(dateISO));
@@ -1330,7 +1391,7 @@ Add and call from `render()`:
 function renderWeek() {
   const end = addDays(viewWeekStart, 6);
   els.weekLabel.textContent = `${viewWeekStart.slice(5).replace('-', '/')} – ${end.slice(5).replace('-', '/')}`;
-  renderWeekView(els.weekGrid, viewWeekStart, groupItemsByDate(items), toISO(new Date()),
+  renderWeekView(els.weekGrid, viewWeekStart, groupItemsByDate(sortItemsByDate(items)), toISO(new Date()),
     { onSelectDay: openDay });
 }
 
@@ -1368,6 +1429,12 @@ git commit -m "feat: week view — seven columns of colored blocks"
     </div>
 ```
 
+Also update the stale hint below it:
+
+```html
+    <p class="hint">Pick a date (and optional time) to add manually — smart add handles plain sentences.</p>
+```
+
 - [ ] **Step 2: app.js manual add** — add `time: document.getElementById('entry-time'), end: document.getElementById('entry-end'),` to `els`. Show the end input once a start time is chosen:
 
 ```js
@@ -1391,38 +1458,60 @@ function handleManualAdd() {
 
 (`<input type="time">` yields `"HH:MM"`, matching `makeItem`; an end-before-start still throws and is shown via the message line.)
 
-- [ ] **Step 3: List rows show times** — in `renderList`, after the `info` span:
+Also guard the smart-add path in `handleAdd` — a typed time with no date would be silently discarded otherwise. Add at the top of `handleAdd`, before the `els.date.value` check:
 
 ```js
+  if (els.time.value && !els.date.value) {
+    setMessage('Add a date to use that time, or clear the time to use smart add.');
+    return;
+  }
+```
+
+- [ ] **Step 3: List rows show times** — in `renderList`, the time line must sit BETWEEN the title and the tag chips. Replace the two existing `main.appendChild(...)` calls so the order is info → time-line → tags:
+
+```js
+    main.appendChild(info);
     if (it.time) {
       const t = document.createElement('div');
       t.className = 'time-line';
       t.textContent = it.endTime ? formatTimeRange(it.time, it.endTime) : formatTime(it.time);
       main.appendChild(t);
     }
+    main.appendChild(tagChips(it));
 ```
 
 with `formatTime, formatTimeRange` added to the `./timegrid.js` import in `app.js`.
 
-- [ ] **Step 4: preview.js time editing** — inside the row builder in `renderPreview`, after the `date` input:
+- [ ] **Step 4: preview.js — time editing + non-destructive confirm.** Two changes.
+
+**(a) Stacked fields.** Inside the row builder in `renderPreview`, the title input stays full-width on its own line; date, type, and the two time inputs go in a wrapping `.preview-fields` row (Task 6's CSS stacks these — five controls in one grid row overflow an iPhone by ~112px). Replace `row.append(title, date, type)` with:
 
 ```js
-    const times = document.createElement('div');
-    times.className = 'preview-times';
+    const fields = document.createElement('div');
+    fields.className = 'preview-fields';
     const time = document.createElement('input');
     time.type = 'time';
     time.value = it.time || '';
-    time.addEventListener('input', () => { draft[i].time = time.value || null; if (!time.value) { end.value = ''; draft[i].endTime = null; } });
     const end = document.createElement('input');
     end.type = 'time';
     end.value = it.endTime || '';
+    time.addEventListener('input', () => { draft[i].time = time.value || null; if (!time.value) { end.value = ''; draft[i].endTime = null; } });
     end.addEventListener('input', () => { draft[i].endTime = end.value || null; });
-    times.append(time, end);
+    fields.append(date, type, time, end);
+    row.append(title, fields);
 ```
 
-and change `row.append(title, date, type)` to `row.append(title, date, type, times)` — update `.preview-row` grid in `styles.css` to `grid-template-columns: 1fr auto;` with the times div wrapping (already set in Task 6's CSS; adjust if cramped on iPhone width).
+**(b) Don't destroy the card before validation can fail.** The current Add-all handler clears the container BEFORE calling `onConfirm` — now that rows can hold invalid times (end before start), a validation error would throw away all the user's edits. Change the contract: `onConfirm` returns `false` to keep the card open. In `preview.js`:
 
-Also guard confirm: in `app.js` `addItems`, wrap the `makeItem` call so one bad row doesn't half-add (validation errors surface via message):
+```js
+  add.addEventListener('click', () => {
+    if (onConfirm(draft) === false) return; // validation failed — keep edits on screen
+    container.hidden = true;
+    container.innerHTML = '';
+  });
+```
+
+And in `app.js`, make `addItems` all-or-nothing (every `makeItem` runs before anything is pushed):
 
 ```js
 function addItems(list) {
@@ -1433,7 +1522,21 @@ function addItems(list) {
 }
 ```
 
-(All-or-nothing: `makeItem` throws before anything is pushed. Callers already catch/message.) Wrap the smart-add `direct` branch and preview `onConfirm` in try/catch showing `e.message`, same as manual add.
+then update the preview call site in `handleAdd`:
+
+```js
+  renderPreview(els.preview, result.items, {
+    onConfirm: (confirmed) => {
+      try { addItems(confirmed); } catch (e) { setMessage(e.message); return false; }
+      els.text.value = '';
+      setMessage('Added.');
+      return true;
+    },
+    onCancel: () => setMessage('Cancelled.'),
+  });
+```
+
+Wrap the smart-add `direct` branch in the same try/catch (showing `e.message`), like manual add.
 
 - [ ] **Step 5: Verify** — `npm test` green; `node --check js/app.js js/preview.js`; manual: add "Dentist" with date + 14:00–15:00 → list shows "2:00–3:00 PM", day view shows the block; preview flow (multi-item smart add) shows editable time boxes; end-before-start shows the validation message and adds nothing.
 
@@ -1498,7 +1601,7 @@ git commit -m "feat: precache V3 modules, bump SW cache"
 git push
 ```
 
-- [ ] **Step 6: Live click-through checklist** (with Alex, on the deployed site or his iPhone):
+- [ ] **Step 6: Live click-through checklist** (with Alex, on the deployed site or his iPhone). Note for an already-installed home-screen app: iOS snapshots the manifest at install, so the new cream splash/background colors only appear after **deleting and re-adding the home screen icon** — include that step.
   - Paper theme everywhere; ⚙ → Dark switches instantly, persists after reload; Auto follows the phone.
   - Smart add "dentist at 2pm tomorrow" → item lands with 2:00 PM; day view shows it.
   - Month: busy day shows `+N more`, tap opens Day. Week: colored blocks, tap opens Day. Day: blocks/pins/Other tasks, arrows navigate.
@@ -1510,5 +1613,14 @@ git push
 ## Self-review notes (done at plan time)
 
 - Spec coverage: data model (T1), timegrid math (T2), month fix (T3+T8), worker (T4+T5), theme+manifest (T6), settings (T7), views (T8–T10), add flows incl. preview + list time display (T11), SW/deploy/E2E (T12). "Out of scope" items have no tasks — correct.
-- The `#item-list` ID-reuse bug in dayview was caught and fixed inline (`.day-other-list` class + shared selectors).
 - Type consistency: `time`/`endTime` names identical across items.js, normalize.js, prompt schema, preview drafts, and view renderers; `openDay` defined in T8, consumed in T9/T10.
+
+## DA-review amendments (2026-07-28)
+
+This plan was devil's-advocate reviewed before execution; the code blocks above already incorporate all fixes. Highlights an executor should not "re-fix":
+- T1 updates the existing `deepEqual` fixture (strict equality rejects the new keys) — expected, not collateral damage.
+- Day view intentionally shows ~9 hours at 48px/hour (spec amended; readability over range).
+- Day-block delete = small `×` button, no confirm. Week columns cap at 8 blocks + `+N`. Preview rows are stacked cards. All four were explicit product decisions by Alex.
+- Month/week/day grouping uses `groupItemsByDate(sortItemsByDate(items))` so truncation shows the day's first items by time, not insertion order.
+- Preview teardown happens only after `onConfirm` returns non-false — do not move the clearing back before the callback.
+- Accepted trade-off (do not "improve"): cluster-wide column widths in `layoutDayBlocks` (one long block halves the whole cluster's width) — spec asked for simple slicing.

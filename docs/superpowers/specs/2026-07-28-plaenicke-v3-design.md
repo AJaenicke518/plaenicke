@@ -47,15 +47,16 @@ View toggle: **List | Month | Week | Day** (one visible at a time).
 ### Week (new)
 - 7 equal columns Sun–Sat, always all visible, no horizontal scroll, no hour axis.
 - Per column: weekday + date number header (today highlighted), then stacked small colored blocks — one per item, color = type, no titles. Timed and untimed items both appear as blocks.
+- Columns cap at 8 blocks; busier days show a small "+N" marker below (keeps all 7 columns uniform height — same reasoning as the month-cell fix).
 - Tap a column → Day view for that date. Prev/next arrows step one week.
 
 ### Day (new)
-- Vertical hour grid; ~07:00–23:00 visible initially, scrollable across the full 24h.
+- Vertical hour grid over the full 24h, auto-scrolled to 07:00. At a readable 48px/hour row height, roughly 9 hours are visible at once (readability beats fitting the whole evening on one screen — DA review decision 2026-07-28).
 - Timed item with `endTime` → block spanning start→end. Timed item without `endTime` → chip pinned at its start hour.
 - Overlap: overlapping items share the width side-by-side (n overlapping → 1/n width each; simple slicing, no packing algorithm).
 - Bottom section **"Other tasks"**: the day's untimed items as a plain list.
 - Prev/next arrows step one day; header like "Wed, Aug 5".
-- Items with visible titles (list, day) can be deleted, as today.
+- Items with visible titles (list, day) can be deleted, as today. Day-view blocks carry a small × delete button (no confirm popup) so stray taps on a block do nothing.
 
 ### Logic modules
 - `js/calendar.js` keeps `buildMonthGrid` / `groupItemsByDate`; gains month-cell overflow counting if needed.
@@ -71,7 +72,7 @@ View toggle: **List | Month | Week | Day** (one visible at a time).
 
 ### Manual add
 - Optional time input next to the date; an end-time input appears once a start time is set. Empty = untimed. Behavior otherwise identical to today.
-- Preview/confirm rows (`js/preview.js`) show and allow editing the time fields.
+- Preview/confirm rows (`js/preview.js`) show and allow editing the time fields. On phone width each preview item renders as a stacked card (title on top, date/type/times wrapping beneath) — five controls in one row don't fit an iPhone.
 
 ## Theme, settings & rehaul
 
