@@ -5,6 +5,7 @@ import { buildMonthGrid, groupItemsByDate } from './calendar.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
 import { renderPreview } from './preview.js';
 import { isVoiceSupported, dictate } from './voice.js';
+import { initSettings } from './settings.js';
 
 const els = {
   text: document.getElementById('entry-text'),
@@ -22,6 +23,8 @@ const els = {
   next: document.getElementById('next-month'),
   calLabel: document.getElementById('calendar-label'),
   calGrid: document.getElementById('calendar-grid'),
+  settingsBtn: document.getElementById('settings-btn'),
+  settingsHost: document.getElementById('settings-host'),
 };
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
@@ -45,6 +48,8 @@ if (els.mic && isVoiceSupported()) {
     });
   });
 }
+
+initSettings({ button: els.settingsBtn, host: els.settingsHost });
 
 function uid() { return 'id-' + Date.now() + '-' + Math.floor(Math.random() * 1e6); }
 function setMessage(t) { els.message.textContent = t || ''; }
