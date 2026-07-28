@@ -4,6 +4,7 @@ import { toISO } from './dateparse.js';
 import { buildMonthGrid, groupItemsByDate, monthCellSummary } from './calendar.js';
 import { startOfWeek, addDays } from './timegrid.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
+import { renderDayView } from './dayview.js';
 import { renderPreview } from './preview.js';
 import { isVoiceSupported, dictate } from './voice.js';
 import { initSettings } from './settings.js';
@@ -206,7 +207,22 @@ function renderCalendar() {
   }
 }
 
-function render() { renderList(); renderCalendar(); }
+let lastDayRendered = null;
+
+function renderDay() {
+  const [y, m, d] = viewDay.split('-').map(Number);
+  const label = new Date(y, m - 1, d).toLocaleDateString('en-US',
+    { weekday: 'short', month: 'short', day: 'numeric' });
+  els.dayLabel.textContent = label;
+  const byDate = groupItemsByDate(sortItemsByDate(items));
+  renderDayView(els.dayBody, viewDay, byDate[viewDay] || [], {
+    onDelete: deleteItem,
+    autoScroll: viewDay !== lastDayRendered, // keep scroll position on same-day re-renders
+  });
+  lastDayRendered = viewDay;
+}
+
+function render() { renderList(); renderCalendar(); renderDay(); }
 
 function showView(which) {
   const views = { list: els.listView, month: els.calView, week: els.weekView, day: els.dayView };
