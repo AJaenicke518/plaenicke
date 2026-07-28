@@ -33,7 +33,18 @@ export function renderPreview(container, items, { onConfirm, onCancel }) {
     }
     type.addEventListener('change', () => { draft[i].type = type.value; });
 
-    row.append(title, date, type);
+    const fields = document.createElement('div');
+    fields.className = 'preview-fields';
+    const time = document.createElement('input');
+    time.type = 'time';
+    time.value = it.time || '';
+    const end = document.createElement('input');
+    end.type = 'time';
+    end.value = it.endTime || '';
+    time.addEventListener('input', () => { draft[i].time = time.value || null; if (!time.value) { end.value = ''; draft[i].endTime = null; } });
+    end.addEventListener('input', () => { draft[i].endTime = end.value || null; });
+    fields.append(date, type, time, end);
+    row.append(title, fields);
     container.appendChild(row);
   });
 
@@ -41,7 +52,11 @@ export function renderPreview(container, items, { onConfirm, onCancel }) {
   actions.className = 'preview-actions';
   const add = document.createElement('button');
   add.textContent = 'Add all';
-  add.addEventListener('click', () => { container.hidden = true; container.innerHTML = ''; onConfirm(draft); });
+  add.addEventListener('click', () => {
+    if (onConfirm(draft) === false) return; // validation failed — keep edits on screen
+    container.hidden = true;
+    container.innerHTML = '';
+  });
   const cancel = document.createElement('button');
   cancel.className = 'cancel';
   cancel.textContent = 'Cancel';

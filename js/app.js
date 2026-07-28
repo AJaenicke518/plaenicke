@@ -2,7 +2,7 @@ import { loadItems, saveItems } from './storage.js';
 import { makeItem, sortItemsByDate } from './items.js';
 import { toISO } from './dateparse.js';
 import { buildMonthGrid, groupItemsByDate, monthCellSummary } from './calendar.js';
-import { startOfWeek, addDays } from './timegrid.js';
+import { startOfWeek, addDays, formatTime, formatTimeRange } from './timegrid.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
 import { renderDayView } from './dayview.js';
 import { renderWeekView } from './weekview.js';
@@ -14,6 +14,8 @@ const els = {
   text: document.getElementById('entry-text'),
   mic: document.getElementById('mic-btn'),
   date: document.getElementById('entry-date'),
+  time: document.getElementById('entry-time'),
+  end: document.getElementById('entry-end'),
   add: document.getElementById('add-btn'),
   message: document.getElementById('message'),
   preview: document.getElementById('preview'),
@@ -72,9 +74,8 @@ function uid() { return 'id-' + Date.now() + '-' + Math.floor(Math.random() * 1e
 function setMessage(t) { els.message.textContent = t || ''; }
 
 function addItems(list) {
-  for (const it of list) {
-    items.push(makeItem(it, { id: uid(), createdAt: toISO(new Date()) }));
-  }
+  const made = list.map((it) => makeItem(it, { id: uid(), createdAt: toISO(new Date()) }));
+  items.push(...made);
   saveItems(items);
   render();
 }
@@ -84,13 +85,18 @@ function handleManualAdd() {
   const title = els.text.value.trim();
   const date = els.date.value;
   if (!title || !date) { setMessage('For manual add, type a title and pick a date.'); return; }
-  addItems([{ title, date, type: 'general' }]);
-  els.text.value = '';
-  els.date.value = '';
+  try {
+    addItems([{ title, date, type: 'general', time: els.time.value || null, endTime: els.end.value || null }]);
+  } catch (e) { setMessage(e.message); return; }
+  els.text.value = ''; els.date.value = ''; els.time.value = ''; els.end.value = ''; els.end.hidden = true;
   setMessage('Added.');
 }
 
 async function handleAdd() {
+  if (els.time.value && !els.date.value) {
+    setMessage('Add a date to use that time, or clear the time to use smart add.');
+    return;
+  }
   // If a date is picked, treat Add as an explicit MANUAL add — no Worker needed.
   // This is the always-available fallback (works offline and on iPhone).
   if (els.date.value) { handleManualAdd(); return; }
@@ -111,14 +117,21 @@ async function handleAdd() {
   const flow = decideFlow(result);
   if (flow === 'empty') { setMessage("I couldn't find anything to add — try rephrasing."); return; }
   if (flow === 'direct') {
-    addItems(result.items);
+    try {
+      addItems(result.items);
+    } catch (e) { setMessage(e.message); return; }
     els.text.value = '';
     setMessage('Added.');
     return;
   }
   setMessage('Review the items below.');
   renderPreview(els.preview, result.items, {
-    onConfirm: (confirmed) => { addItems(confirmed); els.text.value = ''; setMessage('Added.'); },
+    onConfirm: (confirmed) => {
+      try { addItems(confirmed); } catch (e) { setMessage(e.message); return false; }
+      els.text.value = '';
+      setMessage('Added.');
+      return true;
+    },
     onCancel: () => setMessage('Cancelled.'),
   });
 }
@@ -155,6 +168,12 @@ function renderList() {
     const info = document.createElement('span');
     info.textContent = `${it.date} — ${it.title}`;
     main.appendChild(info);
+    if (it.time) {
+      const t = document.createElement('div');
+      t.className = 'time-line';
+      t.textContent = it.endTime ? formatTimeRange(it.time, it.endTime) : formatTime(it.time);
+      main.appendChild(t);
+    }
     main.appendChild(tagChips(it));
     const del = document.createElement('button');
     del.className = 'delete';
@@ -246,6 +265,7 @@ function openDay(dateISO) {
   showView('day');
 }
 
+els.time.addEventListener('input', () => { els.end.hidden = !els.time.value; if (!els.time.value) els.end.value = ''; });
 els.add.addEventListener('click', handleAdd);
 els.text.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleAdd(); });
 els.showList.addEventListener('click', () => showView('list'));
