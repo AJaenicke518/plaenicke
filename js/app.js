@@ -1,7 +1,8 @@
 import { loadItems, saveItems } from './storage.js';
 import { makeItem, sortItemsByDate } from './items.js';
 import { toISO } from './dateparse.js';
-import { buildMonthGrid, groupItemsByDate } from './calendar.js';
+import { buildMonthGrid, groupItemsByDate, monthCellSummary } from './calendar.js';
+import { startOfWeek, addDays } from './timegrid.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
 import { renderPreview } from './preview.js';
 import { isVoiceSupported, dictate } from './voice.js';
@@ -14,8 +15,6 @@ const els = {
   add: document.getElementById('add-btn'),
   message: document.getElementById('message'),
   preview: document.getElementById('preview'),
-  showList: document.getElementById('show-list'),
-  showCal: document.getElementById('show-calendar'),
   listView: document.getElementById('list-view'),
   list: document.getElementById('item-list'),
   calView: document.getElementById('calendar-view'),
@@ -25,6 +24,20 @@ const els = {
   calGrid: document.getElementById('calendar-grid'),
   settingsBtn: document.getElementById('settings-btn'),
   settingsHost: document.getElementById('settings-host'),
+  showList: document.getElementById('show-list'),
+  showMonth: document.getElementById('show-month'),
+  showWeek: document.getElementById('show-week'),
+  showDay: document.getElementById('show-day'),
+  weekView: document.getElementById('week-view'),
+  weekLabel: document.getElementById('week-label'),
+  weekGrid: document.getElementById('week-grid'),
+  prevWeek: document.getElementById('prev-week'),
+  nextWeek: document.getElementById('next-week'),
+  dayView: document.getElementById('day-view'),
+  dayLabel: document.getElementById('day-label'),
+  dayBody: document.getElementById('day-body'),
+  prevDay: document.getElementById('prev-day'),
+  nextDay: document.getElementById('next-day'),
 };
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
@@ -32,6 +45,8 @@ const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
 
 let items = loadItems();
 let viewMonth = new Date();
+let viewDay = toISO(new Date());
+let viewWeekStart = startOfWeek(viewDay);
 
 // In-app dictation — only surface the mic where the browser supports it.
 // (On iPhone, the keyboard's own mic is always available regardless.)
@@ -153,7 +168,7 @@ function renderCalendar() {
   const month = viewMonth.getMonth();
   els.calLabel.textContent = `${MONTH_NAMES[month]} ${year}`;
   const weeks = buildMonthGrid(year, month);
-  const byDate = groupItemsByDate(items);
+  const byDate = groupItemsByDate(sortItemsByDate(items));
   const todayISO = toISO(new Date());
   els.calGrid.innerHTML = '';
   for (const d of ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']) {
@@ -172,12 +187,20 @@ function renderCalendar() {
       num.className = 'cal-day';
       num.textContent = cell.day;
       div.appendChild(num);
-      for (const it of byDate[cell.date] || []) {
+      const { chips, more } = monthCellSummary(byDate[cell.date] || []);
+      for (const it of chips) {
         const chip = document.createElement('div');
         chip.className = 'cal-item type-' + (it.type || 'general');
         chip.textContent = it.title;
         div.appendChild(chip);
       }
+      if (more > 0) {
+        const m = document.createElement('div');
+        m.className = 'cal-more';
+        m.textContent = `+${more} more`;
+        div.appendChild(m);
+      }
+      div.addEventListener('click', () => openDay(cell.date));
       els.calGrid.appendChild(div);
     }
   }
@@ -186,19 +209,31 @@ function renderCalendar() {
 function render() { renderList(); renderCalendar(); }
 
 function showView(which) {
-  const isList = which === 'list';
-  els.listView.hidden = !isList;
-  els.calView.hidden = isList;
-  els.showList.classList.toggle('active', isList);
-  els.showCal.classList.toggle('active', !isList);
+  const views = { list: els.listView, month: els.calView, week: els.weekView, day: els.dayView };
+  const buttons = { list: els.showList, month: els.showMonth, week: els.showWeek, day: els.showDay };
+  for (const [name, el] of Object.entries(views)) el.hidden = name !== which;
+  for (const [name, b] of Object.entries(buttons)) b.classList.toggle('active', name === which);
+  render();
+}
+
+function openDay(dateISO) {
+  viewDay = dateISO;
+  viewWeekStart = startOfWeek(dateISO);
+  showView('day');
 }
 
 els.add.addEventListener('click', handleAdd);
 els.text.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleAdd(); });
 els.showList.addEventListener('click', () => showView('list'));
-els.showCal.addEventListener('click', () => showView('calendar'));
+els.showMonth.addEventListener('click', () => showView('month'));
+els.showWeek.addEventListener('click', () => showView('week'));
+els.showDay.addEventListener('click', () => showView('day'));
 els.prev.addEventListener('click', () => { viewMonth = new Date(viewMonth.getFullYear(), viewMonth.getMonth() - 1, 1); renderCalendar(); });
 els.next.addEventListener('click', () => { viewMonth = new Date(viewMonth.getFullYear(), viewMonth.getMonth() + 1, 1); renderCalendar(); });
+els.prevDay.addEventListener('click', () => { viewDay = addDays(viewDay, -1); render(); });
+els.nextDay.addEventListener('click', () => { viewDay = addDays(viewDay, 1); render(); });
+els.prevWeek.addEventListener('click', () => { viewWeekStart = addDays(viewWeekStart, -7); render(); });
+els.nextWeek.addEventListener('click', () => { viewWeekStart = addDays(viewWeekStart, 7); render(); });
 
 render();
 

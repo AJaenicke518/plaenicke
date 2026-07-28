@@ -45,7 +45,9 @@
 
   <nav class="view-toggle">
     <button id="show-list" type="button" class="active">List</button>
-    <button id="show-calendar" type="button">Calendar</button>
+    <button id="show-month" type="button">Month</button>
+    <button id="show-week" type="button">Week</button>
+    <button id="show-day" type="button">Day</button>
   </nav>
 
   <section id="list-view">
@@ -59,6 +61,24 @@
       <button id="next-month" type="button">&rarr;</button>
     </div>
     <div id="calendar-grid" class="calendar-grid"></div>
+  </section>
+
+  <section id="week-view" hidden>
+    <div class="cal-controls">
+      <button id="prev-week" type="button">&larr;</button>
+      <span id="week-label"></span>
+      <button id="next-week" type="button">&rarr;</button>
+    </div>
+    <div id="week-grid" class="week-grid"></div>
+  </section>
+
+  <section id="day-view" hidden>
+    <div class="cal-controls">
+      <button id="prev-day" type="button">&larr;</button>
+      <span id="day-label"></span>
+      <button id="next-day" type="button">&rarr;</button>
+    </div>
+    <div id="day-body"></div>
   </section>
 
   <div id="settings-host"></div>
