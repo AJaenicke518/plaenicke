@@ -115,6 +115,20 @@ test('parseProperty handles VALUE=DATE all-day properties', () => {
   });
 });
 
+test('parseProperty upper-cases param keys (RFC 5545 param names are case-insensitive), values untouched', () => {
+  const result = parseProperty('DTSTART;tzid=America/New_York:20260901T090000');
+  assert.deepEqual(result, {
+    name: 'DTSTART',
+    params: { TZID: 'America/New_York' }, // key upper-cased; value case preserved
+    value: '20260901T090000',
+  });
+});
+
+test('parseProperty upper-cases a mixed-case param key too (not just all-lowercase)', () => {
+  const result = parseProperty('DTSTART;TzId=America/New_York:20260901T090000');
+  assert.deepEqual(result.params, { TZID: 'America/New_York' });
+});
+
 test('unescapeText converts escaped commas', () => {
   assert.equal(unescapeText('Doe\\, John'), 'Doe, John');
 });
@@ -327,4 +341,63 @@ test('icsDateToLocal: TZID form on a DST fall-back ambiguous wall clock uses the
   // reproduce the same wall clock (first/DST occurrence), not silently
   // shift to the other (EST) occurrence.
   assert.deepEqual(result, { date: '2026-11-01', time: '01:30' });
+});
+
+// ---------------------------------------------------------------------------
+// Case-insensitive param names (review fix): RFC 5545 param names are
+// case-insensitive; a producer writing "tzid=" or "value=" must convert
+// exactly the same as the canonical uppercase form — parseProperty upper-
+// cases keys so every consumer (icsDateToLocal included) benefits.
+// ---------------------------------------------------------------------------
+
+test('icsDateToLocal: a lowercase "tzid" param still converts correctly (not silently treated as floating)', () => {
+  const { params, value } = parseProperty('DTSTART;tzid=America/New_York:20260901T090000');
+  const result = icsDateToLocal(value, params, 'America/Los_Angeles');
+  // 09:00 EDT (America/New_York) = 13:00 UTC = 06:00 PDT (America/Los_Angeles).
+  assert.deepEqual(result, { date: '2026-09-01', time: '06:00' });
+});
+
+test('icsDateToLocal: a lowercase "value=DATE" param still detected as all-day', () => {
+  const { params, value } = parseProperty('DTSTART;value=DATE:20250101');
+  const result = icsDateToLocal(value, params, 'America/New_York');
+  assert.deepEqual(result, { date: '2025-01-01', time: null });
+});
+
+// ---------------------------------------------------------------------------
+// Range validation (review fix): Date.UTC silently normalizes out-of-range
+// components (month 13 rolls into the next year, day 32 rolls into the next
+// month, etc.) — a malformed ICS value must throw, not silently produce a
+// different, wrong-but-valid-looking date.
+// ---------------------------------------------------------------------------
+
+test('icsDateToLocal: throws on an out-of-range month (13) in a DATE value', () => {
+  assert.throws(() => icsDateToLocal('20261301', {}, 'America/New_York'));
+});
+
+test('icsDateToLocal: throws on an out-of-range month (00) in a DATE value', () => {
+  assert.throws(() => icsDateToLocal('20260001', {}, 'America/New_York'));
+});
+
+test('icsDateToLocal: throws on an out-of-range day (32) in a DATE-TIME value', () => {
+  assert.throws(() => icsDateToLocal('20260932T090000', {}, 'America/New_York'));
+});
+
+test('icsDateToLocal: throws on an out-of-range day (00) in a DATE value', () => {
+  assert.throws(() => icsDateToLocal('20260900', {}, 'America/New_York'));
+});
+
+test('icsDateToLocal: throws on an out-of-range hour (24) in a DATE-TIME value', () => {
+  assert.throws(() => icsDateToLocal('20260901T240000', {}, 'America/New_York'));
+});
+
+test('icsDateToLocal: throws on an out-of-range minute (60) in a DATE-TIME value', () => {
+  assert.throws(() => icsDateToLocal('20260901T096000', {}, 'America/New_York'));
+});
+
+test('icsDateToLocal: throws on an out-of-range second (60) in a DATE-TIME value', () => {
+  assert.throws(() => icsDateToLocal('20260901T090060', {}, 'America/New_York'));
+});
+
+test('icsDateToLocal: valid boundary values (month 12, day 31, hour 23, minute 59, second 59) do not throw', () => {
+  assert.doesNotThrow(() => icsDateToLocal('20261231T235959', {}, 'America/New_York'));
 });
