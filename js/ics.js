@@ -44,7 +44,10 @@ export function parseProperty(line) {
     i++; // skip ';'
     let keyEnd = i;
     while (keyEnd < len && line[keyEnd] !== '=') keyEnd++;
-    const key = line.slice(i, keyEnd);
+    // Param names are case-insensitive per RFC 5545 §3.2 — upper-case the key
+    // so every consumer can match against a canonical form (e.g. "tzid=" and
+    // "TZID=" both land in params.TZID). Param *values* are left untouched.
+    const key = line.slice(i, keyEnd).toUpperCase();
     i = keyEnd + 1; // skip '='
 
     let value;
@@ -154,15 +157,31 @@ export function resolveTzid(raw) {
   throw new UnknownTz(raw);
 }
 
+// Intl.DateTimeFormat construction is expensive (~11x the cost of reusing an
+// instance, measured) and zonedWallClockToInstant's offset probing calls
+// formatZonedParts several times per lookup — multiplied per RRULE
+// occurrence in Task 4, this shows up on mobile Safari. Cache one formatter
+// per tzid; formatToParts is pure given an instant, so reuse across
+// different instants is safe.
+const zonedFormatterCache = new Map();
+function getZonedFormatter(tzid) {
+  let dtf = zonedFormatterCache.get(tzid);
+  if (!dtf) {
+    dtf = new Intl.DateTimeFormat('en-US', {
+      timeZone: tzid,
+      hourCycle: 'h23',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+    zonedFormatterCache.set(tzid, dtf);
+  }
+  return dtf;
+}
+
 // formatZonedParts: instant (epoch ms) -> wall-clock fields in tzid. This is
 // the *easy* direction (the one Intl.DateTimeFormat gives directly).
 function formatZonedParts(instantMs, tzid) {
-  const dtf = new Intl.DateTimeFormat('en-US', {
-    timeZone: tzid,
-    hourCycle: 'h23',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-  });
+  const dtf = getZonedFormatter(tzid);
   const map = {};
   for (const p of dtf.formatToParts(instantMs)) map[p.type] = p.value;
   let hour = parseInt(map.hour, 10);
@@ -249,6 +268,16 @@ export function zonedWallClockToInstant(parts, tzid) {
 function pad2(n) { return String(n).padStart(2, '0'); }
 function pad4(n) { return String(n).padStart(4, '0'); }
 
+// assertInRange: reject an out-of-range date/time component instead of
+// letting it silently roll over (Date.UTC(2026, 12, 1) doesn't throw for
+// month 13 — it normalizes to 2027-01-01). A malformed ICS value must fail
+// loudly, not enter the data model as a different, wrong-but-valid date.
+function assertInRange(n, min, max, label, raw) {
+  if (n < min || n > max) {
+    throw new Error(`Invalid ${label} in ICS date value "${raw}": ${n} (expected ${min}-${max})`);
+  }
+}
+
 // icsDateToLocal: parse a raw DTSTART/DTEND value (already split into value
 // + params by parseProperty) into { date: 'YYYY-MM-DD', time: 'HH:MM' | null }
 // wall-clock fields in targetTz — the shape js/items.js already uses.
@@ -264,12 +293,19 @@ export function icsDateToLocal(value, params, targetTz) {
     const m = /^(\d{4})(\d{2})(\d{2})$/.exec(value);
     if (!m) throw new Error(`Invalid DATE value: ${value}`);
     const [, y, mo, d] = m;
+    assertInRange(Number(mo), 1, 12, 'month', value);
+    assertInRange(Number(d), 1, 31, 'day', value);
     return { date: `${y}-${mo}-${d}`, time: null };
   }
 
   const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z)?$/.exec(value);
   if (!m) throw new Error(`Invalid DATE-TIME value: ${value}`);
   const [, y, mo, d, h, mi, s, zFlag] = m;
+  assertInRange(Number(mo), 1, 12, 'month', value);
+  assertInRange(Number(d), 1, 31, 'day', value);
+  assertInRange(Number(h), 0, 23, 'hour', value);
+  assertInRange(Number(mi), 0, 59, 'minute', value);
+  assertInRange(Number(s), 0, 59, 'second', value);
   const parts = {
     year: Number(y), month: Number(mo), day: Number(d),
     hour: Number(h), minute: Number(mi), second: Number(s),
