@@ -139,3 +139,19 @@ test('unescapeText handles a mix of escapes in a SUMMARY-like string', () => {
 test('unescapeText leaves unescaped text untouched', () => {
   assert.equal(unescapeText('Plain text, no escapes; here'), 'Plain text, no escapes; here');
 });
+
+test('unescapeText: an escaped backslash followed by a literal n is backslash+n, not a newline', () => {
+  // Regression pin for if-chain ordering: input is TWO literal backslashes
+  // followed by a literal 'n' (String.raw makes the actual characters
+  // explicit: \, \, n). A left-to-right single pass must consume the pair
+  // as one \\->\  escape first, then treat the trailing 'n' as an ordinary
+  // character — NOT interpret the second backslash + 'n' as a \n newline
+  // escape. If the if-chain were ever reordered to check \n/\N before \\,
+  // or the pair-consumption were dropped, this would wrongly collapse to
+  // a newline.
+  const input = String.raw`foo\\nbar`; // foo, \, \, n, b, a, r
+  const expected = String.raw`foo\nbar`; // foo, \, n, b, a, r (literal, no newline)
+  const result = unescapeText(input);
+  assert.equal(result, expected);
+  assert.equal(result.includes('\n'), false);
+});
