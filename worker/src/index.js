@@ -2,6 +2,7 @@
 // and the shared passphrase (env.APP_PASSPHRASE), both set as Worker secrets.
 import { buildRequestBody } from './prompt.js';
 import { normalizeClaudeJson } from './normalize.js';
+import { handleFeed } from './feed.js';
 
 const ALLOWED_ORIGIN = 'https://ajaenicke518.github.io';
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
@@ -30,6 +31,11 @@ function utcTodayISO() {
 
 export default {
   async fetch(request, env) {
+    const { pathname } = new URL(request.url);
+    if (pathname === '/feed') {
+      return handleFeed(request, { fetchImpl: fetch, cache: caches.default });
+    }
+
     if (request.method === 'OPTIONS') return new Response(null, { headers: cors() });
     if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
 
