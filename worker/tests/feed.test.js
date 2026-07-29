@@ -12,18 +12,50 @@ function req(url, { origin = ALLOWED_ORIGIN, headers = {}, method = 'GET' } = {}
 }
 
 // A fake Response-alike object mirroring what a Workers fetch() redirect: 'manual'
-// response looks like: status, ok, headers.get(), text().
-function fakeResponse({ status = 200, headers = {}, body = ICS_BODY, throwOnText = false } = {}) {
+// response looks like: status, ok, headers.get(), body (a ReadableStream — the
+// real thing the streaming byte-cap reads from, never .text()).
+function fakeResponse({ status = 200, headers = {}, body = ICS_BODY, throwOnRead = false } = {}) {
   const h = new Map(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
+  const bytes = new TextEncoder().encode(body);
+  const stream = new ReadableStream({
+    pull(controller) {
+      if (throwOnRead) {
+        controller.error(new Error('body read failed'));
+        return;
+      }
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
   return {
     status,
     ok: status >= 200 && status < 300,
     headers: { get: (name) => (h.has(name.toLowerCase()) ? h.get(name.toLowerCase()) : null) },
-    text: async () => {
-      if (throwOnText) throw new Error('body read failed');
-      return body;
-    },
+    body: stream,
   };
+}
+
+// Builds a ReadableStream fed from discrete pre-made chunks, instrumented so
+// a test can assert how many chunks were actually pulled before the reader
+// gave up (proves early bail-out) and whether cancel() was called.
+function countingChunkedStream(chunks) {
+  const remaining = [...chunks];
+  let pulls = 0;
+  let cancelled = false;
+  const stream = new ReadableStream({
+    pull(controller) {
+      pulls += 1;
+      if (remaining.length === 0) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(remaining.shift());
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  return { stream, getPulls: () => pulls, wasCancelled: () => cancelled };
 }
 
 // A fake injected cache mirroring the Workers Cache API surface we use.
@@ -92,6 +124,84 @@ test('missing url param -> 400 bad_url', async () => {
   assert.equal(res.status, 400);
   const body = await res.json();
   assert.equal(body.error, 'bad_url');
+});
+
+// Table-driven private-host coverage (security review round 1, Critical 1 +
+// Important 5). Two separate lists on purpose: the first is hosts the naive
+// v4-only/`fe80:`-literal check previously let through as 200; the second is
+// hosts the WHATWG URL parser itself normalizes into a canonical private form
+// (proving we rely on that normalization rather than re-parsing hostnames).
+const PRIVATE_HOST_BYPASSES = [
+  'https://[::ffff:127.0.0.1]/feed.ics', // IPv4-mapped IPv6 loopback
+  'https://localhost./feed.ics', // trailing dot (FQDN root) on localhost
+  'https://0.0.0.0/feed.ics', // 0.0.0.0/8
+  'https://0/feed.ics', // single-component form of 0.0.0.0
+  'https://[fd00::1]/feed.ics', // unique-local fc00::/7
+  'https://[febf::1]/feed.ics', // top of link-local fe80::/10 range
+  'https://[::]/feed.ics', // unspecified address
+  'https://api.localhost/feed.ics', // RFC 6761 .localhost, not just .local
+];
+const NORMALIZED_AWAY_PRIVATE_FORMS = [
+  'https://0177.0.0.1/feed.ics', // octal
+  'https://2130706433/feed.ics', // decimal
+  'https://0x7f000001/feed.ics', // hex
+  'https://127.1/feed.ics', // short dotted form
+  'https://192.168.001.001/feed.ics', // zero-padded octets
+  'https://LOCALHOST/feed.ics', // case
+  'https://127.0.0.1./feed.ics', // trailing dot on an IPv4 literal
+];
+const LEGITIMATE_PUBLIC_HOSTS = [
+  'https://cal.example/feed.ics',
+  'https://p01-calendars.icloud.com/published/2/original',
+];
+
+test('private/loopback/link-local host bypasses are all rejected as bad_url', async () => {
+  for (const target of PRIVATE_HOST_BYPASSES) {
+    const request = req('https://worker.example/feed?url=' + encodeURIComponent(target));
+    const res = await handleFeed(request, {
+      fetchImpl: async () => { throw new Error(`must not fetch: ${target}`); },
+      cache: fakeCache(),
+    });
+    assert.equal(res.status, 400, `expected 400 bad_url for ${target}, got ${res.status}`);
+    const body = await res.json();
+    assert.equal(body.error, 'bad_url', `expected bad_url for ${target}`);
+  }
+});
+
+test('hostnames the URL parser normalizes to a private form are still rejected', async () => {
+  for (const target of NORMALIZED_AWAY_PRIVATE_FORMS) {
+    const request = req('https://worker.example/feed?url=' + encodeURIComponent(target));
+    const res = await handleFeed(request, {
+      fetchImpl: async () => { throw new Error(`must not fetch: ${target}`); },
+      cache: fakeCache(),
+    });
+    assert.equal(res.status, 400, `expected 400 bad_url for ${target}, got ${res.status}`);
+    const body = await res.json();
+    assert.equal(body.error, 'bad_url', `expected bad_url for ${target}`);
+  }
+});
+
+test('legitimate public hosts pass the private-host check', async () => {
+  for (const target of LEGITIMATE_PUBLIC_HOSTS) {
+    const fetchImpl = async () => fakeResponse({ status: 200 });
+    const request = req('https://worker.example/feed?url=' + encodeURIComponent(target));
+    const res = await handleFeed(request, { fetchImpl, cache: fakeCache() });
+    assert.equal(res.status, 200, `expected 200 for ${target}, got ${res.status}`);
+  }
+});
+
+// Addresses that are near the fe80::/10 and fc00::/7 boundaries but must NOT
+// be flagged — regression coverage for the "exactly 4 hex digits" boundary
+// (a value like 0x0FE8 renders as "fe8" with the leading zero stripped, and
+// must not be confused with the true range member "fe80").
+test('addresses adjacent to the link-local/unique-local ranges are not false-positived', async () => {
+  const nonPrivateHosts = ['https://[fe7f::1]/feed.ics', 'https://[fec0::1]/feed.ics'];
+  for (const target of nonPrivateHosts) {
+    const fetchImpl = async () => fakeResponse({ status: 200 });
+    const request = req('https://worker.example/feed?url=' + encodeURIComponent(target));
+    const res = await handleFeed(request, { fetchImpl, cache: fakeCache() });
+    assert.equal(res.status, 200, `expected 200 (not private) for ${target}, got ${res.status}`);
+  }
 });
 
 test('https -> https redirect is followed (iCloud shape)', async () => {
@@ -168,6 +278,50 @@ test('oversized body (>1MB) -> 413 feed_too_large', async () => {
   assert.equal(body.error, 'feed_too_large');
 });
 
+test('a Content-Length header over the cap is rejected before any body is read', async () => {
+  const fetchImpl = async () => fakeResponse({
+    status: 200,
+    headers: { 'content-length': String(1024 * 1024 + 1) },
+    body: ICS_BODY,
+  });
+  const request = req('https://worker.example/feed?url=' + encodeURIComponent('https://cal.example/feed.ics'));
+  const res = await handleFeed(request, { fetchImpl, cache: fakeCache() });
+  assert.equal(res.status, 413);
+  const body = await res.json();
+  assert.equal(body.error, 'feed_too_large');
+});
+
+test('a chunked (no Content-Length) body over 1MB is rejected without buffering the whole stream', async () => {
+  // 5 chunks of 256KB = 1.25MB, over the 1MB cap. No content-length header,
+  // simulating a real chunked-transfer-encoding upstream response.
+  const chunk = new Uint8Array(256 * 1024).fill(65);
+  const totalChunks = 8;
+  const chunks = Array.from({ length: totalChunks }, () => chunk.slice());
+  const { stream, getPulls, wasCancelled } = countingChunkedStream(chunks);
+  const fetchImpl = async () => ({
+    status: 200,
+    ok: true,
+    headers: { get: () => null },
+    body: stream,
+  });
+  const request = req('https://worker.example/feed?url=' + encodeURIComponent('https://cal.example/feed.ics'));
+  const res = await handleFeed(request, { fetchImpl, cache: fakeCache() });
+  assert.equal(res.status, 413);
+  const body = await res.json();
+  assert.equal(body.error, 'feed_too_large');
+  assert.ok(getPulls() < totalChunks, `expected an early bail-out, only pulled ${getPulls()} of ${totalChunks} chunks`);
+  assert.ok(wasCancelled(), 'must cancel the underlying stream once the cap is exceeded');
+});
+
+test('a body-stream read failure mid-transfer -> 502 upstream_error', async () => {
+  const fetchImpl = async () => fakeResponse({ status: 200, throwOnRead: true });
+  const request = req('https://worker.example/feed?url=' + encodeURIComponent('https://cal.example/feed.ics'));
+  const res = await handleFeed(request, { fetchImpl, cache: fakeCache() });
+  assert.equal(res.status, 502);
+  const body = await res.json();
+  assert.equal(body.error, 'upstream_error');
+});
+
 test('HTML body (not an ICS feed) -> 422 not_an_ics_feed', async () => {
   const fetchImpl = async () => fakeResponse({ status: 200, body: '<html><body>not a calendar</body></html>' });
   const request = req('https://worker.example/feed?url=' + encodeURIComponent('https://cal.example/feed.ics'));
@@ -200,6 +354,42 @@ test('upstream non-2xx (e.g. 404) -> 502 upstream_error', async () => {
   assert.equal(res.status, 502);
   const body = await res.json();
   assert.equal(body.error, 'upstream_error');
+});
+
+test('a hop that never resolves is aborted by the per-hop deadline -> 502 upstream_unreachable', async () => {
+  // fetchImpl respects the injected AbortSignal the way a real fetch would:
+  // it never resolves on its own, only rejects when the signal aborts. The
+  // timeout-signal factory is injected too, firing on a microtask instead of
+  // a real timer — deterministic, and avoids relying on AbortSignal.timeout's
+  // (unref'd) internal timer ever getting a turn in a synthetic test where
+  // nothing else keeps the event loop alive.
+  const fetchImpl = (url, options) => new Promise((resolve, reject) => {
+    options.signal.addEventListener('abort', () => {
+      reject(new DOMException('The operation was aborted.', 'AbortError'));
+    });
+  });
+  const createTimeoutSignal = () => {
+    const controller = new AbortController();
+    queueMicrotask(() => controller.abort());
+    return controller.signal;
+  };
+  const request = req('https://worker.example/feed?url=' + encodeURIComponent('https://cal.example/feed.ics'));
+  const res = await handleFeed(request, { fetchImpl, cache: fakeCache(), createTimeoutSignal });
+  assert.equal(res.status, 502);
+  const body = await res.json();
+  assert.equal(body.error, 'upstream_unreachable');
+});
+
+test('a signal is passed to fetchImpl on every hop', async () => {
+  const seenSignals = [];
+  const fetchImpl = async (url, options) => {
+    seenSignals.push(options.signal);
+    return fakeResponse({ status: 200 });
+  };
+  const request = req('https://worker.example/feed?url=' + encodeURIComponent('https://cal.example/feed.ics'));
+  await handleFeed(request, { fetchImpl, cache: fakeCache() });
+  assert.equal(seenSignals.length, 1);
+  assert.ok(seenSignals[0] instanceof AbortSignal);
 });
 
 test('happy path -> 200, CORS headers, and writes the cache', async () => {
@@ -240,6 +430,32 @@ test('Cache-Control: no-cache on the request bypasses cache read AND write', asy
   assert.equal(cache.store.get(target).status, 200);
   const bodyAfter = await cache.store.get(target).clone().text().catch(() => 'STALE');
   assert.equal(bodyAfter, 'STALE', 'must not overwrite the cache while no-cache is set');
+});
+
+test('a throwing cache.match does not break the request — falls through to a live fetch', async () => {
+  const cache = {
+    match: async () => { throw new Error('cache backend unavailable'); },
+    put: async () => { throw new Error('cache backend unavailable'); },
+  };
+  const fetchImpl = async () => fakeResponse({ status: 200 });
+  const request = req('https://worker.example/feed?url=' + encodeURIComponent('https://cal.example/feed.ics'));
+  const res = await handleFeed(request, { fetchImpl, cache });
+  assert.equal(res.status, 200);
+  const body = await res.text();
+  assert.equal(body, ICS_BODY);
+});
+
+test('a throwing cache.put does not break a successful response', async () => {
+  const cache = {
+    match: async () => undefined,
+    put: async () => { throw new Error('cache backend unavailable'); },
+  };
+  const fetchImpl = async () => fakeResponse({ status: 200 });
+  const request = req('https://worker.example/feed?url=' + encodeURIComponent('https://cal.example/feed.ics'));
+  const res = await handleFeed(request, { fetchImpl, cache });
+  assert.equal(res.status, 200);
+  const body = await res.text();
+  assert.equal(body, ICS_BODY);
 });
 
 test('Origin allowlist is checked before the method check (POST from bad origin -> 403, not 405)', async () => {
