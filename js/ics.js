@@ -837,18 +837,32 @@ export function applyExdates(occurrences, exdates, zone) {
   if (!exdates || exdates.length === 0) return occurrences;
   const excludedDates = new Set();
   const excludedInstants = new Set();
+  const excludedDateTimeDates = new Set();
+  const dateStrOf = (f) => `${pad4(f.year)}-${pad2(f.month)}-${pad2(f.day)}`;
   for (const ex of exdates) {
     const fields = parseIcsDateValue(ex.value, ex.tzid ? { TZID: ex.tzid } : {});
     if (fields.form === 'DATE') {
-      excludedDates.add(`${pad4(fields.year)}-${pad2(fields.month)}-${pad2(fields.day)}`);
+      excludedDates.add(dateStrOf(fields));
     } else {
       excludedInstants.add(instantOfWallClock(fields, zoneOfForm(fields, zone)));
+      // RFC 5545 requires EXDATE's value type to match DTSTART's, but real
+      // producers write a midnight DATE-TIME EXDATE against an all-day series.
+      // An all-day occurrence has no instant to match, so such an EXDATE would
+      // otherwise be a silent no-op — the one failure mode that is worse than
+      // either alternative. Chosen reading: for all-day occurrences only, a
+      // DATE-TIME EXDATE cancels the day it names, taken from the value as
+      // written (an all-day series has no zone to convert into). Timed series
+      // keep exact instant matching below, so an EXDATE naming a different time
+      // on a timed series still cancels nothing.
+      excludedDateTimeDates.add(dateStrOf(fields));
     }
   }
   return occurrences.filter((occ) => {
     if (excludedDates.has(occ.dateStr)) return false;
-    if (occ.instantMs !== null && occ.instantMs !== undefined && excludedInstants.has(occ.instantMs)) return false;
-    return true;
+    if (occ.instantMs === null || occ.instantMs === undefined) {
+      return !excludedDateTimeDates.has(occ.dateStr);
+    }
+    return !excludedInstants.has(occ.instantMs);
   });
 }
 
@@ -953,6 +967,15 @@ function buildParsedEvent(raw) {
   // event is skipped with a reason instead.
   if (raw.hasRdate) throw new SkipEvent('unsupported_rdate');
 
+  // A RECURRENCE-ID event replaces exactly one instance of its master, so it
+  // has no recurrence of its own. An RRULE on one is only meaningful together
+  // with RANGE=THISANDFUTURE (already skipped below) — expanding it at the
+  // matched slot would fabricate instances the calendar does not contain, so
+  // it is skipped with its own reason instead.
+  if (raw.recurrenceId && raw.rrule !== null) {
+    throw new SkipEvent('unsupported_recurrence_id_rrule');
+  }
+
   let rrule = null;
   if (raw.rrule !== null) {
     parseRRule(raw.rrule); // throws UnsupportedRRule with its own reason
@@ -1031,6 +1054,18 @@ export function parseICS(text) {
     }
     if (!raw || nested > 0) continue;
     collectProperty(raw, prop, params, value);
+  }
+
+  // A VEVENT still open at end of input was never terminated — a body cut
+  // mid-feed, or one closed only by END:VCALENDAR. Its remaining properties are
+  // unknown, so it cannot be trusted as an event; it is counted as skipped
+  // rather than vanishing from both lists.
+  if (raw) {
+    skipped.push({
+      uid: raw.uid || null,
+      summary: raw.summary === null ? '' : raw.summary,
+      reason: 'unterminated_vevent',
+    });
   }
 
   return { events, skipped };
