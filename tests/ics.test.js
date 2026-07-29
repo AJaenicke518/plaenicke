@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { unfoldLines, parseProperty, unescapeText } from '../js/ics.js';
+import {
+  unfoldLines, parseProperty, unescapeText,
+  zonedWallClockToInstant, resolveTzid, icsDateToLocal, UnknownTz,
+} from '../js/ics.js';
 
 test('unfoldLines joins a folded SUMMARY spanning 3 lines (CRLF, single-space continuation)', () => {
   // Two leading spaces on each continuation: one is real content, the other is
@@ -154,4 +157,174 @@ test('unescapeText: an escaped backslash followed by a literal n is backslash+n,
   const result = unescapeText(input);
   assert.equal(result, expected);
   assert.equal(result.includes('\n'), false);
+});
+
+// ---------------------------------------------------------------------------
+// resolveTzid
+// ---------------------------------------------------------------------------
+
+test('resolveTzid passes through a valid IANA zone name unchanged', () => {
+  assert.equal(resolveTzid('America/New_York'), 'America/New_York');
+  assert.equal(resolveTzid('Australia/Sydney'), 'Australia/Sydney');
+  assert.equal(resolveTzid('UTC'), 'UTC');
+});
+
+test('resolveTzid maps a Windows TZID via the CLDR windowsZones table', () => {
+  assert.equal(resolveTzid('W. Europe Standard Time'), 'Europe/Berlin');
+  assert.equal(resolveTzid('Pacific Standard Time'), 'America/Los_Angeles');
+  assert.equal(resolveTzid('AUS Eastern Standard Time'), 'Australia/Sydney');
+});
+
+test('resolveTzid throws UnknownTz for a garbage TZID (zero fallback, no guessing)', () => {
+  assert.throws(() => resolveTzid('Not/AZone'), UnknownTz);
+  assert.throws(() => resolveTzid('Bogus Standard Time'), UnknownTz);
+  try {
+    resolveTzid('Totally Made Up Zone');
+    assert.fail('expected resolveTzid to throw');
+  } catch (err) {
+    assert.equal(err.name, 'UnknownTz');
+    assert.equal(err.raw, 'Totally Made Up Zone');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// zonedWallClockToInstant — the inverse of Intl.DateTimeFormat.
+//
+// Expected instants below are cross-checked against Date.parse of an ISO
+// string with an explicit numeric UTC offset (e.g. '-04:00'), which is
+// parsed per ECMA-262 independent of the host's tzdata / Intl — a ground
+// truth that doesn't rely on the same machinery under test.
+// ---------------------------------------------------------------------------
+
+test('zonedWallClockToInstant: ordinary wall time, no nearby DST transition (America/New_York, EDT)', () => {
+  const parts = { year: 2026, month: 9, day: 1, hour: 9, minute: 0, second: 0 };
+  const got = zonedWallClockToInstant(parts, 'America/New_York');
+  assert.equal(got, Date.parse('2026-09-01T09:00:00-04:00'));
+});
+
+test('zonedWallClockToInstant: ordinary wall time in America/Los_Angeles (PDT)', () => {
+  const parts = { year: 2026, month: 9, day: 1, hour: 9, minute: 0, second: 0 };
+  const got = zonedWallClockToInstant(parts, 'America/Los_Angeles');
+  assert.equal(got, Date.parse('2026-09-01T09:00:00-07:00'));
+});
+
+test('zonedWallClockToInstant: UTC zone is its own inverse', () => {
+  const parts = { year: 2026, month: 6, day: 15, hour: 12, minute: 30, second: 0 };
+  const got = zonedWallClockToInstant(parts, 'UTC');
+  assert.equal(got, Date.UTC(2026, 5, 15, 12, 30, 0));
+});
+
+test('zonedWallClockToInstant: Australia/Sydney southern-hemisphere DST sign (AEDT, +11)', () => {
+  // January is high summer in Sydney: AEDT is in effect, UTC+11 — the
+  // opposite seasonal sign from the northern-hemisphere zones above.
+  const parts = { year: 2026, month: 1, day: 15, hour: 10, minute: 0, second: 0 };
+  const got = zonedWallClockToInstant(parts, 'Australia/Sydney');
+  assert.equal(got, Date.parse('2026-01-15T10:00:00+11:00'));
+});
+
+test('zonedWallClockToInstant: Australia/Sydney standard time (AEST, +10)', () => {
+  // July is midwinter in Sydney: AEST, UTC+10.
+  const parts = { year: 2026, month: 7, day: 15, hour: 10, minute: 0, second: 0 };
+  const got = zonedWallClockToInstant(parts, 'Australia/Sydney');
+  assert.equal(got, Date.parse('2026-07-15T10:00:00+10:00'));
+});
+
+test('zonedWallClockToInstant: DST fall-back ambiguity (America/New_York) resolves to first occurrence / DST offset', () => {
+  // 2026-11-01 02:00:00 EDT -> 01:00:00 EST. Wall times 01:00-01:59 occur
+  // twice. Policy: first occurrence, i.e. the EDT (UTC-4) reading.
+  const parts = { year: 2026, month: 11, day: 1, hour: 1, minute: 30, second: 0 };
+  const got = zonedWallClockToInstant(parts, 'America/New_York');
+  assert.equal(got, Date.parse('2026-11-01T01:30:00-04:00'));
+  assert.notEqual(got, Date.parse('2026-11-01T01:30:00-05:00'));
+});
+
+test('zonedWallClockToInstant: DST fall-back ambiguity (Australia/Sydney) resolves to first occurrence / DST offset', () => {
+  // 2026-04-05 03:00:00 AEDT -> 02:00:00 AEST. Wall times 02:00-02:59 occur
+  // twice. Policy: first occurrence, i.e. the AEDT (UTC+11) reading.
+  const parts = { year: 2026, month: 4, day: 5, hour: 2, minute: 30, second: 0 };
+  const got = zonedWallClockToInstant(parts, 'Australia/Sydney');
+  assert.equal(got, Date.parse('2026-04-05T02:30:00+11:00'));
+  assert.notEqual(got, Date.parse('2026-04-05T02:30:00+10:00'));
+});
+
+test('zonedWallClockToInstant: spring-forward gap (America/New_York) shifts forward by the gap width', () => {
+  // 2026-03-08 02:00:00 EST -> 03:00:00 EDT. Wall times 02:00-02:59 never
+  // occur. Policy: shift forward by the 1-hour gap width, landing at 03:30 EDT.
+  const parts = { year: 2026, month: 3, day: 8, hour: 2, minute: 30, second: 0 };
+  const got = zonedWallClockToInstant(parts, 'America/New_York');
+  assert.equal(got, Date.parse('2026-03-08T03:30:00-04:00'));
+});
+
+test('zonedWallClockToInstant: spring-forward gap (Australia/Sydney) shifts forward by the gap width', () => {
+  // 2026-10-04 02:00:00 AEST -> 03:00:00 AEDT. Wall times 02:00-02:59 never
+  // occur. Policy: shift forward by the 1-hour gap width, landing at 03:30 AEDT.
+  const parts = { year: 2026, month: 10, day: 4, hour: 2, minute: 30, second: 0 };
+  const got = zonedWallClockToInstant(parts, 'Australia/Sydney');
+  assert.equal(got, Date.parse('2026-10-04T03:30:00+11:00'));
+});
+
+// ---------------------------------------------------------------------------
+// icsDateToLocal — all DTSTART/DTEND forms.
+// ---------------------------------------------------------------------------
+
+test('icsDateToLocal: VALUE=DATE (all-day) form has a null time', () => {
+  const result = icsDateToLocal('20250101', { VALUE: 'DATE' }, 'America/New_York');
+  assert.deepEqual(result, { date: '2025-01-01', time: null });
+});
+
+test('icsDateToLocal: VALUE=DATE form recognized even without an explicit VALUE param (no "T")', () => {
+  const result = icsDateToLocal('20250101', {}, 'America/New_York');
+  assert.deepEqual(result, { date: '2025-01-01', time: null });
+});
+
+test('icsDateToLocal: UTC "Z" form converts the instant into targetTz wall clock', () => {
+  // 13:00 UTC in September is 09:00 EDT (America/New_York, UTC-4, no nearby transition).
+  const result = icsDateToLocal('20260901T130000Z', {}, 'America/New_York');
+  assert.deepEqual(result, { date: '2026-09-01', time: '09:00' });
+});
+
+test('icsDateToLocal: floating time (no Z, no TZID) is targetTz wall time as-is, no conversion', () => {
+  const result = icsDateToLocal('20260901T090000', {}, 'America/Los_Angeles');
+  assert.deepEqual(result, { date: '2026-09-01', time: '09:00' });
+});
+
+test('icsDateToLocal: TZID form converts a zoned wall clock across two fixed zones (America/New_York -> America/Los_Angeles)', () => {
+  // 09:00 EDT (America/New_York, UTC-4) = 13:00 UTC = 06:00 PDT (America/Los_Angeles, UTC-7).
+  const result = icsDateToLocal('20260901T090000', { TZID: 'America/New_York' }, 'America/Los_Angeles');
+  assert.deepEqual(result, { date: '2026-09-01', time: '06:00' });
+});
+
+test('icsDateToLocal: TZID form round-trips when targetTz equals the source TZID', () => {
+  const result = icsDateToLocal('20260901T090000', { TZID: 'America/New_York' }, 'America/New_York');
+  assert.deepEqual(result, { date: '2026-09-01', time: '09:00' });
+});
+
+test('icsDateToLocal: TZID form resolves a Windows TZID via tzmap before converting', () => {
+  // "W. Europe Standard Time" -> Europe/Berlin. 2026-09-01 09:00 CEST (UTC+2)
+  // = 07:00 UTC = 03:00 EDT (America/New_York, UTC-4).
+  const result = icsDateToLocal(
+    '20260901T090000',
+    { TZID: 'W. Europe Standard Time' },
+    'America/New_York',
+  );
+  assert.deepEqual(result, { date: '2026-09-01', time: '03:00' });
+});
+
+test('icsDateToLocal: TZID form throws UnknownTz for a garbage TZID (caller skips the event)', () => {
+  assert.throws(
+    () => icsDateToLocal('20260901T090000', { TZID: 'Not/AZone' }, 'America/New_York'),
+    UnknownTz,
+  );
+});
+
+test('icsDateToLocal: TZID form on a DST fall-back ambiguous wall clock uses the first-occurrence policy end to end', () => {
+  const result = icsDateToLocal(
+    '20261101T013000',
+    { TZID: 'America/New_York' },
+    'America/New_York',
+  );
+  // Round-tripping through the same zone on an ambiguous wall clock should
+  // reproduce the same wall clock (first/DST occurrence), not silently
+  // shift to the other (EST) occurrence.
+  assert.deepEqual(result, { date: '2026-11-01', time: '01:30' });
 });
