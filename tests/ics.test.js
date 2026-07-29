@@ -1541,3 +1541,112 @@ test('expandEvents on a huge COUNT stops walking once occurrences pass the windo
     '2026-01-01', '2026-01-02', '2026-01-03', '2026-01-04', '2026-01-05',
   ]);
 });
+
+// ---------------------------------------------------------------------------
+// Review round 1: three silent-loss / fabrication paths.
+// ---------------------------------------------------------------------------
+
+test('parseICS reports an unterminated VEVENT as skipped instead of dropping it', () => {
+  // A truncated body (connection cut mid-feed) — no END:VEVENT, no END:VCALENDAR.
+  const text = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    ...vevent('UID:complete-1', 'SUMMARY:Complete', 'DTSTART;VALUE=DATE:20260901'),
+    'BEGIN:VEVENT',
+    'UID:truncated-1',
+    'SUMMARY:Truncated',
+    'DTSTART;VALUE=DATE:20260902',
+  ].join('\r\n') + '\r\n';
+  const { events, skipped } = parseICS(text);
+  assert.deepEqual(events.map((e) => e.uid), ['complete-1']);
+  assert.deepEqual(skipped, [
+    { uid: 'truncated-1', summary: 'Truncated', reason: 'unterminated_vevent' },
+  ]);
+});
+
+test('parseICS reports a VEVENT closed only by END:VCALENDAR as skipped', () => {
+  const text = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'BEGIN:VEVENT',
+    'UID:unclosed-1',
+    'SUMMARY:Missing END:VEVENT',
+    'DTSTART;VALUE=DATE:20260901',
+    'END:VCALENDAR',
+  ].join('\r\n') + '\r\n';
+  const { events, skipped } = parseICS(text);
+  assert.deepEqual(events, []);
+  assert.deepEqual(skipped, [
+    { uid: 'unclosed-1', summary: 'Missing END:VEVENT', reason: 'unterminated_vevent' },
+  ]);
+});
+
+test('expandEvents removes an all-day instance named by a midnight DATE-TIME EXDATE', () => {
+  // Type-mismatched per RFC (EXDATE should be VALUE=DATE for an all-day
+  // series) but emitted by real producers. It must not be a silent no-op.
+  const text = ics(vevent(
+    'UID:e', 'SUMMARY:Daily all-day',
+    'DTSTART;VALUE=DATE:20260901',
+    'RRULE:FREQ=DAILY;COUNT=3',
+    'EXDATE:20260902T000000Z',
+  ));
+  assert.deepEqual(expand(text, '2026-09-01', '2026-09-30').map((i) => i.date), ['2026-09-01', '2026-09-03']);
+});
+
+test('expandEvents removes an all-day instance named by a TZID DATE-TIME EXDATE', () => {
+  const text = ics(vevent(
+    'UID:e', 'SUMMARY:Daily all-day',
+    'DTSTART;VALUE=DATE:20260901',
+    'RRULE:FREQ=DAILY;COUNT=3',
+    'EXDATE;TZID=America/New_York:20260903T000000',
+  ));
+  assert.deepEqual(expand(text, '2026-09-01', '2026-09-30').map((i) => i.date), ['2026-09-01', '2026-09-02']);
+});
+
+test('expandEvents keeps DATE-TIME EXDATE matching exact for a timed series (a wrong time cancels nothing)', () => {
+  // The date-part reading is only for all-day series. On a timed series an
+  // EXDATE naming a different instant refers to a different instance, so it
+  // must not cancel this one.
+  const text = ics(vevent(
+    'UID:e', 'SUMMARY:Daily timed',
+    'DTSTART;TZID=America/New_York:20260901T090000',
+    'RRULE:FREQ=DAILY;COUNT=3',
+    'EXDATE;TZID=America/New_York:20260902T113000',
+  ));
+  assert.deepEqual(expand(text, '2026-09-01', '2026-09-30').map((i) => i.date), [
+    '2026-09-01', '2026-09-02', '2026-09-03',
+  ]);
+});
+
+test('parseICS skips a RECURRENCE-ID event that carries its own RRULE (never fabricates instances)', () => {
+  const text = ics(
+    vevent(
+      'UID:series-1', 'SUMMARY:Standup',
+      'DTSTART;TZID=America/New_York:20260901T090000',
+      'DTEND;TZID=America/New_York:20260901T100000',
+      'RRULE:FREQ=DAILY;COUNT=3',
+    ),
+    vevent(
+      'UID:series-1', 'SUMMARY:Standup (moved, with its own rule)',
+      'RECURRENCE-ID;TZID=America/New_York:20260902T090000',
+      'DTSTART;TZID=America/New_York:20260902T140000',
+      'DTEND;TZID=America/New_York:20260902T150000',
+      'RRULE:FREQ=DAILY;COUNT=3',
+    ),
+  );
+  const { events, skipped } = parseICS(text);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].rrule, 'FREQ=DAILY;COUNT=3');
+  assert.deepEqual(skipped, [{
+    uid: 'series-1',
+    summary: 'Standup (moved, with its own rule)',
+    reason: 'unsupported_recurrence_id_rrule',
+  }]);
+  // The master series expands unchanged — exactly its three instances, and no
+  // day that exists in no calendar.
+  assert.deepEqual(expandEvents({ events, skipped }, '2026-09-01', '2026-09-30', NY).map(shape), [
+    ['2026-09-01', '09:00', '10:00'],
+    ['2026-09-02', '09:00', '10:00'],
+    ['2026-09-03', '09:00', '10:00'],
+  ]);
+});
