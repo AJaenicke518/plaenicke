@@ -1,7 +1,7 @@
 import { loadItems, saveItems } from './storage.js';
 import { makeItem, sortItemsByDate } from './items.js';
 import { toISO } from './dateparse.js';
-import { buildMonthGrid, groupItemsByDate, monthCellSummary } from './calendar.js';
+import { buildMonthGrid, groupItemsByDate, monthCellSummary, chronoFirst } from './calendar.js';
 import { startOfWeek, addDays, formatTime, formatTimeRange } from './timegrid.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
 import { renderDayView } from './dayview.js';
@@ -208,7 +208,7 @@ function renderCalendar() {
       num.className = 'cal-day';
       num.textContent = cell.day;
       div.appendChild(num);
-      const { chips, more } = monthCellSummary(byDate[cell.date] || []);
+      const { chips, more } = monthCellSummary(chronoFirst(byDate[cell.date] || []));
       for (const it of chips) {
         const chip = document.createElement('div');
         chip.className = 'cal-item type-' + (it.type || 'general');
@@ -242,11 +242,16 @@ function renderDay() {
     { weekday: 'short', month: 'short', day: 'numeric' });
   els.dayLabel.textContent = label;
   const byDate = groupItemsByDate(sortItemsByDate(items));
+  const visible = !els.dayView.hidden;
   renderDayView(els.dayBody, viewDay, byDate[viewDay] || [], {
     onDelete: deleteItem,
-    autoScroll: viewDay !== lastDayRendered, // keep scroll position on same-day re-renders
+    // Auto-scroll to 07:00 only on a genuine day change while visible; otherwise
+    // dayview.js restores the grid's own prior scrollTop (see its `prev` capture).
+    // A hidden day-view has scrollTop 0, so lastDayRendered must not advance while hidden —
+    // otherwise the first visible open of a day would skip auto-scroll and land at midnight.
+    autoScroll: visible && viewDay !== lastDayRendered,
   });
-  lastDayRendered = viewDay;
+  if (visible) lastDayRendered = viewDay;
 }
 
 function render() { renderList(); renderCalendar(); renderWeek(); renderDay(); }

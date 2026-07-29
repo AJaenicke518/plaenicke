@@ -29,3 +29,13 @@ export function monthCellSummary(dayItems, maxChips = 2) {
   if (dayItems.length <= maxChips) return { chips: dayItems, more: 0 };
   return { chips: dayItems.slice(0, maxChips), more: dayItems.length - maxChips };
 }
+
+// chronoFirst — for truncated views (month chips, week's 8-block cap): timed items
+// first, earliest time first, then untimed items in their existing relative order.
+// The LIST view keeps sortItemsByDate's untimed-first order; this does NOT touch that.
+export function chronoFirst(dayItems) {
+  const timed = dayItems.filter((it) => it.time);
+  const untimed = dayItems.filter((it) => !it.time);
+  timed.sort((a, b) => a.time.localeCompare(b.time));
+  return [...timed, ...untimed];
+}

@@ -5,6 +5,7 @@ const HOUR_PX = 48;
 const SCROLL_TO_HOUR = 7; // grid shows 24h; auto-scroll to 07:00
 
 export function renderDayView(container, dateISO, dayItems, { onDelete, autoScroll = true }) {
+  const prev = container.querySelector('.day-grid')?.scrollTop ?? 0;
   container.innerHTML = '';
   const { untimed, timed } = bucketDayItems(dayItems);
 
@@ -50,7 +51,7 @@ export function renderDayView(container, dateISO, dayItems, { onDelete, autoScro
 
   grid.append(hours, canvas);
   container.appendChild(grid);
-  if (autoScroll) grid.scrollTop = SCROLL_TO_HOUR * HOUR_PX;
+  grid.scrollTop = autoScroll ? SCROLL_TO_HOUR * HOUR_PX : prev;
 
   if (untimed.length > 0) {
     const other = document.createElement('div');

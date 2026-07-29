@@ -22,6 +22,7 @@ Approach: retheme + new view modules (approach 1 from brainstorm). Existing stru
 - Day view: hour grid with timed items; **untimed items in an "Other tasks" list at the bottom** (not an all-day banner at top — keeps the grid uncluttered).
 - Visual direction: **paper planner** (warm cream, serif, stationery feel) with **neutral dark** ("quiet night" — cool near-black, same serif character) as the dark variant.
 - Settings menu (⚙ in header): Appearance Light/Dark/Auto; "Linked calendars" greyed-out placeholder for a future version (no integration in V3).
+- Truncated views (month's 2 chips, week's 8-block cap) prioritize timed items chronologically, then untimed; the list view keeps untimed-first (final-review decision 2026-07-28).
 
 ## Data model (`js/items.js`)
 

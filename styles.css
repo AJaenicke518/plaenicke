@@ -15,9 +15,9 @@
   /* item type colors (warm-tuned) */
   --type-due: #b04a3a;
   --type-start: #3d6b9e;
-  --type-milestone: #c8963e;
+  --type-milestone: #a97a28;
   --type-event: #4a7a54;
-  --type-general: #8a8070;
+  --type-general: #6f6558;
   --on-type: #fffdf8;               /* text on type-colored blocks */
   --shade: rgba(0, 0, 0, 0.25);     /* subtle overlay accents */
   --scrim: rgba(0, 0, 0, 0.35);     /* modal backdrop */
@@ -313,4 +313,4 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 .type-milestone { --type: var(--type-milestone); }
 .type-event     { --type: var(--type-event); }
 .type-general   { --type: var(--type-general); }
-#item-list li { border-left: 4px solid var(--type, var(--type-general)); }
+#item-list li, .day-other-list li { border-left: 4px solid var(--type, var(--type-general)); }

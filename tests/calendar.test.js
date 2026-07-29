@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildMonthGrid, groupItemsByDate, monthCellSummary } from '../js/calendar.js';
+import { buildMonthGrid, groupItemsByDate, monthCellSummary, chronoFirst } from '../js/calendar.js';
 
 test('July 2026 grid starts on the right weekday', () => {
   // July 1 2026 is a Wednesday (index 3): three leading blanks.
@@ -43,4 +43,42 @@ test('monthCellSummary caps at maxChips and counts the rest', () => {
   const s = monthCellSummary(items);
   assert.deepEqual(s.chips.map(i => i.id), ['a', 'b']);
   assert.equal(s.more, 2);
+});
+
+test('chronoFirst puts timed items before untimed items', () => {
+  const untimed = { id: 'u1', title: 'Chore' };
+  const timed = { id: 't1', title: 'Meeting', time: '09:00' };
+  const result = chronoFirst([untimed, timed]);
+  assert.deepEqual(result.map(i => i.id), ['t1', 'u1']);
+});
+
+test('chronoFirst sorts timed items by time ascending', () => {
+  const late = { id: 'late', title: 'Dinner', time: '19:00' };
+  const early = { id: 'early', title: 'Standup', time: '09:00' };
+  const mid = { id: 'mid', title: 'Lunch', time: '12:30' };
+  const result = chronoFirst([late, early, mid]);
+  assert.deepEqual(result.map(i => i.id), ['early', 'mid', 'late']);
+});
+
+test('chronoFirst preserves relative order among untimed items', () => {
+  const u1 = { id: 'u1', title: 'First chore' };
+  const u2 = { id: 'u2', title: 'Second chore' };
+  const u3 = { id: 'u3', title: 'Third chore' };
+  const result = chronoFirst([u1, u2, u3]);
+  assert.deepEqual(result.map(i => i.id), ['u1', 'u2', 'u3']);
+});
+
+test('chronoFirst passes through an empty array', () => {
+  assert.deepEqual(chronoFirst([]), []);
+});
+
+test('chronoFirst passes through an all-untimed array unchanged (relative order)', () => {
+  const items = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+  assert.deepEqual(chronoFirst(items).map(i => i.id), ['a', 'b', 'c']);
+});
+
+test('chronoFirst returns a new array, not the same reference', () => {
+  const items = [{ id: 'a', time: '10:00' }];
+  const result = chronoFirst(items);
+  assert.notEqual(result, items);
 });
