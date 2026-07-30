@@ -1206,6 +1206,33 @@ test('expandEvents keeps a TZID recurrence at the same wall time across a DST tr
   ]);
 });
 
+test('expandEvents pins a timed event inside the DST fall-back hour instead of a backwards range', () => {
+  // 2026-11-01 01:30 EDT + 30 min = 01:00 EST — the same wall hour repeats, so
+  // the local end reads earlier than the local start. A backwards range would
+  // give Day view a negative block height and break the endTime > time
+  // invariant, so the end is dropped and the instance renders as a pinned chip.
+  const text = ics(vevent(
+    'UID:e', 'SUMMARY:Inside the repeated hour',
+    'DTSTART;TZID=America/New_York:20261101T013000',
+    'DURATION:PT30M',
+  ));
+  assert.deepEqual(expand(text, '2026-11-01', '2026-11-01').map(shape), [
+    ['2026-11-01', '01:30', null],
+  ]);
+});
+
+test('expandEvents keeps a normal same-day end time (fall-back guard does not over-reach)', () => {
+  const text = ics(vevent(
+    'UID:e', 'SUMMARY:Ordinary',
+    'DTSTART;TZID=America/New_York:20261101T013000',
+    'DURATION:PT2H',
+  ));
+  // 01:30 EDT + 2h = 02:30 EST (the fall-back adds an hour of wall-clock slack).
+  assert.deepEqual(expand(text, '2026-11-01', '2026-11-01').map(shape), [
+    ['2026-11-01', '01:30', '02:30'],
+  ]);
+});
+
 test('expandEvents lets a UTC recurrence shift wall time across a DST transition (RFC behavior)', () => {
   // A UTC-anchored 06:00Z daily rule is 02:00 EDT before the 2026-11-01
   // fall-back and 01:00 EST after it.
@@ -1374,6 +1401,84 @@ test('expandEvents emits an orphan RECURRENCE-ID override as a standalone instan
     'DTEND;TZID=America/New_York:20260902T150000',
   ));
   assert.deepEqual(expand(text, '2026-09-01', '2026-09-30').map(shape), [['2026-09-02', '14:00', '15:00']]);
+});
+
+// An override's own DTSTART is authoritative and independent of where the
+// master's generation window happens to fall. A reschedule that lands outside
+// the window the master would be expanded over must still appear on its new
+// date — a Day view of the moved-to date is exactly that case.
+const MOVED_PLUS_8 = ics(
+  vevent(
+    'UID:series-1', 'SUMMARY:Weekly sync',
+    'DTSTART;TZID=America/New_York:20260901T090000',
+    'DTEND;TZID=America/New_York:20260901T100000',
+    'RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=4',
+  ),
+  vevent(
+    'UID:series-1', 'SUMMARY:Weekly sync (moved)',
+    'RECURRENCE-ID;TZID=America/New_York:20260908T090000',
+    'DTSTART;TZID=America/New_York:20260916T110000',
+    'DTEND;TZID=America/New_York:20260916T120000',
+  ),
+);
+
+test('expandEvents emits a RECURRENCE-ID override in a range covering only the moved-to day', () => {
+  const out = expand(MOVED_PLUS_8, '2026-09-16', '2026-09-16');
+  assert.deepEqual(out.map((i) => [i.date, i.time, i.endTime, i.title]), [
+    ['2026-09-16', '11:00', '12:00', 'Weekly sync (moved)'],
+  ]);
+});
+
+test('expandEvents emits nothing on the original slot day of a moved RECURRENCE-ID override', () => {
+  assert.deepEqual(expand(MOVED_PLUS_8, '2026-09-08', '2026-09-08'), []);
+});
+
+test('expandEvents emits a RECURRENCE-ID override moved into the next month in that month\'s range', () => {
+  const text = ics(
+    vevent(
+      'UID:series-1', 'SUMMARY:Weekly sync',
+      'DTSTART;TZID=America/New_York:20260901T090000',
+      'RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=4',
+    ),
+    vevent(
+      'UID:series-1', 'SUMMARY:Weekly sync (next month)',
+      'RECURRENCE-ID;TZID=America/New_York:20260908T090000',
+      'DTSTART;TZID=America/New_York:20261006T110000',
+    ),
+  );
+  assert.deepEqual(expand(text, '2026-10-01', '2026-10-31').map((i) => [i.date, i.time, i.title]), [
+    ['2026-10-06', '11:00', 'Weekly sync (next month)'],
+  ]);
+});
+
+test('expandEvents emits an all-day RECURRENCE-ID override moved beyond the master window', () => {
+  const text = ics(
+    vevent(
+      'UID:series-1', 'SUMMARY:Holiday',
+      'DTSTART;VALUE=DATE:20260901',
+      'RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=4',
+    ),
+    vevent(
+      'UID:series-1', 'SUMMARY:Holiday (observed)',
+      'RECURRENCE-ID;VALUE=DATE:20260908',
+      'DTSTART;VALUE=DATE:20261013',
+    ),
+  );
+  assert.deepEqual(expand(text, '2026-10-13', '2026-10-13').map((i) => [i.date, i.title]), [
+    ['2026-10-13', 'Holiday (observed)'],
+  ]);
+});
+
+test('expandEvents emits a RECURRENCE-ID override exactly once when the master window also covers it', () => {
+  // Guards against the override being emitted twice: once directly and once as
+  // a side effect of the master's suppressed slot.
+  const out = expand(MOVED_PLUS_8, '2026-09-01', '2026-09-30');
+  assert.deepEqual(out.map((i) => [i.date, i.time, i.title]), [
+    ['2026-09-01', '09:00', 'Weekly sync'],
+    ['2026-09-15', '09:00', 'Weekly sync'],
+    ['2026-09-16', '11:00', 'Weekly sync (moved)'],
+    ['2026-09-22', '09:00', 'Weekly sync'],
+  ]);
 });
 
 test('parseICS skips a RECURRENCE-ID carrying RANGE=THISANDFUTURE rather than applying it to one instance', () => {

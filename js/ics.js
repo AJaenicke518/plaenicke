@@ -1110,7 +1110,9 @@ function endSpecOf(ev, start, allDay, zone, targetTz) {
 // render truthfully.
 //   all-day / multi-day all-day : one untimed instance per covered day
 //   timed, no end               : one instance, endTime null
-//   timed within one day        : one instance with both times
+//   timed within one day        : one instance with both times, or endTime
+//                                 null when the local end does not advance
+//                                 (zero length, or a DST fall-back hour)
 //   timed across two days       : two segments (start-23:59, 00:00-end)
 //   timed across >2 days        : one untimed instance per covered day, so a
 //                                 week-long block cannot shred Day view's
@@ -1149,7 +1151,13 @@ function emitOccurrence(uid, title, occ, ctx, out) {
 
   const dayCount = endDay - startDay + 1;
   if (dayCount <= 1) {
-    push(startDay, startLocal.time, endTime === startLocal.time ? null : endTime);
+    // A non-increasing local end means "no renderable end": either a
+    // zero-length event, or one inside a DST fall-back hour, where the repeated
+    // wall clock puts the local end at or before the local start (NY
+    // 2026-11-01 01:30 + PT30M reads as 01:00). Emitting that range would give
+    // Day view a negative block height and break the endTime > time invariant
+    // items.js enforces, so the instance renders as a pinned chip instead.
+    push(startDay, startLocal.time, endTime <= startLocal.time ? null : endTime);
     return;
   }
   if (dayCount === 2) {
@@ -1203,13 +1211,11 @@ function expandOne(ev, overrides, ctxBase, out) {
   occurrences = applyExdates(occurrences, ev.exdates, allDay ? ctx.targetTz : zone);
 
   for (const occ of occurrences) {
-    const override = overrides ? findOverride(overrides, occ) : null;
-    if (override) {
-      // The override VEVENT carries its own DTSTART/DTEND/SUMMARY; it is
-      // matched on the master's *original* instance time and replaces it.
-      expandOne(override, null, ctxBase, out);
-      continue;
-    }
+    // An overridden occurrence is only *suppressed* here. The override itself
+    // is expanded independently by expandEvents from its own DTSTART, because
+    // a reschedule can land outside the window this master is generated over
+    // (see the comment on the override pass there).
+    if (overrides && findOverride(overrides, occ)) continue;
     emitOccurrence(ev.uid, ev.title, occ, ctx, out);
   }
 }
@@ -1303,8 +1309,20 @@ export function expandEvents(parsed, rangeStartISO, rangeEndISO, targetTz) {
   const ctxBase = { targetTz, rangeStartDay, rangeEndDay };
   const out = [];
   for (const ev of events) {
-    if (ev.recurrenceId && masterUids.has(ev.uid)) continue; // consumed as an override
+    if (ev.recurrenceId && masterUids.has(ev.uid)) continue; // expanded in the override pass below
     expandOne(ev, overridesByUid.get(ev.uid) || null, ctxBase, out);
+  }
+
+  // Override pass. An override is expanded from its own DTSTART/DTEND, not as
+  // a side effect of its master generating the original slot: the master's
+  // generation window is only widened by the event's own span, so a reschedule
+  // that moves an instance further than that (e.g. a weekly instance pushed
+  // +8 days, viewed on its new date) would otherwise emit nothing at all.
+  // emitOccurrence range-filters each produced instance, so an override
+  // outside [rangeStart, rangeEnd] still contributes nothing.
+  for (const entry of overridesByUid.values()) {
+    for (const override of entry.byInstant.values()) expandOne(override, null, ctxBase, out);
+    for (const override of entry.byDate.values()) expandOne(override, null, ctxBase, out);
   }
   return sortInstances(out);
 }
