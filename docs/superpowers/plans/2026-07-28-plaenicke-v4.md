@@ -4,7 +4,7 @@
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task.
 > Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status: DRAFT — do not execute until Alex approves the spec and this plan.**
+**Status: approved and executed 2026-07-29 (Tasks 0–9 code complete; final whole-branch review + fix wave clean).**
 
 **Goal:** External calendar feeds (Google secret iCal address, iCloud public calendar,
 Outlook published calendar, Canvas calendar feed, any ICS URL) render as read-only
