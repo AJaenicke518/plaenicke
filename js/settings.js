@@ -121,8 +121,12 @@ export function initSettings({ button, host, onFeedsChanged }) {
     // Only one sync (add's first sync, or a row's Sync button) runs at a
     // time: syncFeed's cache read-modify-write isn't safe under concurrent
     // calls for different feeds (same reasoning as syncStale's sequential
-    // loop) — disabling every Sync/Add control while one is in flight avoids
-    // the race at the UI layer instead of re-deriving it here.
+    // loop). The actual lock is an `isBusy()` early-return at the top of both
+    // syncFeed-calling entry points (`runSync`, `handleAdd`) — every disabled
+    // button/input below is UX only (so the click/Enter never fires in the
+    // first place); the early-return is what makes it safe even when a
+    // handler *does* fire while busy (e.g. Enter on a text input, which
+    // .disabled on a button can't intercept).
     // syncingFeedId is null when idle, or the id currently mid-sync — used
     // both to gate every button (`busy`) and to label just that one row's
     // Sync button "Syncing…" (an id not yet in `feeds` during Add's own
@@ -152,6 +156,10 @@ export function initSettings({ button, host, onFeedsChanged }) {
     }
 
     async function runSync(feed) {
+      // Entry-point lock (see comment above `syncErrors`): text inputs have
+      // no `.disabled` gate, so this guard — not the buttons' disabled state
+      // — is what actually prevents a second concurrent syncFeed call.
+      if (isBusy()) return;
       syncingFeedId = feed.id;
       renderCalendars();
       let result;
@@ -267,6 +275,10 @@ export function initSettings({ button, host, onFeedsChanged }) {
       urlInput.autocapitalize = 'off';
       urlInput.spellcheck = false;
       urlInput.value = urlDraft;
+      // UX belt-and-braces alongside handleAdd's own isBusy() early-return
+      // (the actual lock): a disabled input also can't receive focus/typing,
+      // so this keeps the field from looking editable while a sync no-ops.
+      urlInput.disabled = isBusy();
       urlInput.addEventListener('input', () => { urlDraft = urlInput.value; });
 
       const nameInput = document.createElement('input');
@@ -275,6 +287,7 @@ export function initSettings({ button, host, onFeedsChanged }) {
       nameInput.placeholder = 'Name (optional)';
       nameInput.setAttribute('aria-label', 'Calendar name (optional)');
       nameInput.value = nameDraft;
+      nameInput.disabled = isBusy();
       nameInput.addEventListener('input', () => { nameDraft = nameInput.value; });
 
       const addMsg = document.createElement('p');
@@ -287,6 +300,11 @@ export function initSettings({ button, host, onFeedsChanged }) {
       addBtn.disabled = isBusy();
 
       async function handleAdd() {
+        // Entry-point lock — same reasoning as runSync's guard. Reachable via
+        // Enter in urlInput/nameInput even while the Add button is disabled,
+        // since keydown on a text input isn't blocked by another element's
+        // `.disabled` attribute.
+        if (isBusy()) return;
         const raw = urlInput.value.trim();
         if (!raw) {
           urlErrorMsg = 'Enter a calendar link.';
