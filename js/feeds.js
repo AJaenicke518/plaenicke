@@ -10,7 +10,7 @@
 // touching storage.js directly.
 
 import { WORKER_URL } from './config.js';
-import { parseICS, expandEvents } from './ics.js';
+import { parseICS, expandEvents, parseDuration } from './ics.js';
 import {
   loadFeeds, saveFeeds, loadFeedCache, saveFeedCache, QuotaError,
 } from './storage.js';
@@ -66,21 +66,82 @@ function pruneWindow(nowDate) {
   return { startISO: start.toISOString().slice(0, 10), endISO: end.toISOString().slice(0, 10) };
 }
 
-// eventDateISO: the nominal 'YYYY-MM-DD' a cached ParsedEvent's DTSTART value
-// starts with, read directly off the raw ICS value string (no zone
-// resolution needed for a rough pruning decision).
-function eventDateISO(ev) {
-  const raw = ev && ev.dtstart && ev.dtstart.value;
+// dateOnlyISO: the nominal 'YYYY-MM-DD' an ICS DTSTART/DTEND-shaped raw value
+// starts with, read directly off the value string (no zone resolution needed
+// for a rough pruning decision — this is a storage-triage heuristic, not the
+// exact civil-date machinery ics.js uses for rendering).
+function dateOnlyISO(raw) {
   const m = raw ? /^(\d{4})(\d{2})(\d{2})/.exec(raw) : null;
   return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
 }
 
+function addDaysToISO(iso, days) {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+// eventRangeISO: a non-recurring event's own [start, end] as 'YYYY-MM-DD'
+// strings, used to test range overlap against the prune window. End
+// resolution mirrors ics.js's own DTEND > DURATION > neither order:
+//   - DTEND present: its date (whichever form/zone it's in — the first 8
+//     digits are enough for a day-level heuristic).
+//   - else DURATION present: start + duration, rounded to whole days.
+//   - else: an instant/untimed event with no declared length — end = start.
+// A DTSTART that can't be parsed is treated as "unknown" (both start and end
+// null) so the caller can choose to keep it rather than guess.
+function eventRangeISO(ev) {
+  const start = dateOnlyISO(ev && ev.dtstart && ev.dtstart.value);
+  if (start === null) return { start: null, end: null };
+  if (ev.dtend) {
+    const end = dateOnlyISO(ev.dtend.value);
+    if (end !== null) return { start, end };
+  } else if (ev.duration) {
+    try {
+      const days = Math.round(parseDuration(ev.duration) / DAY_MS);
+      return { start, end: addDaysToISO(start, days) };
+    } catch {
+      // malformed duration — fall through to the no-length case below
+    }
+  }
+  return { start, end: start };
+}
+
+// ruleUntilISO: a recurring master's RRULE UNTIL value as 'YYYY-MM-DD', or
+// null if the rule has no UNTIL (either genuinely unbounded, or COUNT-bounded
+// — both cases are handled the same way by the caller: kept). Reading the raw
+// RRULE text directly (rather than parseRRule) keeps this a cheap, tolerant
+// heuristic — a malformed rule just falls back to "no UNTIL found" rather
+// than throwing during quota recovery.
+function ruleUntilISO(rruleText) {
+  const m = /(?:^|;)UNTIL=(\d{8})/.exec(rruleText || '');
+  return m ? `${m[1].slice(0, 4)}-${m[1].slice(4, 6)}-${m[1].slice(6, 8)}` : null;
+}
+
+// keepForQuota: whether an event should survive quota-recovery pruning.
+// Range-overlap, not DTSTART-alone — an event that *started* long ago but
+// runs into or past the window (a multi-week span, an ongoing recurring
+// series) is still relevant and must not be silently lost on this
+// destructive last-resort path.
+//   - Recurring masters: an unbounded rule (no UNTIL — including one bounded
+//     only by COUNT, which isn't cheaply determinable here) is always kept;
+//     a rule with UNTIL is kept unless UNTIL falls before the window even
+//     starts (the series is provably over).
+//   - Non-recurring: kept if its own [start, end] range overlaps
+//     [windowStart, windowEnd] at all.
+//   - Anything whose dates can't be read is kept rather than guessed away.
+function keepForQuota(ev, windowStartISO, windowEndISO) {
+  if (ev.rrule) {
+    const until = ruleUntilISO(ev.rrule);
+    return until === null || until >= windowStartISO;
+  }
+  const { start, end } = eventRangeISO(ev);
+  if (start === null) return true;
+  return end >= windowStartISO && start <= windowEndISO;
+}
+
 // pruneForQuota: drop cached events outside the window, across every feed in
-// the cache (a quota failure is a whole-cache problem, not one feed's). A
-// recurring event's rule is kept regardless of its own DTSTART's age — it's
-// compact (one rule, not N materialized instances) and dropping it would
-// silently erase every future occurrence, not just old ones. An event whose
-// date can't be read is kept rather than guessed away.
+// the cache (a quota failure is a whole-cache problem, not one feed's).
 // Entries that actually lost events are flagged `quotaPruned: true` so
 // feedStatus can surface what happened (the flag lives IN the persisted
 // entry — feedStatus's only inputs are (feed, cacheEntry, now), so this is
@@ -89,12 +150,7 @@ function pruneForQuota(cache, nowDate) {
   const { startISO, endISO } = pruneWindow(nowDate);
   const out = {};
   for (const [feedId, entry] of Object.entries(cache)) {
-    const kept = entry.events.filter((ev) => {
-      if (ev.rrule) return true;
-      const d = eventDateISO(ev);
-      if (d === null) return true;
-      return d >= startISO && d <= endISO;
-    });
+    const kept = entry.events.filter((ev) => keepForQuota(ev, startISO, endISO));
     out[feedId] = kept.length === entry.events.length
       ? entry
       : { ...entry, events: kept, quotaPruned: true };
