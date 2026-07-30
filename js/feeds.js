@@ -197,6 +197,10 @@ function dropLargestFeed(cache) {
 // completely untouched — the caller's last-good cached events keep rendering
 // (offline-first, same posture as V1-V3).
 //
+// If the feed was removed from storage while this fetch was in flight, nothing
+// is persisted and the result carries `removed: true` (still `ok`, because the
+// fetch itself succeeded — there is simply no feed left to cache it for).
+//
 // On a QuotaError from storage.js: prune events outside the window across
 // every cached feed and retry the save once; if that still overflows, drop
 // the largest feed's cache and save again. Each outcome that actually
@@ -243,6 +247,16 @@ export async function syncFeed(feed, { fetchImpl, now = () => new Date(), manual
     // a genuinely malformed top-level input, kept defensive rather than
     // assumed impossible.
     return { ok: false, error: 'parse_error' };
+  }
+
+  // Remove-during-sync guard. Nothing outside this function can serialize a
+  // removal against an in-flight fetch: settings.js's per-row busy gate only
+  // knows about its own manual sync, and app.js's background syncStale batch is
+  // invisible to it. So the ownership check happens here, immediately before
+  // the write — if the feed is no longer stored, the fetch result is dropped
+  // rather than resurrecting a removed calendar as an orphaned cache entry.
+  if (!loadFeeds().some((f) => f.id === feed.id)) {
+    return { ok: true, skipped: parsed.skipped, removed: true };
   }
 
   const entry = { fetchedAt: nowDate.toISOString(), events: parsed.events, skipped: parsed.skipped };
@@ -436,7 +450,12 @@ export function instancesForRange(feeds, cache, start, end, targetTz) {
     let expanded;
     try {
       expanded = expandEvents(entry.events, start, end, targetTz);
-    } catch {
+    } catch (err) {
+      // Skipping keeps one bad feed from blanking every other calendar, but a
+      // silent skip is indistinguishable from an empty calendar. Log the error
+      // NAME only: a feed URL is a capability token and the feed object carries
+      // it, so neither may ever reach the console.
+      console.error(`instancesForRange: expansion failed (${err && err.name ? err.name : 'unknown'}) — feed skipped`);
       continue;
     }
 

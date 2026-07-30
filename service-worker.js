@@ -3,7 +3,13 @@
 // updated version, the phone shows the new version (falling back to the cached
 // copy only when offline). Cache-first would freeze the installed app on the
 // first version forever — the wrong behavior for an app you plan to keep growing.
-const CACHE = 'plaenicke-v4';
+
+// The '-2' generation exists to purge caches written by the previous V4 service
+// worker, which cached cross-origin GETs and so could hold /feed ICS responses
+// keyed by a URL containing the feed's capability token. `activate` deletes
+// every cache whose name isn't this one, so the rename is what actually evicts
+// them; the fetch-handler guard below only stops new ones being written.
+const CACHE = 'plaenicke-v4-2';
 const ASSETS = [
   '.', 'index.html', 'styles.css', 'manifest.json',
   'js/app.js', 'js/storage.js', 'js/items.js', 'js/dateparse.js', 'js/calendar.js',
@@ -28,6 +34,14 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
+  // Same-origin app shell only. Cross-origin GETs are left entirely to the
+  // browser: the Worker's /feed proxy is one, and caching an ICS response would
+  // (a) key up to a megabyte of calendar data by a URL containing the feed's
+  // capability token and (b) let an offline manual sync be served a stale feed
+  // as a *success*, stamping fetchedAt=now so the row claims "fetched just now"
+  // with no error. Offline behavior for feeds is the last-good localStorage
+  // cache in js/feeds.js, not Cache Storage.
+  if (new URL(event.request.url).origin !== self.location.origin) return;
   event.respondWith(
     fetch(event.request)
       .then((response) => {

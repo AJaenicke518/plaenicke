@@ -82,6 +82,7 @@ function resetStorage() {
 
 test('syncFeed: success writes the cache entry and preserves other feeds', async () => {
   resetStorage();
+  saveFeeds([FEED_A, FEED_B]);
   saveFeedCache({ feedB: { fetchedAt: '2026-07-01T00:00:00.000Z', events: [{ uid: 'old' }], skipped: [] } });
 
   const ics = icsWith(vevent({ uid: 'e1', summary: 'Lecture', dtstart: '20260801T090000Z' }));
@@ -122,6 +123,40 @@ test('syncFeed: non-manual sync omits Cache-Control header', async () => {
   assert.equal(Object.prototype.hasOwnProperty.call(capturedOpts.headers, 'Cache-Control'), false);
 });
 
+// --- syncFeed: feed removed mid-flight ------------------------------------
+
+test('syncFeed: a feed removed while its fetch was in flight writes no cache entry', async () => {
+  resetStorage();
+  // The feed being synced is NOT in stored feeds — exactly the state left
+  // behind when Remove ran while this fetch was still outstanding.
+  saveFeeds([FEED_B]);
+  saveFeedCache({ feedB: { fetchedAt: '2026-07-01T00:00:00.000Z', events: [{ uid: 'keep' }], skipped: [] } });
+
+  const ics = icsWith(vevent({ uid: 'e1', summary: 'Lecture', dtstart: '20260801T090000Z' }));
+  const fetchImpl = async () => fakeOkResponse(ics);
+
+  const result = await syncFeed(FEED_A, { fetchImpl, now: () => new Date('2026-07-28T12:00:00.000Z') });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.removed, true);
+  const cache = loadFeedCache();
+  assert.equal(Object.prototype.hasOwnProperty.call(cache, 'feedA'), false);
+  assert.deepEqual(cache.feedB.events, [{ uid: 'keep' }]);
+});
+
+test('syncFeed: a feed still present in stored feeds writes its cache entry as normal', async () => {
+  resetStorage();
+  saveFeeds([FEED_A]);
+  const ics = icsWith(vevent({ uid: 'e1', summary: 'Lecture', dtstart: '20260801T090000Z' }));
+  const fetchImpl = async () => fakeOkResponse(ics);
+
+  const result = await syncFeed(FEED_A, { fetchImpl, now: () => new Date('2026-07-28T12:00:00.000Z') });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.removed, undefined);
+  assert.equal(loadFeedCache().feedA.events.length, 1);
+});
+
 // --- syncFeed: failure keeps last-good ------------------------------------
 
 test('syncFeed: upstream error response keeps last-good cache and reports the error', async () => {
@@ -155,6 +190,7 @@ test('syncFeed: network failure (fetchImpl throws) reports unreachable and keeps
 test('syncFeed: QuotaError prunes out-of-window events and retries once, succeeding', async () => {
   const inner = new FakeLocalStorage();
   globalThis.localStorage = inner;
+  saveFeeds([FEED_A]); // syncFeed only writes a cache entry for a feed that is still stored
   const oldEvent = { uid: 'stale', dtstart: { value: '20250101T090000Z' } }; // ~19 months in the past
   const futureRecurring = { uid: 'rec', dtstart: { value: '20260101T090000Z' }, rrule: 'FREQ=WEEKLY' };
   const inWindow = { uid: 'ok', dtstart: { value: '20260801T090000Z' } };
@@ -179,6 +215,7 @@ test('syncFeed: QuotaError prunes out-of-window events and retries once, succeed
 test('syncFeed: quota prune keeps events whose RANGE overlaps the window, not just DTSTART', async () => {
   const inner = new FakeLocalStorage();
   globalThis.localStorage = inner;
+  saveFeeds([FEED_A]); // syncFeed only writes a cache entry for a feed that is still stored
   // (a) started 60 days ago (outside the -30d edge) but DTEND is 10 days from
   // now, inside the window — must survive: it's still ongoing/relevant.
   const spanningEvent = {
@@ -220,6 +257,7 @@ test('syncFeed: quota prune keeps events whose RANGE overlaps the window, not ju
 test('syncFeed: quota prune keeps a recurring master whose UNTIL still reaches the window', async () => {
   const inner = new FakeLocalStorage();
   globalThis.localStorage = inner;
+  saveFeeds([FEED_A]); // syncFeed only writes a cache entry for a feed that is still stored
   const stillRelevant = {
     uid: 'until-future',
     dtstart: { value: '20200101T090000Z' },
@@ -247,6 +285,7 @@ test('syncFeed: quota prune keeps a recurring master whose UNTIL still reaches t
 test('syncFeed: QuotaError survives prune+retry, drops the largest feed cache, and surfaces it', async () => {
   const inner = new FakeLocalStorage();
   globalThis.localStorage = inner;
+  saveFeeds([FEED_A]); // syncFeed only writes a cache entry for a feed that is still stored
   // feedB is the pre-existing, much larger cache entry — it should be the one dropped.
   const bigEvents = Array.from({ length: 50 }, (_, i) => ({
     uid: `b${i}`,
@@ -277,6 +316,7 @@ test('syncFeed: QuotaError survives prune+retry, drops the largest feed cache, a
 test('syncFeed: QuotaError that persists even after dropping the largest feed reports storage_full', async () => {
   const inner = new FakeLocalStorage();
   globalThis.localStorage = inner;
+  saveFeeds([FEED_A]); // syncFeed only writes a cache entry for a feed that is still stored
   saveFeedCache({});
   globalThis.localStorage = new QuotaThrottledLocalStorage(inner, 3); // every attempt overflows
   const fetchImpl = async () => fakeOkResponse(icsWith());
@@ -302,6 +342,7 @@ test('syncStale: a feed 29 minutes old is not stale and is not synced', async ()
 
 test('syncStale: a feed 31 minutes old is stale and gets synced', async () => {
   resetStorage();
+  saveFeeds([FEED_A]); // stored, so syncFeed's remove-during-sync guard lets the write through
   const now = () => new Date('2026-07-28T12:00:00.000Z');
   const cache = { feedA: { fetchedAt: '2026-07-28T11:29:00.000Z', events: [], skipped: [] } }; // 31 min old
   let called = false;
@@ -315,6 +356,7 @@ test('syncStale: a feed 31 minutes old is stale and gets synced', async () => {
 
 test('syncStale: a feed with no cache entry at all is treated as stale', async () => {
   resetStorage();
+  saveFeeds([FEED_A]); // stored, so syncFeed's remove-during-sync guard lets the write through
   let called = false;
   const fetchImpl = async () => { called = true; return fakeOkResponse(icsWith()); };
   const results = await syncStale([FEED_A], {}, { fetchImpl, now: () => new Date() });
@@ -428,6 +470,37 @@ test('instancesForRange: timed event stamps createdAt with its time', () => {
 test('instancesForRange: feed with no cache entry contributes nothing', () => {
   const out = instancesForRange([FEED_A], {}, '2026-08-01', '2026-08-01', 'UTC');
   assert.deepEqual(out, []);
+});
+
+test('instancesForRange: an expansion throw is logged by error name only, never the feed URL', () => {
+  // A cache entry whose events are structurally wrong (no dtstart) makes
+  // expandEvents throw. The feed is still skipped rather than blanking every
+  // other calendar, but the failure is no longer silent.
+  const cache = {
+    feedA: { fetchedAt: '2026-07-28T12:00:00.000Z', events: [{ uid: 'broken', title: 'Broken' }], skipped: [] },
+    feedB: {
+      fetchedAt: '2026-07-28T12:00:00.000Z',
+      events: [{ uid: 'ok', title: 'Fine', dtstart: { value: '20260801T090000Z' }, recurrenceId: null }],
+      skipped: [],
+    },
+  };
+  const logged = [];
+  const realError = console.error;
+  console.error = (...args) => { logged.push(args.map(String).join(' ')); };
+  let out;
+  try {
+    out = instancesForRange([FEED_A, FEED_B], cache, '2026-08-01', '2026-08-01', 'UTC');
+  } finally {
+    console.error = realError;
+  }
+
+  // The good feed still renders.
+  assert.deepEqual(out.map((i) => i.feedId), ['feedB']);
+  assert.equal(logged.length, 1);
+  assert.match(logged[0], /TypeError/);
+  // Capability rule: a feed URL is a secret — it must never reach the console.
+  assert.ok(!logged[0].includes(FEED_A.url), 'log leaked the feed URL');
+  assert.ok(!logged[0].includes('example.com'), 'log leaked the feed host');
 });
 
 // --- removeFeed --------------------------------------------------------------
