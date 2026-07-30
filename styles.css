@@ -22,6 +22,15 @@
   --shade: rgba(0, 0, 0, 0.25);     /* subtle overlay accents */
   --scrim: rgba(0, 0, 0, 0.35);     /* modal backdrop */
   --serif: Georgia, 'Times New Roman', serif;
+  /* linked-calendar palette (Task 8): 6 fixed swatches feeds auto-assign
+     from / cycle through. Kept distinct from the item-type palette above so
+     an external (feed-colored) block never reads as a same-hued own item. */
+  --feed-palette-1: #5b5aa3;  /* violet */
+  --feed-palette-2: #2f7f7a;  /* teal */
+  --feed-palette-3: #a3436f;  /* rose */
+  --feed-palette-4: #4f6070;  /* slate */
+  --feed-palette-5: #8a7a2e;  /* olive */
+  --feed-palette-6: #b3654a;  /* terracotta */
 }
 
 [data-theme="dark"] {
@@ -43,6 +52,14 @@
   --type-event: #63b57e;
   --type-general: #7d828c;
   --on-type: #14161a;
+  /* linked-calendar palette (Task 8) — lighter/brighter twins of the light
+     values above, same contrast strategy as the item-type palette. */
+  --feed-palette-1: #9a98d4;
+  --feed-palette-2: #5cc2ba;
+  --feed-palette-3: #dd7fa8;
+  --feed-palette-4: #92a4b3;
+  --feed-palette-5: #cbb955;
+  --feed-palette-6: #e0a389;
 }
 
 /* ---------- base ---------- */
@@ -297,6 +314,64 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   padding: 6px 0;
 }
 .seg button.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+
+/* ---------- linked calendars (Task 8) ---------- */
+.feed-empty { color: var(--muted); font-size: 0.8rem; font-style: italic; margin: 0 0 10px; }
+.feed-list { list-style: none; margin: 0 0 10px; padding: 0; }
+.feed-row {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px;
+  margin-bottom: 6px;
+  background: var(--card);
+}
+.feed-row-main { display: flex; align-items: center; gap: 8px; }
+.feed-dot {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--feed-color, var(--type-general));
+}
+.feed-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 700;
+  font-size: 0.9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.feed-status { color: var(--muted); font-size: 0.75rem; margin: 4px 0 6px; }
+.feed-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.feed-actions button {
+  flex: 1 1 auto;
+  background: var(--bg);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  font-size: 0.8rem;
+  padding: 6px 4px;
+}
+.feed-actions button.remove { color: var(--danger); }
+.feed-actions button:disabled { opacity: 0.5; }
+.feed-add { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 4px; }
+.feed-add input {
+  display: block;
+  width: 100%;
+  font-size: 0.9rem;
+  font-family: inherit;
+  padding: 8px;
+  margin-bottom: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--ink);
+}
+.feed-add-msg:empty { display: none; margin: 0; }
+.feed-add button { width: 100%; }
+.feed-add button:disabled { opacity: 0.5; }
 
 /* ---------- tags & preview (restyled) ---------- */
 .tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }

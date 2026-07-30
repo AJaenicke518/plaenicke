@@ -84,7 +84,16 @@ if (els.mic && isVoiceSupported()) {
   });
 }
 
-initSettings({ button: els.settingsBtn, host: els.settingsHost });
+// onFeedsChanged: settings.js's DOM glue (Task 8) mutates feeds/feedCache
+// only through storage.js/feeds.js, then calls this so app.js reloads its
+// own snapshot and re-renders — same "reload + render once" shape as the
+// background sync settle below, just triggered by user action instead of a
+// timer.
+initSettings({
+  button: els.settingsBtn,
+  host: els.settingsHost,
+  onFeedsChanged: () => { feeds = loadFeeds(); feedCache = loadFeedCache(); render(); },
+});
 
 function uid() { return 'id-' + Date.now() + '-' + Math.floor(Math.random() * 1e6); }
 function setMessage(t) { els.message.textContent = t || ''; }
