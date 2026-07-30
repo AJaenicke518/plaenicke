@@ -1,7 +1,7 @@
 // weekview.js — 7 squeezed columns of colored blocks; the "shape of your week".
 // Columns cap at 8 blocks + a "+N" marker so one busy day can't stretch the row.
 import { addDays } from './timegrid.js';
-import { chronoFirst } from './calendar.js';
+import { chronoFirst, itemTypeClass } from './calendar.js';
 
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -24,7 +24,8 @@ export function renderWeekView(container, weekStartISO, itemsByDate, todayISO, {
     const dayItems = chronoFirst(itemsByDate[dateISO] || []);
     for (const it of dayItems.slice(0, 8)) {
       const block = document.createElement('div');
-      block.className = 'week-block type-' + (it.type || 'general');
+      block.className = 'week-block ' + itemTypeClass(it);
+      if (it.external) block.style.setProperty('--feed-color', it.feedColor);
       col.appendChild(block);
     }
     if (dayItems.length > 8) {

@@ -153,6 +153,15 @@ button {
   margin-bottom: 8px;
 }
 #item-list li.empty { color: var(--muted); justify-content: center; }
+#item-list li.list-note {
+  color: var(--muted);
+  justify-content: center;
+  font-size: 0.8rem;
+  font-style: italic;
+  border-left: none;
+  background: transparent;
+  box-shadow: none;
+}
 button.delete { background: transparent; color: var(--danger); padding: 6px 10px; }
 .time-line { color: var(--muted); font-size: 0.8rem; font-style: italic; }
 
@@ -313,4 +322,9 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 .type-milestone { --type: var(--type-milestone); }
 .type-event     { --type: var(--type-event); }
 .type-general   { --type: var(--type-general); }
+/* External-feed items (Task 7): color comes from the owning feed, stamped as
+   an inline --feed-color custom property at the render site — not from the
+   fixed type palette above. Falls back to --type-general if a site somehow
+   omits the inline property, same as every other --type consumer. */
+.type-external  { --type: var(--feed-color, var(--type-general)); }
 #item-list li, .day-other-list li { border-left: 4px solid var(--type, var(--type-general)); }
