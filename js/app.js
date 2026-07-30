@@ -330,10 +330,25 @@ render();
 // already ran from whatever's in cache. Feeds sync sequentially inside
 // syncStale and this settles once for the whole batch, so re-render happens
 // exactly once here, not per feed.
+//
+// syncStale's per-feed failures (unreachable, bad response, parse error) are
+// all caught inside syncFeed and returned as {ok:false, error} — those never
+// reject this promise. A genuine storage-layer bug (a non-QuotaError thrown
+// from saveFeedCache; see feeds.js's syncFeed) is NOT swallowed there by
+// design and escapes as a rejection, ending the sequential batch early. Any
+// feeds that synced before that throw already landed in the persisted
+// cache, so the .catch() below still reloads it and re-renders rather than
+// leaving the view stuck on stale first-paint data. The failure itself is
+// only logged by error name — never the feed object/URL (capability-token
+// rule: a feed URL can carry an access token in its path/query).
 if (feeds.length > 0) {
   syncStale(feeds, feedCache, { fetchImpl: fetch }).then(() => {
     feedCache = loadFeedCache();
     render();
+  }).catch((err) => {
+    feedCache = loadFeedCache();
+    render();
+    console.error('plaenicke: background calendar sync failed', err && err.name);
   });
 }
 
