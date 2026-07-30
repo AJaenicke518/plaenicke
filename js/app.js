@@ -1,7 +1,7 @@
-import { loadItems, saveItems } from './storage.js';
+import { loadItems, saveItems, loadFeeds, loadFeedCache } from './storage.js';
 import { makeItem, sortItemsByDate } from './items.js';
 import { toISO } from './dateparse.js';
-import { buildMonthGrid, groupItemsByDate, monthCellSummary, chronoFirst } from './calendar.js';
+import { buildMonthGrid, groupItemsByDate, monthCellSummary, chronoFirst, itemTypeClass } from './calendar.js';
 import { startOfWeek, addDays, formatTime, formatTimeRange } from './timegrid.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
 import { renderDayView } from './dayview.js';
@@ -9,6 +9,7 @@ import { renderWeekView } from './weekview.js';
 import { renderPreview } from './preview.js';
 import { isVoiceSupported, dictate } from './voice.js';
 import { initSettings } from './settings.js';
+import { instancesForRange, syncStale } from './feeds.js';
 
 const els = {
   text: document.getElementById('entry-text'),
@@ -51,6 +52,21 @@ let items = loadItems();
 let viewMonth = new Date();
 let viewDay = toISO(new Date());
 let viewWeekStart = startOfWeek(viewDay);
+
+// External calendars (Task 6/7) — feeds + cache are read once at load; the
+// only thing that changes them afterward is a background sync settling (see
+// bottom of file), which reloads the cache and re-renders once.
+const DEVICE_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+const LIST_EXTERNAL_HORIZON_DAYS = 366;
+let feeds = loadFeeds();
+let feedCache = loadFeedCache();
+
+// visibleItems: own items (unbounded) ++ every visible feed's instances for
+// [start, end]. Own items are never range-limited here — only the caller's
+// choice of [start, end] bounds how far external instances are expanded.
+function visibleItems(start, end) {
+  return [...items, ...instancesForRange(feeds, feedCache, start, end, DEVICE_TZ)];
+}
 
 // In-app dictation — only surface the mic where the browser supports it.
 // (On iPhone, the keyboard's own mic is always available regardless.)
@@ -152,35 +168,52 @@ function tagChips(it) {
 }
 
 function renderList() {
-  const sorted = sortItemsByDate(items);
+  // External horizon: today -> today+366d. Own items beyond it still render
+  // (visibleItems never range-limits `items`) — only the external instances
+  // fetched here are bounded, per the design doc's list-view horizon.
+  const todayISO = toISO(new Date());
+  const horizonISO = addDays(todayISO, LIST_EXTERNAL_HORIZON_DAYS);
+  const sorted = sortItemsByDate(visibleItems(todayISO, horizonISO));
   els.list.innerHTML = '';
   if (sorted.length === 0) {
     const li = document.createElement('li');
     li.className = 'empty';
     li.textContent = 'Nothing yet. Add something above.';
     els.list.appendChild(li);
-    return;
-  }
-  for (const it of sorted) {
-    const li = document.createElement('li');
-    li.classList.add('type-' + (it.type || 'general'));
-    const main = document.createElement('div');
-    const info = document.createElement('span');
-    info.textContent = `${it.date} — ${it.title}`;
-    main.appendChild(info);
-    if (it.time) {
-      const t = document.createElement('div');
-      t.className = 'time-line';
-      t.textContent = it.endTime ? formatTimeRange(it.time, it.endTime) : formatTime(it.time);
-      main.appendChild(t);
+  } else {
+    for (const it of sorted) {
+      const li = document.createElement('li');
+      li.classList.add(itemTypeClass(it));
+      if (it.external) li.style.setProperty('--feed-color', it.feedColor);
+      const main = document.createElement('div');
+      const info = document.createElement('span');
+      info.textContent = `${it.date} — ${it.title}`;
+      main.appendChild(info);
+      if (it.time) {
+        const t = document.createElement('div');
+        t.className = 'time-line';
+        t.textContent = it.endTime ? formatTimeRange(it.time, it.endTime) : formatTime(it.time);
+        main.appendChild(t);
+      }
+      main.appendChild(tagChips(it));
+      li.appendChild(main);
+      // External items aren't deletable from the planner — there's nothing
+      // in `items` to remove, and the feed will just resupply them anyway.
+      if (!it.external) {
+        const del = document.createElement('button');
+        del.className = 'delete';
+        del.textContent = 'Delete';
+        del.addEventListener('click', () => deleteItem(it.id));
+        li.appendChild(del);
+      }
+      els.list.appendChild(li);
     }
-    main.appendChild(tagChips(it));
-    const del = document.createElement('button');
-    del.className = 'delete';
-    del.textContent = 'Delete';
-    del.addEventListener('click', () => deleteItem(it.id));
-    li.append(main, del);
-    els.list.appendChild(li);
+  }
+  if (feeds.some((f) => !f.hidden)) {
+    const note = document.createElement('li');
+    note.className = 'list-note';
+    note.textContent = `external calendars shown through ${horizonISO}`;
+    els.list.appendChild(note);
   }
 }
 
@@ -189,7 +222,12 @@ function renderCalendar() {
   const month = viewMonth.getMonth();
   els.calLabel.textContent = `${MONTH_NAMES[month]} ${year}`;
   const weeks = buildMonthGrid(year, month);
-  const byDate = groupItemsByDate(sortItemsByDate(items));
+  // buildMonthGrid only ever fills cells with dates from this month (blanks
+  // elsewhere), so the visible range is simply the month's own first/last day.
+  const monthStart = `${year}-${String(month + 1).padStart(2, '0')}-01`;
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const monthEnd = `${year}-${String(month + 1).padStart(2, '0')}-${String(daysInMonth).padStart(2, '0')}`;
+  const byDate = groupItemsByDate(sortItemsByDate(visibleItems(monthStart, monthEnd)));
   const todayISO = toISO(new Date());
   els.calGrid.innerHTML = '';
   for (const d of ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']) {
@@ -211,7 +249,8 @@ function renderCalendar() {
       const { chips, more } = monthCellSummary(chronoFirst(byDate[cell.date] || []));
       for (const it of chips) {
         const chip = document.createElement('div');
-        chip.className = 'cal-item type-' + (it.type || 'general');
+        chip.className = 'cal-item ' + itemTypeClass(it);
+        if (it.external) chip.style.setProperty('--feed-color', it.feedColor);
         chip.textContent = it.title;
         div.appendChild(chip);
       }
@@ -230,7 +269,8 @@ function renderCalendar() {
 function renderWeek() {
   const end = addDays(viewWeekStart, 6);
   els.weekLabel.textContent = `${viewWeekStart.slice(5).replace('-', '/')} – ${end.slice(5).replace('-', '/')}`;
-  renderWeekView(els.weekGrid, viewWeekStart, groupItemsByDate(sortItemsByDate(items)), toISO(new Date()),
+  renderWeekView(els.weekGrid, viewWeekStart,
+    groupItemsByDate(sortItemsByDate(visibleItems(viewWeekStart, end))), toISO(new Date()),
     { onSelectDay: openDay });
 }
 
@@ -241,7 +281,7 @@ function renderDay() {
   const label = new Date(y, m - 1, d).toLocaleDateString('en-US',
     { weekday: 'short', month: 'short', day: 'numeric' });
   els.dayLabel.textContent = label;
-  const byDate = groupItemsByDate(sortItemsByDate(items));
+  const byDate = groupItemsByDate(sortItemsByDate(visibleItems(viewDay, viewDay)));
   const visible = !els.dayView.hidden;
   renderDayView(els.dayBody, viewDay, byDate[viewDay] || [], {
     onDelete: deleteItem,
@@ -285,6 +325,17 @@ els.prevWeek.addEventListener('click', () => { viewWeekStart = addDays(viewWeekS
 els.nextWeek.addEventListener('click', () => { viewWeekStart = addDays(viewWeekStart, 7); render(); });
 
 render();
+
+// Background sync: never block first paint on the network — render() above
+// already ran from whatever's in cache. Feeds sync sequentially inside
+// syncStale and this settles once for the whole batch, so re-render happens
+// exactly once here, not per feed.
+if (feeds.length > 0) {
+  syncStale(feeds, feedCache, { fetchImpl: fetch }).then(() => {
+    feedCache = loadFeedCache();
+    render();
+  });
+}
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => { navigator.serviceWorker.register('service-worker.js'); });

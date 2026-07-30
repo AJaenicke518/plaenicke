@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildMonthGrid, groupItemsByDate, monthCellSummary, chronoFirst } from '../js/calendar.js';
+import {
+  buildMonthGrid, groupItemsByDate, monthCellSummary, chronoFirst, itemTypeClass,
+} from '../js/calendar.js';
 
 test('July 2026 grid starts on the right weekday', () => {
   // July 1 2026 is a Wednesday (index 3): three leading blanks.
@@ -81,4 +83,69 @@ test('chronoFirst returns a new array, not the same reference', () => {
   const items = [{ id: 'a', time: '10:00' }];
   const result = chronoFirst(items);
   assert.notEqual(result, items);
+});
+
+// --- monthCellSummary: own-chip guarantee -----------------------------------
+// External calendars can flood a day with timed instances; an own planner
+// item must never be fully evicted from the chip row if one exists that day.
+
+test('monthCellSummary: all-external day with no own items truncates normally', () => {
+  const items = [
+    { id: 'e1', external: true }, { id: 'e2', external: true },
+    { id: 'e3', external: true }, { id: 'e4', external: true },
+  ];
+  const s = monthCellSummary(items);
+  assert.deepEqual(s.chips.map((i) => i.id), ['e1', 'e2']);
+  assert.equal(s.more, 2);
+});
+
+test('monthCellSummary: own item present but pushed past maxChips by external items is guaranteed a chip', () => {
+  const items = [
+    { id: 'e1', external: true }, { id: 'e2', external: true },
+    { id: 'e3', external: true }, { id: 'own1' },
+  ];
+  const s = monthCellSummary(items);
+  assert.equal(s.chips.length, 2);
+  assert.ok(s.chips.some((i) => i.id === 'own1'), 'own item must survive as a chip');
+  // "+N more" accounting still reflects the true overflow count.
+  assert.equal(s.more, items.length - s.chips.length);
+});
+
+test('monthCellSummary: own item already within the natural top maxChips is left untouched', () => {
+  const items = [
+    { id: 'own1' }, { id: 'e1', external: true }, { id: 'e2', external: true },
+  ];
+  const s = monthCellSummary(items);
+  assert.deepEqual(s.chips.map((i) => i.id), ['own1', 'e1']);
+  assert.equal(s.more, 1);
+});
+
+test('monthCellSummary: multiple own items past maxChips still surfaces exactly one own chip', () => {
+  const items = [
+    { id: 'e1', external: true }, { id: 'e2', external: true },
+    { id: 'e3', external: true }, { id: 'own1' }, { id: 'own2' },
+  ];
+  const s = monthCellSummary(items);
+  assert.equal(s.chips.length, 2);
+  assert.equal(s.chips.filter((i) => !i.external).length, 1);
+  assert.equal(s.more, 3);
+});
+
+// --- itemTypeClass -----------------------------------------------------------
+// The single shared class-name rule used at every 'type-' + ... render site
+// (list, month chips, week blocks, day blocks/other-tasks): own items key off
+// their planner type; external items get their own class so styles.css can
+// hang the feed's own color off a custom property instead of the type palette.
+
+test('itemTypeClass: own item uses its type', () => {
+  assert.equal(itemTypeClass({ type: 'due' }), 'type-due');
+});
+
+test('itemTypeClass: own item with no type defaults to general', () => {
+  assert.equal(itemTypeClass({}), 'type-general');
+});
+
+test('itemTypeClass: external item always maps to type-external regardless of any type field', () => {
+  assert.equal(itemTypeClass({ external: true, type: 'due' }), 'type-external');
+  assert.equal(itemTypeClass({ external: true }), 'type-external');
 });

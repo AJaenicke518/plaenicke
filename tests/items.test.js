@@ -71,3 +71,42 @@ test('sortItemsByDate: same date puts untimed first, then timed by time', () => 
   ];
   assert.deepEqual(sortItemsByDate(input).map(i => i.id), ['u1', 't1', 't2']);
 });
+
+// --- sortItemsByDate: mixed own/external, order-independence -----------------
+// Task 6's EventInstance contract always stamps createdAt (date + time-or-
+// 00:00), so a merged own++external array is total under this comparator
+// regardless of input order — the same permutation must always produce the
+// same sorted output. A comparator hole (e.g. one branch not handling an
+// external item's fields) would show up as different orderings for different
+// permutations of the identical set.
+
+function permutations(arr) {
+  if (arr.length <= 1) return [arr];
+  const out = [];
+  for (let i = 0; i < arr.length; i++) {
+    const rest = arr.slice(0, i).concat(arr.slice(i + 1));
+    for (const p of permutations(rest)) out.push([arr[i], ...p]);
+  }
+  return out;
+}
+
+test('sortItemsByDate: mixed own/external array sorts identically regardless of input order', () => {
+  const own1 = { id: 'own1', title: 'Homework', date: '2026-08-04', time: null, endTime: null, createdAt: '2026-07-01T00:00' };
+  const own2 = { id: 'own2', title: 'Chore', date: '2026-08-04', time: '10:00', endTime: null, createdAt: '2026-07-02T00:00' };
+  const ext1 = {
+    id: 'feedA:e1:2026-08-04:09:00', title: 'Standup', date: '2026-08-04', time: '09:00', endTime: '09:15',
+    createdAt: '2026-08-04T09:00', feedId: 'feedA', feedColor: '#f00', external: true,
+  };
+  const ext2 = {
+    id: 'feedA:e2:2026-08-03:null', title: 'All-day trip', date: '2026-08-03', time: null, endTime: null,
+    createdAt: '2026-08-03T00:00', feedId: 'feedA', feedColor: '#f00', external: true,
+  };
+  const set = [own1, own2, ext1, ext2];
+
+  const orderings = permutations(set).map((perm) => sortItemsByDate(perm).map((i) => i.id));
+  const [first, ...rest] = orderings;
+  for (const ordering of rest) assert.deepEqual(ordering, first);
+
+  // And it's the expected order: date first, then untimed-before-timed, then time.
+  assert.deepEqual(first, [ext2.id, own1.id, ext1.id, own2.id]);
+});
