@@ -176,6 +176,74 @@ test('syncFeed: QuotaError prunes out-of-window events and retries once, succeed
   assert.equal(cache.feedA.events.length, 1); // this sync's own write went through on the retry
 });
 
+test('syncFeed: quota prune keeps events whose RANGE overlaps the window, not just DTSTART', async () => {
+  const inner = new FakeLocalStorage();
+  globalThis.localStorage = inner;
+  // (a) started 60 days ago (outside the -30d edge) but DTEND is 10 days from
+  // now, inside the window — must survive: it's still ongoing/relevant.
+  const spanningEvent = {
+    uid: 'spanning',
+    dtstart: { value: '20260529T090000Z' }, // 2026-07-28 minus 60 days
+    dtend: { value: '20260807T090000Z' }, // 2026-07-28 plus 10 days
+  };
+  // (b) unbounded weekly rule (no UNTIL/COUNT) with an old DTSTART — must
+  // survive regardless of how old its own DTSTART is.
+  const unboundedRecurring = {
+    uid: 'unbounded',
+    dtstart: { value: '20200101T090000Z' },
+    rrule: 'FREQ=WEEKLY;BYDAY=MO',
+  };
+  // (c) a genuinely past single (non-recurring, no span) event — must still
+  // be pruned.
+  const genuinelyPast = { uid: 'past', dtstart: { value: '20250101T090000Z' } };
+
+  saveFeedCache({
+    feedB: {
+      fetchedAt: '2026-07-01T00:00:00.000Z',
+      events: [spanningEvent, unboundedRecurring, genuinelyPast],
+      skipped: [],
+    },
+  });
+
+  globalThis.localStorage = new QuotaThrottledLocalStorage(inner, 1); // 1st save overflows, 2nd succeeds
+  const fetchImpl = async () => fakeOkResponse(icsWith(vevent({ uid: 'e1', summary: 'New', dtstart: '20260801T090000Z' })));
+  const now = () => new Date('2026-07-28T12:00:00.000Z');
+
+  const result = await syncFeed(FEED_A, { fetchImpl, now });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.quotaPruned, true);
+  const keptUids = loadFeedCache().feedB.events.map((e) => e.uid).sort();
+  assert.deepEqual(keptUids, ['spanning', 'unbounded']);
+});
+
+test('syncFeed: quota prune keeps a recurring master whose UNTIL still reaches the window', async () => {
+  const inner = new FakeLocalStorage();
+  globalThis.localStorage = inner;
+  const stillRelevant = {
+    uid: 'until-future',
+    dtstart: { value: '20200101T090000Z' },
+    rrule: 'FREQ=WEEKLY;UNTIL=20270101T000000Z', // ends well after the window start
+  };
+  const trulyOver = {
+    uid: 'until-past',
+    dtstart: { value: '20200101T090000Z' },
+    rrule: 'FREQ=WEEKLY;UNTIL=20210101T000000Z', // ended long before the window start
+  };
+  saveFeedCache({
+    feedB: { fetchedAt: '2026-07-01T00:00:00.000Z', events: [stillRelevant, trulyOver], skipped: [] },
+  });
+
+  globalThis.localStorage = new QuotaThrottledLocalStorage(inner, 1);
+  const fetchImpl = async () => fakeOkResponse(icsWith(vevent({ uid: 'e1', summary: 'New', dtstart: '20260801T090000Z' })));
+  const now = () => new Date('2026-07-28T12:00:00.000Z');
+
+  await syncFeed(FEED_A, { fetchImpl, now });
+
+  const keptUids = loadFeedCache().feedB.events.map((e) => e.uid).sort();
+  assert.deepEqual(keptUids, ['until-future']);
+});
+
 test('syncFeed: QuotaError survives prune+retry, drops the largest feed cache, and surfaces it', async () => {
   const inner = new FakeLocalStorage();
   globalThis.localStorage = inner;
