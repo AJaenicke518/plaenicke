@@ -2,6 +2,12 @@ name = "plaenicke-worker"
 main = "src/index.js"
 compatibility_date = "2026-07-18"
 
+# index.js catches exceptions to return a CORS-bearing 500, which suppresses
+# Cloudflare's automatic exception logging — its console.error is the only
+# remaining signal that a D1 failure happened, and this is where it lands.
+[observability]
+enabled = true
+
 [[d1_databases]]
 binding = "DB"
 database_name = "plaenicke"

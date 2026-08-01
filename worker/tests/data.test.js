@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeD1 } from './fake-d1.js';
-import { handleGetData, handlePutData, MAX_BLOB_CHARS } from '../src/data.js';
+import { handleGetData, handlePutData, MAX_BLOB_BYTES } from '../src/data.js';
 
 const NOW = '2026-08-01T12:00:00.000Z';
 const put = (body) => new Request('https://worker.example/data', {
@@ -60,7 +60,30 @@ test('PUT rejects malformed bodies', async () => {
 
 test('PUT rejects an oversized blob without writing it', async () => {
   const env = { DB: makeD1() };
-  const res = await handlePutData(put({ version: 0, blob: 'x'.repeat(MAX_BLOB_CHARS + 1) }), env, NOW);
+  const res = await handlePutData(put({ version: 0, blob: 'x'.repeat(MAX_BLOB_BYTES + 1) }), env, NOW);
+  assert.equal(res.status, 413);
+  assert.equal((await res.json()).error, 'blob_too_large');
+  assert.equal((await (await handleGetData(env)).json()).version, 0);
+});
+
+// Boundary: a blob of exactly the cap is legal. Without this, flipping the
+// `>` to `>=` — rejecting a maximum-size blob the client is entitled to
+// send — survives the whole suite.
+test('PUT accepts a blob of exactly the cap', async () => {
+  const env = { DB: makeD1() };
+  const res = await handlePutData(put({ version: 0, blob: 'x'.repeat(MAX_BLOB_BYTES) }), env, NOW);
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { version: 1 });
+});
+
+// The cap is BYTES, not UTF-16 code units. 400,000 CJK characters is well
+// under a 1,000,000-character cap but 1.2 MB of UTF-8 — measuring `.length`
+// would let it through to an unhandled D1 row-size rejection.
+test('the cap counts UTF-8 bytes, not characters', async () => {
+  const env = { DB: makeD1() };
+  const blob = '中'.repeat(400_000); // 3 bytes each = 1,200,000 bytes
+  assert.ok(blob.length < MAX_BLOB_BYTES, 'blob must be under the cap as characters');
+  const res = await handlePutData(put({ version: 0, blob }), env, NOW);
   assert.equal(res.status, 413);
   assert.equal((await res.json()).error, 'blob_too_large');
   assert.equal((await (await handleGetData(env)).json()).version, 0);

@@ -1,5 +1,11 @@
-// index.js — Cloudflare Worker entry. Holds the Anthropic key (env.ANTHROPIC_API_KEY)
-// and the shared passphrase (env.APP_PASSPHRASE), both set as Worker secrets.
+// index.js — Cloudflare Worker entry and pathname router.
+//
+// Env it depends on:
+//   env.ANTHROPIC_API_KEY — Worker secret, smart-add (POST /)
+//   env.ADMIN_SECRET      — Worker secret, mint/revoke device tokens
+//   env.DB                — D1 binding, the sync store and the device table
+//
+// There is no passphrase: POST / is deliberately public (see handleSmartAdd).
 import { buildRequestBody } from './prompt.js';
 import { normalizeClaudeJson } from './normalize.js';
 import { handleFeed } from './feed.js';
@@ -127,12 +133,31 @@ export default {
       return handleFeed(request, { fetchImpl: fetch, cache: caches.default });
     }
 
-    if (request.method === 'OPTIONS') return new Response(null, { headers: cors() });
+    // Everything below is wrapped so an unexpected throw (a D1 outage, say)
+    // becomes a 500 that CARRIES CORS HEADERS. Cloudflare's own 1101 page does
+    // not, so the browser would see an opaque TypeError indistinguishable from
+    // being offline — the one state the client tolerates silently. The `await`s
+    // are load-bearing: without them the promises escape this try.
+    //
+    // The try deliberately starts AFTER the /feed dispatch, so a feed failure
+    // never picks up this wider shared CORS policy.
+    try {
+      if (request.method === 'OPTIONS') return new Response(null, { headers: cors() });
 
-    if (pathname === '/') return handleSmartAdd(request, env);
-    if (pathname === '/data') return handleData(request, env);
-    if (pathname === '/admin/device') return handleAdminDevice(request, env);
+      if (pathname === '/') return await handleSmartAdd(request, env);
+      if (pathname === '/data') return await handleData(request, env);
+      if (pathname === '/admin/device') return await handleAdminDevice(request, env);
 
-    return json({ error: 'not_found' }, 404);
+      return json({ error: 'not_found' }, 404);
+    } catch (err) {
+      // Catching suppresses Cloudflare's automatic exception logging, so this
+      // is the only remaining signal. Name and message ONLY — never the
+      // request, the payload, or the blob. Optional chaining because a
+      // `throw null` would otherwise throw again HERE, escaping fetch() and
+      // landing back on the 1101 page this handler exists to avoid (verified
+      // by test — plain `err.name` fails it).
+      console.error(err?.name, err?.message);
+      return json({ error: 'internal_error' }, 500);
+    }
   },
 };

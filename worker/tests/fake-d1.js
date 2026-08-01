@@ -2,8 +2,9 @@
 //
 // Backed by real SQLite rather than pattern-matched fake responses, so the SQL
 // the Worker actually issues — including the compare-and-swap UPDATE and the
-// single-row CHECK — is genuinely exercised. Mirrors the subset of the D1
-// binding the Worker uses: prepare().bind().first()/all()/run().
+// single-row CHECK — is genuinely exercised. Mirrors exactly the subset of the
+// D1 binding the Worker uses: prepare().bind().first()/run(). Nothing more —
+// an unused method in a test double advertises a contract nothing verifies.
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -29,9 +30,6 @@ export function makeD1() {
         const row = db.prepare(sql).get(...args);
         return row === undefined ? null : { ...row };
       },
-      async all() {
-        return { success: true, results: db.prepare(sql).all(...args).map((r) => ({ ...r })) };
-      },
       async run() {
         const r = db.prepare(sql).run(...args);
         return { success: true, meta: { changes: Number(r.changes) }, results: [] };
@@ -40,5 +38,5 @@ export function makeD1() {
     return api;
   }
 
-  return { prepare, exec: (sql) => db.exec(sql) };
+  return { prepare };
 }
