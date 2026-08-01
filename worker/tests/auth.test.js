@@ -63,3 +63,14 @@ test('isAdmin requires an exactly matching secret and fails closed when unset', 
   assert.equal(isAdmin(req({ authorization: 'Bearer s3cret' }), { ADMIN_SECRET: '' }), false);
   assert.equal(isAdmin(req(), { ADMIN_SECRET: 's3cret' }), false);
 });
+
+test('devices are independent: distinct tokens, revocation is scoped', async () => {
+  const env = { DB: makeD1() };
+  const a = await mintDevice(env, 'a', NOW);
+  const b = await mintDevice(env, 'b', NOW);
+  assert.notEqual(a, b);
+  assert.equal(await revokeDevice(env, await sha256Hex(a)), true);
+  assert.equal(await authenticateDevice(req({ authorization: `Bearer ${a}` }), env, NOW), null);
+  assert.equal(await authenticateDevice(req({ authorization: `Bearer ${b}` }), env, NOW),
+    await sha256Hex(b));
+});
