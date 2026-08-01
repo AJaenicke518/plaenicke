@@ -1,4 +1,6 @@
-import { loadItems, saveItems, loadFeeds, loadFeedCache } from './storage.js';
+import {
+  loadItems, saveItems, loadFeeds, loadFeedCache, addTombstone,
+} from './storage.js';
 import { makeItem, sortItemsByDate } from './items.js';
 import { toISO } from './dateparse.js';
 import { buildMonthGrid, groupItemsByDate, monthCellSummary, chronoFirst, itemTypeClass } from './calendar.js';
@@ -164,6 +166,7 @@ async function handleAdd() {
 function deleteItem(id) {
   items = items.filter((it) => it.id !== id);
   saveItems(items);
+  addTombstone(id, 'item', new Date().toISOString());
   render();
 }
 
