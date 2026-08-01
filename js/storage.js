@@ -42,7 +42,14 @@ export function loadItems() {
 }
 
 export function saveItems(items) {
-  localStorage.setItem(STORAGE_KEY, serializeItems(items));
+  try {
+    localStorage.setItem(STORAGE_KEY, serializeItems(items));
+  } catch (err) {
+    if (err && err.name === 'QuotaExceededError') {
+      throw new QuotaError('Items exceeded storage quota');
+    }
+    throw err;
+  }
 }
 
 // --- feeds ---
