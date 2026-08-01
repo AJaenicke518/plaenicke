@@ -3,6 +3,7 @@
 // pins down that the pre-existing smart-add behavior at '/' is unchanged.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import worker from '../src/index.js';
 
 const ALLOWED_ORIGIN = 'https://ajaenicke518.github.io';
@@ -19,9 +20,14 @@ test('OPTIONS / returns the CORS preflight response, unchanged', async () => {
   assert.equal(body, '');
 });
 
-test('feed.js and index.js agree on the allowed origin', async () => {
-  const { ALLOWED_ORIGIN: fromCors } = await import('../src/cors.js');
-  assert.equal(fromCors, 'https://ajaenicke518.github.io');
+test('the allowed origin lives only in cors.js', async () => {
+  const { ALLOWED_ORIGIN } = await import('../src/cors.js');
+  assert.equal(ALLOWED_ORIGIN, 'https://ajaenicke518.github.io');
+  for (const f of ['index.js', 'feed.js']) {
+    const src = readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8');
+    assert.ok(!src.includes('ajaenicke518.github.io'),
+      `${f} still hardcodes the origin`);
+  }
 });
 
 test('POST / with empty text returns 400 empty_text, unchanged', async () => {
