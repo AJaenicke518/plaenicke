@@ -7,7 +7,7 @@ import {
   QuotaError,
 } from '../js/storage.js';
 
-const ITEM = { id: 'a', title: 'Bio', date: '2026-07-02', createdAt: '2026-07-01' };
+const ITEM = { id: 'a', title: 'Bio', date: '2026-07-02', createdAt: '2026-07-01', updatedAt: '2026-07-01' };
 
 class FakeLocalStorage {
   constructor() { this.store = new Map(); }
@@ -131,4 +131,16 @@ test('feed cache: loadFeedCache returns {} when nothing stored', () => {
 test('feed cache: saveFeedCache throws QuotaError on QuotaExceededError', () => {
   globalThis.localStorage = new QuotaExceedingLocalStorage();
   assert.throws(() => saveFeedCache({ f1: CACHE_ENTRY }), QuotaError);
+});
+
+test('deserializeItems backfills updatedAt from createdAt', () => {
+  const json = JSON.stringify([{ id: 'a', title: 'Bio', date: '2026-07-02', createdAt: '2026-07-01' }]);
+  assert.equal(deserializeItems(json)[0].updatedAt, '2026-07-01');
+});
+
+test('deserializeItems preserves an existing updatedAt', () => {
+  const json = JSON.stringify([
+    { id: 'a', title: 'Bio', date: '2026-07-02', createdAt: '2026-07-01', updatedAt: '2026-07-05' },
+  ]);
+  assert.equal(deserializeItems(json)[0].updatedAt, '2026-07-05');
 });
