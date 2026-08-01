@@ -8,7 +8,8 @@ test('makeItem builds an item with type and tags, trims title', () => {
       project: 'Physics paper', subject: 'Physics', category: 'School' },
     { id: 'a', createdAt: '2026-07-18' });
   assert.deepEqual(it, {
-    id: 'a', title: 'First draft', date: '2026-05-15', time: null, endTime: null, createdAt: '2026-07-18',
+    id: 'a', title: 'First draft', date: '2026-05-15', time: null, endTime: null,
+    createdAt: '2026-07-18', updatedAt: '2026-07-18',
     type: 'milestone', project: 'Physics paper', subject: 'Physics', category: 'School',
   });
 });
@@ -109,4 +110,15 @@ test('sortItemsByDate: mixed own/external array sorts identically regardless of 
 
   // And it's the expected order: date first, then untimed-before-timed, then time.
   assert.deepEqual(first, [ext2.id, own1.id, ext1.id, own2.id]);
+});
+
+test('makeItem defaults updatedAt to createdAt', () => {
+  const it = makeItem({ title: 'x', date: '2026-05-15' }, { id: 'c', createdAt: '2026-07-18' });
+  assert.equal(it.updatedAt, '2026-07-18');
+});
+
+test('makeItem honours an explicit updatedAt', () => {
+  const it = makeItem({ title: 'x', date: '2026-05-15' },
+    { id: 'd', createdAt: '2026-07-18', updatedAt: '2026-07-20' });
+  assert.equal(it.updatedAt, '2026-07-20');
 });

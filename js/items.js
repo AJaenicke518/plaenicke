@@ -21,6 +21,7 @@ export function makeItem(fields, meta) {
     time,
     endTime,
     createdAt: meta.createdAt,
+    updatedAt: meta.updatedAt || meta.createdAt,
     type: fields.type || 'general',
     project: fields.project || null,
     subject: fields.subject || null,

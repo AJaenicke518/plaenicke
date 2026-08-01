@@ -24,11 +24,17 @@ export function deserializeItems(json) {
     return [];
   }
   if (!Array.isArray(parsed)) return [];
-  return parsed.filter(it =>
-    it &&
-    typeof it.id === 'string' &&
-    typeof it.title === 'string' &&
-    typeof it.date === 'string');
+  return parsed
+    .filter(it =>
+      it &&
+      typeof it.id === 'string' &&
+      typeof it.title === 'string' &&
+      typeof it.date === 'string')
+    // Records written before V5 have no updatedAt. Backfill from createdAt so
+    // conflict resolution has an input; see spec 5.1.
+    .map(it => (typeof it.updatedAt === 'string'
+      ? it
+      : { ...it, updatedAt: typeof it.createdAt === 'string' ? it.createdAt : '1970-01-01T00:00:00.000Z' }));
 }
 
 export function loadItems() {
