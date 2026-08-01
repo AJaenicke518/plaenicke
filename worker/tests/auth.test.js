@@ -47,6 +47,30 @@ test('authenticateDevice records last_seen_at', async () => {
   assert.equal(row.last_seen_at, '2026-08-02T00:00:00.000Z');
 });
 
+// Ordering pin: the row lookup must happen BEFORE the last_seen_at UPDATE.
+// Reversing the two otherwise survives the entire suite, and the consequence
+// is that `Authorization: Bearer anything` fires an unauthenticated D1 write.
+//
+// Row state alone cannot catch this: the UPDATE is scoped `WHERE token_hash =
+// ?`, so with an unknown hash it changes nothing either way (verified — the
+// reversed implementation passes a last_seen_at-only assertion). What
+// distinguishes the two orderings is whether the statement is ISSUED at all,
+// so this spies on the SQL reaching the binding.
+test('a rejected token issues no write — the lookup precedes the UPDATE', async () => {
+  const db = makeD1();
+  const issued = [];
+  const env = { DB: { prepare: (sql) => { issued.push(sql); return db.prepare(sql); } } };
+  await mintDevice(env, 'phone', NOW);
+
+  issued.length = 0;
+  assert.equal(await authenticateDevice(req({ authorization: 'Bearer wrong' }), env, NOW), null);
+  assert.deepEqual(issued.filter((sql) => /^\s*UPDATE/i.test(sql)), [],
+    'an unauthenticated request must not reach a write statement');
+
+  const row = await db.prepare('SELECT last_seen_at FROM devices').first();
+  assert.equal(row.last_seen_at, null);
+});
+
 test('revokeDevice removes the row and the token stops working', async () => {
   const env = { DB: makeD1() };
   const token = await mintDevice(env, 'old', NOW);
