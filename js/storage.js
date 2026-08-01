@@ -83,6 +83,47 @@ export function saveFeeds(feeds) {
   localStorage.setItem(FEEDS_KEY, serializeFeeds(feeds));
 }
 
+// --- tombstones ---
+// Deletions live here, NOT in plaenicke.items: a tombstone has no title/date,
+// so deserializeItems would discard it on the next load and the deletion would
+// be lost. Cleared only once a sync has acknowledged them. See spec 5.6.
+
+const TOMBSTONES_KEY = 'plaenicke.syncTombstones';
+const TOMBSTONE_MAX_AGE_DAYS = 90;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export function loadTombstones() {
+  const json = localStorage.getItem(TOMBSTONES_KEY);
+  if (!json) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.filter(t =>
+    t &&
+    typeof t.id === 'string' &&
+    (t.kind === 'item' || t.kind === 'feed') &&
+    typeof t.deletedAt === 'string');
+}
+
+export function saveTombstones(list) {
+  localStorage.setItem(TOMBSTONES_KEY, JSON.stringify(list));
+}
+
+export function addTombstone(id, kind, deletedAt) {
+  const kept = loadTombstones().filter(t => !(t.id === id && t.kind === kind));
+  kept.push({ id, kind, deletedAt });
+  saveTombstones(kept);
+}
+
+export function pruneTombstones(list, now, maxAgeDays = TOMBSTONE_MAX_AGE_DAYS) {
+  const cutoff = now.getTime() - maxAgeDays * DAY_MS;
+  return list.filter(t => Date.parse(t.deletedAt) >= cutoff);
+}
+
 // --- feed cache ---
 // Cache is an object keyed by feedId: { [feedId]: { fetchedAt, events, skipped } }.
 // Pruning entries for feeds that no longer exist is feeds.js's job, not storage's.
