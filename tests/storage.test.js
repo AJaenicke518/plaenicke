@@ -26,7 +26,10 @@ class QuotaExceedingLocalStorage {
   }
 }
 
-const FEED = { id: 'f1', url: 'https://example.com/cal.ics', name: 'Work', color: '#ff0000', hidden: false };
+const FEED = {
+  id: 'f1', url: 'https://example.com/cal.ics', name: 'Work', color: '#ff0000', hidden: false,
+  updatedAt: '2026-07-01T00:00:00.000Z',
+};
 const CACHE_ENTRY = { fetchedAt: '2026-07-28T00:00:00.000Z', events: [{ id: 'e1' }], skipped: [] };
 
 test('serialize then deserialize round-trips', () => {
@@ -143,4 +146,22 @@ test('deserializeItems preserves an existing updatedAt', () => {
     { id: 'a', title: 'Bio', date: '2026-07-02', createdAt: '2026-07-01', updatedAt: '2026-07-05' },
   ]);
   assert.equal(deserializeItems(json)[0].updatedAt, '2026-07-05');
+});
+
+// FEED_LEGACY (distinct from the shared FEED fixture above, which already
+// carries updatedAt) represents a pre-V5 feed record with no updatedAt field.
+const FEED_LEGACY = { id: 'f1', url: 'https://x/c.ics', name: 'X', color: '#111', hidden: false };
+
+test('deserializeFeeds backfills updatedAt to the epoch', () => {
+  const out = deserializeFeeds(JSON.stringify([FEED_LEGACY]));
+  assert.equal(out[0].updatedAt, '1970-01-01T00:00:00.000Z');
+});
+
+test('deserializeFeeds preserves an existing updatedAt', () => {
+  const out = deserializeFeeds(JSON.stringify([{ ...FEED_LEGACY, updatedAt: '2026-08-01T00:00:00.000Z' }]));
+  assert.equal(out[0].updatedAt, '2026-08-01T00:00:00.000Z');
+});
+
+test('deserializeFeeds still rejects records missing required fields', () => {
+  assert.deepEqual(deserializeFeeds(JSON.stringify([{ id: 'f', url: 'u' }])), []);
 });
