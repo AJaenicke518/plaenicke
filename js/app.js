@@ -10,6 +10,7 @@ import { renderPreview } from './preview.js';
 import { isVoiceSupported, dictate } from './voice.js';
 import { initSettings } from './settings.js';
 import { instancesForRange, syncStale } from './feeds.js';
+import { uid } from './uid.js';
 
 const els = {
   text: document.getElementById('entry-text'),
@@ -95,7 +96,6 @@ initSettings({
   onFeedsChanged: () => { feeds = loadFeeds(); feedCache = loadFeedCache(); render(); },
 });
 
-function uid() { return 'id-' + Date.now() + '-' + Math.floor(Math.random() * 1e6); }
 function setMessage(t) { els.message.textContent = t || ''; }
 
 function addItems(list) {

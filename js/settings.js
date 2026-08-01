@@ -14,6 +14,7 @@ import {
   syncFeed, feedStatus, removeFeed, webcalToHttps, inferName,
 } from './feeds.js';
 import { loadFeeds, saveFeeds, loadFeedCache } from './storage.js';
+import { uid } from './uid.js';
 
 const CHOICES = ['light', 'dark', 'auto'];
 
@@ -33,8 +34,6 @@ function nextColor(color) {
   const idx = PALETTE.indexOf(color);
   return PALETTE[(idx + 1) % PALETTE.length];
 }
-
-function uid() { return `feed-${Date.now()}-${Math.floor(Math.random() * 1e6)}`; }
 
 function systemPrefersDark() {
   return window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -315,7 +314,7 @@ export function initSettings({ button, host, onFeedsChanged }) {
         const url = webcalToHttps(raw);
         const name = nameInput.value.trim() || inferName(url);
         const color = PALETTE[feeds.length % PALETTE.length];
-        const feed = { id: uid(), url, name, color, hidden: false };
+        const feed = { id: uid('feed'), url, name, color, hidden: false };
 
         feeds = [...feeds, feed];
         saveFeeds(feeds);
