@@ -79,3 +79,50 @@ test('POST / calls out to the real fetch and propagates upstream_unreachable, un
     globalThis.fetch = originalFetch;
   }
 });
+
+test('an unknown path returns 404 rather than falling through to smart-add', async () => {
+  const request = new Request('https://worker.example/nope', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: 'dentist tuesday' }),
+  });
+  const res = await worker.fetch(request, ENV);
+  assert.equal(res.status, 404);
+  assert.equal((await res.json()).error, 'not_found');
+});
+
+test('a GET to an unknown path returns 404, not method_not_allowed', async () => {
+  const res = await worker.fetch(new Request('https://worker.example/nope'), ENV);
+  assert.equal(res.status, 404);
+});
+
+test('OPTIONS on any path still returns the preflight', async () => {
+  const res = await worker.fetch(
+    new Request('https://worker.example/data', { method: 'OPTIONS' }), ENV);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('Access-Control-Allow-Origin'), 'https://ajaenicke518.github.io');
+});
+
+// Regression pin: /feed must handle its own OPTIONS preflight (narrower
+// method set, its own origin allowlist enforced with 403) rather than being
+// intercepted by the shared, wider preflight in the router. This must go
+// through worker.fetch — calling handleFeed directly would not catch a
+// routing-order regression.
+test('OPTIONS /feed keeps feed.js own preflight, not the wide shared one', async () => {
+  // index.js reads the Workers-provided global `caches.default`, which does
+  // not exist under `node --test` (see feed.js's own comment on this). Stand
+  // in a minimal stub for the duration of this test; its match/put are never
+  // reached because feed.js's disallowed-origin check returns 403 before the
+  // cache is touched.
+  const originalCaches = globalThis.caches;
+  globalThis.caches = { default: { match: async () => undefined, put: async () => {} } };
+  try {
+    const res = await worker.fetch(new Request('https://worker.example/feed', {
+      method: 'OPTIONS',
+      headers: { origin: 'https://evil.example' },
+    }), ENV);
+    assert.equal(res.status, 403);
+  } finally {
+    globalThis.caches = originalCaches;
+  }
+});
