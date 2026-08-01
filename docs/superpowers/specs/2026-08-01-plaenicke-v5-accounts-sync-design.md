@@ -250,7 +250,7 @@ Matches the existing `node --test` setup and the injected-effects pattern.
 
 - **Multi-user** — add an owner column and a users table; the blob and merge logic are unchanged.
 - **Live sync** — Durable Objects, without redoing the data model.
-- **Custom domain** — fixes § 6.4 origin isolation.
+- **Custom domain** — fixes § 6.4 origin isolation. **Decided: yes, via Cloudflare Registrar, keeping GitHub Pages hosting.** Sequenced *after* sync — see § 13.
 
 ## 11. To verify during implementation
 
@@ -274,3 +274,22 @@ Matches the existing `node --test` setup and the injected-effects pattern.
 | (absent) | Client-side encryption | Feed URLs are capability tokens the codebase treats as secrets |
 | (absent) | Explicit adoption choice + dedupe | Union silently doubles every shared calendar on first link |
 | Quota on client `today` | Quota on server UTC date | Client-supplied date made the limit bypassable |
+
+## 13. Custom domain migration (after sync)
+
+**Decision:** buy through Cloudflare Registrar (at-cost, and DNS lands in the same dashboard as the Worker); keep GitHub Pages hosting.
+
+**Why it must come after sync, not before.** `localStorage` is per-origin, so serving plaenicke from a new domain yields a completely empty app. Items could be re-entered; **feed subscriptions could not** — `settings.js` never renders `feed.url` anywhere (verified: zero references), by deliberate design, since those URLs are capability tokens. Recovering them means devtools archaeology or re-publishing every calendar from Google/Outlook/iCloud.
+
+With sync shipped, migration is trivial: link the old origin (data uploads encrypted), then link the new domain (data downloads). Rotate the link code afterward to retire any credential that ever touched the old origin.
+
+**Client code needs no origin changes** — `manifest.json` uses a relative `start_url` and `service-worker.js:44` guards on `self.location.origin`. The only change is `ALLOWED_ORIGIN`, currently duplicated across `index.js:7`, `feed.js:11`, and two test files. Consolidate it into one module that accepts a **list**, allow both origins during the transition, then drop the old one once the new domain is verified working.
+
+**Owner steps (manual, in this order):**
+1. Buy the domain at Cloudflare Registrar.
+2. **Verify the domain in GitHub first** (Settings → Pages → verified domains) — configuring DNS before the domain is claimed in GitHub opens a takeover window.
+3. Add the domain in the repo's Pages settings (creates the `CNAME` file; none exists today).
+4. Add DNS at the apex — A records to `185.199.108.153`, `185.199.109.153`, `185.199.110.153`, `185.199.111.153`, plus AAAA to `2606:50c0:8000::153`, `2606:50c0:8001::153`, `2606:50c0:8002::153`, `2606:50c0:8003::153`. Optionally `CNAME www → ajaenicke518.github.io` (GitHub auto-redirects between the two).
+5. **Set these records to DNS-only (grey cloud), not proxied** — a Cloudflare proxy in front of GitHub Pages blocks GitHub's certificate provisioning.
+6. Wait for the certificate (can take up to 24 h), then enable **Enforce HTTPS**.
+7. Tell me the domain; I add it to the allowed-origin list and redeploy the Worker.
