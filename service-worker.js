@@ -4,11 +4,12 @@
 // copy only when offline). Cache-first would freeze the installed app on the
 // first version forever — the wrong behavior for an app you plan to keep growing.
 
-// The '-2' generation exists to purge caches written by the previous V4 service
-// worker, which cached cross-origin GETs and so could hold /feed ICS responses
-// keyed by a URL containing the feed's capability token. `activate` deletes
-// every cache whose name isn't this one, so the rename is what actually evicts
-// them; the fetch-handler guard below only stops new ones being written.
+// Bumping CACHE's name purges every cache written by a previous version —
+// notably the V4 service worker, which cached cross-origin GETs and so could
+// hold /feed ICS responses keyed by a URL containing the feed's capability
+// token. `activate` deletes every cache whose name isn't this one, so the
+// rename is what actually evicts them; the fetch-handler guard below only
+// stops new ones being written.
 const CACHE = 'plaenicke-v5-1';
 const ASSETS = [
   '.', 'index.html', 'styles.css', 'manifest.json',

@@ -15,6 +15,7 @@ import {
 } from './feeds.js';
 import { loadFeeds, saveFeeds, loadFeedCache } from './storage.js';
 import { uid } from './uid.js';
+import { nowISO } from './dateparse.js';
 
 const CHOICES = ['light', 'dark', 'auto'];
 
@@ -246,7 +247,20 @@ export function initSettings({ button, host, onFeedsChanged }) {
           removeBtn.textContent = 'Remove';
           removeBtn.disabled = syncingFeedId === feed.id;
           removeBtn.addEventListener('click', () => {
-            removeFeed(feed.id);
+            // Same catch+surface shape as runSync/handleAdd above: removeFeed
+            // only throws on a genuine storage failure (see feeds.js), never
+            // include the feed object/URL in the log. On failure, leave
+            // `feeds`/`feedCache` untouched — removeFeed's own tombstone-first
+            // ordering means a thrown error left the feed still linked, so
+            // the row should keep showing it, now with an inline error.
+            try {
+              removeFeed(feed.id);
+            } catch (err) {
+              syncErrors[feed.id] = 'remove_failed';
+              console.error('plaenicke: calendar remove failed', err && err.name);
+              renderCalendars();
+              return;
+            }
             feeds = feeds.filter((f) => f.id !== feed.id);
             delete feedCache[feed.id];
             delete syncErrors[feed.id];
@@ -316,7 +330,7 @@ export function initSettings({ button, host, onFeedsChanged }) {
         const color = PALETTE[feeds.length % PALETTE.length];
         const feed = {
           id: uid('feed'), url, name, color, hidden: false,
-          updatedAt: new Date().toISOString(),
+          updatedAt: nowISO(),
         };
 
         feeds = [...feeds, feed];

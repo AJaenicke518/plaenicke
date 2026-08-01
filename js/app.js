@@ -2,7 +2,7 @@ import {
   loadItems, saveItems, loadFeeds, loadFeedCache, addTombstone,
 } from './storage.js';
 import { makeItem, sortItemsByDate } from './items.js';
-import { toISO } from './dateparse.js';
+import { toISO, nowISO } from './dateparse.js';
 import { buildMonthGrid, groupItemsByDate, monthCellSummary, chronoFirst, itemTypeClass } from './calendar.js';
 import { startOfWeek, addDays, formatTime, formatTimeRange } from './timegrid.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
@@ -101,7 +101,11 @@ initSettings({
 function setMessage(t) { els.message.textContent = t || ''; }
 
 function addItems(list) {
-  const made = list.map((it) => makeItem(it, { id: uid(), createdAt: toISO(new Date()) }));
+  // createdAt stays a local calendar date (toISO) — sortItemsByDate depends
+  // on its current format. updatedAt is a full-precision UTC instant
+  // (nowISO), matching feed updatedAt and tombstone deletedAt so sync's
+  // last-write-wins comparisons are all apples-to-apples.
+  const made = list.map((it) => makeItem(it, { id: uid(), createdAt: toISO(new Date()), updatedAt: nowISO() }));
   items.push(...made);
   saveItems(items);
   render();
@@ -164,10 +168,30 @@ async function handleAdd() {
 }
 
 function deleteItem(id) {
+  // Tombstone BEFORE the destructive write: if addTombstone throws (quota
+  // exhausted, or storage blocked as in Safari Private Browsing), the item
+  // is still present locally and nothing else has changed — that converges
+  // to the user's intent (retry, or the item just stays). The old order
+  // (save first, tombstone second) let a tombstone-write failure delete the
+  // item locally with no tombstone to propagate — a silent, self-reversing
+  // delete once sync ships.
+  addTombstone(id, 'item', nowISO());
   items = items.filter((it) => it.id !== id);
   saveItems(items);
-  addTombstone(id, 'item', new Date().toISOString());
   render();
+}
+
+// handleDelete: DOM-facing wrapper around deleteItem, same catch+setMessage
+// shape as addItems' call sites below. Used both directly (list view) and as
+// the onDelete callback passed into dayview.js, which has no message
+// mechanism of its own — the wrapping belongs here, where the callback is
+// supplied from.
+function handleDelete(id) {
+  try {
+    deleteItem(id);
+  } catch (e) {
+    setMessage(e.message);
+  }
 }
 
 function tagChips(it) {
@@ -215,7 +239,7 @@ function renderList() {
         const del = document.createElement('button');
         del.className = 'delete';
         del.textContent = 'Delete';
-        del.addEventListener('click', () => deleteItem(it.id));
+        del.addEventListener('click', () => handleDelete(it.id));
         li.appendChild(del);
       }
       els.list.appendChild(li);
@@ -296,7 +320,7 @@ function renderDay() {
   const byDate = groupItemsByDate(sortItemsByDate(visibleItems(viewDay, viewDay)));
   const visible = !els.dayView.hidden;
   renderDayView(els.dayBody, viewDay, byDate[viewDay] || [], {
-    onDelete: deleteItem,
+    onDelete: handleDelete,
     // Auto-scroll to 07:00 only on a genuine day change while visible; otherwise
     // dayview.js restores the grid's own prior scrollTop (see its `prev` capture).
     // A hidden day-view has scrollTop 0, so lastDayRendered must not advance while hidden —

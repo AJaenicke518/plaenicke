@@ -122,3 +122,17 @@ test('makeItem honours an explicit updatedAt', () => {
     { id: 'd', createdAt: '2026-07-18', updatedAt: '2026-07-20' });
   assert.equal(it.updatedAt, '2026-07-20');
 });
+
+// Regression for the day-resolution updatedAt bug: app.js's item-construction
+// path now passes a full-precision UTC instant (dateparse.js's nowISO()) as
+// meta.updatedAt, not app.js's old createdAt fallback (a local YYYY-MM-DD
+// date via toISO). makeItem must preserve that full precision verbatim
+// rather than truncating it — a day-only updatedAt is what let a tombstone's
+// deletedAt lose to a same-day edit's updatedAt and resurrect a deleted item.
+test('makeItem preserves a full-precision UTC updatedAt distinct from a day-only createdAt', () => {
+  const it = makeItem({ title: 'x', date: '2026-05-15' },
+    { id: 'j', createdAt: '2026-08-01', updatedAt: '2026-08-01T22:05:00.000Z' });
+  assert.equal(it.updatedAt, '2026-08-01T22:05:00.000Z');
+  assert.match(it.updatedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  assert.notEqual(it.updatedAt, it.createdAt);
+});

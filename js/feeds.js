@@ -11,6 +11,7 @@
 
 import { WORKER_URL } from './config.js';
 import { parseICS, expandEvents, parseDuration } from './ics.js';
+import { nowISO } from './dateparse.js';
 import {
   loadFeeds, saveFeeds, loadFeedCache, saveFeedCache, QuotaError, addTombstone,
 } from './storage.js';
@@ -340,6 +341,7 @@ const ERROR_TEXT = {
   parse_error: "couldn't read calendar data",
   storage_full: 'device storage full',
   server: 'sync failed',
+  remove_failed: 'could not remove — try again',
 };
 
 function errorText(code) {
@@ -486,13 +488,18 @@ export function instancesForRange(feeds, cache, start, end, targetTz) {
 // than touching storage.js's feeds/cache directly, keeping feeds.js the sole
 // owner of cache lifecycle.
 export function removeFeed(id) {
+  // Tombstone BEFORE the destructive writes: if addTombstone throws (quota
+  // exhausted, or storage blocked as in Safari Private Browsing), the feed
+  // is still present locally and nothing else has changed — that converges
+  // to the user's intent (retry, or the feed just stays linked). The old
+  // order (save first, tombstone second) let a tombstone-write failure
+  // remove the feed locally with no tombstone to propagate — a silent,
+  // self-reversing delete once sync ships.
+  addTombstone(id, 'feed', nowISO());
   saveFeeds(loadFeeds().filter((f) => f.id !== id));
   const cache = loadFeedCache();
   if (Object.prototype.hasOwnProperty.call(cache, id)) {
     delete cache[id];
     saveFeedCache(cache);
   }
-  // Record the deletion so a later sync can propagate it. Without this, a
-  // device that still holds the feed resurrects it on the next pull.
-  addTombstone(id, 'feed', new Date().toISOString());
 }
