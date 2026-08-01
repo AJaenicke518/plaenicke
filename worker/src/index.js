@@ -3,23 +3,9 @@
 import { buildRequestBody } from './prompt.js';
 import { normalizeClaudeJson } from './normalize.js';
 import { handleFeed } from './feed.js';
+import { cors, json } from './cors.js';
 
-const ALLOWED_ORIGIN = 'https://ajaenicke518.github.io';
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
-
-function cors(headers = {}) {
-  return {
-    'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'content-type',
-    'content-type': 'application/json',
-    ...headers,
-  };
-}
-
-function json(obj, status = 200) {
-  return new Response(JSON.stringify(obj), { status, headers: cors() });
-}
 
 // Fallback only — the browser sends its own local date so relative dates
 // ("tomorrow") resolve in the USER's timezone, not the Worker's UTC clock.
