@@ -13,10 +13,15 @@ test('OPTIONS / returns the CORS preflight response, unchanged', async () => {
   const res = await worker.fetch(request, ENV);
   assert.equal(res.status, 200);
   assert.equal(res.headers.get('Access-Control-Allow-Origin'), ALLOWED_ORIGIN);
-  assert.equal(res.headers.get('Access-Control-Allow-Methods'), 'POST, OPTIONS');
-  assert.equal(res.headers.get('Access-Control-Allow-Headers'), 'content-type');
+  assert.equal(res.headers.get('Access-Control-Allow-Methods'), 'GET, POST, PUT, DELETE, OPTIONS');
+  assert.equal(res.headers.get('Access-Control-Allow-Headers'), 'content-type, authorization');
   const body = await res.text();
   assert.equal(body, '');
+});
+
+test('feed.js and index.js agree on the allowed origin', async () => {
+  const { ALLOWED_ORIGIN: fromCors } = await import('../src/cors.js');
+  assert.equal(fromCors, 'https://ajaenicke518.github.io');
 });
 
 test('POST / with empty text returns 400 empty_text, unchanged', async () => {
