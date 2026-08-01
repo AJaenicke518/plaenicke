@@ -195,6 +195,61 @@ test('a minted token immediately works against /data', async () => {
   assert.equal(res.status, 200);
 });
 
+// --- DELETE /admin/device: the revoke wiring itself. auth.js's own unit
+// tests cover revokeDevice() in isolation; what they cannot cover is this
+// route actually calling it, with the right hash, such that a revoked
+// token is actually cut off. Revocation is the only control that turns off
+// a leaked token, so a route that silently reports success without ever
+// revoking is the worst kind of bug here.
+test('DELETE /admin/device revokes a minted token, and the token then fails on /data', async () => {
+  const env = { ...ENV, DB: makeD1(), ADMIN_SECRET: 'adm1n' };
+  const minted = await (await worker.fetch(new Request('https://worker.example/admin/device', {
+    method: 'POST',
+    headers: { authorization: 'Bearer adm1n', 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'phone' }),
+  }), env)).json();
+  const row = await env.DB.prepare('SELECT token_hash FROM devices WHERE name = ?')
+    .bind('phone').first();
+
+  const del = await worker.fetch(new Request('https://worker.example/admin/device', {
+    method: 'DELETE',
+    headers: { authorization: 'Bearer adm1n', 'content-type': 'application/json' },
+    body: JSON.stringify({ token_hash: row.token_hash }),
+  }), env);
+  assert.equal(del.status, 200);
+  assert.deepEqual(await del.json(), { revoked: true });
+
+  // The assertion that kills a silent-success mutant: without this, a
+  // handler that always returns {revoked: true} without ever calling
+  // revokeDevice would still pass the assertion above.
+  const res = await worker.fetch(new Request('https://worker.example/data', {
+    headers: { authorization: `Bearer ${minted.token}` },
+  }), env);
+  assert.equal(res.status, 401);
+});
+
+test('DELETE /admin/device with an unknown hash reports revoked: false', async () => {
+  const env = { ...ENV, DB: makeD1(), ADMIN_SECRET: 'adm1n' };
+  const res = await worker.fetch(new Request('https://worker.example/admin/device', {
+    method: 'DELETE',
+    headers: { authorization: 'Bearer adm1n', 'content-type': 'application/json' },
+    body: JSON.stringify({ token_hash: 'not-a-real-hash' }),
+  }), env);
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { revoked: false });
+});
+
+test('DELETE /admin/device without a token_hash returns 400 bad_request', async () => {
+  const env = { ...ENV, DB: makeD1(), ADMIN_SECRET: 'adm1n' };
+  const res = await worker.fetch(new Request('https://worker.example/admin/device', {
+    method: 'DELETE',
+    headers: { authorization: 'Bearer adm1n', 'content-type': 'application/json' },
+    body: JSON.stringify({}),
+  }), env);
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error, 'bad_request');
+});
+
 test('smart-add is still public — this plan does not flip it', async () => {
   const env = { ...ENV, DB: makeD1() };
   const res = await worker.fetch(new Request('https://worker.example/', {
