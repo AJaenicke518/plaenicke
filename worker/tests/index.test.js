@@ -5,6 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import worker from '../src/index.js';
+import { makeD1 } from './fake-d1.js';
+import { mintDevice } from '../src/auth.js';
 
 const ALLOWED_ORIGIN = 'https://ajaenicke518.github.io';
 const ENV = { ANTHROPIC_API_KEY: 'test-key' };
@@ -125,4 +127,149 @@ test('OPTIONS /feed keeps feed.js own preflight, not the wide shared one', async
   } finally {
     globalThis.caches = originalCaches;
   }
+});
+
+// --- /data and /admin/device (Task 6) ---------------------------------
+
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+test('/data requires a device token', async () => {
+  const env = { ...ENV, DB: makeD1() };
+  const res = await worker.fetch(new Request('https://worker.example/data'), env);
+  assert.equal(res.status, 401);
+  assert.equal((await res.json()).error, 'unauthorized');
+});
+
+test('/data with a valid token returns the seeded state', async () => {
+  const env = { ...ENV, DB: makeD1() };
+  const token = await mintDevice(env, 'laptop', '2026-08-01T00:00:00.000Z');
+  const res = await worker.fetch(new Request('https://worker.example/data', {
+    headers: { authorization: `Bearer ${token}` },
+  }), env);
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { version: 0, blob: '' });
+});
+
+test('/data rejects an unsupported method', async () => {
+  const env = { ...ENV, DB: makeD1() };
+  const token = await mintDevice(env, 'laptop', '2026-08-01T00:00:00.000Z');
+  const res = await worker.fetch(new Request('https://worker.example/data', {
+    method: 'DELETE', headers: { authorization: `Bearer ${token}` },
+  }), env);
+  assert.equal(res.status, 405);
+});
+
+test('/admin/device requires the admin secret, not a device token', async () => {
+  const env = { ...ENV, DB: makeD1(), ADMIN_SECRET: 'adm1n' };
+  const deviceToken = await mintDevice(env, 'laptop', '2026-08-01T00:00:00.000Z');
+
+  const asDevice = await worker.fetch(new Request('https://worker.example/admin/device', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${deviceToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'phone' }),
+  }), env);
+  assert.equal(asDevice.status, 401);
+
+  const asAdmin = await worker.fetch(new Request('https://worker.example/admin/device', {
+    method: 'POST',
+    headers: { authorization: 'Bearer adm1n', 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'phone' }),
+  }), env);
+  assert.equal(asAdmin.status, 200);
+  const body = await asAdmin.json();
+  assert.match(body.token, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(body.name, 'phone');
+});
+
+test('a minted token immediately works against /data', async () => {
+  const env = { ...ENV, DB: makeD1(), ADMIN_SECRET: 'adm1n' };
+  const minted = await (await worker.fetch(new Request('https://worker.example/admin/device', {
+    method: 'POST',
+    headers: { authorization: 'Bearer adm1n', 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'phone' }),
+  }), env)).json();
+
+  const res = await worker.fetch(new Request('https://worker.example/data', {
+    headers: { authorization: `Bearer ${minted.token}` },
+  }), env);
+  assert.equal(res.status, 200);
+});
+
+test('smart-add is still public — this plan does not flip it', async () => {
+  const env = { ...ENV, DB: makeD1() };
+  const res = await worker.fetch(new Request('https://worker.example/', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: '   ' }),
+  }), env);
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error, 'empty_text');
+});
+
+// --- Controller override 1: method dispatch must precede body parsing ---
+// The brief's handleAdminDevice parses the JSON body before checking the
+// method, so a bodiless GET with a valid admin secret would fall through to
+// `bad_json` (400) and the trailing 405 branch would be unreachable dead
+// code. This pins the corrected ordering: unsupported methods are rejected
+// with 405 before any body is read.
+test('GET /admin/device with a valid admin secret returns 405, not 400', async () => {
+  const env = { ...ENV, DB: makeD1(), ADMIN_SECRET: 'adm1n' };
+  const res = await worker.fetch(new Request('https://worker.example/admin/device', {
+    method: 'GET',
+    headers: { authorization: 'Bearer adm1n' },
+  }), env);
+  assert.equal(res.status, 405);
+});
+
+// --- Reverse-privilege check: the admin secret must not authenticate /data
+// (the brief already pins the other direction — a device token rejected by
+// /admin/device — in the test above).
+test('the admin secret does not authenticate against /data', async () => {
+  const env = { ...ENV, DB: makeD1(), ADMIN_SECRET: 'adm1n' };
+  const res = await worker.fetch(new Request('https://worker.example/data', {
+    headers: { authorization: 'Bearer adm1n' },
+  }), env);
+  assert.equal(res.status, 401);
+  assert.equal((await res.json()).error, 'unauthorized');
+});
+
+// --- Controller override 2: pin the clock boundary end-to-end -----------
+// nowISO() reads the real clock, so these assert on shape and freshness
+// rather than an exact value. They must go through worker.fetch — the point
+// is to prove index.js's real nowISO() actually reaches data.js/auth.js,
+// not just that data.js/auth.js accept a `now` argument (already covered by
+// their own unit tests using a fixed NOW).
+test('PUT /data stamps updated_at with the router\'s real clock, not the seeded epoch', async () => {
+  const env = { ...ENV, DB: makeD1() };
+  const token = await mintDevice(env, 'laptop', '2026-08-01T00:00:00.000Z');
+  const before = Date.now();
+
+  const res = await worker.fetch(new Request('https://worker.example/data', {
+    method: 'PUT',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ version: 0, blob: 'cipher' }),
+  }), env);
+  assert.equal(res.status, 200);
+
+  const row = await env.DB.prepare('SELECT updated_at FROM data WHERE id = 1').first();
+  assert.match(row.updated_at, ISO_INSTANT);
+  assert.notEqual(row.updated_at, '1970-01-01T00:00:00.000Z');
+  assert.ok(Math.abs(Date.parse(row.updated_at) - before) < 5000,
+    `updated_at not close to now: ${row.updated_at}`);
+});
+
+test('authenticateDevice via /data stamps last_seen_at with the router\'s real clock', async () => {
+  const env = { ...ENV, DB: makeD1() };
+  const token = await mintDevice(env, 'laptop', '2026-08-01T00:00:00.000Z');
+  const before = Date.now();
+
+  const res = await worker.fetch(new Request('https://worker.example/data', {
+    headers: { authorization: `Bearer ${token}` },
+  }), env);
+  assert.equal(res.status, 200);
+
+  const row = await env.DB.prepare('SELECT last_seen_at FROM devices').first();
+  assert.match(row.last_seen_at, ISO_INSTANT);
+  assert.ok(Math.abs(Date.parse(row.last_seen_at) - before) < 5000,
+    `last_seen_at not close to now: ${row.last_seen_at}`);
 });

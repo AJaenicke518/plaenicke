@@ -4,6 +4,10 @@ import { buildRequestBody } from './prompt.js';
 import { normalizeClaudeJson } from './normalize.js';
 import { handleFeed } from './feed.js';
 import { cors, json } from './cors.js';
+import { handleGetData, handlePutData } from './data.js';
+import {
+  authenticateDevice, isAdmin, mintDevice, revokeDevice,
+} from './auth.js';
 
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -66,6 +70,52 @@ export async function handleSmartAdd(request, env) {
   return json(normalizeClaudeJson(parsed));
 }
 
+// The single clock boundary for this router. authenticateDevice and
+// handlePutData take `now` as a parameter rather than reading the clock
+// themselves, so tests can inject a fixed instant — see auth.js/data.js.
+function nowISO() { return new Date().toISOString(); }
+
+async function handleData(request, env) {
+  const device = await authenticateDevice(request, env, nowISO());
+  if (!device) return json({ error: 'unauthorized' }, 401);
+  if (request.method === 'GET') return handleGetData(env);
+  if (request.method === 'PUT') return handlePutData(request, env, nowISO());
+  return json({ error: 'method_not_allowed' }, 405);
+}
+
+async function handleAdminDevice(request, env) {
+  // Auth before method: an unauthenticated caller must not be able to probe
+  // which methods this route supports.
+  if (!isAdmin(request, env)) return json({ error: 'unauthorized' }, 401);
+
+  // Method before body: reject unsupported methods without ever touching the
+  // request body, so e.g. a bodiless GET gets a real 405 instead of a
+  // misleading bad_json.
+  if (request.method !== 'POST' && request.method !== 'DELETE') {
+    return json({ error: 'method_not_allowed' }, 405);
+  }
+
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return json({ error: 'bad_json' }, 400);
+  }
+
+  if (request.method === 'POST') {
+    const name = payload && typeof payload.name === 'string' ? payload.name.trim() : '';
+    if (!name) return json({ error: 'bad_request' }, 400);
+    // The token is returned here and never again — only its hash is stored.
+    const token = await mintDevice(env, name, nowISO());
+    return json({ token, name });
+  }
+
+  // DELETE
+  const hash = payload && typeof payload.token_hash === 'string' ? payload.token_hash : '';
+  if (!hash) return json({ error: 'bad_request' }, 400);
+  return json({ revoked: await revokeDevice(env, hash) });
+}
+
 export default {
   async fetch(request, env) {
     const { pathname } = new URL(request.url);
@@ -80,6 +130,8 @@ export default {
     if (request.method === 'OPTIONS') return new Response(null, { headers: cors() });
 
     if (pathname === '/') return handleSmartAdd(request, env);
+    if (pathname === '/data') return handleData(request, env);
+    if (pathname === '/admin/device') return handleAdminDevice(request, env);
 
     return json({ error: 'not_found' }, 404);
   },
