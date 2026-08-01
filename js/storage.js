@@ -117,7 +117,14 @@ export function loadTombstones() {
 }
 
 export function saveTombstones(list) {
-  localStorage.setItem(TOMBSTONES_KEY, JSON.stringify(list));
+  try {
+    localStorage.setItem(TOMBSTONES_KEY, JSON.stringify(list));
+  } catch (err) {
+    if (err && err.name === 'QuotaExceededError') {
+      throw new QuotaError('Tombstones exceeded storage quota');
+    }
+    throw err;
+  }
 }
 
 export function addTombstone(id, kind, deletedAt) {

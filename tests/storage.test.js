@@ -240,3 +240,16 @@ test('saveItems rethrows non-quota errors unchanged', () => {
   globalThis.localStorage.setItem = () => { throw new Error('boom'); };
   assert.throws(() => saveItems([ITEM]), /boom/);
 });
+
+// --- saveTombstones quota handling ---
+
+test('saveTombstones throws QuotaError on QuotaExceededError', () => {
+  globalThis.localStorage = new QuotaExceedingLocalStorage();
+  assert.throws(() => saveTombstones([{ id: 'a', kind: 'item', deletedAt: '2026-08-01T00:00:00.000Z' }]), QuotaError);
+});
+
+test('saveTombstones rethrows non-quota errors unchanged', () => {
+  globalThis.localStorage = new FakeLocalStorage();
+  globalThis.localStorage.setItem = () => { throw new Error('boom'); };
+  assert.throws(() => saveTombstones([{ id: 'a', kind: 'item', deletedAt: '2026-08-01T00:00:00.000Z' }]), /boom/);
+});

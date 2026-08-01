@@ -436,7 +436,16 @@ export function loadTombstones() {
 }
 
 export function saveTombstones(list) {
-  localStorage.setItem(TOMBSTONES_KEY, JSON.stringify(list));
+  // Same quota treatment as saveItems and saveFeedCache — a bare setItem here
+  // lets a raw QuotaExceededError escape deleteItem's unwrapped click handlers.
+  try {
+    localStorage.setItem(TOMBSTONES_KEY, JSON.stringify(list));
+  } catch (err) {
+    if (err && err.name === 'QuotaExceededError') {
+      throw new QuotaError('Tombstones exceeded storage quota');
+    }
+    throw err;
+  }
 }
 
 export function addTombstone(id, kind, deletedAt) {
