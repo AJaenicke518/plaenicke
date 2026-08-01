@@ -14,12 +14,19 @@ const SIMPLE_ORD = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 
   thirteenth: 13, fourteenth: 14, fifteenth: 15, sixteenth: 16, seventeenth: 17,
   eighteenth: 18, nineteenth: 19, twentieth: 20, thirtieth: 30 };
 
+// toISO: local calendar date only ('YYYY-MM-DD') — day resolution, no time
+// or zone. Use for anything keyed to "which day", e.g. calendar navigation.
 export function toISO(d) {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
 }
+
+// nowISO: full-precision UTC instant (e.g. '2026-08-01T22:05:00.000Z'). Use
+// for anything that needs to compare "when" across records/devices, e.g.
+// updatedAt/deletedAt timestamps feeding sync's last-write-wins.
+export function nowISO() { return new Date().toISOString(); }
 
 function addDays(d, n) {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);

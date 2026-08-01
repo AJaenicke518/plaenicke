@@ -78,6 +78,30 @@ function resetStorage() {
   globalThis.localStorage = new FakeLocalStorage();
 }
 
+// Opposite throttle from QuotaThrottledLocalStorage above: the first
+// `succeedCount` setItem calls go through normally, then every call after
+// that throws QuotaExceededError. Lets a test simulate "the small write
+// succeeds, a later larger write overflows" — e.g. a tombstone save going
+// through while the subsequent feeds save doesn't.
+class QuotaFailsAfterLocalStorage {
+  constructor(inner, succeedCount) {
+    this.inner = inner;
+    this.succeedCount = succeedCount;
+    this.calls = 0;
+  }
+  getItem(key) { return this.inner.getItem(key); }
+  setItem(key, value) {
+    this.calls += 1;
+    if (this.calls > this.succeedCount) {
+      const err = new Error('quota exceeded');
+      err.name = 'QuotaExceededError';
+      throw err;
+    }
+    this.inner.setItem(key, value);
+  }
+  removeItem(key) { this.inner.removeItem(key); }
+}
+
 // --- syncFeed: success ---------------------------------------------------
 
 test('syncFeed: success writes the cache entry and preserves other feeds', async () => {
@@ -543,6 +567,38 @@ test('removeFeed records a feed tombstone', () => {
   assert.equal(tombs[0].id, 'f1');
   assert.equal(tombs[0].kind, 'feed');
   assert.ok(Date.parse(tombs[0].deletedAt) > 0);
+});
+
+test('removeFeed: tombstone-first ordering means the tombstone survives even when the feed-save step throws', () => {
+  const inner = new FakeLocalStorage();
+  globalThis.localStorage = inner;
+  saveFeeds([{ id: 'f1', url: 'https://x/c.ics', name: 'X', color: '#111', hidden: false,
+    updatedAt: '2026-08-01T00:00:00.000Z' }]);
+
+  // removeFeed's first setItem is its own addTombstone call — let that
+  // succeed. Its second setItem (saveFeeds, the destructive write) throws,
+  // simulating storage that can take the small tombstone write but not the
+  // larger feeds write. Fix 3 requires the tombstone to be written FIRST,
+  // so it must be durable even though the feed removal itself then fails.
+  globalThis.localStorage = new QuotaFailsAfterLocalStorage(inner, 1);
+
+  let threw = false;
+  try {
+    removeFeed('f1');
+  } catch {
+    threw = true;
+  }
+  assert.ok(threw, 'removeFeed should propagate the storage failure rather than swallow it');
+
+  const tombs = loadTombstones();
+  assert.equal(tombs.length, 1);
+  assert.equal(tombs[0].id, 'f1');
+  assert.equal(tombs[0].kind, 'feed');
+  // The destructive write never completed, so the feed is still present
+  // locally — that's the "converges to the user's intent" half of the fix:
+  // a tombstone now exists for a record still present, rather than a
+  // record gone with no tombstone to propagate the deletion.
+  assert.deepEqual(loadFeeds().map((f) => f.id), ['f1']);
 });
 
 // --- webcalToHttps -------------------------------------------------------------
