@@ -12,7 +12,7 @@
 import { WORKER_URL } from './config.js';
 import { parseICS, expandEvents, parseDuration } from './ics.js';
 import {
-  loadFeeds, saveFeeds, loadFeedCache, saveFeedCache, QuotaError,
+  loadFeeds, saveFeeds, loadFeedCache, saveFeedCache, QuotaError, addTombstone,
 } from './storage.js';
 
 // ---------------------------------------------------------------------------
@@ -492,4 +492,7 @@ export function removeFeed(id) {
     delete cache[id];
     saveFeedCache(cache);
   }
+  // Record the deletion so a later sync can propagate it. Without this, a
+  // device that still holds the feed resurrects it on the next pull.
+  addTombstone(id, 'feed', new Date().toISOString());
 }

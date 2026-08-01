@@ -5,7 +5,7 @@ import {
   webcalToHttps, inferName,
 } from '../js/feeds.js';
 import {
-  loadFeeds, saveFeeds, loadFeedCache, saveFeedCache,
+  loadFeeds, saveFeeds, loadFeedCache, saveFeedCache, loadTombstones,
 } from '../js/storage.js';
 
 // --- fakes -------------------------------------------------------------
@@ -528,6 +528,21 @@ test('removeFeed: removing a feed with no cache entry does not throw', () => {
   saveFeedCache({});
   assert.doesNotThrow(() => removeFeed('feedA'));
   assert.deepEqual(loadFeeds(), []);
+});
+
+test('removeFeed records a feed tombstone', () => {
+  globalThis.localStorage = new FakeLocalStorage();
+  saveFeeds([{ id: 'f1', url: 'https://x/c.ics', name: 'X', color: '#111', hidden: false,
+    updatedAt: '2026-08-01T00:00:00.000Z' }]);
+
+  removeFeed('f1');
+
+  assert.deepEqual(loadFeeds(), []);
+  const tombs = loadTombstones();
+  assert.equal(tombs.length, 1);
+  assert.equal(tombs[0].id, 'f1');
+  assert.equal(tombs[0].kind, 'feed');
+  assert.ok(Date.parse(tombs[0].deletedAt) > 0);
 });
 
 // --- webcalToHttps -------------------------------------------------------------
