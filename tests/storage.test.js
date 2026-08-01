@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  serializeItems, deserializeItems,
+  serializeItems, deserializeItems, saveItems,
   serializeFeeds, deserializeFeeds, loadFeeds, saveFeeds,
   serializeFeedCache, deserializeFeedCache, loadFeedCache, saveFeedCache,
   loadTombstones, saveTombstones, addTombstone, pruneTombstones,
@@ -221,4 +221,22 @@ test('pruneTombstones retains an entry whose deletedAt cannot be parsed', () => 
   const now = new Date('2026-08-01T00:00:00.000Z');
   const list = [{ id: 'corrupt', kind: 'item', deletedAt: 'not-a-date' }];
   assert.deepEqual(pruneTombstones(list, now).map(t => t.id), ['corrupt']);
+});
+
+// --- saveItems quota handling ---
+
+test('saveItems throws QuotaError when storage is full', () => {
+  globalThis.localStorage = new FakeLocalStorage();
+  globalThis.localStorage.setItem = () => {
+    const err = new Error('full');
+    err.name = 'QuotaExceededError';
+    throw err;
+  };
+  assert.throws(() => saveItems([ITEM]), QuotaError);
+});
+
+test('saveItems rethrows non-quota errors unchanged', () => {
+  globalThis.localStorage = new FakeLocalStorage();
+  globalThis.localStorage.setItem = () => { throw new Error('boom'); };
+  assert.throws(() => saveItems([ITEM]), /boom/);
 });
