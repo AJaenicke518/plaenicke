@@ -114,14 +114,26 @@ export function saveTombstones(list) {
 }
 
 export function addTombstone(id, kind, deletedAt) {
-  const kept = loadTombstones().filter(t => !(t.id === id && t.kind === kind));
+  const existing = loadTombstones();
+  const prior = existing.find(t => t.id === id && t.kind === kind);
+  if (prior && Date.parse(prior.deletedAt) > Date.parse(deletedAt)) {
+    // Prior entry is newer than the incoming one — keep it.
+    return;
+  }
+  const kept = existing.filter(t => !(t.id === id && t.kind === kind));
   kept.push({ id, kind, deletedAt });
   saveTombstones(kept);
 }
 
 export function pruneTombstones(list, now, maxAgeDays = TOMBSTONE_MAX_AGE_DAYS) {
   const cutoff = now.getTime() - maxAgeDays * DAY_MS;
-  return list.filter(t => Date.parse(t.deletedAt) >= cutoff);
+  return list.filter(t => {
+    const parsed = Date.parse(t.deletedAt);
+    // An unparseable deletedAt must not cause a tombstone to be dropped:
+    // losing it would let the deleted item resurrect on the next sync.
+    if (Number.isNaN(parsed)) return true;
+    return parsed >= cutoff;
+  });
 }
 
 // --- feed cache ---
