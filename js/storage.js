@@ -60,13 +60,19 @@ export function deserializeFeeds(json) {
     return [];
   }
   if (!Array.isArray(parsed)) return [];
-  return parsed.filter(f =>
-    f &&
-    typeof f.id === 'string' &&
-    typeof f.url === 'string' &&
-    typeof f.name === 'string' &&
-    typeof f.color === 'string' &&
-    typeof f.hidden === 'boolean');
+  return parsed
+    .filter(f =>
+      f &&
+      typeof f.id === 'string' &&
+      typeof f.url === 'string' &&
+      typeof f.name === 'string' &&
+      typeof f.color === 'string' &&
+      typeof f.hidden === 'boolean')
+    // Pre-V5 feeds have no updatedAt. Backfill to the epoch so any genuine
+    // post-link edit always wins; see spec 5.1.
+    .map(f => (typeof f.updatedAt === 'string'
+      ? f
+      : { ...f, updatedAt: '1970-01-01T00:00:00.000Z' }));
 }
 
 export function loadFeeds() {

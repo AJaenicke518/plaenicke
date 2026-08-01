@@ -314,7 +314,10 @@ export function initSettings({ button, host, onFeedsChanged }) {
         const url = webcalToHttps(raw);
         const name = nameInput.value.trim() || inferName(url);
         const color = PALETTE[feeds.length % PALETTE.length];
-        const feed = { id: uid('feed'), url, name, color, hidden: false };
+        const feed = {
+          id: uid('feed'), url, name, color, hidden: false,
+          updatedAt: new Date().toISOString(),
+        };
 
         feeds = [...feeds, feed];
         saveFeeds(feeds);
