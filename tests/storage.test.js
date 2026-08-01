@@ -4,6 +4,7 @@ import {
   serializeItems, deserializeItems,
   serializeFeeds, deserializeFeeds, loadFeeds, saveFeeds,
   serializeFeedCache, deserializeFeedCache, loadFeedCache, saveFeedCache,
+  loadTombstones, saveTombstones, addTombstone, pruneTombstones,
   QuotaError,
 } from '../js/storage.js';
 
@@ -164,4 +165,45 @@ test('deserializeFeeds preserves an existing updatedAt', () => {
 
 test('deserializeFeeds still rejects records missing required fields', () => {
   assert.deepEqual(deserializeFeeds(JSON.stringify([{ id: 'f', url: 'u' }])), []);
+});
+
+// --- tombstones ---
+
+test('tombstones round-trip', () => {
+  globalThis.localStorage = new FakeLocalStorage();
+  saveTombstones([{ id: 'a', kind: 'item', deletedAt: '2026-08-01T00:00:00.000Z' }]);
+  assert.deepEqual(loadTombstones(), [{ id: 'a', kind: 'item', deletedAt: '2026-08-01T00:00:00.000Z' }]);
+});
+
+test('loadTombstones returns [] when unset or malformed', () => {
+  globalThis.localStorage = new FakeLocalStorage();
+  assert.deepEqual(loadTombstones(), []);
+  globalThis.localStorage.setItem('plaenicke.syncTombstones', 'not json');
+  assert.deepEqual(loadTombstones(), []);
+});
+
+test('addTombstone appends and de-duplicates by id+kind keeping the newer', () => {
+  globalThis.localStorage = new FakeLocalStorage();
+  addTombstone('a', 'item', '2026-08-01T00:00:00.000Z');
+  addTombstone('b', 'feed', '2026-08-01T00:00:00.000Z');
+  addTombstone('a', 'item', '2026-08-02T00:00:00.000Z');
+  const out = loadTombstones();
+  assert.equal(out.length, 2);
+  assert.equal(out.find(t => t.id === 'a').deletedAt, '2026-08-02T00:00:00.000Z');
+});
+
+test('addTombstone treats the same id under a different kind as distinct', () => {
+  globalThis.localStorage = new FakeLocalStorage();
+  addTombstone('x', 'item', '2026-08-01T00:00:00.000Z');
+  addTombstone('x', 'feed', '2026-08-01T00:00:00.000Z');
+  assert.equal(loadTombstones().length, 2);
+});
+
+test('pruneTombstones drops entries older than the window and keeps the rest', () => {
+  const now = new Date('2026-08-01T00:00:00.000Z');
+  const list = [
+    { id: 'old', kind: 'item', deletedAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'new', kind: 'item', deletedAt: '2026-07-30T00:00:00.000Z' },
+  ];
+  assert.deepEqual(pruneTombstones(list, now).map(t => t.id), ['new']);
 });
