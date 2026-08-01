@@ -128,7 +128,7 @@ Expected: no matches in `app.js` or `settings.js`.
 
 - [ ] **Step 7: Run the full suite and commit**
 
-Run: `node --test tests/`
+Run: `npm test`
 
 ```bash
 git add -A && git commit -m "feat: single crypto.randomUUID-based uid, replacing two duplicated generators"
@@ -239,7 +239,7 @@ Run: `node --test tests/items.test.js tests/storage.test.js` — Expected: PASS
 
 - [ ] **Step 6: Run the full suite and commit**
 
-Run: `node --test tests/`
+Run: `npm test`
 
 ```bash
 git add -A && git commit -m "feat: updatedAt on items with backfill from createdAt"
@@ -329,7 +329,7 @@ Run: `node --test tests/storage.test.js` — Expected: PASS
 
 - [ ] **Step 6: Run the full suite and commit**
 
-Run: `node --test tests/`
+Run: `npm test`
 
 ```bash
 git add -A && git commit -m "feat: updatedAt on feeds; color/hidden stay device-local per spec 6.3"
@@ -457,7 +457,7 @@ Run: `node --test tests/storage.test.js` — Expected: PASS
 
 - [ ] **Step 5: Run the full suite and commit**
 
-Run: `node --test tests/`
+Run: `npm test`
 
 ```bash
 git add -A && git commit -m "feat: tombstone storage in its own key, surviving the item deserializer"
@@ -528,7 +528,7 @@ Run: `node --test tests/storage.test.js` — Expected: PASS
 
 - [ ] **Step 5: Run the full suite and commit**
 
-Run: `node --test tests/`
+Run: `npm test`
 
 ```bash
 git add -A && git commit -m "feat: saveItems raises typed QuotaError, matching saveFeedCache"
@@ -611,7 +611,7 @@ Run: `node --test tests/feeds.test.js` — Expected: PASS
 
 - [ ] **Step 6: Run the full suite and commit**
 
-Run: `node --test tests/`
+Run: `npm test`
 
 ```bash
 git add -A && git commit -m "feat: record item and feed deletions as tombstones"
@@ -646,7 +646,7 @@ Cross-check that every filename printed appears in `ASSETS` (prefixed `js/`). An
 
 - [ ] **Step 3: Run the full suite and commit**
 
-Run: `node --test tests/`
+Run: `npm test`
 
 ```bash
 git add -A && git commit -m "chore: precache js/uid.js, bump SW cache to plaenicke-v5-1"
