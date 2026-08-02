@@ -51,11 +51,15 @@ export async function linkWithCode(input) {
     code = trimmed;
   }
   const { authToken } = parseLinkCode(code);
+  // ORDER MATTERS. Write the cursor (with the gate raised) BEFORE the
+  // credential. If saveAuth ran first and this threw — a quota failure on the
+  // syncState key, or crypto.subtle being unavailable — the device would be
+  // left linked with the adoption gate DOWN, which is the one state the gate
+  // exists to prevent. With this order a failure leaves a cursor and no
+  // credential, which reads as unlinked and is inert.
+  const hash = await tokenHash(authToken);
+  saveSyncState({ ...ZERO, tokenHash: hash, adoptionPending: true });
   saveAuth(code);
-  // Hard reset: a re-link must never reuse a version from a previous device,
-  // which would push at a cursor the server never issued (spec 5.7).
-  // adoptionPending gates the first sync until the user chooses.
-  saveSyncState({ ...ZERO, tokenHash: await tokenHash(authToken), adoptionPending: true });
   return getLink();
 }
 

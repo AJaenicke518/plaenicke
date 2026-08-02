@@ -2,7 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { installFakeLocalStorage } from './fake-localstorage.js';
 import { generateEncKey, bytesToBase64url, composeLinkCode } from '../js/crypto.js';
-import { loadSyncState, saveSyncState, loadItems, saveItems } from '../js/storage.js';
+import {
+  loadSyncState, saveSyncState, loadItems, saveItems,
+  loadFeeds, saveFeeds, loadTombstones, saveTombstones, SYNC_STATE_KEY,
+} from '../js/storage.js';
 import {
   isLinked, getLink, linkWithCode, unlink, tokenHash,
   resetSyncStateIfDeviceChanged, isAdoptionPending, clearAdoptionPending,
@@ -72,6 +75,34 @@ test('linking sets the adoption gate, and only clearAdoptionPending lifts it', a
   assert.equal(isAdoptionPending(), false);
 });
 
+// The bootstrap path has no remote data to union, so the gate is nearly free
+// there. A device JOINING an existing account is the entire reason the gate
+// exists — this must be checked independently of the bootstrap-path test above.
+test('joining an existing account with a full link code also raises the gate', async () => {
+  installFakeLocalStorage();
+  await linkWithCode(composeLinkCode(bareToken(), generateEncKey()));
+  assert.equal(isAdoptionPending(), true, 'a device joining an existing account must not sync silently');
+});
+
+// If the cursor write fails AFTER the credential is already stored, the
+// device is left linked with the adoption gate down — the one state the gate
+// exists to prevent. linkWithCode must write the cursor before the
+// credential so a failure here leaves no credential at all.
+test('a failure writing the cursor must not leave the device linked with the gate down', async () => {
+  installFakeLocalStorage();
+  const raw = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = (key, value) => {
+    if (key === SYNC_STATE_KEY) {
+      const err = new Error('Sync state exceeded storage quota');
+      err.name = 'QuotaExceededError';
+      throw err;
+    }
+    return raw(key, value);
+  };
+  await assert.rejects(() => linkWithCode(bareToken()));
+  assert.equal(isLinked(), false, 'a write failure must not leave the device linked with the gate down');
+});
+
 test('clearAdoptionPending preserves the rest of the cursor', async () => {
   installFakeLocalStorage();
   await linkWithCode(bareToken());
@@ -95,11 +126,18 @@ test('resetSyncStateIfDeviceChanged zeroes on a different token and leaves the s
 test('unlink clears credentials and cursor but NEVER touches local data', async () => {
   installFakeLocalStorage();
   saveItems([{ id: 'a', title: 'keep me', date: '2026-08-02', updatedAt: '2026-08-02T00:00:00.000Z' }]);
+  // A wiped feed is a URL nothing on screen can restore (settings.js never
+  // renders feed.url), and wiped tombstones would let every deleted item
+  // resurrect on the next sync — both are local data, same as items.
+  saveFeeds([{ id: 'f1', url: 'https://example.com/feed.ics', name: 'keep me too', color: '#336699', hidden: false, updatedAt: '2026-08-02T00:00:00.000Z' }]);
+  saveTombstones([{ id: 'd1', kind: 'item', deletedAt: '2026-08-02T00:00:00.000Z' }]);
   await linkWithCode(bareToken());
   unlink();
   assert.equal(isLinked(), false);
   assert.equal(loadSyncState().version, 0);
   assert.equal(loadItems().length, 1, 'unlinking must never delete local data');
+  assert.equal(loadFeeds().length, 1, 'unlinking must never delete feeds');
+  assert.equal(loadTombstones().length, 1, 'unlinking must never delete tombstones');
 });
 
 test('a corrupt stored link code reads as unlinked rather than throwing on every tick', () => {
