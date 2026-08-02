@@ -149,13 +149,36 @@ function collapse(records, keyOf) {
   return [...out.values()];
 }
 
-export function dedupeState(state) {
+export function dedupeState(state, now) {
+  const feeds = collapse(state.feeds, f => normalizeUrl(f.url));
+  // \u0001 is a field separator that cannot appear in a title, date or
+  // time string, so a title ending in a substring of the next field can
+  // never collide with a differently-split key. `time || ''` folds every
+  // spelling of "all-day" -- a missing key on a pre-V5 record, an explicit
+  // null, an explicit undefined -- into the same bucket. Without it,
+  // `${i.time}` stringifies to the literal text "null" or "undefined",
+  // splitting one all-day event into up to three ungatherable keys.
+  const items = collapse(state.items, i => `${i.title}\u0001${i.date}\u0001${i.time || ''}`);
+  // collapse() silently drops the loser of each group. Without a tombstone
+  // for every dropped id, a peer device that never ran adoption (dedupeState
+  // runs ONCE, at link time, on ONE device) still holds the loser locally
+  // with no tombstone of its own -- and a local-only record with no
+  // tombstone always survives merge, so the peer's next sync brings the
+  // "collapsed" record right back. Writing tombstones here is what makes
+  // the collapse actually propagate through the ordinary merge path, with
+  // no special-casing needed at the call site.
+  const survivingFeedIds = new Set(feeds.map(f => f.id));
+  const survivingItemIds = new Set(items.map(i => i.id));
+  const droppedTombstones = [
+    ...state.feeds.filter(f => !survivingFeedIds.has(f.id))
+      .map(f => ({ id: f.id, kind: 'feed', deletedAt: now.toISOString() })),
+    ...state.items.filter(i => !survivingItemIds.has(i.id))
+      .map(i => ({ id: i.id, kind: 'item', deletedAt: now.toISOString() })),
+  ];
   return {
     ...state,
-    feeds: collapse(state.feeds, f => normalizeUrl(f.url)),
-    // \u0001 is a field separator that cannot appear in a title, date or
-    // time string, so a title ending in a substring of the next field can
-    // never collide with a differently-split key.
-    items: collapse(state.items, i => `${i.title}\u0001${i.date}\u0001${i.time}`),
+    feeds,
+    items,
+    tombstones: mergeTombstones(state.tombstones, droppedTombstones),
   };
 }

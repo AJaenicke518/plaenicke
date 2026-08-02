@@ -138,12 +138,17 @@ test('merge is idempotent — merging a result with its own remote changes nothi
 test('toWire strips per-device fields and sorts, so two devices agree byte for byte', () => {
   const a = state({
     items: [item('z', '2026-08-01T00:00:00.000Z'), item('a', '2026-08-01T00:00:00.000Z')],
-    feeds: [feed('f', '2026-08-01T00:00:00.000Z', { color: '#111', hidden: false })],
+    // Two feeds in one order on this side, reversed on the other — feed ids
+    // are per-device, so this is the one place order actually differs
+    // between two real devices (review finding 4).
+    feeds: [feed('f', '2026-08-01T00:00:00.000Z', { color: '#111', hidden: false }),
+            feed('g', '2026-08-01T00:00:00.000Z', { color: '#222', hidden: false })],
     tombstones: [{ id: 'y', kind: 'item', deletedAt: '2026-08-01T00:00:00.000Z' }, { id: 'x', kind: 'feed', deletedAt: '2026-08-01T00:00:00.000Z' }],
   });
   const b = state({
     items: [item('a', '2026-08-01T00:00:00.000Z'), item('z', '2026-08-01T00:00:00.000Z')],
-    feeds: [feed('f', '2026-08-01T00:00:00.000Z', { color: '#999', hidden: true })],
+    feeds: [feed('g', '2026-08-01T00:00:00.000Z', { color: '#444', hidden: true }),
+            feed('f', '2026-08-01T00:00:00.000Z', { color: '#999', hidden: true })],
     tombstones: [{ id: 'x', kind: 'feed', deletedAt: '2026-08-01T00:00:00.000Z' }, { id: 'y', kind: 'item', deletedAt: '2026-08-01T00:00:00.000Z' }],
   });
   assert.equal(JSON.stringify(toWire(a)), JSON.stringify(toWire(b)));
@@ -159,7 +164,7 @@ test('toWire is idempotent', () => {
 test('dedupeState collapses feeds sharing a normalised URL, keeping the newer', () => {
   const out = dedupeState(state({ feeds: [
     { ...feed('a', '2026-08-01T00:00:00.000Z'), url: 'https://cal.example/x.ics' },
-    { ...feed('b', '2026-08-02T00:00:00.000Z'), url: 'HTTPS://Cal.Example/x.ics/' }] }));
+    { ...feed('b', '2026-08-02T00:00:00.000Z'), url: 'HTTPS://Cal.Example/x.ics/' }] }), NOW);
   assert.equal(out.feeds.length, 1);
   assert.equal(out.feeds[0].id, 'b');
 });
@@ -168,7 +173,7 @@ test('dedupeState collapses items sharing title, date and time', () => {
   const out = dedupeState(state({ items: [
     { ...item('a', '2026-08-01T00:00:00.000Z'), title: 'Dentist', date: '2026-08-05', time: '09:00' },
     { ...item('b', '2026-08-02T00:00:00.000Z'), title: 'Dentist', date: '2026-08-05', time: '09:00' },
-    { ...item('c', '2026-08-02T00:00:00.000Z'), title: 'Dentist', date: '2026-08-06', time: '09:00' }] }));
+    { ...item('c', '2026-08-02T00:00:00.000Z'), title: 'Dentist', date: '2026-08-06', time: '09:00' }] }), NOW);
   assert.deepEqual(out.items.map(i => i.id).sort(), ['b', 'c']);
 });
 
@@ -177,9 +182,66 @@ test('dedupeState collapses items sharing title, date and time', () => {
 test('dedupeState breaks an updatedAt tie deterministically by id', () => {
   const same = '2026-08-01T00:00:00.000Z';
   const base = { title: 'Dentist', date: '2026-08-05', time: '09:00', updatedAt: same };
-  const forward = dedupeState(state({ items: [{ ...base, id: 'a' }, { ...base, id: 'b' }] }));
-  const reverse = dedupeState(state({ items: [{ ...base, id: 'b' }, { ...base, id: 'a' }] }));
+  const forward = dedupeState(state({ items: [{ ...base, id: 'a' }, { ...base, id: 'b' }] }), NOW);
+  const reverse = dedupeState(state({ items: [{ ...base, id: 'b' }, { ...base, id: 'a' }] }), NOW);
   assert.deepEqual(forward.items.map(i => i.id), reverse.items.map(i => i.id));
+});
+
+// Review finding 1: collapse() silently drops the loser. Unless dedupeState
+// writes a tombstone for it, a peer device that never ran adoption still
+// holds the loser locally with no tombstone, and a local-only record with no
+// tombstone always survives merge — so the peer's next sync brings it right
+// back, and adoption never actually converges the two devices.
+test('dedupeState tombstones the ids it drops, and does not tombstone the survivor', () => {
+  const out = dedupeState(state({
+    feeds: [
+      { ...feed('f1', '2026-08-01T00:00:00.000Z'), url: 'https://cal.example/x.ics' },
+      { ...feed('f2', '2026-08-02T00:00:00.000Z'), url: 'HTTPS://Cal.Example/x.ics/' }],
+  }), NOW);
+  assert.equal(out.feeds.map(f => f.id).length, 1);
+  assert.equal(out.feeds[0].id, 'f2');
+  assert.deepEqual(out.tombstones, [{ id: 'f1', kind: 'feed', deletedAt: NOW.toISOString() }]);
+  // The survivor must not also be tombstoned — it kept a different id.
+  assert.ok(!out.tombstones.some(t => t.id === 'f2'), 'the survivor must not be tombstoned');
+});
+
+// Review finding 1, round trip: device A adopts, collapsing f1/f2 (same URL)
+// down to f2. Device B never ran adoption and still holds f1 with no
+// tombstone of its own. B must merge A's result and NOT resurrect f1 — that
+// is the entire point of adoption existing.
+test('a peer device does not resurrect a feed dedupeState collapsed away', () => {
+  const deviceB = state({ feeds: [feed('f1', '2026-08-01T00:00:00.000Z')] });
+  const deviceAAdopted = dedupeState(state({
+    feeds: [
+      { ...feed('f1', '2026-08-01T00:00:00.000Z'), url: 'https://cal.example/x.ics' },
+      { ...feed('f2', '2026-08-02T00:00:00.000Z'), url: 'https://cal.example/x.ics' }],
+  }), NOW);
+  const peerResult = merge(deviceB, deviceAAdopted, NOW);
+  assert.deepEqual(peerResult.feeds.map(f => f.id), ['f2'], 'f1 must not come back');
+});
+
+// Review finding 2: `${i.time}` stringifies null -> "null" and undefined ->
+// "undefined", so a legacy pre-V5 item with no time key at all, one with
+// time: null and one with time: undefined would land in three different
+// dedupe buckets instead of the one all-day bucket they represent.
+test('dedupeState folds every spelling of all-day (missing, null, undefined) into one bucket', () => {
+  const missingTime = { id: 'a', title: 'Dentist', date: '2026-08-05', updatedAt: '2026-08-01T00:00:00.000Z' };
+  const nullTime = { id: 'b', title: 'Dentist', date: '2026-08-05', time: null, updatedAt: '2026-08-02T00:00:00.000Z' };
+  const undefinedTime = { id: 'c', title: 'Dentist', date: '2026-08-05', time: undefined, updatedAt: '2026-08-03T00:00:00.000Z' };
+  const out = dedupeState(state({ items: [missingTime, nullTime, undefinedTime] }), NOW);
+  assert.equal(out.items.length, 1);
+  assert.equal(out.items[0].id, 'c');
+});
+
+// Review finding 3: the only existing multi-item dedupe test varies the
+// DATE across its distinguishing item, so dropping time from the dedupe key
+// entirely still passes. Two same-day appointments at different times must
+// both survive, or adoption silently deletes one of them.
+test('dedupeState keeps two items sharing title and date but differing only in time', () => {
+  const out = dedupeState(state({ items: [
+    { ...item('a', '2026-08-01T00:00:00.000Z'), title: 'Dentist', date: '2026-08-05', time: '09:00' },
+    { ...item('b', '2026-08-01T00:00:00.000Z'), title: 'Dentist', date: '2026-08-05', time: '17:00' }] }), NOW);
+  assert.deepEqual(out.items.map(i => i.id).sort(), ['a', 'b']);
 });
 
 test('emptyState is a valid mergeable state', () => {
