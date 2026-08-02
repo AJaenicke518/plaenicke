@@ -1557,7 +1557,7 @@ export async function syncOnce(deps) {
     // Dedupe runs ONLY here, on an explicit adoption. On an ordinary sync it
     // would collapse any two records sharing a title, date and time — silent,
     // permanent, cross-device deletion.
-    if (adoptChoice === 'adopt-merge') merged = dedupeState(merged);
+    if (adoptChoice === 'adopt-merge') merged = dedupeState(merged, now());
 
     // Apply BEFORE advancing the cursor, and push what applyState actually
     // wrote: it re-merges against live storage, so the two can differ.
