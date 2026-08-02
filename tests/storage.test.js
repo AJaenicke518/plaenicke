@@ -7,6 +7,8 @@ import {
   loadTombstones, saveTombstones, addTombstone, pruneTombstones,
   QuotaError,
 } from '../js/storage.js';
+import { installFakeLocalStorage } from './fake-localstorage.js';
+import { loadAuth, saveAuth, clearAuth, loadSyncState, saveSyncState } from '../js/storage.js';
 
 const ITEM = { id: 'a', title: 'Bio', date: '2026-07-02', createdAt: '2026-07-01', updatedAt: '2026-07-01' };
 
@@ -252,4 +254,53 @@ test('saveTombstones rethrows non-quota errors unchanged', () => {
   globalThis.localStorage = new FakeLocalStorage();
   globalThis.localStorage.setItem = () => { throw new Error('boom'); };
   assert.throws(() => saveTombstones([{ id: 'a', kind: 'item', deletedAt: '2026-08-01T00:00:00.000Z' }]), /boom/);
+});
+
+// --- auth and sync state ---
+
+test('auth round-trips and clears', () => {
+  installFakeLocalStorage();
+  assert.equal(loadAuth(), null);
+  saveAuth('abc');
+  assert.equal(loadAuth(), 'abc');
+  clearAuth();
+  assert.equal(loadAuth(), null);
+});
+
+test('loadSyncState returns a zeroed state when nothing is stored', () => {
+  installFakeLocalStorage();
+  assert.deepEqual(loadSyncState(),
+    { version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false });
+});
+
+test('syncState round-trips including adoptionPending', () => {
+  installFakeLocalStorage();
+  const s = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-08-02T00:00:00.000Z', lastError: null, adoptionPending: true };
+  saveSyncState(s);
+  assert.deepEqual(loadSyncState(), s);
+});
+
+test('a corrupt or non-numeric syncState falls back to zero rather than throwing', () => {
+  installFakeLocalStorage();
+  localStorage.setItem('plaenicke.syncState', '{{{');
+  assert.equal(loadSyncState().version, 0);
+  localStorage.setItem('plaenicke.syncState', JSON.stringify({ version: 'seven' }));
+  assert.equal(loadSyncState().version, 0);
+});
+
+// adoptionPending gates the first sync of a newly linked device. A corrupt
+// value must fail CLOSED (pending) rather than open, or the union is applied
+// and pushed before the user is asked.
+test('a missing or non-boolean adoptionPending reads as false only when explicitly false', () => {
+  installFakeLocalStorage();
+  localStorage.setItem('plaenicke.syncState', JSON.stringify({ version: 1, adoptionPending: 'yes' }));
+  assert.equal(loadSyncState().adoptionPending, true);
+  localStorage.setItem('plaenicke.syncState', JSON.stringify({ version: 1, adoptionPending: false }));
+  assert.equal(loadSyncState().adoptionPending, false);
+});
+
+test('saveSyncState converts a quota failure to QuotaError', () => {
+  const ls = installFakeLocalStorage();
+  ls.setItem = () => { const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; };
+  assert.throws(() => saveSyncState({ version: 1 }), (e) => e.name === 'QuotaError');
 });

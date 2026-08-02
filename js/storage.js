@@ -195,3 +195,52 @@ export function saveFeedCache(cache) {
     throw err;
   }
 }
+
+// --- sync credentials and cursor ---
+// The link code contains the encryption key, so it is a secret: never log it
+// and never render it outside the linking UI.
+
+export const AUTH_KEY = 'plaenicke.auth';
+export const SYNC_STATE_KEY = 'plaenicke.syncState';
+
+export function loadAuth() {
+  const v = localStorage.getItem(AUTH_KEY);
+  return typeof v === 'string' && v ? v : null;
+}
+
+export function saveAuth(code) { localStorage.setItem(AUTH_KEY, code); }
+export function clearAuth() { localStorage.removeItem(AUTH_KEY); }
+
+const ZERO_SYNC_STATE = {
+  version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false,
+};
+
+export function loadSyncState() {
+  const json = localStorage.getItem(SYNC_STATE_KEY);
+  if (!json) return { ...ZERO_SYNC_STATE };
+  let parsed;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return { ...ZERO_SYNC_STATE };
+  }
+  if (!parsed || typeof parsed !== 'object') return { ...ZERO_SYNC_STATE };
+  return {
+    version: Number.isInteger(parsed.version) && parsed.version >= 0 ? parsed.version : 0,
+    tokenHash: typeof parsed.tokenHash === 'string' ? parsed.tokenHash : null,
+    lastSyncedAt: typeof parsed.lastSyncedAt === 'string' ? parsed.lastSyncedAt : null,
+    lastError: typeof parsed.lastError === 'string' ? parsed.lastError : null,
+    // Fails CLOSED: anything other than an explicit false leaves adoption
+    // pending, so a corrupt value cannot let the silent union through.
+    adoptionPending: parsed.adoptionPending !== false && parsed.adoptionPending !== undefined,
+  };
+}
+
+export function saveSyncState(s) {
+  try {
+    localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({ ...ZERO_SYNC_STATE, ...s }));
+  } catch (err) {
+    if (err && err.name === 'QuotaExceededError') throw new QuotaError('Sync state exceeded storage quota');
+    throw err;
+  }
+}
