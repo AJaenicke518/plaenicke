@@ -10,13 +10,13 @@
 // token. `activate` deletes every cache whose name isn't this one, so the
 // rename is what actually evicts them; the fetch-handler guard below only
 // stops new ones being written.
-const CACHE = 'plaenicke-v5-1';
+const CACHE = 'plaenicke-v5-2';
 const ASSETS = [
   '.', 'index.html', 'styles.css', 'manifest.json',
   'js/app.js', 'js/storage.js', 'js/items.js', 'js/dateparse.js', 'js/calendar.js',
   'js/config.js', 'js/smartadd.js', 'js/preview.js', 'js/voice.js',
   'js/timegrid.js', 'js/theme.js', 'js/settings.js', 'js/dayview.js', 'js/weekview.js',
-  'js/ics.js', 'js/tzmap.js', 'js/feeds.js', 'js/uid.js',
+  'js/ics.js', 'js/tzmap.js', 'js/feeds.js', 'js/uid.js', 'js/crypto.js',
   'icons/icon-192.png', 'icons/icon-512.png',
 ];
 
