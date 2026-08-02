@@ -1011,6 +1011,15 @@ test('linking sets the adoption gate, and only clearAdoptionPending lifts it', a
   assert.equal(isAdoptionPending(), false);
 });
 
+// The JOIN path is the case the gate exists for: a first device bootstrapping
+// has no remote data to union, a second device joining does. A gate set only on
+// the bootstrap branch passes every other test in this file.
+test('joining an existing account with a full link code also raises the gate', async () => {
+  installFakeLocalStorage();
+  await linkWithCode(composeLinkCode(bareToken(), generateEncKey()));
+  assert.equal(isAdoptionPending(), true, 'a device joining an existing account must not sync silently');
+});
+
 test('clearAdoptionPending preserves the rest of the cursor', async () => {
   installFakeLocalStorage();
   await linkWithCode(bareToken());
@@ -1034,11 +1043,17 @@ test('resetSyncStateIfDeviceChanged zeroes on a different token and leaves the s
 test('unlink clears credentials and cursor but NEVER touches local data', async () => {
   installFakeLocalStorage();
   saveItems([{ id: 'a', title: 'keep me', date: '2026-08-02', updatedAt: '2026-08-02T00:00:00.000Z' }]);
+  saveFeeds([{ id: 'f', url: 'https://cal.example/a.ics', name: 'n', color: '#111', hidden: false, updatedAt: '2026-08-02T00:00:00.000Z' }]);
+  saveTombstones([{ id: 'gone', kind: 'item', deletedAt: '2026-08-02T00:00:00.000Z' }]);
   await linkWithCode(bareToken());
   unlink();
   assert.equal(isLinked(), false);
   assert.equal(loadSyncState().version, 0);
-  assert.equal(loadItems().length, 1, 'unlinking must never delete local data');
+  // All three are local data. A wiped feed is a URL nothing on screen can
+  // restore; wiped tombstones resurrect every deleted item on the next sync.
+  assert.equal(loadItems().length, 1, 'unlinking must never delete items');
+  assert.equal(loadFeeds().length, 1, 'unlinking must never delete feeds');
+  assert.equal(loadTombstones().length, 1, 'unlinking must never delete tombstones');
 });
 
 test('a corrupt stored link code reads as unlinked rather than throwing on every tick', () => {
@@ -1109,11 +1124,15 @@ export async function linkWithCode(input) {
     code = trimmed;
   }
   const { authToken } = parseLinkCode(code);
+  // ORDER MATTERS. Write the cursor (with the gate raised) BEFORE the
+  // credential. If saveAuth ran first and this threw — a quota failure on the
+  // syncState key, or crypto.subtle being unavailable — the device would be
+  // left linked with the adoption gate DOWN, which is the one state the gate
+  // exists to prevent. With this order a failure leaves a cursor and no
+  // credential, which reads as unlinked and is inert.
+  const hash = await tokenHash(authToken);
+  saveSyncState({ ...ZERO, tokenHash: hash, adoptionPending: true });
   saveAuth(code);
-  // Hard reset: a re-link must never reuse a version from a previous device,
-  // which would push at a cursor the server never issued (spec 5.7).
-  // adoptionPending gates the first sync until the user chooses.
-  saveSyncState({ ...ZERO, tokenHash: await tokenHash(authToken), adoptionPending: true });
   return getLink();
 }
 
