@@ -14,6 +14,16 @@ function workerStyleToken(bytes) {
 }
 const allBytes = () => Uint8Array.from({ length: 256 }, (_, i) => i);
 
+// Deterministic filler for CSPRNG spies below. A length-request count alone
+// proves getRandomValues was CALLED, not that its output reached the key or
+// the ciphertext — a discarded call, or a non-CSPRNG source entirely, both
+// pass a call-count-only check. This pattern lets a test assert the actual
+// returned bytes appear where the secret is supposed to be.
+function fillPattern(arr) {
+  for (let i = 0; i < arr.length; i += 1) arr[i] = (i * 7 + arr.length) % 256;
+  return arr;
+}
+
 test('bytesToBase64url matches the Worker encoding for all 256 byte values', () => {
   assert.equal(bytesToBase64url(allBytes()), workerStyleToken(allBytes()));
 });
@@ -32,6 +42,25 @@ test('generateEncKey returns 32 fresh bytes', () => {
   const a = generateEncKey(), b = generateEncKey();
   assert.equal(a.length, KEY_BYTES);
   assert.notDeepEqual([...a], [...b]);
+});
+
+// Length-and-distinctness alone does not prove the CSPRNG's output IS the
+// key: a Math.random()-backed generator is 32 bytes and two calls differ,
+// and would pass the test above while making every blob in the account
+// decryptable by anyone who can enumerate a V8 PRNG state.
+test('generateEncKey uses the CSPRNG bytes as the key, not just their length', () => {
+  const real = crypto.getRandomValues.bind(crypto);
+  const requested = [];
+  crypto.getRandomValues = (arr) => { requested.push(arr.length); return fillPattern(arr); };
+  let key;
+  try {
+    key = generateEncKey();
+  } finally {
+    crypto.getRandomValues = real;
+  }
+  assert.deepEqual(requested, [KEY_BYTES], 'must request exactly KEY_BYTES from the CSPRNG');
+  assert.deepEqual([...key], [...fillPattern(new Uint8Array(KEY_BYTES))],
+    'the key must BE the CSPRNG output, not merely follow a call to it');
 });
 
 test('a composed link code parses back to the EXACT token string the Worker hashed', () => {
@@ -86,6 +115,27 @@ test('the IV is drawn from crypto.getRandomValues on every encryption', async ()
   }
   assert.deepEqual(sizes, [IV_BYTES, IV_BYTES],
     'each encryption must request exactly one fresh IV from the CSPRNG');
+});
+
+// The spy above proves getRandomValues was CALLED with the right size — it
+// does not prove the returned bytes are what ends up in the blob. A
+// mutant that requests an IV, discards it, and encrypts with a counter
+// instead would pass that test while still colliding IVs across devices.
+test('encryptBlob uses the CSPRNG bytes as the IV, not just requests one', async () => {
+  const key = generateEncKey();
+  const real = crypto.getRandomValues.bind(crypto);
+  const requested = [];
+  crypto.getRandomValues = (arr) => { requested.push(arr.length); return fillPattern(arr); };
+  let blob;
+  try {
+    blob = await encryptBlob(key, { schemaVersion: 1 });
+  } finally {
+    crypto.getRandomValues = real;
+  }
+  assert.deepEqual(requested, [IV_BYTES], 'must request exactly IV_BYTES from the CSPRNG');
+  const bytes = Uint8Array.from(atob(blob), c => c.charCodeAt(0));
+  assert.deepEqual([...bytes.slice(0, IV_BYTES)], [...fillPattern(new Uint8Array(IV_BYTES))],
+    'the IV prefix of the blob must BE the CSPRNG output, not a discarded call');
 });
 
 test('identical plaintext never produces identical ciphertext', async () => {
