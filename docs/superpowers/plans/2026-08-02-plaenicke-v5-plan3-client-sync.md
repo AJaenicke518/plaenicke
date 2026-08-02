@@ -610,6 +610,13 @@ test('emptyState is a valid mergeable state', () => {
 // records on two devices never conflict — the common case, and it is safe.
 // Editing the SAME record on both while offline loses the older edit; spec 5.4
 // explains why that trade is accepted.
+//
+// CLOCK SKEW IS THE WEAK JOINT. updatedAt is wall-clock time from two devices
+// whose clocks are never compared. A phone 90 seconds ahead of a laptop wins
+// every tie for 90 seconds, silently. This is tolerable ONLY because the app
+// has no edit path today — app.js adds and deletes, nothing rewrites a record —
+// so the same id is almost never written on both devices. Anyone adding an edit
+// feature must revisit this before shipping it.
 
 export const SCHEMA_VERSION = 1;
 
@@ -764,7 +771,7 @@ export function dedupeState(state) {
 Run each, confirm a test FAILS, revert, record the output:
 - **M1:** `>=` → `>` in `unionById` (ties go local; retry idempotence breaks).
 - **M2:** move `prune()` before `applyTombstones` (records resurrect).
-- **M3:** delete the `color`/`hidden` preservation in `pickFeed`.
+- **M3:** delete the `color`/`hidden` preservation in `pickFeed`. **Check this one carefully rather than assuming it bites:** once `toWire` strips `color`/`hidden`, the only wire fields a feed carries are `id`, `url`, `name`, `updatedAt`, so the per-device-field protection has very little surface left to fail on. If M3 survives, the protection is untested in the one place it matters — add a direct test that a pulled feed whose remote record carries a different colour leaves the local colour untouched.
 - **M4:** `>` → `>=` in `applyTombstones` (same-millisecond re-creation vanishes).
 - **M5:** delete the `'feed'` call in `merge` (unsubscribes stop propagating).
 - **M6:** make `toWire` return `state` unchanged (per-device fields reach the wire).
@@ -1859,7 +1866,7 @@ git commit -m "feat(sync): apply callback re-merging against live storage, trigg
 **Interfaces:**
 - Consumes: `isLinked`, `getLink`, `linkWithCode`, `unlink`, `isAdoptionPending`, `clearAdoptionPending` (Task 4); `composeForNewDevice` (Task 1); `previewRemote`, `syncOnce` (Task 5); `loadSyncState` (Task 3).
 - Produces from `js/linkui.js`:
-  - `describeSyncStatus(syncState, now: Date) → string`
+  - `describeSyncStatus(syncState, now: Date) → string` — **must distinguish "linked, waiting for you to choose" from "never synced".** The adoption gate means a device that links while offline sits at `adoptionPending: true` and syncs nothing until the user completes the dialog. The failure mode moved from "silently wrong" to "silently does nothing", and this string is the only thing standing between the user and an app they believe is syncing but is not.
   - `classifyPastedCode(input) → 'linkcode' | 'token' | 'invalid'`
   - `chooseAdoption(localState, remoteState) → 'none' | 'auto' | 'ask'` — `'none'` when the server is empty, `'auto'` when local is empty, `'ask'` when both hold data
   - `renderSyncStatus()` — **imported by `app.js`; it must exist and be safe to call when the host element is absent**
@@ -1875,7 +1882,7 @@ Never render the link code except in the field the user copies from, and never l
 
 - [ ] **Step 1: Write the failing tests for the pure helpers**
 
-`tests/linkui.test.js` must cover: `describeSyncStatus` for never-synced, just-synced, minutes, hours, and with `lastError` set; `classifyPastedCode` for an 86-char code, a 43-char token, whitespace padding, and junk; `chooseAdoption` for all three outcomes including empty-local-and-empty-remote; and `renderSyncStatus()` not throwing when the host element is absent.
+`tests/linkui.test.js` must cover: `describeSyncStatus` for never-synced, just-synced, minutes, hours, with `lastError` set, and — distinctly from all of those — with `adoptionPending: true`, asserting the string mentions a pending choice and does NOT read as "never synced"; `classifyPastedCode` for an 86-char code, a 43-char token, whitespace padding, and junk; `chooseAdoption` for all three outcomes including empty-local-and-empty-remote; and `renderSyncStatus()` not throwing when the host element is absent.
 
 - [ ] **Step 2: Run to verify they fail** — `npm test`.
 
