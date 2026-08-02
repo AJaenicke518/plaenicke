@@ -230,15 +230,22 @@ export function loadSyncState() {
     tokenHash: typeof parsed.tokenHash === 'string' ? parsed.tokenHash : null,
     lastSyncedAt: typeof parsed.lastSyncedAt === 'string' ? parsed.lastSyncedAt : null,
     lastError: typeof parsed.lastError === 'string' ? parsed.lastError : null,
-    // Fails CLOSED: anything other than an explicit false leaves adoption
-    // pending, so a corrupt value cannot let the silent union through.
-    adoptionPending: parsed.adoptionPending !== false && parsed.adoptionPending !== undefined,
+    // Fails CLOSED: ONLY an explicit false lifts the gate. A missing key, a
+    // corrupt value, null, 0 — all read as still-pending, so nothing can let
+    // the silent union through. Do NOT add `&& !== undefined`: a stored object
+    // that omits the key would then read as lifted, which is the exact
+    // fail-open this guard exists to prevent.
+    adoptionPending: parsed.adoptionPending !== false,
   };
 }
 
 export function saveSyncState(s) {
   try {
-    localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({ ...ZERO_SYNC_STATE, ...s }));
+    // Merges over the CURRENT persisted state, not over the zero state: a
+    // caller doing a partial update (`{version, lastSyncedAt}` after a
+    // routine sync) would otherwise silently reset adoptionPending to false
+    // and lift the gate.
+    localStorage.setItem(SYNC_STATE_KEY, JSON.stringify({ ...loadSyncState(), ...s }));
   } catch (err) {
     if (err && err.name === 'QuotaExceededError') throw new QuotaError('Sync state exceeded storage quota');
     throw err;

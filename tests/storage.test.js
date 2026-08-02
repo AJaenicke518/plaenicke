@@ -286,6 +286,15 @@ test('a corrupt or non-numeric syncState falls back to zero rather than throwing
   assert.equal(loadSyncState().version, 0);
   localStorage.setItem('plaenicke.syncState', JSON.stringify({ version: 'seven' }));
   assert.equal(loadSyncState().version, 0);
+  // -5 and 1.5 catch an implementation that accepts "any number" instead of
+  // "non-negative integer"; null catches typeof-based checks that treat
+  // typeof null === 'object' as already excluded but should still be tested.
+  localStorage.setItem('plaenicke.syncState', JSON.stringify({ version: -5 }));
+  assert.equal(loadSyncState().version, 0);
+  localStorage.setItem('plaenicke.syncState', JSON.stringify({ version: 1.5 }));
+  assert.equal(loadSyncState().version, 0);
+  localStorage.setItem('plaenicke.syncState', JSON.stringify({ version: null }));
+  assert.equal(loadSyncState().version, 0);
 });
 
 // adoptionPending gates the first sync of a newly linked device. A corrupt
@@ -295,12 +304,55 @@ test('a missing or non-boolean adoptionPending reads as false only when explicit
   installFakeLocalStorage();
   localStorage.setItem('plaenicke.syncState', JSON.stringify({ version: 1, adoptionPending: 'yes' }));
   assert.equal(loadSyncState().adoptionPending, true);
+  // A stored object that OMITS the key entirely — e.g. a syncState written
+  // before this field existed — must still gate as pending. This is the
+  // scenario that fails open under `&& parsed.adoptionPending !== undefined`.
+  localStorage.setItem('plaenicke.syncState', JSON.stringify({ version: 1 }));
+  assert.equal(loadSyncState().adoptionPending, true);
+  localStorage.setItem('plaenicke.syncState', JSON.stringify({ version: 1, adoptionPending: null }));
+  assert.equal(loadSyncState().adoptionPending, true);
+  localStorage.setItem('plaenicke.syncState', JSON.stringify({ version: 1, adoptionPending: 0 }));
+  assert.equal(loadSyncState().adoptionPending, true);
+  localStorage.setItem('plaenicke.syncState', JSON.stringify({ version: 1, adoptionPending: {} }));
+  assert.equal(loadSyncState().adoptionPending, true);
+  localStorage.setItem('plaenicke.syncState', JSON.stringify({ version: 1, adoptionPending: 'no' }));
+  assert.equal(loadSyncState().adoptionPending, true);
   localStorage.setItem('plaenicke.syncState', JSON.stringify({ version: 1, adoptionPending: false }));
   assert.equal(loadSyncState().adoptionPending, false);
+});
+
+// Dedicated reproduction of the exact scenario from review: a syncState
+// written before adoptionPending existed must still gate the first sync,
+// not silently lift the gate because the key is merely absent.
+test('a stored syncState that predates the adoptionPending field still gates as pending (fail closed)', () => {
+  installFakeLocalStorage();
+  localStorage.setItem('plaenicke.syncState', JSON.stringify({ version: 3, tokenHash: 'h' }));
+  assert.equal(loadSyncState().adoptionPending, true);
 });
 
 test('saveSyncState converts a quota failure to QuotaError', () => {
   const ls = installFakeLocalStorage();
   ls.setItem = () => { const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; };
   assert.throws(() => saveSyncState({ version: 1 }), (e) => e.name === 'QuotaError');
+});
+
+// saveSyncState must merge over the CURRENT persisted state, not the zero
+// state: a caller doing a routine partial update (e.g. {version, lastSyncedAt}
+// after a sync) must not silently reset adoptionPending to false and lift
+// the gate.
+test('saveSyncState preserves adoptionPending on a partial update instead of resetting it to the zero default', () => {
+  installFakeLocalStorage();
+  saveSyncState({ version: 1, adoptionPending: true });
+  saveSyncState({ version: 9 });
+  assert.equal(loadSyncState().adoptionPending, true);
+});
+
+// Confirms the fix for the above does not break unlink()-style full resets:
+// a caller supplying every field still gets exactly that object back.
+test('saveSyncState with a complete object overwrites every field, including lifting adoptionPending', () => {
+  installFakeLocalStorage();
+  saveSyncState({ version: 1, tokenHash: 'h', lastSyncedAt: null, lastError: null, adoptionPending: true });
+  saveSyncState({ version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false });
+  assert.deepEqual(loadSyncState(),
+    { version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false });
 });
