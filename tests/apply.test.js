@@ -4,7 +4,7 @@ import { register } from 'node:module';
 import { installFakeLocalStorage } from './fake-localstorage.js';
 import { SCHEMA_VERSION } from '../js/merge.js';
 import {
-  saveItems, loadItems, saveTombstones, saveFeeds, loadFeeds,
+  saveItems, loadItems, saveTombstones, saveFeeds, loadFeeds, loadTombstones,
 } from '../js/storage.js';
 import { linkWithCode } from '../js/auth.js';
 import { bytesToBase64url, TOKEN_BYTES } from '../js/crypto.js';
@@ -18,11 +18,22 @@ import { bytesToBase64url, TOKEN_BYTES } from '../js/crypto.js';
 // ANY of app.js's module-scope code runs, including the code this file
 // exists to test. This registers an ESM resolution hook, scoped to this
 // process only, that redirects just the one `.../linkui.js` specifier to a
-// tiny in-memory `data:` module — no file is ever written anywhere, and a
-// normal import of app.js (from index.html, or once Task 8 lands and
-// js/linkui.js is a real file that wins specifier resolution before this
-// hook's suffix check would even matter) is completely unaffected. The stub
-// counts its own calls via globalThis.__renderSyncStatusCalls so the
+// tiny in-memory `data:` module — no file is ever written anywhere.
+//
+// CORRECTNESS NOTE: a resolve hook runs BEFORE Node's default resolution,
+// not after — it does not get consulted only when the normal lookup fails.
+// An earlier version of this hook returned the stub unconditionally for any
+// `.../linkui.js` specifier, which would keep shadowing a REAL js/linkui.js
+// forever once Task 8 lands (verified: with a real file on disk exporting a
+// distinguishable value, the unconditional version still resolved to the
+// stub). This version tries the real resolution FIRST via nextResolve(), and
+// only falls back to the in-memory stub if that fails with
+// ERR_MODULE_NOT_FOUND — so the hook self-removes the moment a real
+// js/linkui.js exists, and any other resolution failure (a typo, a real
+// syntax error in a future js/linkui.js) still surfaces as itself rather
+// than being silently masked.
+//
+// The stub counts its own calls via globalThis.__renderSyncStatusCalls so the
 // adoption-pending test below can observe whether runSync's guard actually
 // stopped it from reaching the point of calling it.
 const RENDER_SYNC_STATUS_STUB = 'export function renderSyncStatus(){ globalThis.__renderSyncStatusCalls = (globalThis.__renderSyncStatusCalls || 0) + 1; }';
@@ -30,7 +41,14 @@ const HOOK_SOURCE = `
   const STUB_URL = 'data:text/javascript,${encodeURIComponent(RENDER_SYNC_STATUS_STUB)}';
   export async function resolve(specifier, context, nextResolve) {
     if (specifier.endsWith('/linkui.js')) {
-      return { url: STUB_URL, shortCircuit: true };
+      try {
+        return await nextResolve(specifier, context);
+      } catch (err) {
+        if (err && err.code === 'ERR_MODULE_NOT_FOUND') {
+          return { url: STUB_URL, shortCircuit: true };
+        }
+        throw err;
+      }
     }
     return nextResolve(specifier, context);
   }
@@ -209,8 +227,20 @@ test('applySyncedState honours a tombstone written after the state was computed'
   const { applySyncedState } = await import('../js/app.js');
   saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
   saveTombstones([{ id: 'a', kind: 'item', deletedAt: '2026-08-04T00:00:00.000Z' }]);
-  const written = applySyncedState(state({ items: [item('a', '2026-08-01T00:00:00.000Z')] }));
+  // A second tombstone that arrives ONLY via the incoming state (never
+  // written to local storage directly) — this is what actually exercises
+  // the saveTombstones(written.tombstones) write below, not just the
+  // pre-existing local write above surviving by coincidence.
+  const remoteTombstone = { id: 'remote-deleted', kind: 'item', deletedAt: '2026-08-01T00:00:00.000Z' };
+  const written = applySyncedState(state({
+    items: [item('a', '2026-08-01T00:00:00.000Z')],
+    tombstones: [remoteTombstone],
+  }));
   assert.deepEqual(written.items, [], 'a concurrent delete must not be undone');
+  const storedTombstones = loadTombstones();
+  assert.ok(storedTombstones.some((t) => t.id === 'a'), 'the pre-existing local tombstone must survive');
+  assert.ok(storedTombstones.some((t) => t.id === 'remote-deleted'),
+    'a tombstone that only arrived via the incoming state must actually be persisted, not merely returned');
 });
 
 test('applySyncedState returns what it wrote', async () => {
@@ -235,6 +265,27 @@ test('applySyncedState with opts.replace discards live storage instead of re-mer
   assert.deepEqual(loadItems().map((i) => i.id), ['remote-only']);
 });
 
+// Replace's "nothing is tombstoned" guarantee depends on the ORDER of the
+// applyRemoteFeeds()/saveTombstones() calls inside applySyncedState:
+// applyRemoteFeeds's own removeFeed() writes a real tombstone for every local
+// feed the replace discards, and the full-overwrite saveTombstones() that
+// runs immediately after is what erases it (see the comment at the two call
+// sites in js/app.js). Swapping those two lines would leave the tombstone in
+// place and push that deletion to the account being joined on the next sync.
+test('applySyncedState with opts.replace leaves no tombstone for a feed the replace discarded', async () => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  const feedX = {
+    id: 'feedX', url: 'https://example.com/x.ics', name: 'X', color: 'var(--feed-palette-1)', hidden: false,
+    updatedAt: '2026-07-01T00:00:00.000Z',
+  };
+  saveFeeds([feedX]);
+  applySyncedState(state({ feeds: [] }), { replace: true });
+  assert.deepEqual(loadFeeds(), [], 'the local-only feed must be gone after replace');
+  assert.deepEqual(loadTombstones(), [],
+    'replace must not leave a tombstone for data it discarded locally — that would push the deletion to the account being joined');
+});
+
 // --- applyRemoteFeeds must get the COMPLETE merged list (mutation M5) ------
 //
 // applyRemoteFeeds deletes+tombstones every local feed absent from its
@@ -253,6 +304,41 @@ test('applySyncedState keeps a feed that exists only locally through an ordinary
   saveFeeds([feedX]);
   applySyncedState(state({ feeds: [] }));
   assert.deepEqual(loadFeeds().map((f) => f.id), ['feedX']);
+});
+
+// --- a newly pulled feed must actually be fetched, not just stored ---------
+//
+// applyRemoteFeeds only writes plaenicke.feeds; it never touches the feed
+// cache. app.js's background syncStale runs once, at module load, over the
+// feed list from that moment — so without applySyncedState routing a freshly
+// pulled feed's id through that same path, a device that just linked (or
+// pulled a newly-added feed from another device) would show the right
+// subscription with ZERO events until a full page reload.
+test('applySyncedState fetches a feed the device has never seen before, immediately', async () => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  // A raw wire-form feed — no color/hidden — exactly what arrives over sync
+  // (merge.js's pickFeed marks a first-seen feed this way; toWire strips
+  // both fields entirely before a push).
+  const newFeed = {
+    id: 'feedNew', url: 'https://example.com/new.ics', name: 'New', updatedAt: '2026-08-01T00:00:00.000Z',
+  };
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => { calls.push(String(url)); return { ok: true, text: async () => '' }; };
+  try {
+    applySyncedState(state({ feeds: [newFeed] }));
+    // backgroundSyncFeeds's fetch call happens synchronously up to its own
+    // first await inside syncFeed — this tick is a safety margin only, not
+    // load-bearing for the assertion below.
+    await new Promise((resolve) => { setTimeout(resolve, 0); });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.ok(
+    calls.some((u) => u.includes('/feed?url=') && u.includes(encodeURIComponent(newFeed.url))),
+    'a feed the device just learned about via sync must be fetched immediately, not only at next page load',
+  );
 });
 
 // --- cross-tab storage listener is narrowed to the three data keys (M4) ----
@@ -278,6 +364,19 @@ test('the storage listener ignores plaenicke.syncState and only reacts to the th
 
   for (const fn of storageListeners) fn({ key: 'plaenicke.items' });
   assert.ok(allText(list).includes('t-cross-tab-item'), 'an items write must trigger a reload/re-render');
+
+  // The listener reloads items/feeds/feedCache regardless of WHICH of the
+  // three data keys fired — so a distinguishable item is enough to prove
+  // 'plaenicke.feeds' and 'plaenicke.syncTombstones' are each still in the
+  // allowlist, not just 'plaenicke.items' (a narrowing regression that
+  // dropped the other two would otherwise pass silently).
+  saveItems([item('cross-tab-item-feeds-key', '2026-08-01T00:00:00.000Z')]);
+  for (const fn of storageListeners) fn({ key: 'plaenicke.feeds' });
+  assert.ok(allText(list).includes('t-cross-tab-item-feeds-key'), 'a plaenicke.feeds write must also trigger a reload/re-render');
+
+  saveItems([item('cross-tab-item-tombstones-key', '2026-08-01T00:00:00.000Z')]);
+  for (const fn of storageListeners) fn({ key: 'plaenicke.syncTombstones' });
+  assert.ok(allText(list).includes('t-cross-tab-item-tombstones-key'), 'a plaenicke.syncTombstones write must also trigger a reload/re-render');
 });
 
 // --- runSync must not run while adoption is pending (mutation M3) ----------

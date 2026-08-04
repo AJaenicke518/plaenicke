@@ -434,6 +434,17 @@ export function applySyncedState(state, opts = {}) {
   // never a delta) — it deletes+tombstones every local feed absent from its
   // argument, and a partial list would propagate a deletion of every other
   // feed to every device.
+  //
+  // ORDER MATTERS here. On replace, applyRemoteFeeds's own removeFeed() call
+  // (for every local feed absent from written.feeds) writes a real feed
+  // tombstone via addTombstone() as it runs. The saveTombstones() line below
+  // is what erases that: on replace, written IS state — the caller's raw
+  // incoming state, not a merge — so written.tombstones carries none of
+  // those just-written tombstones, and this full-overwrite save discards
+  // them, keeping the "Replace is a LOCAL discard, nothing is tombstoned"
+  // guarantee above true. Swap these two lines and a replace would tombstone
+  // every feed it discarded locally and push those deletions to the account
+  // being joined on the very next sync.
   const { added } = applyRemoteFeeds(written.feeds);
   saveTombstones(written.tombstones);
   feeds = loadFeeds();
