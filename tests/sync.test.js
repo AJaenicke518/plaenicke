@@ -5,8 +5,8 @@ import { installFakeLocalStorage } from './fake-localstorage.js';
 import { syncOnce, previewRemote, MAX_ATTEMPTS } from '../js/sync.js';
 import { linkWithCode, clearAdoptionPending } from '../js/auth.js';
 import { encryptBlob, decryptBlob, generateEncKey, bytesToBase64url } from '../js/crypto.js';
-import { SCHEMA_VERSION, toWire } from '../js/merge.js';
-import { saveItems, loadSyncState, saveSyncState } from '../js/storage.js';
+import { SCHEMA_VERSION, toWire, merge } from '../js/merge.js';
+import { saveItems, loadItems, loadFeeds, loadSyncState, saveSyncState } from '../js/storage.js';
 
 const NOW = () => new Date('2026-08-02T12:00:00.000Z');
 const item = (id, updatedAt) => ({ id, title: `t-${id}`, date: '2026-08-02', time: null, updatedAt });
@@ -300,4 +300,147 @@ test('the pushed blob is what applyState returned, not what it was given', async
     applyState: (s) => ({ ...s, items: [...s.items, item('added-by-apply', '2026-08-03T00:00:00.000Z')] }) });
   const pushed = await decryptBlob(link.encKey, server.row.blob);
   assert.ok(pushed.items.some(i => i.id === 'added-by-apply'));
+});
+
+// --- Second-pass review findings ---
+
+// Finding 1: fetch() resolves as soon as headers arrive. A connection dropped
+// mid-body, or a captive portal answering with a 200 HTML page, throws out of
+// res.json() — not out of the fetchImpl call — and that must still report
+// 'offline', not 'undecryptable'. Reporting 'undecryptable' here is worse
+// than the original bug: the linking flow would tell a merely-offline user
+// their data cannot be decrypted, inviting a needless re-link.
+test('a GET response whose body cannot be read reports offline, not undecryptable', async () => {
+  await linked();
+  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token < in JSON'); } });
+  const res = await syncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo });
+  assert.equal(res.status, 'offline');
+});
+
+test('previewRemote reports offline, not undecryptable, when the GET body cannot be read', async () => {
+  await linked();
+  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token < in JSON'); } });
+  const res = await previewRemote({ fetchImpl, apiBase: 'https://w.example' });
+  assert.equal(res.status, 'offline');
+});
+
+// Finding 2: a body-read failure on the PUT response must resolve syncOnce to
+// a status, never reject its promise. Task 7's runSync only logs a
+// rejection's err.name, so a rejected syncOnce would still leave the status
+// line reading "last synced" successfully.
+test('a PUT 200 response whose confirmation body cannot be read reports offline instead of rejecting', async () => {
+  await linked();
+  saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
+  const fetchImpl = async (url, opts = {}) => {
+    if ((opts.method || 'GET') === 'PUT') {
+      return { ok: true, status: 200, json: async () => { throw new SyntaxError('bad json'); } };
+    }
+    return { ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) };
+  };
+  const res = await syncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo });
+  assert.equal(res.status, 'offline');
+});
+
+test('a 409 response whose conflict body cannot be read reports offline instead of rejecting', async () => {
+  await linked();
+  saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
+  const fetchImpl = async (url, opts = {}) => {
+    if ((opts.method || 'GET') === 'PUT') {
+      return { ok: false, status: 409, json: async () => { throw new SyntaxError('bad json'); } };
+    }
+    return { ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) };
+  };
+  const res = await syncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo });
+  assert.equal(res.status, 'offline');
+});
+
+// Finding 3: the retry's decrypt and its call into applyState are different
+// failure classes. An applyState that throws after a successful decrypt is a
+// LOCAL failure (quota, a corrupt local record) — the remote blob was read
+// fine — and must not be reported as if the remote were unreadable.
+test('an applyState failure during the retry reports error, not undecryptable', async () => {
+  const link = await linked();
+  saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer({ version: 1, blob: await encryptBlob(link.encKey, state({ items: [item('theirs', '2026-08-01T00:00:00.000Z')] })) });
+  let calls = 0;
+  const applyState = (s) => {
+    calls += 1;
+    if (calls === 1) return s;   // the initial apply succeeds, so a push is attempted
+    throw new Error('quota');    // the retry's own apply fails locally
+  };
+  const fetchImpl = async (url, opts = {}) => {
+    if ((opts.method || 'GET') === 'PUT') {
+      // Force a conflict on the very first PUT attempt.
+      server.row.version += 1;
+      server.row.blob = await encryptBlob(link.encKey, state({
+        items: [item('theirs', '2026-08-01T00:00:00.000Z'), item('other', '2026-08-01T00:00:00.000Z')] }));
+      return { ok: false, status: 409, json: async () => ({ error: 'version_conflict', version: server.row.version, blob: server.row.blob }) };
+    }
+    return server.fetchImpl(url, opts);
+  };
+  const res = await syncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example', applyState });
+  assert.equal(res.status, 'error', 'a local apply failure is not the same as an unreadable remote blob');
+});
+
+// Finding 4: `adopt-replace` must produce a state that a REAL applyState —
+// which re-merges against live storage before writing (Task 7) — does not
+// union local content back into. `echo`, used everywhere else in this file,
+// cannot see this bug: echo writes nothing, so `toWire(merged) ===
+// toWire(remote)` trivially and the push loop is never entered. These two
+// tests use an applyState that behaves like the real one instead.
+function fakeApplySyncedState(state, opts = {}) {
+  const live = { schemaVersion: SCHEMA_VERSION, items: loadItems(), feeds: loadFeeds(), tombstones: [] };
+  const written = opts.replace ? state : merge(live, state, new Date());
+  saveItems(written.items);
+  return written;
+}
+
+test('adopt-replace discards local records even when applyState re-merges against live storage, like Task 7 does', async () => {
+  const link = await linked();
+  saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer({ version: 2, blob: await encryptBlob(link.encKey, state({ items: [item('remote', '2026-08-01T00:00:00.000Z')] })) });
+  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: fakeApplySyncedState, adoptChoice: 'adopt-replace' });
+  assert.equal(res.status, 'ok');
+  assert.equal(res.pushed, false, 'a faithful replace already matches the remote it discarded local for — nothing needs pushing');
+  const written = JSON.parse(localStorage.getItem('plaenicke.items'));
+  assert.deepEqual(written.map(i => i.id), ['remote'], 'the record the user chose to discard must not survive a real re-merging applyState');
+});
+
+// Isolates the retry's OWN re-merge from the main path's fix: an item with an
+// unparseable date is dropped by the simulated write path (mirroring how
+// smartadd.js already drops items missing a valid ISO date elsewhere in this
+// app), so the first apply legitimately differs from what was pulled and a
+// push — followed by a conflict — becomes unavoidable even under a
+// byte-faithful replace, which otherwise never has anything to push.
+function fakeApplySyncedStateValidating(state, opts = {}) {
+  const cleaned = { ...state, items: state.items.filter(i => typeof i.date === 'string') };
+  const live = { schemaVersion: SCHEMA_VERSION, items: loadItems(), feeds: loadFeeds(), tombstones: [] };
+  const written = opts.replace ? cleaned : merge(live, cleaned, new Date());
+  saveItems(written.items);
+  return written;
+}
+
+test('adopt-replace that hits a 409 mid-retry still replaces with the new server state, not a merge', async () => {
+  const link = await linked();
+  saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer({ version: 2, blob: await encryptBlob(link.encKey, state({
+    items: [item('remote', '2026-08-01T00:00:00.000Z'), { id: 'bad', title: 'Bad', date: null, time: null, updatedAt: '2026-08-01T00:00:00.000Z' }],
+  })) });
+  let forced = false;
+  const fetchImpl = async (url, opts = {}) => {
+    if ((opts.method || 'GET') === 'PUT' && !forced) {
+      forced = true;
+      server.row.version += 1;
+      server.row.blob = await encryptBlob(link.encKey, state({ items: [item('remote2', '2026-08-01T00:00:00.000Z')] }));
+      return { ok: false, status: 409, json: async () => ({ error: 'version_conflict', version: server.row.version, blob: server.row.blob }) };
+    }
+    return server.fetchImpl(url, opts);
+  };
+  const res = await syncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: fakeApplySyncedStateValidating, adoptChoice: 'adopt-replace' });
+  assert.equal(res.status, 'ok');
+  const pushed = await decryptBlob(link.encKey, server.row.blob);
+  assert.deepEqual(pushed.items.map(i => i.id), ['remote2'],
+    'a 409 mid-replace must not silently convert into a merge that unions in what the previous apply already wrote locally');
 });

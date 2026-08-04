@@ -22,11 +22,13 @@ function localState() {
 function record(patch) { saveSyncState({ ...loadSyncState(), ...patch }); }
 
 async function fetchRemote({ fetchImpl, apiBase, link }) {
-  // The network call and the decrypt/schema check below must fail
-  // distinguishably: a thrown fetch (offline) is not the same failure as a
-  // decrypt that throws (undecryptable), and the caller reports each
-  // differently. Catching only here, and tagging the result rather than
-  // rethrowing, keeps that distinction visible one level up.
+  // The network call, the body read, and the decrypt/schema check below must
+  // all fail distinguishably: a dropped connection (offline) is not the same
+  // failure as a decrypt that throws (undecryptable), and the caller reports
+  // each differently. fetch() resolves as soon as headers arrive, so a
+  // connection dropped mid-body — or a captive portal returning a 200 HTML
+  // page — throws out of res.json(), not out of the fetchImpl call; that read
+  // gets its own networkError tag for the same reason the call above does.
   let res;
   try {
     res = await fetchImpl(`${apiBase}/data`, { headers: { authorization: `Bearer ${link.authToken}` } });
@@ -35,7 +37,13 @@ async function fetchRemote({ fetchImpl, apiBase, link }) {
   }
   if (res.status === 401) return { unauthorized: true };
   if (!res.ok) return { failed: res.status };
-  const { version, blob } = await res.json();
+  let body;
+  try {
+    body = await res.json();
+  } catch (err) {
+    return { networkError: err };
+  }
+  const { version, blob } = body;
   if (!blob) return { version, state: null };          // empty server — first push
   const state = await decryptBlob(link.encKey, blob);  // throws → caller halts
   if (!state || state.schemaVersion !== SCHEMA_VERSION) throw new Error('Unrecognised schemaVersion');
@@ -62,6 +70,10 @@ export async function syncOnce(deps) {
   const { fetchImpl, now, apiBase, applyState, adoptChoice = null } = deps;
   const link = getLink();
   if (!link) return { status: 'skipped' };
+  // Replace is a LOCAL discard, not a tombstone: the user explicitly chose to
+  // drop local data, so nothing here should re-merge it back in, and nothing
+  // on any other device should ever see it deleted (spec 5.7).
+  const isReplace = adoptChoice === 'adopt-replace';
 
   // A freshly linked device must not pull-merge-push before the user has been
   // offered Merge / Replace / Cancel. Only the linking flow passes adoptChoice
@@ -89,17 +101,18 @@ export async function syncOnce(deps) {
   let remote = pulled.state || emptyState();
   let merged;
   try {
-    merged = adoptChoice === 'adopt-replace' && pulled.state
-      ? remote
-      : merge(localState(), remote, now());
+    merged = isReplace ? remote : merge(localState(), remote, now());
     // Dedupe runs ONLY here, on an explicit adoption. On an ordinary sync it
     // would collapse any two records sharing a title, date and time — silent,
     // permanent, cross-device deletion.
     if (adoptChoice === 'adopt-merge') merged = dedupeState(merged, now());
 
     // Apply BEFORE advancing the cursor, and push what applyState actually
-    // wrote: it re-merges against live storage, so the two can differ.
-    merged = applyState(merged) || merged;
+    // wrote: it re-merges against live storage, so the two can differ. On
+    // adopt-replace the owner must NOT re-merge — the user chose to discard
+    // local data, and re-merging would union it straight back in and then
+    // push it to the account being joined.
+    merged = applyState(merged, { replace: isReplace }) || merged;
   } catch (err) {
     record({ lastError: err.name || 'ApplyError' });
     return { status: 'error' };
@@ -112,12 +125,22 @@ export async function syncOnce(deps) {
   }
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    // Encrypt before the network try: a local crypto failure is a permanent
+    // condition, not a transient network one, and must not be reported as
+    // 'offline' — that would present an unpushable device as merely offline.
+    let blob;
+    try {
+      blob = await encryptBlob(link.encKey, toWire(merged));
+    } catch (err) {
+      record({ lastError: err.name || 'EncryptError' });
+      return { status: 'error' };
+    }
     let res;
     try {
       res = await fetchImpl(`${apiBase}/data`, {
         method: 'PUT',
         headers: { authorization: `Bearer ${link.authToken}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ version, blob: await encryptBlob(link.encKey, toWire(merged)) }),
+        body: JSON.stringify({ version, blob }),
       });
     } catch {
       record({ lastError: 'offline' });
@@ -125,26 +148,52 @@ export async function syncOnce(deps) {
     }
     if (res.status === 401) { record({ lastError: 'unauthorized' }); return { status: 'unauthorized' }; }
     if (res.ok) {
-      const body = await res.json();
+      let body;
+      try {
+        body = await res.json();
+      } catch {
+        // The write landed server-side, but reading the confirmation body
+        // failed. Report offline rather than reject syncOnce's promise —
+        // the caller (Task 7's runSync) treats a resolved status as the
+        // contract, not a thrown error it happens to catch.
+        record({ lastError: 'offline' });
+        return { status: 'offline' };
+      }
       record({ version: body.version, lastSyncedAt: now().toISOString(), lastError: null });
       if (adoptChoice) clearAdoptionPending();
       return { status: 'ok', pushed: true };
     }
     if (res.status !== 409) { record({ lastError: `http_${res.status}` }); return { status: 'error' }; }
 
+    let conflict;
+    try {
+      conflict = await res.json();
+    } catch {
+      record({ lastError: 'offline' });
+      return { status: 'offline' };
+    }
+    version = conflict.version;
+
     // Someone wrote first. Re-merge against LIVE local state, not the snapshot
     // from before the PUT: the round trip is long enough for the user to have
     // added or deleted, and replaying the snapshot would destroy that — for a
     // feed, destroying a URL nothing on screen can restore.
-    const conflict = await res.json();
-    version = conflict.version;
     try {
       remote = conflict.blob ? await decryptBlob(link.encKey, conflict.blob) : emptyState();
-      merged = merge(localState(), remote, now());
-      merged = applyState(merged) || merged;
     } catch (err) {
       record({ lastError: err.name || 'DecryptError' });
       return { status: 'undecryptable' };
+    }
+    try {
+      // Replace still means replace after a conflict: adopt the NEW server
+      // state, do not quietly convert the user's choice into a merge.
+      merged = isReplace ? remote : merge(localState(), remote, now());
+      merged = applyState(merged, { replace: isReplace }) || merged;
+    } catch (err) {
+      // A local apply failure is NOT 'undecryptable' — the remote data was
+      // read fine. Same condition as the main path gets the same label.
+      record({ lastError: err.name || 'ApplyError' });
+      return { status: 'error' };
     }
   }
 
