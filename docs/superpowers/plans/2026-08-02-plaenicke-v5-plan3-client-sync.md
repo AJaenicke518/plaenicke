@@ -1177,7 +1177,7 @@ git commit -m "feat(sync): link lifecycle, cursor reset, and the adoption gate"
   - `previewRemote(deps) → Promise<{status, version, state}>` — pull only, applies and pushes **nothing**. Used by the linking UI to decide whether to offer the adoption choice.
   - `syncOnce(deps) → Promise<{status, ...}>`; `status` ∈ `'skipped' | 'adoption-required' | 'ok' | 'conflict' | 'unauthorized' | 'undecryptable' | 'offline' | 'error'`.
   - `deps` = `{ fetchImpl, now, apiBase, applyState, adoptChoice }`. `adoptChoice` is `null` for an ordinary sync (**no dedupe**), or `'adopt-merge'` / `'adopt-replace'` — passed only by the linking flow.
-  - **`applyState(state)` must return the state it actually wrote.** It re-merges against live storage (Task 7), so what lands may differ from what was handed in; the push must send what landed.
+  - **`applyState(state, opts)` must return the state it actually wrote.** It re-merges against live storage (Task 7), so what lands may differ from what was handed in; the push must send what landed. `opts.replace === true` tells the owner to write wholesale WITHOUT re-merging — `adopt-replace` means the user explicitly chose to discard local data, and re-merging would union it straight back in and then push it to the account being joined.
 - **`sync.js` must not import `saveItems`, `saveFeeds` or `saveFeedCache`.**
 
 - [ ] **Step 1: Write the failing tests**
@@ -1550,6 +1550,7 @@ export async function syncOnce(deps) {
   const { fetchImpl, now, apiBase, applyState, adoptChoice = null } = deps;
   const link = getLink();
   if (!link) return { status: 'skipped' };
+  const isReplace = adoptChoice === 'adopt-replace';
 
   // A freshly linked device must not pull-merge-push before the user has been
   // offered Merge / Replace / Cancel. Only the linking flow passes adoptChoice
@@ -1576,9 +1577,7 @@ export async function syncOnce(deps) {
   let remote = pulled.state || emptyState();
   let merged;
   try {
-    merged = adoptChoice === 'adopt-replace' && pulled.state
-      ? remote
-      : merge(localState(), remote, now());
+    merged = isReplace ? remote : merge(localState(), remote, now());
     // Dedupe runs ONLY here, on an explicit adoption. On an ordinary sync it
     // would collapse any two records sharing a title, date and time — silent,
     // permanent, cross-device deletion.
@@ -1586,7 +1585,9 @@ export async function syncOnce(deps) {
 
     // Apply BEFORE advancing the cursor, and push what applyState actually
     // wrote: it re-merges against live storage, so the two can differ.
-    merged = applyState(merged) || merged;
+    // On adopt-replace the owner must NOT re-merge — the user chose to discard
+    // local data, and re-merging unions it back in and then pushes it.
+    merged = applyState(merged, { replace: isReplace }) || merged;
   } catch (err) {
     record({ lastError: err.name || 'ApplyError' });
     return { status: 'error' };
@@ -1623,15 +1624,30 @@ export async function syncOnce(deps) {
     // from before the PUT: the round trip is long enough for the user to have
     // added or deleted, and replaying the snapshot would destroy that — for a
     // feed, destroying a URL nothing on screen can restore.
-    const conflict = await res.json();
+    let conflict;
+    try {
+      conflict = await res.json();
+    } catch {
+      record({ lastError: 'offline' });
+      return { status: 'offline' };
+    }
     version = conflict.version;
     try {
       remote = conflict.blob ? await decryptBlob(link.encKey, conflict.blob) : emptyState();
-      merged = merge(localState(), remote, now());
-      merged = applyState(merged) || merged;
     } catch (err) {
       record({ lastError: err.name || 'DecryptError' });
       return { status: 'undecryptable' };
+    }
+    try {
+      // Replace still means replace after a conflict: adopt the NEW server
+      // state, do not quietly convert the user's choice into a merge.
+      merged = isReplace ? remote : merge(localState(), remote, now());
+      merged = applyState(merged, { replace: isReplace }) || merged;
+    } catch (err) {
+      // A local apply failure is NOT 'undecryptable' — the remote data was
+      // read fine. Same condition, same label as the main path.
+      record({ lastError: err.name || 'ApplyError' });
+      return { status: 'error' };
     }
   }
 
@@ -1794,12 +1810,17 @@ test('applySyncedState returns what it wrote', async () => {
 // retry), during which the user may have added or deleted. Writing `state`
 // wholesale would destroy those edits — and for a feed, destroy a URL that is
 // never rendered anywhere and so cannot be re-entered.
-export function applySyncedState(state) {
+export function applySyncedState(state, opts = {}) {
+  // opts.replace is set only by the linking flow's "Replace this device".
+  // The user explicitly chose to discard local data, so re-merging would union
+  // it straight back in — and sync would then push it to the account being
+  // joined. Replace is a LOCAL discard: nothing is tombstoned, so the other
+  // devices keep their own copies.
   const live = {
     schemaVersion: SCHEMA_VERSION,
     items: loadItems(), feeds: loadFeeds(), tombstones: loadTombstones(),
   };
-  const written = merge(live, state, new Date());
+  const written = opts.replace ? state : merge(live, state, new Date());
   items = written.items;
   saveItems(items);
   applyRemoteFeeds(written.feeds);
