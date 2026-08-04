@@ -1577,7 +1577,13 @@ export async function syncOnce(deps) {
   let remote = pulled.state || emptyState();
   let merged;
   try {
-    merged = isReplace ? remote : merge(localState(), remote, now());
+    // Replace still routes through merge — against an EMPTY local side, so
+    // local is genuinely discarded, but every feed still passes through
+    // pickFeed. Handing raw wire feeds to applyState would skip that: the wire
+    // form carries no color/hidden at all, deserializeFeeds drops any feed
+    // whose color is not a string, and the device that chose "Replace" would
+    // lose every calendar subscription on its next page load.
+    merged = isReplace ? merge(emptyState(), remote, now()) : merge(localState(), remote, now());
     // Dedupe runs ONLY here, on an explicit adoption. On an ordinary sync it
     // would collapse any two records sharing a title, date and time — silent,
     // permanent, cross-device deletion.
@@ -1641,7 +1647,7 @@ export async function syncOnce(deps) {
     try {
       // Replace still means replace after a conflict: adopt the NEW server
       // state, do not quietly convert the user's choice into a merge.
-      merged = isReplace ? remote : merge(localState(), remote, now());
+      merged = isReplace ? merge(emptyState(), remote, now()) : merge(localState(), remote, now());
       merged = applyState(merged, { replace: isReplace }) || merged;
     } catch (err) {
       // A local apply failure is NOT 'undecryptable' — the remote data was
@@ -1696,7 +1702,7 @@ Read `js/feeds.js` first — it owns feed-cache lifecycle and declares `removeFe
 
 `applyRemoteFeeds` must:
 1. Delete local feeds absent from `mergedFeeds` **via `removeFeed()`**, so `feedCache[id]` is cleaned. A raw `saveFeeds()` orphans the entry forever — never read, still iterated and re-serialised by `pruneForQuota`, a permanent quota leak.
-2. Replace `color: null` with this device's next colour and set `hidden: false`. **A `null` colour reaching `saveFeeds` is silently dropped by `deserializeFeeds` on the next load** (`js/storage.js:71-77`), destroying the subscription.
+2. Replace any **non-string** `color` — `null`, or the key absent entirely — with this device's next colour, and coerce a non-boolean `hidden` to `false`. **Do NOT test `color === null`**: a wire-form feed has no `color` key at all, so an identity check misses it, and `deserializeFeeds` (`js/storage.js:71-77`) then drops the feed on the next load, destroying the subscription.
 3. Preserve existing `color`/`hidden` for known feeds.
 4. Return the added and removed ids.
 
@@ -1706,7 +1712,7 @@ Read `js/feeds.js` first — it owns feed-cache lifecycle and declares `removeFe
 
 Read `tests/feeds.test.js` and `tests/settings.test.js` and follow their existing setup exactly. Write these assertions in full:
 
-- `applyRemoteFeeds` gives a first-seen feed (`color: null`) a **string** colour and `hidden === false`, and the result survives a `saveFeeds`→`loadFeeds` round trip.
+- `applyRemoteFeeds` gives a first-seen feed a **string** colour and `hidden === false`, and the result survives a `saveFeeds`→`loadFeeds` round trip. Cover BOTH shapes: `color: null`, and a feed with no `color` key at all.
 - `applyRemoteFeeds` preserves local `color`/`hidden` while accepting a changed `name`.
 - `applyRemoteFeeds` removes a dropped feed **and its cache entry** — seed `feedCache[id]`, apply a list without it, assert `loadFeedCache()` no longer contains the id.
 - `applyRemoteFeeds` returns the added and removed ids.
@@ -2057,7 +2063,7 @@ git commit -m "test(sync): precache guard and two-device convergence simulation"
 
 **Placeholder scan.** Tasks 6 and 8 name assertions rather than giving literal test code, because both depend on `feeds.js`/`settings.js` setup the implementer must read first. Every assertion is named specifically enough to fail correctly. All other tasks carry literal, runnable code.
 
-**Type consistency.** `state` is `{schemaVersion, items, feeds, tombstones}` throughout. `applyState(state) → state` in Task 5 matches `applySyncedState(state) → state` in Task 7. `adoptChoice` is `null | 'adopt-merge' | 'adopt-replace'` in Tasks 5 and 8. `applyRemoteFeeds` returns `{added, removed}` in Task 6 and is consumed in Task 7. `renderSyncStatus` is exported by Task 8 and imported by Task 7.
+**Type consistency.** `state` is `{schemaVersion, items, feeds, tombstones}` throughout. `applyState(state, opts) → state` in Task 5 matches `applySyncedState(state, opts) → state` in Task 7, with `opts.replace` set only by the adoption flow. `adoptChoice` is `null | 'adopt-merge' | 'adopt-replace'` in Tasks 5 and 8. `applyRemoteFeeds` returns `{added, removed}` in Task 6 and is consumed in Task 7. `renderSyncStatus` is exported by Task 8 and imported by Task 7.
 
 **What the adversarial review changed.** Four Criticals: dedupe ran on every sync (C1); the adoption choice was offered after the union had already been pushed (C2); the protocol never reached a fixed point (C3); the CAS retry replayed a pre-PUT snapshot and could destroy an unrecoverable feed URL (C4). Five Majors: `renderSyncStatus` was undefined and the whole wiring layer untested (M1); the single-writer rule was enforced on the wrong file (M2); `localStorage` does not exist in Node and the new test files had no stub (M3); four tests passed under broken implementations (M4); a commit boundary white-screened the app and pulled feeds never fetched (M5).
 
