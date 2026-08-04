@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   syncFeed, syncStale, feedStatus, instancesForRange, removeFeed,
-  webcalToHttps, inferName,
+  webcalToHttps, inferName, applyRemoteFeeds,
 } from '../js/feeds.js';
 import {
   loadFeeds, saveFeeds, loadFeedCache, saveFeedCache, loadTombstones,
@@ -599,6 +599,113 @@ test('removeFeed: tombstone-first ordering means the tombstone survives even whe
   // a tombstone now exists for a record still present, rather than a
   // record gone with no tombstone to propagate the deletion.
   assert.deepEqual(loadFeeds().map((f) => f.id), ['f1']);
+});
+
+// --- applyRemoteFeeds --------------------------------------------------------
+
+// The wire form pickFeed hands a first-seen feed (see js/merge.js): color is
+// explicitly null, a marker feeds.js MUST replace before saving.
+test('applyRemoteFeeds: a first-seen feed with color:null gets a string colour and hidden:false, surviving a save/load round trip', () => {
+  resetStorage();
+  const merged = [
+    { id: 'feedA', url: 'https://example.com/a.ics', name: 'A', updatedAt: '2026-08-01T00:00:00.000Z', color: null, hidden: false },
+  ];
+
+  applyRemoteFeeds(merged);
+
+  // Round trip through storage's own deserializer, not just the in-memory
+  // return value — this is what a reviewer found actually breaks: a
+  // non-string color survives the write but deserializeFeeds drops the
+  // whole feed on the very next load.
+  const stored = loadFeeds();
+  assert.equal(stored.length, 1);
+  assert.equal(typeof stored[0].color, 'string');
+  assert.equal(stored[0].hidden, false);
+});
+
+// A raw wire-form feed (toWire strips color/hidden entirely) has no `color`
+// key at all — distinct from color:null, and the shape an `color === null`
+// check would silently miss.
+test('applyRemoteFeeds: a first-seen feed with no color key at all gets a string colour and hidden:false, surviving a save/load round trip', () => {
+  resetStorage();
+  const merged = [
+    { id: 'feedA', url: 'https://example.com/a.ics', name: 'A', updatedAt: '2026-08-01T00:00:00.000Z' },
+  ];
+
+  applyRemoteFeeds(merged);
+
+  const stored = loadFeeds();
+  assert.equal(stored.length, 1);
+  assert.equal(typeof stored[0].color, 'string');
+  assert.equal(stored[0].hidden, false);
+});
+
+test('applyRemoteFeeds: preserves local color/hidden for a known feed while accepting a changed name', () => {
+  resetStorage();
+  saveFeeds([
+    { id: 'feedA', url: 'https://example.com/a.ics', name: 'Old Name', color: 'var(--feed-palette-3)', hidden: true, updatedAt: '2026-07-01T00:00:00.000Z' },
+  ]);
+
+  const merged = [
+    // Same id, changed name, and (per pickFeed's own wire shape) a
+    // non-string color/hidden that must never overwrite the local values.
+    { id: 'feedA', url: 'https://example.com/a.ics', name: 'New Name', updatedAt: '2026-08-01T00:00:00.000Z', color: null, hidden: false },
+  ];
+
+  applyRemoteFeeds(merged);
+
+  const stored = loadFeeds();
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0].name, 'New Name');
+  assert.equal(stored[0].color, 'var(--feed-palette-3)');
+  assert.equal(stored[0].hidden, true);
+});
+
+test('applyRemoteFeeds: removes a feed dropped from mergedFeeds and its cache entry', () => {
+  resetStorage();
+  saveFeeds([FEED_A, FEED_B]);
+  saveFeedCache({
+    feedA: { fetchedAt: '2026-07-01T00:00:00.000Z', events: [], skipped: [] },
+    feedB: { fetchedAt: '2026-07-02T00:00:00.000Z', events: [{ uid: 'keep' }], skipped: [] },
+  });
+
+  // feedA is absent from mergedFeeds — dropped remotely.
+  const merged = [{ ...FEED_B, updatedAt: '2026-08-01T00:00:00.000Z' }];
+
+  applyRemoteFeeds(merged);
+
+  assert.deepEqual(loadFeeds().map((f) => f.id), ['feedB']);
+  const cache = loadFeedCache();
+  assert.equal(Object.prototype.hasOwnProperty.call(cache, 'feedA'), false);
+  // The surviving feed's cache entry is untouched.
+  assert.deepEqual(cache.feedB.events, [{ uid: 'keep' }]);
+});
+
+test('applyRemoteFeeds: returns the added ids for feeds with no local counterpart', () => {
+  resetStorage();
+  saveFeeds([FEED_A]);
+  saveFeedCache({});
+
+  const merged = [
+    { ...FEED_A, updatedAt: '2026-08-01T00:00:00.000Z' }, // known — not "added"
+    { id: 'feedC', url: 'https://example.com/c.ics', name: 'C', updatedAt: '2026-08-01T00:00:00.000Z', color: null, hidden: false },
+  ];
+
+  const result = applyRemoteFeeds(merged);
+
+  assert.deepEqual(result.added, ['feedC']);
+  assert.deepEqual(result.removed, []);
+});
+
+test('applyRemoteFeeds: returns the removed ids for feeds dropped from mergedFeeds', () => {
+  resetStorage();
+  saveFeeds([FEED_A, FEED_B]);
+  saveFeedCache({});
+
+  const result = applyRemoteFeeds([{ ...FEED_B, updatedAt: '2026-08-01T00:00:00.000Z' }]);
+
+  assert.deepEqual(result.removed, ['feedA']);
+  assert.deepEqual(result.added, []);
 });
 
 // --- webcalToHttps -------------------------------------------------------------

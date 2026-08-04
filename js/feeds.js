@@ -7,7 +7,10 @@
 // feeds.js is the SINGLE owner of cache pruning: nothing else prunes or
 // deletes entries from plaenicke.feedCache. `removeFeed` is likewise the only
 // sanctioned way to delete a feed — settings.js (Task 7) calls it rather than
-// touching storage.js directly.
+// touching storage.js directly. `applyRemoteFeeds` is the sync-side mirror of
+// that same rule: js/sync.js hands merged state to applyState(state, opts)
+// and never writes storage itself (spec 5.5) — this file is what actually
+// persists the feeds half of it.
 
 import { WORKER_URL } from './config.js';
 import { parseICS, expandEvents, parseDuration } from './ics.js';
@@ -502,4 +505,64 @@ export function removeFeed(id) {
     delete cache[id];
     saveFeedCache(cache);
   }
+}
+
+// ---------------------------------------------------------------------------
+// applyRemoteFeeds
+// ---------------------------------------------------------------------------
+
+// This device's colour cycle for a feed with no local record of its own —
+// the same 6-slot palette settings.js (Task 7) offers on Add. Duplicated
+// rather than imported: settings.js already imports FROM feeds.js (syncFeed,
+// feedStatus, removeFeed, ...), so importing the other way would be a cycle.
+// Both lists must stay in lockstep with styles.css's --feed-palette-1..6.
+const FEED_PALETTE = [
+  'var(--feed-palette-1)', 'var(--feed-palette-2)', 'var(--feed-palette-3)',
+  'var(--feed-palette-4)', 'var(--feed-palette-5)', 'var(--feed-palette-6)',
+];
+
+// applyRemoteFeeds: the feeds half of the "single writer" fix — js/sync.js
+// hands merged state to applyState(state, opts) and never writes storage
+// itself (spec 5.5); this IS that write, for plaenicke.feeds.
+//
+// - A local feed absent from `mergedFeeds` is gone remotely (another
+//   device's removeFeed, or a tombstone this device already recorded) and is
+//   deleted via removeFeed() here — never a raw saveFeeds(). A raw save
+//   would orphan that feed's feedCache entry forever: never read again, but
+//   still iterated and re-serialised by pruneForQuota on every future quota
+//   recovery — a permanent leak on the most storage-constrained device.
+// - color/hidden are device-local and never travel over the wire (spec 6.3;
+//   see merge.js's pickFeed). A feed with no local counterpart may arrive
+//   with color: null (pickFeed's own first-seen marker) or with no `color`
+//   key at all (a raw wire-form feed — toWire strips it entirely). Testing
+//   "is it a string", never "is it null", is what catches both shapes;
+//   missing either and saving it anyway makes storage.js's deserializeFeeds
+//   drop the feed on the very next load, destroying a subscription whose URL
+//   nothing on screen can restore.
+// - A feed already known locally keeps ITS color/hidden, full stop —
+//   whatever arrived on the wire for those two fields is never trusted.
+export function applyRemoteFeeds(mergedFeeds) {
+  const localFeeds = loadFeeds();
+  const localById = new Map(localFeeds.map((f) => [f.id, f]));
+  const mergedIds = new Set(mergedFeeds.map((f) => f.id));
+
+  const removed = localFeeds.filter((f) => !mergedIds.has(f.id)).map((f) => f.id);
+  for (const id of removed) removeFeed(id);
+
+  const added = [];
+  let paletteIdx = localFeeds.length; // continue settings.js's own add-time cycle
+  const next = mergedFeeds.map((feed) => {
+    const local = localById.get(feed.id);
+    if (local) return { ...feed, color: local.color, hidden: local.hidden };
+    added.push(feed.id);
+    const color = typeof feed.color === 'string'
+      ? feed.color
+      : FEED_PALETTE[paletteIdx % FEED_PALETTE.length];
+    paletteIdx += 1;
+    const hidden = typeof feed.hidden === 'boolean' ? feed.hidden : false;
+    return { ...feed, color, hidden };
+  });
+
+  saveFeeds(next);
+  return { added, removed };
 }

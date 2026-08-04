@@ -141,6 +141,25 @@ export function initSettings({ button, host, onFeedsChanged }) {
     let nameDraft = '';
     function isBusy() { return syncingFeedId !== null || addBusy; }
 
+    // reapplyFeedField: closes the "two writers on plaenicke.feeds" gap —
+    // this panel opened with a possibly-stale `feeds` snapshot, and Task 8
+    // mounts the linking UI inside this same panel, so a newly linked
+    // device's first sync can land in storage while the panel is still open.
+    // The `storage` event doesn't fire in the tab that wrote (Task 7's
+    // cross-tab listener can't help here), so a stale-snapshot write is the
+    // ONLY way this bug can be reached. Re-reading storage immediately
+    // before writing, then patching only the field the user actually
+    // changed onto that fresh read, means the write is always "sync's
+    // latest plus this one edit" — never "sync's latest minus everything
+    // sync did since the panel opened".
+    function reapplyFeedField(id, computePatch) {
+      const fresh = loadFeeds();
+      const next = fresh.map((f) => (f.id === id ? { ...f, ...computePatch(f) } : f));
+      saveFeeds(next);
+      feeds = next;
+      return next;
+    }
+
     const calendars = document.createElement('div');
     calendars.className = 'settings-section';
     const ch = document.createElement('h3');
@@ -205,8 +224,7 @@ export function initSettings({ button, host, onFeedsChanged }) {
           dot.setAttribute('aria-label', `Change color for ${feed.name}`);
           dot.disabled = isBusy();
           dot.addEventListener('click', () => {
-            feed.color = nextColor(feed.color);
-            saveFeeds(feeds);
+            reapplyFeedField(feed.id, (f) => ({ color: nextColor(f.color) }));
             renderCalendars();
             notifyChanged();
           });
@@ -229,8 +247,7 @@ export function initSettings({ button, host, onFeedsChanged }) {
           toggle.textContent = feed.hidden ? 'Show' : 'Hide';
           toggle.disabled = isBusy();
           toggle.addEventListener('click', () => {
-            feed.hidden = !feed.hidden;
-            saveFeeds(feeds);
+            reapplyFeedField(feed.id, (f) => ({ hidden: !f.hidden }));
             renderCalendars();
             notifyChanged();
           });
@@ -327,13 +344,17 @@ export function initSettings({ button, host, onFeedsChanged }) {
         urlErrorMsg = '';
         const url = webcalToHttps(raw);
         const name = nameInput.value.trim() || inferName(url);
-        const color = PALETTE[feeds.length % PALETTE.length];
+        // Re-read immediately before the write (same reasoning as
+        // reapplyFeedField above): appending onto the stale `feeds` closure
+        // would silently drop anything sync wrote while this panel sat open.
+        const fresh = loadFeeds();
+        const color = PALETTE[fresh.length % PALETTE.length];
         const feed = {
           id: uid('feed'), url, name, color, hidden: false,
           updatedAt: nowISO(),
         };
 
-        feeds = [...feeds, feed];
+        feeds = [...fresh, feed];
         saveFeeds(feeds);
         urlDraft = '';
         nameDraft = '';
