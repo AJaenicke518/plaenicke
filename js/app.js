@@ -1,5 +1,6 @@
 import {
   loadItems, saveItems, loadFeeds, loadFeedCache, addTombstone,
+  loadTombstones, saveTombstones,
 } from './storage.js';
 import { makeItem, sortItemsByDate } from './items.js';
 import { toISO, nowISO } from './dateparse.js';
@@ -11,8 +12,13 @@ import { renderWeekView } from './weekview.js';
 import { renderPreview } from './preview.js';
 import { isVoiceSupported, dictate } from './voice.js';
 import { initSettings } from './settings.js';
-import { instancesForRange, syncStale } from './feeds.js';
+import { instancesForRange, syncStale, applyRemoteFeeds } from './feeds.js';
 import { uid } from './uid.js';
+import { syncOnce } from './sync.js';
+import { isLinked, isAdoptionPending } from './auth.js';
+import { merge, SCHEMA_VERSION } from './merge.js';
+import { renderSyncStatus } from './linkui.js';
+import { WORKER_URL } from './config.js';
 
 const els = {
   text: document.getElementById('entry-text'),
@@ -109,6 +115,7 @@ function addItems(list) {
   items.push(...made);
   saveItems(items);
   render();
+  scheduleSync();
 }
 
 // Manual add: title box + date box, type defaults to general. Works with no network.
@@ -179,6 +186,7 @@ function deleteItem(id) {
   items = items.filter((it) => it.id !== id);
   saveItems(items);
   render();
+  scheduleSync();
 }
 
 // handleDelete: DOM-facing wrapper around deleteItem, same catch+setMessage
@@ -377,8 +385,16 @@ render();
 // leaving the view stuck on stale first-paint data. The failure itself is
 // only logged by error name — never the feed object/URL (capability-token
 // rule: a feed URL can carry an access token in its path/query).
-if (feeds.length > 0) {
-  syncStale(feeds, feedCache, { fetchImpl: fetch }).then(() => {
+//
+// Extracted to a named function so applySyncedState (below) can reuse the
+// EXACT same quota-aware fetch + error handling for a device's freshly
+// pulled feeds, rather than a second, drifting fetch path (DA-M5): a feed
+// this device just learned about from sync has no cache entry yet, and the
+// call below only ever runs once, at module load, over the feed list from
+// that moment.
+function backgroundSyncFeeds(feedList) {
+  if (feedList.length === 0) return;
+  syncStale(feedList, feedCache, { fetchImpl: fetch }).then(() => {
     feedCache = loadFeedCache();
     render();
   }).catch((err) => {
@@ -387,6 +403,105 @@ if (feeds.length > 0) {
     console.error('plaenicke: background calendar sync failed', err && err.name);
   });
 }
+backgroundSyncFeeds(feeds);
+
+// --- account sync (Task 5's syncOnce, wired to the page) -------------------
+//
+// Sync applies through the owners of each key, never through storage
+// directly. app.js owns `items`; feeds.js owns feeds. See spec 5.5.
+//
+// It re-merges against LIVE storage first: between the merge that produced
+// `state` (in sync.js, possibly across a CAS retry) and this call there may
+// have been a full PUT round trip, during which the user may have added or
+// deleted here. Writing `state` wholesale would destroy those edits — and
+// for a feed, destroy a URL that is never rendered anywhere and so cannot be
+// re-entered. Returns what it actually wrote; sync.js pushes THAT, not the
+// state it was handed.
+export function applySyncedState(state, opts = {}) {
+  // opts.replace is set only by the linking flow's "Replace this device".
+  // The user explicitly chose to discard local data, so re-merging would
+  // union it straight back in — and sync would then push it to the account
+  // being joined. Replace is a LOCAL discard: nothing is tombstoned, so the
+  // other devices keep their own copies.
+  const live = {
+    schemaVersion: SCHEMA_VERSION,
+    items: loadItems(), feeds: loadFeeds(), tombstones: loadTombstones(),
+  };
+  const written = opts.replace ? state : merge(live, state, new Date());
+  items = written.items;
+  saveItems(items);
+  // applyRemoteFeeds requires the COMPLETE merged feed list (written.feeds,
+  // never a delta) — it deletes+tombstones every local feed absent from its
+  // argument, and a partial list would propagate a deletion of every other
+  // feed to every device.
+  const { added } = applyRemoteFeeds(written.feeds);
+  saveTombstones(written.tombstones);
+  feeds = loadFeeds();
+  feedCache = loadFeedCache();
+  render();
+  // Newly pulled feeds must actually be fetched — otherwise a freshly linked
+  // device shows the right subscriptions with zero events until a full page
+  // reload (backgroundSyncFeeds above only ran once, over the load-time feed
+  // list). Same quota-aware path and error handling, just fed the added ids.
+  backgroundSyncFeeds(feeds.filter((f) => added.includes(f.id)));
+  return written;
+}
+
+let syncInFlight = false;
+let syncPending = false;
+let syncTimer = null;
+
+async function runSync() {
+  // Never run while the user hasn't chosen Merge / Replace / Cancel yet
+  // (spec 5.7) — that choice is what supplies opts.replace above.
+  if (!isLinked() || isAdoptionPending()) return;
+  if (syncInFlight) { syncPending = true; return; }
+  syncInFlight = true;
+  try {
+    await syncOnce({
+      fetchImpl: (u, o) => fetch(u, o),
+      now: () => new Date(),
+      apiBase: WORKER_URL,
+      applyState: applySyncedState,
+    });
+  } catch (err) {
+    // Never let a sync failure break the app; local data keeps rendering.
+    console.error('sync', err && err.name);
+  } finally {
+    syncInFlight = false;
+    renderSyncStatus();
+    // A trigger that arrived mid-sync must not be dropped — otherwise it
+    // would wait for an unrelated later trigger instead of running promptly.
+    if (syncPending) { syncPending = false; scheduleSync(); }
+  }
+}
+
+// Debounced so one smart-add batch is one push, not one per item.
+function scheduleSync() {
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(runSync, 2000);
+}
+
+// Another tab wrote. Reload our module-scope snapshot rather than letting the
+// next addItems()/deleteItem() write a stale array back over it. This event
+// does not fire in the tab that performed the write, so no echo guard is
+// needed. Narrowed to the three data keys — plaenicke.syncState is written on
+// every sync tick and would otherwise force a full re-render in every other
+// tab on every tick.
+const CROSS_TAB_KEYS = ['plaenicke.items', 'plaenicke.feeds', 'plaenicke.syncTombstones'];
+window.addEventListener('storage', (e) => {
+  if (!CROSS_TAB_KEYS.includes(e.key)) return;
+  items = loadItems();
+  feeds = loadFeeds();
+  feedCache = loadFeedCache();
+  render();
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') runSync();
+});
+window.addEventListener('online', runSync);
+runSync();
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => { navigator.serviceWorker.register('service-worker.js'); });
