@@ -11,4 +11,4 @@ enabled = true
 [[d1_databases]]
 binding = "DB"
 database_name = "plaenicke"
-database_id = "REPLACE_AFTER_wrangler_d1_create"
+database_id = "6c06de93-26e5-495f-81e8-4193941635dc"
