@@ -100,8 +100,18 @@ export async function syncOnce(deps) {
   let version = pulled.version;
   let remote = pulled.state || emptyState();
   let merged;
+  let pushed;
   try {
-    merged = isReplace ? remote : merge(localState(), remote, now());
+    // Replace still runs through merge(), against an EMPTY local side rather
+    // than skipping merge entirely: local is still fully discarded (nothing
+    // from `local` can survive a union with nothing), but every remote feed
+    // still passes through pickFeed. Handing applyState raw wire-form feeds
+    // instead — as a bare `merged = remote` would — strips color/hidden
+    // entirely (toWire already removed them before this blob was ever
+    // pushed), and storage.js's deserializeFeeds drops any feed whose color
+    // is not a string. undefined is not null, so that silently destroys
+    // every subscription on this device's next page load.
+    merged = isReplace ? merge(emptyState(), remote, now()) : merge(localState(), remote, now());
     // Dedupe runs ONLY here, on an explicit adoption. On an ordinary sync it
     // would collapse any two records sharing a title, date and time — silent,
     // permanent, cross-device deletion.
@@ -113,12 +123,17 @@ export async function syncOnce(deps) {
     // local data, and re-merging would union it straight back in and then
     // push it to the account being joined.
     merged = applyState(merged, { replace: isReplace }) || merged;
+    // toWire can throw on a structurally incomplete state — e.g. applyState
+    // returning `{schemaVersion}` with no items/feeds/tombstones. That is
+    // the SAME failure class as applyState throwing directly, and must
+    // resolve to the same status, not reject syncOnce's promise.
+    pushed = JSON.stringify(toWire(merged)) !== JSON.stringify(toWire(remote));
   } catch (err) {
     record({ lastError: err.name || 'ApplyError' });
     return { status: 'error' };
   }
 
-  if (JSON.stringify(toWire(merged)) === JSON.stringify(toWire(remote))) {
+  if (!pushed) {
     record({ version, lastSyncedAt: now().toISOString(), lastError: null });
     if (adoptChoice) clearAdoptionPending();
     return { status: 'ok', pushed: false };
@@ -186,8 +201,10 @@ export async function syncOnce(deps) {
     }
     try {
       // Replace still means replace after a conflict: adopt the NEW server
-      // state, do not quietly convert the user's choice into a merge.
-      merged = isReplace ? remote : merge(localState(), remote, now());
+      // state, do not quietly convert the user's choice into a merge. Still
+      // through merge() against an empty local side — see the main path for
+      // why a bare `merged = remote` here would strip every feed's color.
+      merged = isReplace ? merge(emptyState(), remote, now()) : merge(localState(), remote, now());
       merged = applyState(merged, { replace: isReplace }) || merged;
     } catch (err) {
       // A local apply failure is NOT 'undecryptable' — the remote data was

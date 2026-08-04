@@ -6,7 +6,7 @@ import { syncOnce, previewRemote, MAX_ATTEMPTS } from '../js/sync.js';
 import { linkWithCode, clearAdoptionPending } from '../js/auth.js';
 import { encryptBlob, decryptBlob, generateEncKey, bytesToBase64url } from '../js/crypto.js';
 import { SCHEMA_VERSION, toWire, merge } from '../js/merge.js';
-import { saveItems, loadItems, loadFeeds, loadSyncState, saveSyncState } from '../js/storage.js';
+import { saveItems, loadItems, loadFeeds, saveFeeds, loadSyncState, saveSyncState } from '../js/storage.js';
 
 const NOW = () => new Date('2026-08-02T12:00:00.000Z');
 const item = (id, updatedAt) => ({ id, title: `t-${id}`, date: '2026-08-02', time: null, updatedAt });
@@ -443,4 +443,124 @@ test('adopt-replace that hits a 409 mid-retry still replaces with the new server
   const pushed = await decryptBlob(link.encKey, server.row.blob);
   assert.deepEqual(pushed.items.map(i => i.id), ['remote2'],
     'a 409 mid-replace must not silently convert into a merge that unions in what the previous apply already wrote locally');
+});
+
+// --- Third-pass review findings ---
+
+// Finding 5: adopt-replace must still route every remote feed through
+// merge()'s pickFeed, which stamps color:null/hidden:false for a first-seen
+// feed. Server blobs are always wire form (toWire already stripped
+// color/hidden before this blob was ever pushed), and storage.js's
+// deserializeFeeds drops any feed whose color is not a string — undefined is
+// not null, so handing applyState the raw remote feed silently destroys the
+// subscription the moment a real applyState calls saveFeeds.
+test('adopt-replace hands applyState a feed with a color key and boolean hidden, and it survives a save/load round trip', async () => {
+  const link = await linked();
+  saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
+  const remoteFeed = { id: 'fRemote', url: 'https://cal.example/a.ics', name: 'A', updatedAt: '2026-08-01T00:00:00.000Z' };
+  const server = fakeServer({ version: 2, blob: await encryptBlob(link.encKey, state({ feeds: [remoteFeed] })) });
+  let handedFeeds = null;
+  const applyState = (s) => {
+    handedFeeds = s.feeds;
+    // Mimics feeds.js's applyRemoteFeeds: a first-seen feed's null color
+    // MUST be replaced before it is ever saved.
+    const assigned = s.feeds.map(f => (f.color === null ? { ...f, color: '#111' } : f));
+    saveFeeds(assigned);
+    return { ...s, feeds: assigned };
+  };
+  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState, adoptChoice: 'adopt-replace' });
+  assert.equal(res.status, 'ok');
+  assert.equal(handedFeeds.length, 1);
+  assert.ok('color' in handedFeeds[0], 'color key must be present (null is fine) so a real applyState can assign one');
+  assert.equal(typeof handedFeeds[0].hidden, 'boolean');
+  const survivors = loadFeeds();
+  assert.deepEqual(survivors.map(f => f.id), ['fRemote'],
+    'the feed must survive a real save/load round trip, not be silently dropped by deserializeFeeds');
+});
+
+// Isolates the RETRY's own routing from the main path's: reaching the retry
+// under replace requires forcing a mismatch (see the note on the 409
+// mid-retry test above), so this drops a malformed item to get there, then
+// checks the feed handed to applyState AFTER the conflict, not before.
+test('adopt-replace that hits a 409 mid-retry also routes the new remote feed through pickFeed', async () => {
+  const link = await linked();
+  saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer({ version: 2, blob: await encryptBlob(link.encKey, state({
+    items: [item('remote', '2026-08-01T00:00:00.000Z'), { id: 'bad', title: 'Bad', date: null, time: null, updatedAt: '2026-08-01T00:00:00.000Z' }],
+  })) });
+  let lastFeeds = null;
+  const applyState = (s) => {
+    lastFeeds = s.feeds;
+    return { ...s, items: s.items.filter(i => typeof i.date === 'string') };
+  };
+  const conflictFeed = { id: 'fConflict', url: 'https://cal.example/b.ics', name: 'B', updatedAt: '2026-08-01T00:00:00.000Z' };
+  let forced = false;
+  const fetchImpl = async (url, opts = {}) => {
+    if ((opts.method || 'GET') === 'PUT' && !forced) {
+      forced = true;
+      server.row.version += 1;
+      server.row.blob = await encryptBlob(link.encKey, state({ items: [item('remote2', '2026-08-01T00:00:00.000Z')], feeds: [conflictFeed] }));
+      return { ok: false, status: 409, json: async () => ({ error: 'version_conflict', version: server.row.version, blob: server.row.blob }) };
+    }
+    return server.fetchImpl(url, opts);
+  };
+  const res = await syncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example', applyState, adoptChoice: 'adopt-replace' });
+  assert.equal(res.status, 'ok');
+  assert.equal(lastFeeds.length, 1);
+  assert.ok('color' in lastFeeds[0], 'the retry must also route feeds through pickFeed before handing them to applyState');
+  assert.equal(typeof lastFeeds[0].hidden, 'boolean');
+});
+
+// Finding 6: a toWire() failure while deciding whether to push is the SAME
+// failure class as applyState throwing directly (both mean "what applyState
+// wrote cannot be turned into a valid push"), and must resolve to 'error'
+// like every other apply-time failure — not reject syncOnce's promise, which
+// would leave Task 7's runSync silently swallowing it via `catch (err) {
+// console.error('sync', err && err.name); }` and the status line still
+// reading "last synced" successfully.
+test('an applyState that returns a structurally incomplete state reports error instead of rejecting', async () => {
+  await linked();
+  saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer();
+  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: () => ({ schemaVersion: SCHEMA_VERSION }) });
+  assert.equal(res.status, 'error');
+});
+
+// Finding 7: the encrypt-before-network-try hoist has no direct test. Poison
+// crypto.subtle.encrypt so encryptBlob itself rejects, and confirm the
+// failure is classified as a permanent local error, not a transient network
+// one — catching it as 'offline' would present an unpushable device as
+// merely offline forever.
+test('an encrypt failure before the PUT reports error, not offline', async () => {
+  await linked();
+  saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer();
+  const originalEncrypt = crypto.subtle.encrypt;
+  crypto.subtle.encrypt = async () => { throw new Error('encrypt failed'); };
+  try {
+    const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo });
+    assert.equal(res.status, 'error');
+  } finally {
+    crypto.subtle.encrypt = originalEncrypt;
+  }
+});
+
+// Finding 8: chosen behaviour — adopt-replace against an EMPTY server
+// discards local and pushes nothing. Task 8's chooseAdoption returns 'none'
+// when there is nothing to replace with, so the UI has no path here today,
+// but if this is ever reached, "replace" must mean replace: adopt exactly
+// what the server has, even if that is nothing. Silently falling back to
+// keeping and pushing local data instead is the exact "does not replace"
+// bug Finding 4 fixed, reintroduced for the one case where pulled.state is
+// null.
+test('adopt-replace against an empty server discards local and pushes nothing', async () => {
+  await linked();
+  saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer(); // version 0, blob ''
+  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: echo, adoptChoice: 'adopt-replace' });
+  assert.equal(res.status, 'ok');
+  assert.equal(res.pushed, false);
+  assert.equal(server.row.version, 0, 'nothing local may be pushed to the account being joined');
 });
