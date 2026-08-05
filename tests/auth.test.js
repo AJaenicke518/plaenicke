@@ -123,6 +123,22 @@ test('resetSyncStateIfDeviceChanged zeroes on a different token and leaves the s
   assert.equal(loadSyncState().version, 0, 'different device must reset');
 });
 
+// The version reset is only half of what this function does, and the only
+// assertion above is `version === 0` — which is 0 whether the gate goes up or
+// stays down, so a reset writing `adoptionPending: false` passed 548/548.
+// Raising the gate is the load-bearing half: it is what forces the user to be
+// asked again instead of this device silently unioning its data into an
+// account it was just re-pointed at.
+test('resetSyncStateIfDeviceChanged re-raises the adoption gate, not just the cursor', async () => {
+  installFakeLocalStorage();
+  await linkWithCode(bareToken());
+  clearAdoptionPending();
+  assert.equal(isAdoptionPending(), false, 'fixture check: the gate starts down');
+  await resetSyncStateIfDeviceChanged(bareToken()); // a DIFFERENT device token
+  assert.equal(isAdoptionPending(), true,
+    'a device pointed at a different account must be asked again, never union silently');
+});
+
 test('unlink clears credentials and cursor but NEVER touches local data', async () => {
   installFakeLocalStorage();
   saveItems([{ id: 'a', title: 'keep me', date: '2026-08-02', updatedAt: '2026-08-02T00:00:00.000Z' }]);

@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
 import { syncOnce, previewRemote, MAX_ATTEMPTS } from '../js/sync.js';
-import { linkWithCode, clearAdoptionPending } from '../js/auth.js';
-import { encryptBlob, decryptBlob, generateEncKey, bytesToBase64url } from '../js/crypto.js';
+import { linkWithCode, clearAdoptionPending, tokenHash } from '../js/auth.js';
+import { encryptBlob, decryptBlob, generateEncKey, bytesToBase64url, composeLinkCode } from '../js/crypto.js';
 import { SCHEMA_VERSION, toWire, merge } from '../js/merge.js';
-import { saveItems, loadItems, loadFeeds, saveFeeds, loadSyncState, saveSyncState } from '../js/storage.js';
+import { saveItems, loadItems, loadFeeds, saveFeeds, saveAuth, loadSyncState, saveSyncState } from '../js/storage.js';
 
 const NOW = () => new Date('2026-08-02T12:00:00.000Z');
 const item = (id, updatedAt) => ({ id, title: `t-${id}`, date: '2026-08-02', time: null, updatedAt });
@@ -426,6 +426,53 @@ test('a replace that 409s mid-retry adopts the account CURRENT state, which is w
     'the retry must adopt the account as it now stands, not silently convert the replace into a merge');
   assert.ok(!lastApplied.items.some(i => i.id === 'local'),
     'the record the user chose to discard must not come back through the retry');
+});
+
+// THE DEVICE-CHANGE PATH INTO THE GATE, END TO END.
+//
+// syncOnce carries a three-link safety chain — reset on a changed device
+// token, then re-check the gate the reset just raised — and `linked()` above
+// always syncs with the token it linked with, so the branch never fired.
+// Three separate mutants survived 548/548 because of it: writing
+// `adoptionPending: false` in resetSyncStateIfDeviceChanged (the auth test
+// asserted only `version === 0`, which is 0 either way), deleting the
+// `resetSyncStateIfDeviceChanged` call, and deleting the SECOND gate check.
+// Deleting BOTH gate copies IS caught, so the gate itself was tested — only
+// the way in was not.
+//
+// Production effect: a device re-pointed at a different account silently
+// unions its local data into that account and pushes it, which is the exact
+// silent union spec 5.7 exists to prevent.
+test('a device whose credential now names a different account is asked again, and syncs nothing', async () => {
+  const link = await linked();
+  saveItems([item('mine', '2026-08-01T00:00:00.000Z')]);
+  saveSyncState({ ...loadSyncState(), version: 7, lastSyncedAt: '2026-08-01T00:00:00.000Z' });
+  const hashBefore = loadSyncState().tokenHash;
+  assert.ok(hashBefore, 'fixture check: the cursor records which device it belongs to');
+
+  // The stored credential now carries a DIFFERENT device token. The encKey is
+  // unchanged, so decryption is emphatically not what stops this — only the
+  // token-hash comparison is.
+  const otherToken = bytesToBase64url(generateEncKey());
+  saveAuth(composeLinkCode(otherToken, link.encKey));
+
+  const server = fakeServer({
+    version: 12,
+    blob: await encryptBlob(link.encKey, state({ items: [item('theirs', '2026-08-01T00:00:00.000Z')] })),
+  });
+  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo });
+
+  assert.equal(res.status, 'adoption-required',
+    'the reset raises the gate and the SECOND check is what turns that into a refusal');
+  assert.deepEqual(server.calls, [],
+    'nothing may be pulled or pushed — the union must not reach the account at all');
+  assert.equal(server.row.version, 12);
+  const after = loadSyncState();
+  assert.equal(after.adoptionPending, true, 'the user must be offered Merge / Replace / Cancel again');
+  assert.equal(after.version, 0, 'a stale cursor from the previous account must never be reused');
+  assert.equal(after.lastSyncedAt, null);
+  assert.equal(after.tokenHash, await tokenHash(otherToken), 'and the cursor must now name the new device token');
+  assert.deepEqual(loadItems().map((i) => i.id), ['mine'], 'and local data is untouched');
 });
 
 test('a failed adoption leaves the gate up so the user is asked again', async () => {
