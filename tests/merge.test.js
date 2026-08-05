@@ -156,6 +156,78 @@ test('toWire strips per-device fields and sorts, so two devices agree byte for b
   assert.ok(!('hidden' in toWire(a).feeds[0]), 'hidden must not reach the wire');
 });
 
+// EVERY ASSERTION ABOVE IS SYMMETRIC, NEGATIVE OR A FIXED POINT — none of
+// them says a single content field reaches the wire, and the whole suite was
+// satisfied by a toWire that shipped no content at all. This implementation
+// passed 548/548:
+//
+//   items: [...state.items].map(({ title, date, time, ...r }) => r).sort(byId),
+//   feeds: [...state.feeds].map(({ color, hidden, url, name, ...rest }) => rest).sort(byId),
+//
+// Every device would have received items with no title, date or time, and
+// feeds with no URL — and a feed URL is never re-displayed anywhere in the
+// app, so that loss is permanent. Stripping `date` alone, `time` alone, feed
+// `name` alone or feed `url` alone each passed 548/548 too, because the
+// existing checks compare toWire against ITSELF: `toWire(a) === toWire(b)` is
+// satisfied by any stripping mutant, so are the two "colour must not reach the
+// wire" negatives, so is idempotence, and so is linkui.test.js's
+// deepEqual(pushed, toWire(pushed)).
+//
+// So: assert the projection EXACTLY, field by field, in both directions. An
+// exact deepEqual is what makes this total — it fails on a field that
+// disappears AND on a field that appears (a leak of a per-device preference is
+// the same defect from the other side).
+test('toWire carries every item field through untouched — the wire is the only copy the account has', () => {
+  const full = {
+    id: 'i1',
+    title: 'Dentist',
+    date: '2026-08-05',
+    time: '09:00',
+    endTime: '09:45',
+    createdAt: '2026-08-01',
+    updatedAt: '2026-08-01T00:00:00.000Z',
+    type: 'appointment',
+    project: 'Health',
+    subject: 'Teeth',
+    category: 'Personal',
+  };
+  const wired = toWire(state({ items: [full] }));
+  assert.deepEqual(wired.items, [full],
+    'an item must cross the wire exactly as stored — nothing about an item is per-device');
+  // Named individually so a failure says WHICH field was dropped rather than
+  // just "objects differ", and so the four fields the executed mutant removed
+  // are each pinned by name.
+  for (const key of ['id', 'title', 'date', 'time', 'endTime', 'updatedAt', 'type', 'project', 'subject', 'category']) {
+    assert.ok(key in wired.items[0], `toWire dropped item.${key}`);
+    assert.deepEqual(wired.items[0][key], full[key], `toWire altered item.${key}`);
+  }
+});
+
+test('toWire carries every SYNCED feed field and drops exactly the two per-device ones', () => {
+  const full = {
+    id: 'f1',
+    url: 'https://cal.example/secret-token/f1.ics',
+    name: 'Work',
+    updatedAt: '2026-08-01T00:00:00.000Z',
+    color: '#abc',
+    hidden: true,
+  };
+  const wired = toWire(state({ feeds: [full] }));
+  assert.deepEqual(wired.feeds, [{
+    id: 'f1', url: 'https://cal.example/secret-token/f1.ics', name: 'Work', updatedAt: '2026-08-01T00:00:00.000Z',
+  }], 'url, name and updatedAt are the account\'s copy; color and hidden are this device\'s alone (spec 6.3)');
+  for (const key of ['id', 'url', 'name', 'updatedAt']) {
+    assert.ok(key in wired.feeds[0], `toWire dropped feed.${key}`);
+    assert.equal(wired.feeds[0][key], full[key], `toWire altered feed.${key}`);
+  }
+  assert.ok(!('color' in wired.feeds[0]) && !('hidden' in wired.feeds[0]));
+});
+
+test('toWire carries every tombstone field — a tombstone missing kind or deletedAt deletes nothing', () => {
+  const t = { id: 'x', kind: 'feed', deletedAt: '2026-08-01T00:00:00.000Z' };
+  assert.deepEqual(toWire(state({ tombstones: [t] })).tombstones, [t]);
+});
+
 test('toWire is idempotent', () => {
   const w = toWire(state({ items: [item('a', '2026-08-01T00:00:00.000Z')] }));
   assert.deepEqual(toWire(w), w);
