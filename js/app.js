@@ -98,10 +98,17 @@ if (els.mic && isVoiceSupported()) {
 // own snapshot and re-renders — same "reload + render once" shape as the
 // background sync settle below, just triggered by user action instead of a
 // timer.
+//
+// applyState threads applySyncedState (declared below — a hoisted function
+// declaration, so the reference is live here) down to linkui.js's adoption
+// flow, which hands it to syncOnce. It is injected rather than imported
+// there because linkui.js already supplies THIS file with renderSyncStatus;
+// importing it back would close a module cycle (DA-C6).
 initSettings({
   button: els.settingsBtn,
   host: els.settingsHost,
   onFeedsChanged: () => { feeds = loadFeeds(); feedCache = loadFeedCache(); render(); },
+  applyState: applySyncedState,
 });
 
 function setMessage(t) { els.message.textContent = t || ''; }

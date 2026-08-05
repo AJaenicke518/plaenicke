@@ -67,7 +67,19 @@ export async function previewRemote({ fetchImpl, apiBase }) {
 }
 
 export async function syncOnce(deps) {
-  const { fetchImpl, now, apiBase, applyState, adoptChoice = null } = deps;
+  // adoptChoice is one of exactly three values, and only the linking flow
+  // (js/linkui.js) ever sets it:
+  //   'adopt-bootstrap' — an empty account, or an empty device. Adopt as-is.
+  //   'adopt-merge'     — union both sides AND dedupe. The only dedupe site.
+  //   'adopt-replace'   — discard local, take the account.
+  // The four tests below are deliberately written against those exact values:
+  // isReplace is `=== 'adopt-replace'`, the gate check is `!adoptChoice`, the
+  // dedupe is `=== 'adopt-merge'`, and the clear is `if (adoptChoice)`.
+  // Relaxing the dedupe to `!== 'adopt-replace'` would silently dedupe the
+  // bootstrap path — collapsing two legitimately distinct same-title/date/
+  // time records and pushing a tombstone for the loser to every device
+  // (DA-C1). tests/sync.test.js pins that.
+  const { fetchImpl, now, apiBase, applyState, adoptChoice = null, expectVersion = null } = deps;
   const link = getLink();
   if (!link) return { status: 'skipped' };
   // Replace is a LOCAL discard, not a tombstone: the user explicitly chose to
@@ -96,6 +108,19 @@ export async function syncOnce(deps) {
   if (pulled.networkError) { record({ lastError: 'offline' }); return { status: 'offline' }; }
   if (pulled.unauthorized) { record({ lastError: 'unauthorized' }); return { status: 'unauthorized' }; }
   if (pulled.failed) { record({ lastError: `http_${pulled.failed}` }); return { status: 'error' }; }
+
+  // The account can move between the linking UI's previewRemote and this
+  // call. A user who chose "Replace this device" against data they SAW would
+  // otherwise get a silent full local wipe with no re-confirmation if the
+  // account emptied in between — and nothing in here can tell, because the
+  // merge is applied against THIS pull. Re-previewing from linkui.js narrows
+  // that window but cannot close it. So the caller pins the version it
+  // decided against, and a mismatch applies NOTHING, pushes NOTHING, advances
+  // no cursor and leaves the gate raised: the decision goes back to the user
+  // (DA-I5). Deliberately no record() — nothing failed.
+  if (expectVersion != null && pulled.version !== expectVersion) {
+    return { status: 'changed', version: pulled.version };
+  }
 
   let version = pulled.version;
   let remote = pulled.state || emptyState();

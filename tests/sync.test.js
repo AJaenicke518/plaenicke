@@ -281,6 +281,74 @@ test('adopt-merge dedupes, and clears the adoption gate on success', async () =>
   assert.equal(loadSyncState().adoptionPending, false, 'a completed adoption lifts the gate');
 });
 
+// DA-C1. 'adopt-bootstrap' is the third legal adoptChoice: it lifts the gate
+// and adopts, but it must NOT dedupe. It is used on the first device's
+// bootstrap (spec 5.7 step 2 — an empty server means local uploads AS-IS) and
+// on a device with nothing local to dedupe against. sync.js's dedupe
+// condition is `=== 'adopt-merge'` for exactly this reason; without this test
+// a later refactor to `!== 'adopt-replace'` would silently restore a
+// permanent, cross-device collapse of any two records sharing title, date and
+// time — and push a tombstone for the loser to every device.
+test("'adopt-bootstrap' adopts and lifts the gate WITHOUT deduping", async () => {
+  installFakeLocalStorage();
+  const link = await linkWithCode(bytesToBase64url(generateEncKey()));
+  saveItems([
+    { id: 'l1', title: 'Call mom', date: '2026-08-05', time: null, updatedAt: '2026-08-01T00:00:00.000Z' },
+    { id: 'l2', title: 'Call mom', date: '2026-08-05', time: null, updatedAt: '2026-08-01T00:00:00.000Z' },
+  ]);
+  saveFeeds([
+    { id: 'f1', url: 'https://cal.example/a.ics', name: 'A', color: '#111', hidden: false, updatedAt: '2026-08-01T00:00:00.000Z' },
+    { id: 'f2', url: 'https://cal.example/a.ics/', name: 'A again', color: '#222', hidden: false, updatedAt: '2026-08-01T00:00:00.000Z' },
+  ]);
+  const server = fakeServer(); // empty account — the first device's bootstrap
+  let applied = null;
+  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: (s) => { applied = s; return s; }, adoptChoice: 'adopt-bootstrap' });
+  assert.equal(res.status, 'ok');
+  assert.equal(applied.items.length, 2, 'a bootstrap must upload local records AS-IS, never collapse two distinct ones');
+  assert.equal(applied.feeds.length, 2, 'two feeds whose URLs differ only by a trailing slash are two subscriptions');
+  assert.deepEqual(applied.tombstones, [], 'a bootstrap must not invent tombstones to push to every other device');
+  const pushed = await decryptBlob(link.encKey, server.row.blob);
+  assert.equal(pushed.items.length, 2);
+  assert.deepEqual(pushed.tombstones, []);
+  assert.equal(loadSyncState().adoptionPending, false, 'a completed adoption lifts the gate');
+});
+
+// DA-I5. The account can empty (or change) between the linking UI's
+// previewRemote and its syncOnce. A user who clicked "Replace this device"
+// against data they SAW would otherwise get a silent full local wipe with no
+// re-confirmation, and sync.js cannot see it. Re-previewing from linkui.js
+// narrows the window but does not close it — the merge is applied against the
+// pull INSIDE syncOnce.
+test('expectVersion matching the pulled version proceeds normally', async () => {
+  const link = await linked();
+  saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer({ version: 5, blob: await encryptBlob(link.encKey, state()) });
+  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: echo, expectVersion: 5 });
+  assert.equal(res.status, 'ok');
+  assert.equal(server.row.version, 6, 'a matching version must not block the push');
+});
+
+test('expectVersion that no longer matches applies nothing, pushes nothing and hands the decision back', async () => {
+  // Linked WITHOUT clearing the gate: this is the adoption flow, which is the
+  // only caller that passes expectVersion.
+  installFakeLocalStorage();
+  const link = await linkWithCode(bytesToBase64url(generateEncKey()));
+  saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer({ version: 9, blob: await encryptBlob(link.encKey, state({ items: [item('r', '2026-08-01T00:00:00.000Z')] })) });
+  let applied = false;
+  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: () => { applied = true; }, adoptChoice: 'adopt-replace', expectVersion: 4 });
+  assert.equal(res.status, 'changed');
+  assert.equal(res.version, 9, 'the caller needs the version it must re-decide against');
+  assert.equal(applied, false, 'a choice made against data that has since moved must not be acted on');
+  assert.equal(server.row.version, 9, 'nothing may be pushed');
+  assert.deepEqual(JSON.parse(localStorage.getItem('plaenicke.items')).map(i => i.id), ['local']);
+  assert.equal(loadSyncState().adoptionPending, true, 'the gate stays raised so the user is asked again');
+  assert.equal(loadSyncState().version, 0, 'the cursor must not advance past a pull that was never applied');
+});
+
 test('a failed adoption leaves the gate up so the user is asked again', async () => {
   installFakeLocalStorage();
   await linkWithCode(bytesToBase64url(generateEncKey()));

@@ -1,59 +1,25 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { register } from 'node:module';
 import { installFakeLocalStorage } from './fake-localstorage.js';
 import { SCHEMA_VERSION } from '../js/merge.js';
 import {
-  saveItems, loadItems, saveTombstones, saveFeeds, loadFeeds, loadTombstones,
+  saveItems, loadItems, saveTombstones, saveFeeds, loadFeeds, loadTombstones, loadSyncState,
 } from '../js/storage.js';
 import { linkWithCode } from '../js/auth.js';
 import { bytesToBase64url, TOKEN_BYTES } from '../js/crypto.js';
+import { SYNC_STATUS_ID } from '../js/linkui.js';
 
-// --- js/linkui.js does not exist yet (Task 8) -------------------------------
+// --- historical note: the js/linkui.js resolve hook -------------------------
 //
-// app.js's plan-mandated import list (spec Task 7) includes
-// `import { renderSyncStatus } from './linkui.js';`. js/linkui.js is Task 8's
-// file and must not be stubbed into existence on disk — but leaving the
-// import as-is means Node's module loader throws ERR_MODULE_NOT_FOUND before
-// ANY of app.js's module-scope code runs, including the code this file
-// exists to test. This registers an ESM resolution hook, scoped to this
-// process only, that redirects just the one `.../linkui.js` specifier to a
-// tiny in-memory `data:` module — no file is ever written anywhere.
-//
-// CORRECTNESS NOTE: a resolve hook runs BEFORE Node's default resolution,
-// not after — it does not get consulted only when the normal lookup fails.
-// An earlier version of this hook returned the stub unconditionally for any
-// `.../linkui.js` specifier, which would keep shadowing a REAL js/linkui.js
-// forever once Task 8 lands (verified: with a real file on disk exporting a
-// distinguishable value, the unconditional version still resolved to the
-// stub). This version tries the real resolution FIRST via nextResolve(), and
-// only falls back to the in-memory stub if that fails with
-// ERR_MODULE_NOT_FOUND — so the hook self-removes the moment a real
-// js/linkui.js exists, and any other resolution failure (a typo, a real
-// syntax error in a future js/linkui.js) still surfaces as itself rather
-// than being silently masked.
-//
-// The stub counts its own calls via globalThis.__renderSyncStatusCalls so the
-// adoption-pending test below can observe whether runSync's guard actually
-// stopped it from reaching the point of calling it.
-const RENDER_SYNC_STATUS_STUB = 'export function renderSyncStatus(){ globalThis.__renderSyncStatusCalls = (globalThis.__renderSyncStatusCalls || 0) + 1; }';
-const HOOK_SOURCE = `
-  const STUB_URL = 'data:text/javascript,${encodeURIComponent(RENDER_SYNC_STATUS_STUB)}';
-  export async function resolve(specifier, context, nextResolve) {
-    if (specifier.endsWith('/linkui.js')) {
-      try {
-        return await nextResolve(specifier, context);
-      } catch (err) {
-        if (err && err.code === 'ERR_MODULE_NOT_FOUND') {
-          return { url: STUB_URL, shortCircuit: true };
-        }
-        throw err;
-      }
-    }
-    return nextResolve(specifier, context);
-  }
-`;
-register(`data:text/javascript,${encodeURIComponent(HOOK_SOURCE)}`, import.meta.url);
+// Until Task 8, this file registered an ESM resolve hook that redirected
+// app.js's `import { renderSyncStatus } from './linkui.js'` to an in-memory
+// stub, because js/linkui.js did not exist yet and Node's loader would
+// otherwise throw ERR_MODULE_NOT_FOUND before any of app.js's module-scope
+// code ran. js/linkui.js now exists, so the hook only ever took the
+// nextResolve() path — dead code. It is REMOVED rather than left inert:
+// while it was present, deleting or renaming js/linkui.js would have made
+// this suite quietly fall back to the stub instead of failing, which is the
+// same class of "assertion that cannot fail" defect DA-C4 flagged below.
 
 // --- minimal fake DOM --------------------------------------------------
 //
@@ -382,19 +348,38 @@ test('the storage listener ignores plaenicke.syncState and only reacts to the th
 // --- runSync must not run while adoption is pending (mutation M3) ----------
 //
 // sync.js's syncOnce has its OWN internal isAdoptionPending() check and
-// refuses to touch the network either way — so this mutation can't be caught
+// refuses to touch the network either way — so this mutation cannot be caught
 // by asserting "no fetch call happened". The only externally observable
 // effect of app.js's own guard is that a correctly-guarded runSync returns
 // BEFORE its try/finally, so renderSyncStatus is never called; remove the
 // guard and isLinked() alone lets it fall through into syncOnce (which
-// resolves immediately, harmlessly, with status 'adoption-required') and
-// then into the finally block, which DOES call renderSyncStatus. A `fetch`
-// spy that throws is a redundant belt-and-braces check that no real network
-// call ever escapes, in case that reasoning about sync.js is ever wrong.
+// resolves immediately, harmlessly, with status 'adoption-required') and then
+// into the finally block, which DOES call renderSyncStatus.
+//
+// RE-ANCHORED IN TASK 8 (DA-C4). This assertion used to count calls into the
+// in-memory stub the removed resolve hook installed while js/linkui.js was
+// absent. That hook was correctly self-healing, so landing Task 8 deleted the
+// stub and the counter could never move again — converting the only live
+// guard on "never union silently" into a permanently green assertion.
+// Measured: with the real js/linkui.js present and the guard removed, the old
+// version passed 9/9.
+//
+// The re-anchor is the real renderSyncStatus's own observable effect: it
+// paints the element whose id is SYNC_STATUS_ID. Seed that element with a
+// sentinel; if runSync reaches its finally, the sentinel is overwritten.
+//
+// ALSO MEASURED, and the reason the two checks below are belt-and-braces
+// rather than the anchor: neither a fetch spy nor loadSyncState() can
+// distinguish this mutation on its own. syncOnce's own gate check
+// (js/sync.js:81) returns BEFORE resetSyncStateIfDeviceChanged and before any
+// network call, so with app.js's guard removed there is still no request and
+// still no write. They are kept only to prove no real network call escapes,
+// in case that reasoning about sync.js is ever wrong.
+const SENTINEL = 'sentinel: renderSyncStatus has not run';
+
 test('runSync does not proceed into its try/finally while adoption is pending', async () => {
   installFakeLocalStorage();
   await import('../js/app.js'); // cached after the first test; online listener already registered
-  globalThis.__renderSyncStatusCalls = 0;
 
   // linkWithCode's bootstrap path accepts any base64url string of exactly
   // TOKEN_BYTES bytes and always sets adoptionPending: true (spec 5.7) — this
@@ -402,17 +387,29 @@ test('runSync does not proceed into its try/finally while adoption is pending', 
   const token = bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES)));
   await linkWithCode(token);
 
+  const statusEl = globalThis.document.getElementById(SYNC_STATUS_ID);
+  statusEl.textContent = SENTINEL;
+  const syncStateBefore = JSON.stringify(loadSyncState());
+
   const onlineListeners = globalThis.window._listeners.online;
   assert.ok(onlineListeners && onlineListeners.length > 0, 'expected an online listener to be registered');
 
+  const requests = [];
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = () => { throw new Error('unexpected network call while adoption is pending'); };
+  globalThis.fetch = (url) => {
+    requests.push(String(url));
+    throw new Error('unexpected network call while adoption is pending');
+  };
   try {
     for (const fn of onlineListeners) await fn();
   } finally {
     globalThis.fetch = originalFetch;
   }
 
-  assert.equal(globalThis.__renderSyncStatusCalls, 0,
-    'runSync must return before its try/finally while adoption is pending, so renderSyncStatus must never be called');
+  assert.equal(statusEl.textContent, SENTINEL,
+    'runSync must return before its try/finally while adoption is pending, so renderSyncStatus must never repaint the status line');
+  assert.deepEqual(requests.filter((u) => u.includes('/data')), [],
+    'nothing may be pulled or pushed before the user has chosen Merge / Replace / Cancel');
+  assert.equal(JSON.stringify(loadSyncState()), syncStateBefore,
+    'a sync that must not run must not move the cursor either');
 });

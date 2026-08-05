@@ -14,6 +14,7 @@ import {
   syncFeed, feedStatus, removeFeed, webcalToHttps, inferName,
 } from './feeds.js';
 import { loadFeeds, saveFeeds, loadFeedCache } from './storage.js';
+import { initLinkUI } from './linkui.js';
 import { uid } from './uid.js';
 import { nowISO } from './dateparse.js';
 
@@ -52,7 +53,12 @@ function getSetting() {
   return CHOICES.includes(t) ? t : 'auto';
 }
 
-export function initSettings({ button, host, onFeedsChanged }) {
+// applyState is app.js's applySyncedState, threaded straight through to
+// linkui.js. It is INJECTED rather than imported there because linkui.js
+// already supplies app.js with renderSyncStatus; importing applySyncedState
+// back would close a cycle that drags the whole DOM-bound app.js into
+// linkui.js's unit tests (DA-C6).
+export function initSettings({ button, host, onFeedsChanged, applyState }) {
   // Follow the phone while in auto.
   window.matchMedia('(prefers-color-scheme: dark)')
     .addEventListener('change', () => applyTheme(getSetting()));
@@ -390,9 +396,38 @@ export function initSettings({ button, host, onFeedsChanged }) {
 
     renderCalendars();
 
-    panel.append(appearance, calendars);
+    // --- Sync (Task 8) ------------------------------------------------
+    //
+    // MOUNTED HERE, not from initSettings, and against its own sub-element.
+    // open() rebuilds the whole panel on every click and close() does
+    // `host.innerHTML = ''` (:65, :78), so a single initLinkUI call from
+    // initSettings against the panel host would be wiped on the first open.
+    // Mounting per open against a fresh `linkHost` is what keeps it
+    // idempotent: no listener ever accumulates, because the element every
+    // listener is attached to is discarded with the panel. initLinkUI itself
+    // makes no network call on mount unless an adoption is already pending.
+    const account = document.createElement('div');
+    account.className = 'settings-section';
+    const sh = document.createElement('h3');
+    sh.textContent = 'Sync';
+    const linkHost = document.createElement('div');
+    account.append(sh, linkHost);
+
+    panel.append(appearance, calendars, account);
     backdrop.appendChild(panel);
     host.appendChild(backdrop);
+    // AFTER the panel is in the document: linkui.js's status line is found by
+    // id (renderSyncStatus), and an element that is not in the document is
+    // not findable.
+    initLinkUI({
+      host: linkHost,
+      applyState,
+      // Adoption can pull an entire account's worth of calendars, so app.js
+      // must reload its own feeds/feedCache snapshot and re-render — the same
+      // path a feed edit already takes.
+      onLinked: notifyChanged,
+      onUnlinked: notifyChanged,
+    });
     document.body.style.overflow = 'hidden'; // no scrolling behind the modal (iOS)
     document.addEventListener('keydown', onKey);
   }
