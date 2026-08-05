@@ -1913,39 +1913,88 @@ git commit -m "feat(sync): apply callback re-merging against live storage, trigg
 
 ### Task 8: `linkui.js` — the linking UI
 
-**Files:** Create `js/linkui.js`; Modify `js/settings.js`, `service-worker.js`; Test: `tests/linkui.test.js`
+**Files:** Create `js/linkui.js`; Modify `js/settings.js`, `js/app.js`, `js/sync.js`, `service-worker.js`, `tests/apply.test.js`, `tests/sync.test.js`; Test: `tests/linkui.test.js`
+
+> **Revised 2026-08-05** after a second devil's advocate pass on this section (C1–C6, I1–I5). Every change below was executed against the shipped modules, not argued. The originals are in git history; the ledger records the findings.
 
 **Interfaces:**
-- Consumes: `isLinked`, `getLink`, `linkWithCode`, `unlink`, `isAdoptionPending`, `clearAdoptionPending` (Task 4); `composeForNewDevice` (Task 1); `previewRemote`, `syncOnce` (Task 5); `loadSyncState` (Task 3).
+- Consumes: `isLinked`, `getLink`, `linkWithCode`, `unlink`, `isAdoptionPending`, `clearAdoptionPending` (Task 4); `composeForNewDevice`, `base64urlToBytes` (Task 1); `previewRemote`, `syncOnce` (Task 5); `loadSyncState`, `loadAuth`, `loadItems`, `loadFeeds` (Task 3).
 - Produces from `js/linkui.js`:
   - `describeSyncStatus(syncState, now: Date) → string` — **must distinguish "linked, waiting for you to choose" from "never synced".** The adoption gate means a device that links while offline sits at `adoptionPending: true` and syncs nothing until the user completes the dialog. The failure mode moved from "silently wrong" to "silently does nothing", and this string is the only thing standing between the user and an app they believe is syncing but is not.
-  - `classifyPastedCode(input) → 'linkcode' | 'token' | 'invalid'`
-  - `chooseAdoption(localState, remoteState) → 'none' | 'auto' | 'ask'` — `'none'` when the server is empty, `'auto'` when local is empty, `'ask'` when both hold data
-  - `renderSyncStatus()` — **imported by `app.js`; it must exist and be safe to call when the host element is absent**
-  - `initLinkUI({ host, onLinked, onUnlinked })`
+    - **Branch precedence is fixed: `adoptionPending` outranks `lastError` (DA-I1).** Linking while offline sets *both* (`js/sync.js:96` records `lastError` and does not clear the gate) — the exact scenario this string was written for. If `lastError` won, the load-bearing signal would be hidden behind an offline banner precisely when it matters.
+  - `classifyPastedCode(input) → 'linkcode' | 'token' | 'invalid'` — **decode, do not count characters (DA-I3).** `linkWithCode` branches on `base64urlToBytes(trimmed).length === TOKEN_BYTES` (`js/auth.js:45`), so a character count disagrees with it on valid-length/invalid-alphabet input (standard base64 with `+`/`/`, or 43 characters of junk): the UI would show the "creates a **new** account" warning, the user confirms, and `base64urlToBytes` throws out of `linkWithCode`. Required body:
+    ```js
+    try {
+      const n = base64urlToBytes(input.trim()).length;
+      return n === 64 ? 'linkcode' : n === 32 ? 'token' : 'invalid';
+    } catch { return 'invalid'; }
+    ```
+  - `chooseAdoption(localState, remoteState) → 'none' | 'auto' | 'ask'` — **the emptiness predicate is stated literally, not left to judgement (DA-C2).** `previewRemote` returns `state: null` only when the response carries no blob at all; an account whose records were all deleted returns a non-null `{schemaVersion, items: [], feeds: [], tombstones: [...]}`. Reading emptiness as `state === null` classifies that account as "has data", offers **Replace this device**, and wipes every local item and every feed URL — unrecoverably, since `js/settings.js` never re-displays a feed URL.
+    - `remoteEmpty ≡ remoteState === null || (remoteState.items.length === 0 && remoteState.feeds.length === 0)`
+    - `localEmpty ≡ localState.items.length === 0 && localState.feeds.length === 0`
+    - **Tombstones are never counted on either side.**
+    - `remoteEmpty → 'none'` (checked first, so **both-empty resolves to `'none'`** — the plan previously gave two answers for that case).
+    - `localEmpty → 'auto'`. Otherwise `'ask'`.
+    - `localState` is built by the caller from `loadItems()` / `loadFeeds()`. `sync.js`'s `localState()` is module-private (`js/sync.js:18`) and must not be duplicated wholesale — `linkui.js` needs only the two counts.
+  - `renderSyncStatus()` — **imported by `app.js`; it must exist and be safe to call when the host element is absent.** It is invoked from `runSync`'s `finally` (`js/app.js:483`), outside the try, and `runSync` is called un-awaited from four sites, so a throw here is an unhandled rejection that also drops the queued `syncPending` re-arm at `:486`.
+    - It must also render the **corrupt-stored-code** state (DA-I2): `getLink()` returns `null` for an unparseable code (`js/auth.js:30`), so `isLinked()` reads false while a credential *is* stored, `runSync` returns before its try/finally, and `plaenicke.syncState` keeps showing the last good `lastSyncedAt` — a permanently frozen "synced N minutes ago" on an app that will never sync again. `describeSyncStatus(syncState, now)` cannot express this (the discriminator is not in `syncState`), so **`renderSyncStatus` itself checks `loadAuth() && !getLink()`** and renders a distinct "this device's saved code is unreadable — re-link" state.
+  - `initLinkUI({ host, onLinked, onUnlinked, applyState })` — **`applyState` is injected (DA-C6).** `syncOnce` requires it (`js/sync.js:70`) and the only implementation is `applySyncedState` in `js/app.js`, which already imports `renderSyncStatus` from this module. Importing it back creates a cycle that drags the whole DOM-bound `app.js` into `tests/linkui.test.js`, so Step 1's pure-helper tests cannot run at all (executed: `ReferenceError: document is not defined`). `js/app.js` passes `applySyncedState` into `initSettings`, which forwards it here. **`js/linkui.js` imports nothing from `js/app.js`.**
 
 The UI must offer:
 1. **Unlinked:** a paste field. On a bare token, warn that this creates a **new** account and that joining an existing one needs an 86-character code from an already-linked device.
-2. **Adoption:** after linking, call `previewRemote`. Per `chooseAdoption`: `'none'`/`'auto'` → run `syncOnce({adoptChoice: 'adopt-merge'})` directly; `'ask'` → present **Merge** (default), **Replace this device**, **Cancel**. Cancel leaves `adoptionPending` set and syncs nothing.
+2. **Adoption:** after linking, call `previewRemote`.
+   - **Branch on `preview.status` BEFORE consulting `chooseAdoption` (DA-C3).** `previewRemote` can return `offline`, `unauthorized`, `error`, `undecryptable`, or `skipped` — each with **no `state` key at all**. Treating an absent `state` as "empty server" runs a silent merge on all five. `chooseAdoption` is only ever called with `preview.state` from a `status: 'ok'` preview.
+     - `undecryptable` → this is the signature of pasting a bare 43-character token on a *second* device: `linkWithCode` bootstraps a fresh `encKey` (`js/auth.js:47`), producing a device that can never read the account. Say exactly that, and offer re-link with an 86-character code.
+     - `unauthorized` → prompt re-link (spec § 7: invalid/revoked device token).
+     - `offline` → say the device is linked but has not synced yet, and give a **retry control**; the gate stays raised and there is otherwise no path out.
+     - `error` / `skipped` → surface, leave the gate raised, offer retry.
+   - Per `chooseAdoption`: `'none'`/`'auto'` → run `syncOnce({adoptChoice: 'adopt-bootstrap'})` directly; `'ask'` → present **Merge** (default), **Replace this device**, **Cancel**. Cancel leaves `adoptionPending` set and syncs nothing.
+   - **`'none'`/`'auto'` must NOT pass `'adopt-merge'` (DA-C1).** `js/sync.js:118` runs `dedupeState` on exactly that value, and `js/merge.js` now writes a tombstone per dropped id which is then pushed to the account. On `'none'` — the first device's bootstrap — that collapses two legitimately distinct same-title/date/time records into one, permanently, and destroys one of two feeds whose URLs differ only in a trailing slash. Executed: 2 items → 1, 2 feeds → 1, tombstones pushed. Spec § 5.7 step 2 says an empty server means local uploads **as-is**. On `'auto'` there is nothing local to dedupe *against*, yet it deduplicates the account's own records and propagates the tombstones to every other device.
+     - `'adopt-bootstrap'` needs **no behaviour change in `js/sync.js`**: `isReplace` is `=== 'adopt-replace'`, the gate check is `!adoptChoice`, the dedupe is `=== 'adopt-merge'`, and the clear is `if (adoptChoice)`. Add a comment naming the three legal values and **a test in `tests/sync.test.js` pinning that `'adopt-bootstrap'` does not dedupe** — without it, a later refactor of that condition to `!== 'adopt-replace'` silently restores this defect.
+   - **Close the TOCTOU gap with `expectVersion` (DA-I5).** The account can empty between `previewRemote` and `syncOnce`; a user who clicked Replace against data they *saw* then gets a silent full local wipe with no re-confirmation, and `sync.js` cannot see it. Re-previewing from `linkui.js` narrows the window but does not close it — the merge is applied against the pull *inside* `syncOnce`. Add an optional `expectVersion` to `syncOnce`: after `fetchRemote` resolves, if `expectVersion != null && pulled.version !== expectVersion`, apply and push **nothing** and return `{ status: 'changed', version: pulled.version }`. `linkui.js` passes the version it previewed, and on `'changed'` re-previews and re-asks rather than acting on a stale choice. Test both: unchanged version proceeds, moved version returns `'changed'` with no write.
 3. **Linked:** `describeSyncStatus` output, a failure banner when `lastError` is set, and **Unlink** (noting local data is kept).
-4. **Link another device:** paste a fresh token from `POST /admin/device`, get back `composeForNewDevice(token, getLink())`. This is the only way a second device obtains `encKey`.
+4. **Link another device:** paste a fresh token from `POST /admin/device`, get back `composeForNewDevice(token, getLink())`. This is the only way a second device obtains `encKey`. `composeForNewDevice` fails closed on a null link and on an 86-character token (`js/crypto.js:58`, `:40`) — **every `linkWithCode` / `composeForNewDevice` call site catches and renders `err.message`**; an uncaught throw here leaves the dialog frozen with no diagnostic.
 
-Never render the link code except in the field the user copies from, and never log it.
+**Mount point (DA observation).** `js/settings.js`'s `open()` rebuilds the whole panel on every click and `close()` does `host.innerHTML = ''` (`:65`, `:78`). Calling `initLinkUI` once from `initSettings` with the panel host means the UI is wiped on first open; calling it inside `open()` fires a fresh `previewRemote` network request and duplicate listeners on every settings click. **Call it from inside `open()`, against a dedicated sub-element of the panel, and make it idempotent** — no network call on mount, only on an explicit user action or an already-pending adoption.
+
+Never render the link code except in the field the user copies from, and never log it. **This extends to the pasted input** (on a transient failure it *is* a real code — never `console.error(msg, input)`) **and to `aria-label` / `title` on the copy field**, which put the value in the accessibility tree.
 
 - [ ] **Step 1: Write the failing tests for the pure helpers**
 
-`tests/linkui.test.js` must cover: `describeSyncStatus` for never-synced, just-synced, minutes, hours, with `lastError` set, and — distinctly from all of those — with `adoptionPending: true`, asserting the string mentions a pending choice and does NOT read as "never synced"; `classifyPastedCode` for an 86-char code, a 43-char token, whitespace padding, and junk; `chooseAdoption` for all three outcomes including empty-local-and-empty-remote; and `renderSyncStatus()` not throwing when the host element is absent.
+`tests/linkui.test.js` must cover:
+- `describeSyncStatus` for never-synced, just-synced, minutes, hours, with `lastError` set, and — distinctly from all of those — with `adoptionPending: true`, asserting the string mentions a pending choice and does NOT read as "never synced"; **plus a fixture with `adoptionPending: true` AND `lastError: 'offline'` set together**, asserting the pending-choice wording wins (DA-I1).
+- `classifyPastedCode` for an 86-char code, a 43-char token, whitespace padding, junk, **and a 43-character string that is not valid base64url** (e.g. containing `+`), which must classify `'invalid'`, not `'token'` (DA-I3).
+- `chooseAdoption` for all three outcomes, including empty-local-and-empty-remote → `'none'`, **and a remote holding only tombstones → `'none'`, never `'ask'`** (DA-C2).
+- `renderSyncStatus()` not throwing when the host element is absent. **The fake `document` must return `null` for the unmounted id** — the repo's existing fakes (`tests/apply.test.js:170`, `tests/settings.test.js`) *lazily create* an element for any id and never return null, so an implementation that does `document.getElementById('sync-status').textContent = …` passes this assertion and throws in a real browser.
+- `renderSyncStatus()` rendering the corrupt-code state when `loadAuth()` returns a non-null unparseable code (DA-I2).
+- The `preview.status` switch: each of `offline`, `unauthorized`, `undecryptable`, `error` produces its own distinct message and **calls `syncOnce` zero times** (DA-C3).
 
 - [ ] **Step 2: Run to verify they fail** — `npm test`.
 
-- [ ] **Step 3: Implement `js/linkui.js`, mount it from `js/settings.js`, add it to `ASSETS`.**
+- [ ] **Step 3: Implement `js/linkui.js`, mount it from `js/settings.js`, thread `applyState` from `js/app.js`, add `js/linkui.js` to `ASSETS`.**
 
-- [ ] **Step 4: Run tests** — `npm test`, expect PASS.
+- [ ] **Step 4: Re-anchor `tests/apply.test.js`'s adoption-guard assertion (DA-C4)**
 
-- [ ] **Step 5: Commit**
+`tests/apply.test.js:416` asserts `globalThis.__renderSyncStatusCalls === 0`, and that counter is incremented **only by the in-memory stub** the ESM resolve hook installs when `js/linkui.js` is absent. The hook is correctly self-healing, so the moment this task lands the stub is gone and the counter can never move again. Executed: with a real `js/linkui.js` present, the M3 mutation (dropping `isAdoptionPending()` from `runSync`) passes 9/9; with the stub, it fails. Landing Task 8 therefore converts the only live guard on "never union silently" into a permanently green assertion.
+
+Re-anchor it on an observable that survives the real module — a `fetchImpl` spy asserting zero `/data` requests, plus `loadSyncState()` unchanged — and **verify by re-applying the M3 mutation and confirming the test now fails.**
+
+- [ ] **Step 5: Run tests** — `npm test`, expect PASS.
+
+- [ ] **Step 6: Mutation-check** (each must FAIL at least one named test)
+
+- **M1:** `chooseAdoption` reads remote emptiness as `remoteState === null` (the tombstone-only account is offered Replace).
+- **M2:** `'none'`/`'auto'` pass `'adopt-merge'` instead of `'adopt-bootstrap'`.
+- **M3:** `classifyPastedCode` switches to `input.length === 86 ? … : input.length === 43 ? …`.
+- **M4:** `describeSyncStatus` checks `lastError` before `adoptionPending`.
+- **M5:** the `preview.status` switch is deleted and `chooseAdoption(local, preview.state)` is called unconditionally.
+- **M6:** `syncOnce` ignores `expectVersion`.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add js/linkui.js js/settings.js tests/linkui.test.js service-worker.js
+git add js/linkui.js js/settings.js js/app.js js/sync.js service-worker.js \
+        tests/linkui.test.js tests/apply.test.js tests/sync.test.js
 git commit -m "feat(sync): linking UI with an explicit, pre-write adoption choice"
 ```
 
@@ -1954,6 +2003,8 @@ git commit -m "feat(sync): linking UI with an explicit, pre-write adoption choic
 ### Task 9: Service-worker guard and the convergence simulation
 
 **Files:** Modify `service-worker.js`; Test: `tests/serviceworker.test.js`, `tests/convergence.test.js`
+
+> **Revised 2026-08-05** after a second devil's advocate pass (C5, I4). Both tests below were executed against mutants; the originals passed with `js/feeds.js` deleted from `ASSETS`, and the convergence simulation let 5 of 8 merge mutants through. The originals are in git history.
 
 - [ ] **Step 1: Write the failing service-worker test**
 
@@ -1964,16 +2015,42 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 
+const read = () => readFileSync(new URL('../service-worker.js', import.meta.url), 'utf8');
+
+// PARSE the ASSETS array; do not substring-search the file. `sw.includes('js/feeds.js')`
+// is satisfied by the prose comment at service-worker.js:44 ("cache in js/feeds.js, not
+// Cache Storage"), so the original test passed with js/feeds.js deleted from ASSETS
+// outright — a cold offline start would white-screen on the module that owns every
+// calendar subscription, and the guard said nothing.
+function assets(sw) {
+  const m = sw.match(/const ASSETS = \[([\s\S]*?)\];/);
+  assert.ok(m, 'could not find the ASSETS array in service-worker.js');
+  return m[1].split(',').map((s) => s.trim()).filter(Boolean).map((s) => {
+    assert.match(s, /^'[^']*'$/, `ASSETS entry is not a plain quoted string: ${s}`);
+    return s.slice(1, -1);
+  });
+}
+
 test('every js/ module is precached — a missing one white-screens a cold offline start', () => {
-  const sw = readFileSync(new URL('../service-worker.js', import.meta.url), 'utf8');
+  const listed = new Set(assets(read()));
   for (const f of readdirSync(new URL('../js', import.meta.url))) {
-    if (f.endsWith('.js')) assert.ok(sw.includes(`js/${f}`), `service-worker ASSETS is missing js/${f}`);
+    if (f.endsWith('.js')) assert.ok(listed.has(`js/${f}`), `service-worker ASSETS is missing js/${f}`);
   }
 });
 
-test('the cache name was bumped past the previous release', () => {
-  const sw = readFileSync(new URL('../service-worker.js', import.meta.url), 'utf8');
-  assert.ok(!sw.includes("'plaenicke-v5-1'"), 'CACHE must be bumped so the new modules are fetched');
+// A guard against forgetting on a FUTURE release, not a Task 9 deliverable — this
+// branch already bumped v5-1 -> v5-2 in 1c03057, so it is green on arrival. Stated
+// plainly because the original spelled the assertion as `!sw.includes("'plaenicke-v5-1'")`,
+// which hardcodes one stale value and can therefore never fail again for any release.
+const CACHE_ON_MAIN = 'plaenicke-v5-1';
+
+test('the cache name is ahead of the release on main', () => {
+  const m = read().match(/const CACHE = '([^']+)'/);
+  assert.ok(m, 'could not find CACHE in service-worker.js');
+  const got = Number(m[1].match(/(\d+)$/)?.[1]);
+  const base = Number(CACHE_ON_MAIN.match(/(\d+)$/)[1]);
+  assert.ok(Number.isFinite(got) && got > base,
+    `CACHE must end in an integer greater than ${base} so new modules are fetched; got '${m[1]}'`);
 });
 ```
 
@@ -1983,29 +2060,63 @@ test('the cache name was bumped past the previous release', () => {
 
 `tests/convergence.test.js`. **This must simulate the real replicated loop**, not merely assert `merge(a,b) ≡ merge(b,a)` — commutativity of one merge is not convergence, and cannot see a dedupe-on-sync bug, a non-canonical wire form, or a stale-snapshot retry.
 
+Three defects in the first draft of this test, all measured, all fixed below:
+
+1. **The RNG was destroyed by float precision.** `seed * 1103515245` with `seed < 2^31` exceeds `Number.MAX_SAFE_INTEGER`, zeroing the low ~9 bits before the mask. Over the exact draw order of the loop: device 1 performed a local operation in **0.4%** of steps (996/4 split), only `r0` and `r1` were ever touched, `rnd(20)` yielded only `{0,4,8,12,16}` and `rnd(24)` only `{0,8,16}`. A "two-device, four-record, randomised" simulation was one device editing one record.
+2. **The fixed-point assertion could not fail.** Every operation was followed immediately by `sync(d)`, so the devices were **never concurrently divergent**. The quiesce loop body executed zero times in **100/100** trials — `assert.ok(rounds < 20)` was asserting `0 < 20`. `sync(0) || sync(1)` also short-circuits, skipping device 1 on every round device 0 pushes.
+3. **The item-count assertion compared a device against what that device had just pushed.** Both sides collapse identically under a dedupe leak, so the stated purpose ("a dedupe leaking into the sync path would collapse them all") was not served.
+
+Measured mutant survival on the first draft: `toWire` drops the item sort — survives; drops the feed sort — survives; `merge` stops applying item tombstones — survives; `merge` drops `pickFeed` (the subscription-destroying defect from Task 5) — survives; `unionById` ties go local — survives. **Five of eight, including both defects spec § 8 claims this test would have caught.**
+
 ```js
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { merge, toWire, emptyState, SCHEMA_VERSION } from '../js/merge.js';
+import { merge, toWire, emptyState } from '../js/merge.js';
 
 // Two devices, a shared compare-and-swap row, randomised local operations.
-// Each round: a device pulls, merges, applies locally, and pushes if its wire
-// form differs. Assert both devices converge AND that the protocol reaches a
-// fixed point — a version that stops climbing once operations stop.
+// Operations and syncs are DECOUPLED — a device may accumulate several edits
+// before it pushes — because that is the only way the two devices are ever
+// concurrently divergent, and convergence is meaningless without divergence.
 test('two devices converge and stop pushing', () => {
   let seed = 987654321;
-  const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+  // Math.imul, not `*`. See defect 1 above.
+  const rnd = (n) => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return (seed >>> 16) % n; };
+  const NOW = new Date('2026-09-01T00:00:00.000Z');
+  let tieTrials = 0; // coverage counter — see the assertion after the loop
 
   for (let trial = 0; trial < 100; trial += 1) {
     const server = { version: 0, wire: emptyState() };
     const devices = [emptyState(), emptyState()];
     const colours = ['#111', '#222'];
+    // The oracle: latest create and latest delete per record over the WHOLE op
+    // log, computed independently of anything merge.js does. A record is alive
+    // at the fixed point iff it was created at or after it was last deleted —
+    // applyTombstones drops on `deletedAt > updatedAt`, so a tie survives.
+    // Timestamps below are non-decreasing, which is what makes a plain max
+    // correct here: a later local write can never destroy a newer version.
+    const created = new Map();
+    const deleted = new Map();
+    const bump = (m, k, v) => { if (!m.has(k) || v > m.get(k)) m.set(k, v); };
+    let sawTie = false;
 
     const sync = (d) => {
+      const before = devices[d];
       const remote = server.wire;
-      const merged = merge(devices[d], remote, new Date('2026-09-01T00:00:00.000Z'));
+      const merged = merge(before, remote, NOW);
+      // pickFeed must carry a KNOWN feed's per-device colour through the merge.
+      // Dropping it hands storage.js a feed whose color is undefined, and
+      // deserializeFeeds drops any feed whose color is not a string — the
+      // defect that would have destroyed every calendar subscription, and the
+      // one the first draft of this test could not see.
+      for (const f of merged.feeds) {
+        const prior = before.feeds.find((p) => p.id === f.id);
+        if (prior) {
+          assert.equal(f.color, prior.color,
+            `trial ${trial}: merge lost a known feed's per-device colour`);
+        }
+      }
       // Give each device its own per-device fields, as feeds.js would.
-      devices[d] = { ...merged, feeds: merged.feeds.map(f => ({ ...f, color: colours[d], hidden: d === 1 })) };
+      devices[d] = { ...merged, feeds: merged.feeds.map((f) => ({ ...f, color: colours[d], hidden: d === 1 })) };
       const wire = toWire(devices[d]);
       if (JSON.stringify(wire) !== JSON.stringify(toWire(remote))) {
         server.version += 1;
@@ -2015,34 +2126,71 @@ test('two devices converge and stop pushing', () => {
       return false;
     };
 
-    for (let step = 0; step < 10; step += 1) {
+    for (let step = 0; step < 16; step += 1) {
       const d = rnd(2);
-      const at = new Date(Date.UTC(2026, 7, 1 + rnd(20), rnd(24))).toISOString();
+      // Non-decreasing, with a deliberately COARSE quantum so consecutive steps
+      // share a timestamp. Ties on the same id from two devices are where the
+      // tie rules live (unionById `>=` goes remote; collapse breaks by id), and
+      // a tie broken the wrong way makes the devices push at each other forever.
+      const at = new Date(Date.UTC(2026, 7, 1) + Math.floor(step / 2) * 3600000).toISOString();
+      const atMs = Date.parse(at);
       const id = `r${rnd(4)}`;
       const op = rnd(3);
+      // `by` makes the two devices' writes for the same id at the same instant
+      // DISTINGUISHABLE. Without it every record is byte-identical and the tie
+      // rules are unobservable. toWire keeps it; dedupeState's key ignores it.
+      const priorItem = devices[d].items.find((i) => i.id === id);
       if (op === 0) {
-        devices[d] = { ...devices[d], items: [...devices[d].items.filter(i => i.id !== id), { id, title: 'shared title', date: '2026-08-05', time: null, updatedAt: at }] };
+        if (priorItem && priorItem.updatedAt === at && priorItem.by !== d) sawTie = true;
+        devices[d] = { ...devices[d], items: [...devices[d].items.filter((i) => i.id !== id), { id, title: 'shared title', date: '2026-08-05', time: null, updatedAt: at, by: d }] };
+        bump(created, `item:${id}`, atMs);
       } else if (op === 1) {
-        devices[d] = { ...devices[d], tombstones: [...devices[d].tombstones.filter(t => !(t.id === id && t.kind === 'item')), { id, kind: 'item', deletedAt: at }] };
+        devices[d] = { ...devices[d], tombstones: [...devices[d].tombstones.filter((t) => !(t.id === id && t.kind === 'item')), { id, kind: 'item', deletedAt: at }] };
+        bump(deleted, `item:${id}`, atMs);
       } else {
-        devices[d] = { ...devices[d], feeds: [...devices[d].feeds.filter(f => f.id !== id), { id, url: `https://cal.example/${id}.ics`, name: id, color: colours[d], hidden: false, updatedAt: at }] };
+        devices[d] = { ...devices[d], feeds: [...devices[d].feeds.filter((f) => f.id !== id), { id, url: `https://cal.example/${id}.ics`, name: id, color: colours[d], hidden: false, updatedAt: at, by: d }] };
+        bump(created, `feed:${id}`, atMs);
       }
-      sync(d);
+      if (rnd(3) === 0) sync(d); // sync only SOMETIMES — see defect 2 above
     }
 
-    // Quiesce: no more local operations, just sync until nobody pushes.
+    // Quiesce: no more local operations, just sync until nobody pushes. NOT
+    // `sync(0) || sync(1)` — that short-circuits past device 1.
     let rounds = 0;
-    while (rounds < 20 && (sync(0) || sync(1))) rounds += 1;
+    for (;;) {
+      const a = sync(0);
+      const b = sync(1);
+      if (!a && !b) break;
+      rounds += 1;
+      assert.ok(rounds < 50, `trial ${trial}: never reached a fixed point — devices push at each other forever`);
+    }
+    if (sawTie) tieTrials += 1;
 
-    assert.ok(rounds < 20, `trial ${trial}: never reached a fixed point — devices push at each other forever`);
-    assert.equal(JSON.stringify(toWire(devices[0])), JSON.stringify(toWire(devices[1])),
-      `trial ${trial}: devices diverged`);
-    // Every item carries the SAME title, so a dedupe leaking into the sync
-    // path would collapse them all and this count would collapse with it.
-    assert.equal(toWire(devices[0]).items.length, toWire(server.wire).items.length);
+    const w0 = toWire(devices[0]);
+    assert.deepEqual(w0, toWire(devices[1]), `trial ${trial}: devices diverged`);
+    assert.deepEqual(w0, toWire(server.wire), `trial ${trial}: devices agree but the server holds something else`);
+
+    // Against the OP LOG, not against what a device just pushed. Every item
+    // carries the same title/date/time, so a dedupe leaking into the sync path
+    // collapses them all and this comparison fails.
+    const alive = (kind) => [...created]
+      .filter(([k]) => k.startsWith(`${kind}:`))
+      .filter(([k, c]) => !(deleted.has(k) && deleted.get(k) > c))
+      .map(([k]) => k.slice(kind.length + 1)).sort();
+    assert.deepEqual(w0.items.map((i) => i.id).sort(), alive('item'), `trial ${trial}: item set does not match the op log`);
+    assert.deepEqual(w0.feeds.map((f) => f.id).sort(), alive('feed'), `trial ${trial}: feed set does not match the op log`);
   }
+
+  // Coverage, not behaviour: if no trial ever produced a same-id/same-instant
+  // write from both devices, the tie rules were never exercised and the
+  // ties-go-remote mutant would pass for want of a scenario, not for merit.
+  assert.ok(tieTrials > 0, 'no trial exercised a cross-device timestamp tie — the tie rules are untested');
 });
 ```
+
+- [ ] **Step 3b: Mutation-check the simulation** — each of these must FAIL it:
+
+`toWire` drops the item sort; `toWire` drops the feed sort; `toWire` stops stripping `color`/`hidden`; `merge` stops applying item tombstones; `merge` drops `pickFeed`; `unionById` ties go local (`>` instead of `>=`); `merge` ignores remote tombstones; `merge` runs `dedupeState` on every call. **All eight.** Report the killing assertion for each; if any survives, the simulation is not done.
 
 - [ ] **Step 4: Run the full suite** — `npm test`. Also `cd worker && npm test` to confirm 100 still pass and nothing here touched the Worker.
 
