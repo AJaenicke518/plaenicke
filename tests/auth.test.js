@@ -4,7 +4,7 @@ import { installFakeLocalStorage } from './fake-localstorage.js';
 import { generateEncKey, bytesToBase64url, composeLinkCode } from '../js/crypto.js';
 import {
   loadSyncState, saveSyncState, loadItems, saveItems,
-  loadFeeds, saveFeeds, loadTombstones, saveTombstones, SYNC_STATE_KEY,
+  loadFeeds, saveFeeds, loadTombstones, saveTombstones, SYNC_STATE_KEY, ZERO_SYNC_STATE,
 } from '../js/storage.js';
 import {
   isLinked, getLink, linkWithCode, unlink, tokenHash,
@@ -154,6 +154,35 @@ test('unlink clears credentials and cursor but NEVER touches local data', async 
   assert.equal(loadItems().length, 1, 'unlinking must never delete local data');
   assert.equal(loadFeeds().length, 1, 'unlinking must never delete feeds');
   assert.equal(loadTombstones().length, 1, 'unlinking must never delete tombstones');
+});
+
+// unlink()'s reset is a FULL reset only because ZERO_SYNC_STATE enumerates
+// every field — saveSyncState merges over the current persisted state, not
+// over a zero. The only assertion on it was `version === 0`, so all three of
+// these passed 548/548: deleting the reset outright, replacing it with
+// `{ ...ZERO, adoptionPending: true, tokenHash: 'stale' }`, and (before this
+// commit) letting auth.js's private copy drift from storage.js's.
+//
+// deepEqual against the exported constant is what makes this total: a sixth
+// field added to ZERO_SYNC_STATE fails here unless it is BOTH cleared by
+// unlink and carried by loadSyncState's projection.
+test('unlink resets every field of the cursor, not only the ones a test names', async () => {
+  installFakeLocalStorage();
+  await linkWithCode(bareToken());
+  saveSyncState({ version: 42, lastSyncedAt: '2026-08-01T00:00:00.000Z', lastError: 'offline' });
+  const before = loadSyncState();
+  assert.ok(before.tokenHash && before.version === 42 && before.lastError === 'offline',
+    'fixture check: every field is dirty before the unlink');
+
+  unlink();
+
+  assert.deepEqual(loadSyncState(), ZERO_SYNC_STATE);
+  // Named individually so a failure says WHICH field survived. tokenHash is
+  // what makes the NEXT link's device-change reset fire, and a stale
+  // adoptionPending: true would leave a device that is not linked at all
+  // reporting a pending adoption it can never complete.
+  assert.equal(loadSyncState().tokenHash, null, 'a stale token hash outlives the credential it describes');
+  assert.equal(loadSyncState().adoptionPending, false, 'an unlinked device has no adoption to resolve');
 });
 
 test('a corrupt stored link code reads as unlinked rather than throwing on every tick', () => {

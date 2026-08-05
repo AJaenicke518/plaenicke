@@ -12,9 +12,15 @@
 // working, offline app (spec 4.4).
 
 import { parseLinkCode, composeLinkCode, generateEncKey, base64urlToBytes, TOKEN_BYTES } from './crypto.js';
-import { loadAuth, saveAuth, clearAuth, loadSyncState, saveSyncState } from './storage.js';
+import {
+  loadAuth, saveAuth, clearAuth, loadSyncState, saveSyncState, ZERO_SYNC_STATE,
+} from './storage.js';
 
-const ZERO = { version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false };
+// NOT a local copy. saveSyncState merges over the CURRENT persisted state, so
+// `{ ...ZERO_SYNC_STATE }` below is a full reset only because that object
+// enumerates every field of the cursor. A second literal here would mean a
+// sixth field added to storage.js silently stopped being cleared by unlink()
+// and resetSyncStateIfDeviceChanged() while both still read as full resets.
 
 export async function tokenHash(authToken) {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(authToken));
@@ -58,18 +64,18 @@ export async function linkWithCode(input) {
   // exists to prevent. With this order a failure leaves a cursor and no
   // credential, which reads as unlinked and is inert.
   const hash = await tokenHash(authToken);
-  saveSyncState({ ...ZERO, tokenHash: hash, adoptionPending: true });
+  saveSyncState({ ...ZERO_SYNC_STATE, tokenHash: hash, adoptionPending: true });
   saveAuth(code);
   return getLink();
 }
 
 export function unlink() {
   clearAuth();
-  saveSyncState({ ...ZERO });
+  saveSyncState({ ...ZERO_SYNC_STATE });
 }
 
 export async function resetSyncStateIfDeviceChanged(authToken) {
   const hash = await tokenHash(authToken);
   const state = loadSyncState();
-  if (state.tokenHash !== hash) saveSyncState({ ...ZERO, tokenHash: hash, adoptionPending: true });
+  if (state.tokenHash !== hash) saveSyncState({ ...ZERO_SYNC_STATE, tokenHash: hash, adoptionPending: true });
 }

@@ -211,7 +211,19 @@ export function loadAuth() {
 export function saveAuth(code) { localStorage.setItem(AUTH_KEY, code); }
 export function clearAuth() { localStorage.removeItem(AUTH_KEY); }
 
-const ZERO_SYNC_STATE = {
+// EXPORTED, and it is the ONLY copy. saveSyncState merges over the CURRENT
+// persisted state (see below), so `saveSyncState({ ...ZERO_SYNC_STATE })` is a
+// FULL reset only because this object happens to enumerate every field
+// loadSyncState returns. auth.js used to keep a second, identical literal for
+// exactly that purpose: adding a sixth field here would have left unlink() and
+// resetSyncStateIfDeviceChanged() silently no longer clearing it, while still
+// reading at both call sites as a full reset. There was never an import-cycle
+// reason for the duplicate — auth.js already imports from this file.
+//
+// tests/auth.test.js asserts loadSyncState() deep-equals this object after
+// unlink, so a field added here without being cleared, or without being added
+// to loadSyncState's projection below, fails rather than drifting.
+export const ZERO_SYNC_STATE = {
   version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false,
 };
 
