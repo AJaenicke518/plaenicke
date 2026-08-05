@@ -316,7 +316,14 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
               renderCalendars();
               return;
             }
-            feeds = feeds.filter((f) => f.id !== feed.id);
+            // RE-READ, never rebuild from the snapshot open() captured — same
+            // reasoning as reapplyFeedField and handleAdd above.
+            // removeFeed() has already done its own load-filter-save, so this
+            // is "storage's latest, minus the one just removed". Filtering the
+            // stale closure instead dropped any feed a sync pulled in while
+            // this panel sat open, and the list went straight to "No calendars
+            // linked yet" beside a subscription that still existed.
+            feeds = loadFeeds();
             delete feedCache[feed.id];
             delete syncErrors[feed.id];
             renderCalendars();

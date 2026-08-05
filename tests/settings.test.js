@@ -243,6 +243,37 @@ test('settings: adding a calendar is a SYNCED change, not just a re-render', asy
   }
 });
 
+// The one write path in this panel that was never converted to re-read
+// storage. Its three siblings — reapplyFeedField, handleAdd and
+// refreshCalendars — all do, and its own comment claimed parity with them,
+// but it rebuilt the list from the snapshot open() captured. A calendar
+// pulled in by a sync while the panel sat open therefore vanished from the
+// list on any Remove. Display only (storage stayed correct), but the panel is
+// the only place a calendar's existence is visible.
+test('settings: removing a calendar keeps one that arrived in storage after the panel opened', () => {
+  const feedA = {
+    id: 'feedA', url: 'https://example.com/a.ics', name: 'A', color: 'var(--feed-palette-1)', hidden: false,
+    updatedAt: '2026-07-01T00:00:00.000Z',
+  };
+  const { host } = openPanel([feedA]); // the panel's `feeds` binding is [feedA] only
+
+  // An adoption lands while the panel is open. Same-tab write, so the
+  // cross-tab `storage` event never fires here.
+  const feedC = {
+    id: 'feedC', url: 'https://example.com/c.ics', name: 'C', color: 'var(--feed-palette-2)', hidden: false,
+    updatedAt: '2026-08-01T00:00:00.000Z',
+  };
+  saveFeeds([feedA, feedC]);
+
+  findButtonByText(host, 'Remove').click(); // feedA's row is first
+
+  assert.deepEqual(loadFeeds().map((f) => f.id), ['feedC'], 'fixture check: storage is right either way');
+  assert.ok(allText(host).includes('C'),
+    'the panel must show the calendar sync pulled in, not the snapshot it opened with');
+  assert.ok(!allText(host).includes('No calendars linked yet'),
+    'a subscription that exists must never be rendered as if the device had none');
+});
+
 test('settings: colour and hidden are per-device preferences and never schedule a sync', () => {
   const feedA = {
     id: 'feedA', url: 'https://example.com/a.ics', name: 'A', color: 'var(--feed-palette-1)', hidden: false,
