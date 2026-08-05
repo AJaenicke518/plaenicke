@@ -253,17 +253,41 @@ const MAX_ADOPT_ATTEMPTS = 3;
 // semantics, resolved by arrival order. app.js's own syncInFlight guard does
 // not cover linkui's syncOnce calls.
 //
-// IT MUST NOT BE ABLE TO OUTLIVE ITS PURPOSE. It is cleared in the episode's
-// `finally`, and nothing in previewRemote/fetchRemote carries an
+// IT MUST NOT BE ABLE TO OUTLIVE ITS PURPOSE either. It is cleared in the
+// episode's `finally`, and nothing in previewRemote/fetchRemote carries an
 // AbortController or a timeout — so an episode whose request never settles
-// held it for the page's lifetime, and every later panel open rendered a busy
-// view with NO controls at all: no retry, no cancel, not even Unlink, on a
-// fully healthy network. A joining mount can therefore TAKE OVER. The
-// generation counter is what makes that safe: an episode that has been
-// superseded refuses to write, so a stalled request completing later cannot
-// land a second, conflicting adoption.
+// would hold it for the page's lifetime, and every later panel open would
+// render a busy view with no controls at all, on a fully healthy network.
+// A joining mount can therefore TAKE OVER — but ONLY during the preview.
+//
+// THE PHASE DISTINCTION IS THE WHOLE DESIGN, and getting it wrong is how the
+// first attempt at this destroyed the exclusion it was written to preserve:
+//
+//   - A PREVIEW is a read with no side effects. Abandoning one is safe, and
+//     `adoptionGeneration` is sufficient: a late-returning preview finds its
+//     generation superseded and returns before writing anything.
+//   - A WRITE (syncOnceImpl) is NOT abandonable, and a generation check in
+//     front of it answers the wrong question. It gates whether an episode may
+//     BEGIN a write; it says nothing once an episode is already inside one.
+//     Measured, with the generation counter working exactly as designed:
+//     Merge held inside syncOnce -> close/reopen -> take over -> Replace, and
+//     both writes ran concurrently. The superseded PUT then landed AFTER the
+//     replace, putting the record the user explicitly discarded back into the
+//     account, at a higher version, with no error and no status anywhere.
+//     A Cancel in the same window reported "nothing was combined" while the
+//     superseded episode's syncOnce went on to call clearAdoptionPending().
+//
+// So `writeInFlight` — set immediately before the write and cleared in a
+// finally — is what actually excludes. Takeover is refused while it is true.
 let activeAdoption = null;
 let adoptionGeneration = 0;
+let writeInFlight = false;
+let activeStartedAt = 0;
+
+// A healthy adoption takes a second or two. Offering "Try again" instantly,
+// under text that invites the click, turns every ordinary two-second wait
+// into an invitation to start a second episode.
+const STALE_ADOPTION_MS = 10000;
 
 function el(tag, props = {}) {
   const node = document.createElement(tag);
@@ -304,6 +328,7 @@ export function initLinkUI(options = {}) {
     apiBase = WORKER_URL,
     now = () => new Date(),
     syncOnceImpl = syncOnce,
+    staleAfterMs = STALE_ADOPTION_MS,
   } = options;
 
   // stage === null means "derive the view from stored state".
@@ -312,10 +337,7 @@ export function initLinkUI(options = {}) {
   let notice = '';
   let mintedCode = '';
   let inflight = Promise.resolve();
-  // The adoption generation this mount's current episode belongs to. An
-  // episode whose generation is no longer the live one has been superseded
-  // and must not write — see `adoptionGeneration`.
-  let myGeneration = 0;
+  let joinTimer = null;
 
   function guarded(fn) {
     return (async () => {
@@ -338,29 +360,52 @@ export function initLinkUI(options = {}) {
     return inflight;
   }
 
+  // Attach to the episode already running instead of starting one. This must
+  // never be a dead end: it awaits the live episode and re-renders when it
+  // settles, and — if that episode is still only PREVIEWING — re-checks once
+  // it has been running long enough to look stuck, so the takeover control
+  // appears without needing another panel open.
+  function joinActive() {
+    const elapsed = now().getTime() - activeStartedAt;
+    if (writeInFlight) stage = 'saving';
+    else if (elapsed >= staleAfterMs) stage = 'joining-stale';
+    else stage = 'joining';
+    stageData = {};
+    render();
+    clearTimeout(joinTimer);
+    if (stage === 'joining') {
+      joinTimer = setTimeout(() => {
+        if (stage === 'joining' && activeAdoption) joinActive();
+      }, Math.max(0, staleAfterMs - elapsed));
+    }
+    inflight = activeAdoption.then(() => {
+      clearTimeout(joinTimer);
+      stage = null;
+      stageData = {};
+      render();
+    });
+    return inflight;
+  }
+
   // Anything that talks to the account. At most ONE adoption episode runs
   // across every mounted panel — see `activeAdoption` above.
   function runAdoption(fn, { takeOver = false } = {}) {
-    if (activeAdoption && !takeOver) {
-      // A previous mount is still mid-adoption. Show its progress and wait
-      // for it rather than racing it with a second, conflicting write — but
-      // offer a way out, because that episode may never settle.
-      stage = 'joining';
-      stageData = {};
-      render();
-      inflight = activeAdoption.then(() => { stage = null; stageData = {}; render(); });
-      return inflight;
-    }
-    // Starting fresh, or taking over from an episode that appears stalled.
-    // Either way this becomes the only episode allowed to write; anything
-    // still in flight from before is now superseded.
+    // Takeover is refused outright while a write is in flight — see
+    // `writeInFlight`. `takeOver` is only ever passed by a control that is
+    // only rendered when it is false, so this is belt-and-braces.
+    if (activeAdoption && (!takeOver || writeInFlight)) return joinActive();
+    // Starting fresh, or taking over a preview that appears stalled. Either
+    // way this becomes the live episode; anything still previewing from
+    // before is superseded and will refuse to write.
     const generation = (adoptionGeneration += 1);
-    myGeneration = generation;
+    activeStartedAt = now().getTime();
     const episode = (async () => {
       try {
-        await guarded(fn);
+        await guarded(() => fn(generation));
       } finally {
-        // A superseded episode must not clear the marker its successor set.
+        // A superseded episode must not clear the marker its successor set —
+        // that would orphan the successor's exclusion and let a third episode
+        // start freely alongside it.
         if (adoptionGeneration === generation) activeAdoption = null;
       }
     })();
@@ -371,7 +416,7 @@ export function initLinkUI(options = {}) {
 
   // --- actions -------------------------------------------------------------
 
-  async function doLink(raw) {
+  async function doLink(raw, generation) {
     notice = '';
     try {
       await linkWithCode(raw);
@@ -384,17 +429,17 @@ export function initLinkUI(options = {}) {
       return;
     }
     if (onLinked) onLinked();
-    await doPreview();
+    await doPreview(1, generation);
   }
 
   // `attempt` counts one adoption EPISODE's automatic re-previews. A human
   // clicking a button starts a fresh episode at 1 — the loop being bounded
   // here is the automatic one, which nothing else gates.
-  async function doPreview(attempt = 1) {
+  async function doPreview(attempt, generation) {
     stage = 'busy';
     stageData = { text: 'Checking the account…' };
     render();
-    await handlePreview(await previewRemote({ fetchImpl, apiBase }), attempt);
+    await handlePreview(await previewRemote({ fetchImpl, apiBase }), attempt, generation);
   }
 
   // BRANCH ON preview.status BEFORE CONSULTING chooseAdoption (DA-C3).
@@ -404,7 +449,7 @@ export function initLinkUI(options = {}) {
   // is exactly the signature of pasting a bare token on a second device.
   // chooseAdoption is only ever called with preview.state from a status: 'ok'
   // preview.
-  async function handlePreview(preview, attempt = 1) {
+  async function handlePreview(preview, attempt, generation) {
     if (preview.status !== 'ok') {
       stage = 'failed';
       stageData = { status: preview.status };
@@ -424,12 +469,20 @@ export function initLinkUI(options = {}) {
       render();
       return;
     }
+    await decideAndAct(remote, preview.version, attempt, generation);
+  }
+
+  // The single place the decision is made and acted on. The re-ask path goes
+  // through here too: if local emptied while the dialog sat open, the honest
+  // answer is no longer "choose" but 'auto', and re-rendering the old dialog
+  // would put "This device holds 0 items and 0 calendars" beside a Replace
+  // button — the exact shape DA-C2 named as not an informed choice.
+  async function decideAndAct(remote, version, attempt, generation) {
     // tombstones are load-bearing on BOTH sides — see adoptionCounts.
     const local = readLocal();
-    const decision = chooseAdoption(local, remote);
-    if (decision === 'ask') {
+    if (chooseAdoption(local, remote) === 'ask') {
       stage = 'ask';
-      stageData = { version: preview.version, remote, ...adoptionCounts(local, remote) };
+      stageData = { version, remote, ...adoptionCounts(local, remote) };
       render();
       return;
     }
@@ -445,7 +498,7 @@ export function initLinkUI(options = {}) {
     // uploads AS-IS. On 'auto' there is nothing local to dedupe *against*,
     // yet it would deduplicate the account's OWN records and propagate the
     // tombstones to every other device.
-    await adopt('adopt-bootstrap', preview.version, attempt);
+    await adopt('adopt-bootstrap', version, attempt, generation);
   }
 
   // The LOCAL half of the same guarantee expectVersion gives for the remote
@@ -456,27 +509,30 @@ export function initLinkUI(options = {}) {
   // Measured: dialog read "1 item and 1 calendar", a second calendar was
   // added, Replace was clicked, and BOTH were destroyed — the user consented
   // to discarding one. So re-read at CLICK time and re-ask if it moved.
-  async function adoptAgainstFreshCounts(adoptChoice) {
+  async function adoptAgainstFreshCounts(adoptChoice, generation) {
     const shown = stageData;
     const fresh = adoptionCounts(readLocal(), shown.remote);
-    if (fresh.localItems !== shown.localItems
+    // Every count the dialog DESCRIBED, including remoteDeletesLocal, which
+    // is a function of local records too.
+    const moved = fresh.localItems !== shown.localItems
       || fresh.localFeeds !== shown.localFeeds
-      || fresh.localDeletesRemote !== shown.localDeletesRemote) {
+      || fresh.localDeletesRemote !== shown.localDeletesRemote
+      || fresh.remoteDeletesLocal !== shown.remoteDeletesLocal;
+    if (moved) {
       notice = 'This device changed while the dialog was open. Here is what it holds now — please choose again.';
-      stage = 'ask';
-      stageData = { ...shown, ...fresh };
-      render();
+      await decideAndAct(shown.remote, shown.version, 1, generation);
       return;
     }
-    await adopt(adoptChoice, shown.version);
+    await adopt(adoptChoice, shown.version, 1, generation);
   }
 
-  async function adopt(adoptChoice, expectVersion, attempt = 1) {
-    // A stalled episode that another mount has taken over from must not
-    // write when it finally comes back — that is the concurrent double-adopt
-    // the exclusion exists to prevent, and taking over would otherwise
-    // re-open it.
-    if (myGeneration !== adoptionGeneration) return;
+  async function adopt(adoptChoice, expectVersion, attempt, generation) {
+    // A PREVIEW that another mount has taken over from must not go on to
+    // write when it finally returns. This gate is sufficient for that and
+    // ONLY that: it says whether this episode may BEGIN a write, never
+    // whether one is already under way. `writeInFlight` below is what
+    // excludes concurrent writes.
+    if (generation !== adoptionGeneration) return;
     if (!applyState) {
       stage = 'failed';
       stageData = { status: 'no-apply' };
@@ -486,9 +542,17 @@ export function initLinkUI(options = {}) {
     stage = 'busy';
     stageData = { text: 'Combining…' };
     render();
-    const res = await syncOnceImpl({
-      fetchImpl, now, apiBase, applyState, adoptChoice, expectVersion,
-    });
+    // From here until syncOnceImpl settles there is an unabandonable write in
+    // flight. No mount may take over from it — see `writeInFlight`.
+    let res;
+    writeInFlight = true;
+    try {
+      res = await syncOnceImpl({
+        fetchImpl, now, apiBase, applyState, adoptChoice, expectVersion,
+      });
+    } finally {
+      writeInFlight = false;
+    }
     if (res.status === 'changed') {
       // The account moved between the preview and the write, so the choice
       // the user made was against data that is no longer there — a Replace
@@ -506,7 +570,7 @@ export function initLinkUI(options = {}) {
         return;
       }
       notice = 'The account changed while you were deciding. Here is what it holds now — please choose again.';
-      await doPreview(attempt + 1);
+      await doPreview(attempt + 1, generation);
       return;
     }
     if (res.status === 'ok') {
@@ -573,8 +637,8 @@ export function initLinkUI(options = {}) {
     };
     input.addEventListener('input', refresh);
     const button = el('button', { type: 'button', text: buttonText });
-    button.addEventListener('click', () => runAdoption(() => doLink(input.value)));
-    input.addEventListener('keydown', (e) => { if (e && e.key === 'Enter') runAdoption(() => doLink(input.value)); });
+    button.addEventListener('click', () => runAdoption((g) => doLink(input.value, g)));
+    input.addEventListener('keydown', (e) => { if (e && e.key === 'Enter') runAdoption((g) => doLink(input.value, g)); });
     wrap.append(input, warning, button);
   }
 
@@ -599,17 +663,51 @@ export function initLinkUI(options = {}) {
     wrap.appendChild(el('p', { className: 'note', text: stageData.text || 'Working…' }));
   }
 
-  // Shown to a mount that found another episode already running. That episode
-  // may never settle (no timeout, no AbortController anywhere below this), so
-  // this view must never be a dead end.
+  // Shown to a mount that found another episode already PREVIEWING, and not
+  // for long enough to look stuck. No takeover control: a healthy adoption
+  // takes a second or two, and offering one here under text that invites the
+  // click turns every ordinary wait into a second episode. joinActive()
+  // re-renders this into renderJoiningStale once the threshold passes, and
+  // out of it entirely once the live episode settles, so it is never a dead
+  // end even though nothing below this has a timeout.
   function renderJoining(wrap) {
     wrap.appendChild(el('p', {
       className: 'note',
       text: 'Checking the account… this was already under way when the panel opened.',
     }));
+  }
+
+  // The live episode has been previewing long enough to look stuck. A preview
+  // is a read with no side effects, so abandoning it is safe.
+  function renderJoiningStale(wrap) {
+    wrap.appendChild(el('p', {
+      className: 'note',
+      text: 'Still checking the account. This is taking longer than it should.',
+    }));
     const takeOver = el('button', { type: 'button', text: 'Try again' });
-    takeOver.addEventListener('click', () => runAdoption(() => doPreview(), { takeOver: true }));
+    takeOver.addEventListener('click', () => runAdoption((g) => doPreview(1, g), { takeOver: true }));
     wrap.append(takeOver, unlinkButton('Unlink this device'));
+    wrap.appendChild(el('p', {
+      className: 'note',
+      text: 'Unlinking stops syncing. Nothing on this device is deleted.',
+    }));
+  }
+
+  // A write is in flight. It cannot be abandoned and nothing may take over
+  // from it: a second, concurrent syncOnce is exactly the failure the
+  // exclusion exists to prevent, and Unlink here would leave that write
+  // pushing with a token the user just revoked.
+  function renderSaving(wrap) {
+    // No controls, deliberately — see renderSaving's caller. But a write that
+    // never answers would otherwise leave this panel on a bare spinner for
+    // ever (nothing under syncOnce has a timeout), so say what is happening
+    // and that waiting is not the only option. Reloading IS safe: the gate is
+    // still raised, and the compare-and-swap makes a re-run idempotent.
+    wrap.appendChild(el('p', {
+      className: 'note',
+      text: 'Saving your choice… This step cannot be interrupted. '
+        + 'If it does not finish, it is safe to reload the page and try again — nothing is lost either way.',
+    }));
   }
 
   function renderAdoptionEntry(wrap) {
@@ -618,7 +716,7 @@ export function initLinkUI(options = {}) {
       text: 'This device is linked but has not been combined with the account yet. Nothing syncs until you choose.',
     }));
     const go = el('button', { type: 'button', text: 'Continue' });
-    go.addEventListener('click', () => runAdoption(() => doPreview()));
+    go.addEventListener('click', () => runAdoption((g) => doPreview(1, g)));
     wrap.appendChild(go);
   }
 
@@ -640,9 +738,9 @@ export function initLinkUI(options = {}) {
     text += ' Choose how to combine them.';
     wrap.appendChild(el('p', { className: 'note', text }));
     const mergeBtn = el('button', { type: 'button', className: 'primary', text: 'Merge (recommended)' });
-    mergeBtn.addEventListener('click', () => runAdoption(() => adoptAgainstFreshCounts('adopt-merge')));
+    mergeBtn.addEventListener('click', () => runAdoption((g) => adoptAgainstFreshCounts('adopt-merge', g)));
     const replaceBtn = el('button', { type: 'button', text: 'Replace this device' });
-    replaceBtn.addEventListener('click', () => runAdoption(() => adoptAgainstFreshCounts('adopt-replace')));
+    replaceBtn.addEventListener('click', () => runAdoption((g) => adoptAgainstFreshCounts('adopt-replace', g)));
     const cancelBtn = el('button', { type: 'button', text: 'Cancel' });
     cancelBtn.addEventListener('click', () => {
       notice = 'Nothing was combined. This device will not sync until you choose.';
@@ -667,18 +765,24 @@ export function initLinkUI(options = {}) {
     }));
     if (RETRYABLE.has(status)) {
       const retry = el('button', { type: 'button', text: 'Try again' });
-      retry.addEventListener('click', () => runAdoption(() => doPreview()));
+      retry.addEventListener('click', () => runAdoption((g) => doPreview(1, g)));
       wrap.appendChild(retry);
     } else {
       // 'unauthorized' and 'undecryptable'. Re-linking is the right first
-      // answer, but it CANNOT be the only one: closing and re-opening the
-      // panel just previews straight back into the same state, so a user who
-      // pasted a bare token on a second device — precisely the user with no
-      // valid 86-character code — had no way to stop syncing at all.
+      // answer, but it cannot be the only one — see below.
       pasteField(wrap, 'Re-link this device');
-      wrap.appendChild(unlinkButton('Unlink this device'));
     }
+    // EVERY failure state offers Unlink, and the note describing it is
+    // rendered with the button rather than beside its absence.
+    //
+    // Two of these are otherwise inescapable. On 'unauthorized' and
+    // 'undecryptable', closing and re-opening the panel just previews
+    // straight back into the same state, so a user who pasted a bare token on
+    // a second device — precisely the user with no valid 86-character code —
+    // could never stop syncing. On 'malformed', "Try again" re-previews the
+    // same unusable blob forever.
     if (getLink()) {
+      wrap.appendChild(unlinkButton('Unlink this device'));
       wrap.appendChild(el('p', {
         className: 'note',
         text: 'Unlinking stops syncing. Nothing on this device is deleted.',
@@ -755,6 +859,8 @@ export function initLinkUI(options = {}) {
     else if (!link) renderUnlinked(wrap);
     else if (stage === 'busy') renderBusy(wrap);
     else if (stage === 'joining') renderJoining(wrap);
+    else if (stage === 'joining-stale') renderJoiningStale(wrap);
+    else if (stage === 'saving') renderSaving(wrap);
     else if (stage === 'ask') renderAsk(wrap);
     else if (stage === 'failed') renderFailed(wrap);
     else if (isAdoptionPending()) renderAdoptionEntry(wrap);
@@ -770,7 +876,7 @@ export function initLinkUI(options = {}) {
   // and empties the host on close (:65), so this runs once per panel open
   // against a fresh sub-element — never accumulating listeners, and never
   // firing a request just because the user opened Settings.
-  if (getLink() && isAdoptionPending()) runAdoption(() => doPreview());
+  if (getLink() && isAdoptionPending()) runAdoption((g) => doPreview(1, g));
 
   return { settled: () => inflight };
 }

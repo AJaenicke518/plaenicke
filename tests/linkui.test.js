@@ -10,7 +10,7 @@ import {
   bytesToBase64url, generateEncKey, composeLinkCode, encryptBlob, parseLinkCode,
 } from '../js/crypto.js';
 import {
-  saveItems, saveFeeds, saveAuth, saveTombstones, loadItems, loadFeeds, loadSyncState, saveSyncState,
+  saveItems, saveFeeds, saveAuth, saveTombstones, loadItems, loadFeeds, loadTombstones, loadSyncState, saveSyncState,
 } from '../js/storage.js';
 import { SCHEMA_VERSION, toWire } from '../js/merge.js';
 import { WORKER_URL } from '../js/config.js';
@@ -731,58 +731,340 @@ test('re-opening the panel mid-adoption does not start a second, concurrent adop
   assert.equal(link.authToken.length, 43); // fixture sanity
 });
 
-// IR2. activeAdoption is cleared only in the episode's finally, and nothing in
-// previewRemote/fetchRemote has an AbortController or a timeout — so an
-// episode that never settles held it for the page's lifetime and every later
-// panel open rendered a busy view with NO controls at all. A flaky connection
-// could cost the user the whole linking UI until they reloaded, with nothing
-// on screen saying so. The exclusion must not be able to outlive its purpose.
-test('a request that never settles does not wedge every later panel open', async () => {
+// --- the adoption exclusion: preview phase vs write phase ------------------
+//
+// A PREVIEW is a read with no side effects, so abandoning one is safe and a
+// joining mount may take it over. A WRITE is not abandonable and nothing may
+// take over from it. Round 2 got this wrong: it gated whether an episode may
+// BEGIN a write, which says nothing once one is already inside syncOnce, and
+// the takeover control was offered instantly under text that invited the
+// click. Every mutant of the generation counter died loudly; the defect only
+// appears under an interleaving, so these tests construct the interleavings.
+
+function makeClock(startMs) {
+  let t = startMs;
+  return { now: () => new Date(t), advance: (ms) => { t += ms; } };
+}
+
+const settle = () => new Promise((resolve) => { setTimeout(resolve, 0); });
+
+// Mounts a linked, adoption-pending device with a preview that can be held
+// open, and a syncOnceImpl that can be held open independently.
+async function concurrencyFixture({ staleAfterMs, clock, localEmpty = false } = {}) {
   installFakeLocalStorage();
   const doc = installDom();
-  await linkWithCode(bytesToBase64url(generateEncKey()));
-
-  let releaseStuck;
-  const stuck = new Promise((resolve) => { releaseStuck = resolve; });
-  let gets = 0;
+  const link = await linkWithCode(bytesToBase64url(generateEncKey()));
+  // localEmpty drives chooseAdoption to 'auto', so an episode reaches the
+  // WRITE with no human in the loop — the only way to exercise what happens
+  // to a superseded episode that gets as far as adopt().
+  if (!localEmpty) saveItems([it('local')]);
+  // The account holds data too, so chooseAdoption reaches 'ask' and these
+  // tests exercise the dialog and the write, not just the preview.
+  const blob = await encryptBlob(link.encKey, st({ items: [it('r')] }));
+  const gets = [];
+  const releases = [];
   const fetchImpl = async () => {
-    gets += 1;
-    if (gets === 1) await stuck;
-    return { ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) };
+    const index = gets.length;
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    releases.push(release);
+    gets.push(index);
+    await held;
+    return { ok: true, status: 200, json: async () => ({ version: 4, blob }) };
   };
   const syncCalls = [];
+  let releaseWrite = null;
+  const syncOnceImpl = async (d) => {
+    syncCalls.push(d.adoptChoice);
+    if (releaseWrite === false) {
+      await new Promise((resolve) => { releaseWrite = resolve; });
+    }
+    return { status: 'ok', pushed: false };
+  };
   const deps = {
     applyState: (s) => s,
     fetchImpl,
     apiBase: 'https://w.example',
-    now: () => NOW,
-    syncOnceImpl: async (d) => { syncCalls.push(d.adoptChoice); return { status: 'ok', pushed: false }; },
+    now: (clock || { now: () => NOW }).now,
+    syncOnceImpl,
+    ...(staleAfterMs === undefined ? {} : { staleAfterMs }),
   };
+  const mount = () => {
+    const host = doc.createElement('div');
+    doc.body.appendChild(host);
+    return { host, ui: initLinkUI({ host, ...deps }) };
+  };
+  const letWriteFinish = () => {
+    if (typeof releaseWrite === 'function') releaseWrite();
+    releaseWrite = null;
+  };
+  return {
+    doc, mount, gets, syncCalls,
+    releaseGet: (i) => releases[i](),
+    holdNextWrite: () => { releaseWrite = false; },
+    letWriteFinish,
+    // Registered with t.after by every test below. A concurrency test that
+    // fails an assertion half way through would otherwise leave held fetch
+    // promises pending, which keeps node's event loop alive and hangs the
+    // WHOLE suite rather than reporting the failure — measured: three
+    // mutants that these tests do detect were reported as a 60s timeout in
+    // an unrelated file instead of as a named failure.
+    releaseAll: () => { releases.forEach((r) => r()); letWriteFinish(); },
+  };
+}
 
-  const hostA = doc.createElement('div');
-  doc.body.appendChild(hostA);
-  const first = initLinkUI({ host: hostA, ...deps });
+// THE CRITICAL. Reproduced verbatim before the fix: Merge held inside
+// syncOnce -> close/reopen -> Try again -> Replace gave
+// ['adopt-merge','adopt-replace'] with both writes in flight at once. The
+// superseded PUT then landed after the replace, putting the record the user
+// explicitly discarded back into the account.
+test('a mount arriving while a write is in flight cannot take over from it', async (t) => {
+  const f = await concurrencyFixture();
+  t.after(() => f.releaseAll());
+  const a = f.mount();
+  f.releaseGet(0);
+  await a.ui.settled();
+  assert.ok(findButton(a.host, 'Merge'), 'fixture check: the dialog is up');
 
-  // The panel is closed and re-opened on a now-healthy network.
-  hostA.innerHTML = '';
-  const hostB = doc.createElement('div');
-  doc.body.appendChild(hostB);
-  const second = initLinkUI({ host: hostB, ...deps });
+  f.holdNextWrite();
+  findButton(a.host, 'Merge').click();
+  await settle();
+  assert.deepEqual(f.syncCalls, ['adopt-merge'], 'fixture check: the write is in flight');
 
-  const takeOver = findButton(hostB, 'Try again');
-  assert.ok(takeOver, 'a mount that joins a stalled episode must still offer a way out');
-  assert.ok(findButton(hostB, 'Unlink'), 'and a way to stop syncing entirely');
+  // The panel is closed and re-opened while that write is still running.
+  a.host.innerHTML = '';
+  const b = f.mount();
+  assert.match(allText(b.host), /Saving your choice/,
+    'a write in flight must be reported as such, not as something to retry');
+  assert.equal(findButton(b.host, 'Try again'), null,
+    'nothing may take over from an unabandonable write');
+  assert.equal(findButton(b.host, 'Unlink'), null,
+    'and unlinking here would leave that write pushing with a token the user just revoked');
+  // Nothing under syncOnce has a timeout, so a write that never answers would
+  // leave this on a bare spinner. With no control to offer, the text has to
+  // carry the whole state: what is happening, that it cannot be interrupted,
+  // and that reloading is SAFE — the gate is still raised and the
+  // compare-and-swap makes a re-run idempotent. "Reload the page" without
+  // "this is safe" just invites the user to sit and wait instead.
+  assert.match(allText(b.host), /cannot be interrupted/i);
+  assert.match(allText(b.host), /safe to reload/i,
+    'a user with no control to click must be told that reloading loses nothing');
+
+  f.letWriteFinish();
+  await a.ui.settled();
+  await b.ui.settled();
+  assert.deepEqual(f.syncCalls, ['adopt-merge'], 'exactly one write may run');
+  assert.doesNotMatch(allText(b.host), /Saving your choice/,
+    'the joining mount must leave that view once the write settles');
+});
+
+// A healthy adoption takes a second or two. Offering a takeover instantly
+// turns every ordinary wait into an invitation to start a second episode.
+test('a takeover is not offered until the live preview has been running long enough to look stuck', async (t) => {
+  const clock = makeClock(Date.parse('2026-08-05T12:00:00.000Z'));
+  const f = await concurrencyFixture({ staleAfterMs: 10000, clock });
+  t.after(() => f.releaseAll());
+  const a = f.mount();
+
+  a.host.innerHTML = '';
+  const b = f.mount();
+  assert.equal(findButton(b.host, 'Try again'), null,
+    'a two-second adoption must not present a takeover control');
+  assert.match(allText(b.host), /already under way/);
+
+  f.releaseGet(0);
+  await a.ui.settled();
+  await b.ui.settled();
+  assert.deepEqual(f.syncCalls, [], 'a preview alone must never write');
+});
+
+test('a preview that has stalled past the threshold can be taken over, and the stalled one never writes', async (t) => {
+  const clock = makeClock(Date.parse('2026-08-05T12:00:00.000Z'));
+  const f = await concurrencyFixture({ staleAfterMs: 50, clock });
+  t.after(() => f.releaseAll());
+  const a = f.mount();
+
+  a.host.innerHTML = '';
+  clock.advance(60);
+  const b = f.mount();
+  const takeOver = findButton(b.host, 'Try again');
+  assert.ok(takeOver, 'a stalled PREVIEW is abandonable and must offer a way out');
+  assert.ok(findButton(b.host, 'Unlink'), 'and a way to stop syncing entirely');
 
   takeOver.click();
-  await second.settled();
-  assert.deepEqual(syncCalls, ['adopt-bootstrap'], 'taking over must actually complete the adoption');
+  f.releaseGet(1);
+  await b.ui.settled();
+  assert.ok(findButton(b.host, 'Merge'), 'the takeover must reach the dialog');
+  findButton(b.host, 'Merge').click();
+  await b.ui.settled();
+  assert.deepEqual(f.syncCalls, ['adopt-merge']);
 
-  // The stalled episode finally answers. It has been superseded and must NOT
-  // adopt a second time — that is the very race the exclusion exists to stop.
-  releaseStuck();
-  await first.settled();
-  assert.deepEqual(syncCalls, ['adopt-bootstrap'],
-    'a superseded episode must not write when it eventually completes');
+  // The stalled preview finally answers. It has been superseded.
+  f.releaseGet(0);
+  await a.ui.settled();
+  assert.deepEqual(f.syncCalls, ['adopt-merge'],
+    'a superseded preview must not go on to write when it eventually returns');
+});
+
+// Cancel says "Nothing was combined. This device will not sync until you
+// choose." A superseded episode reaching syncOnce would call
+// clearAdoptionPending() and make that statement false.
+test('Cancel after a takeover stays true — the superseded episode never lands the adoption', async (t) => {
+  const clock = makeClock(Date.parse('2026-08-05T12:00:00.000Z'));
+  const f = await concurrencyFixture({ staleAfterMs: 50, clock });
+  t.after(() => f.releaseAll());
+  const a = f.mount();
+
+  a.host.innerHTML = '';
+  clock.advance(60);
+  const b = f.mount();
+  findButton(b.host, 'Try again').click();
+  f.releaseGet(1);
+  await b.ui.settled();
+  findButton(b.host, 'Cancel').click();
+  await b.ui.settled();
+  assert.equal(loadSyncState().adoptionPending, true);
+
+  f.releaseGet(0);
+  await a.ui.settled();
+  assert.deepEqual(f.syncCalls, [], 'the superseded episode must not adopt behind the user');
+  assert.equal(loadSyncState().adoptionPending, true,
+    'the panel said nothing was combined — that must remain true');
+});
+
+// R3C-a. The mutation battery proved the test above does NOT cover this:
+// deleting `|| writeInFlight` from runAdoption's guard left the whole suite
+// green, because joinActive picks the 'saving' view on its own so there is no
+// button to click. The reachable interleaving is a takeover control rendered
+// BEFORE the write began and still on screen after it started: the joining
+// mount only re-renders when the episode it joined settles.
+test('a takeover control left on screen from before the write cannot fire once the write starts', async (t) => {
+  const clock = makeClock(Date.parse('2026-08-05T12:00:00.000Z'));
+  const f = await concurrencyFixture({ staleAfterMs: 50, clock, localEmpty: true });
+  t.after(() => f.releaseAll());
+  const a = f.mount();
+  a.host.innerHTML = '';
+  clock.advance(60);
+  const b = f.mount();
+  const takeOver = findButton(b.host, 'Try again');
+  assert.ok(takeOver, 'fixture check: the stalled-preview takeover is offered');
+
+  // The live episode's preview answers and it goes straight into its write.
+  f.holdNextWrite();
+  f.releaseGet(0);
+  await settle();
+  assert.deepEqual(f.syncCalls, ['adopt-bootstrap'], 'fixture check: a write is now in flight');
+
+  takeOver.click();
+  await settle();
+  assert.deepEqual(f.syncCalls, ['adopt-bootstrap'],
+    'a stale takeover control must not start a second write alongside the live one');
+  assert.match(allText(b.host), /Saving your choice/, 'and must report what is actually happening');
+
+  f.letWriteFinish();
+  await a.ui.settled();
+  await b.ui.settled();
+});
+
+// R3C-d. Also proved uncovered: in the takeover test above, the superseded
+// episode lands on the DIALOG and never reaches adopt(), so the generation
+// gate is never exercised. It only bites on the automatic path, where no
+// human stands between the preview returning and the write.
+test('a superseded preview does not write when it returns, on the automatic path', async (t) => {
+  const clock = makeClock(Date.parse('2026-08-05T12:00:00.000Z'));
+  const f = await concurrencyFixture({ staleAfterMs: 50, clock, localEmpty: true });
+  t.after(() => f.releaseAll());
+  const a = f.mount();
+  a.host.innerHTML = '';
+  clock.advance(60);
+  const b = f.mount();
+  findButton(b.host, 'Try again').click();
+  f.releaseGet(1);
+  await b.ui.settled();
+  assert.deepEqual(f.syncCalls, ['adopt-bootstrap'], 'fixture check: the live episode adopted');
+
+  f.releaseGet(0);
+  await a.ui.settled();
+  assert.deepEqual(f.syncCalls, ['adopt-bootstrap'],
+    'the superseded preview must not adopt a second time when it finally answers');
+});
+
+// R3C-f. The re-check timer is what stops the ordinary joining view becoming
+// the wedge again: a mount that joined a preview which LATER stalls must be
+// offered the way out without the user closing and reopening the panel.
+test('a mount that joined a healthy preview is offered a takeover once it stalls', async (t) => {
+  const clock = makeClock(Date.parse('2026-08-05T12:00:00.000Z'));
+  const f = await concurrencyFixture({ staleAfterMs: 30, clock });
+  t.after(() => f.releaseAll());
+  const a = f.mount();
+  a.host.innerHTML = '';
+  const b = f.mount();
+  assert.equal(findButton(b.host, 'Try again'), null, 'fixture check: nothing looks stuck yet');
+
+  clock.advance(120);
+  await new Promise((resolve) => { setTimeout(resolve, 80); });
+  assert.ok(findButton(b.host, 'Try again'),
+    'the joining view must promote itself when the episode it joined stalls, not wait for another panel open');
+});
+
+// M19. "A superseded episode must not clear the marker its successor set."
+// The comment asserted it; nothing tested it. Clearing unconditionally
+// orphans the live episode's exclusion and lets a third start alongside it.
+test('a superseded episode that finishes does not release the live episode exclusion', async (t) => {
+  const clock = makeClock(Date.parse('2026-08-05T12:00:00.000Z'));
+  const f = await concurrencyFixture({ staleAfterMs: 50, clock });
+  t.after(() => f.releaseAll());
+  const a = f.mount();                       // generation 1
+  a.host.innerHTML = '';
+  clock.advance(60);
+  const b = f.mount();                       // joins
+  findButton(b.host, 'Try again').click();   // generation 2
+  b.host.innerHTML = '';
+  clock.advance(60);
+  const c = f.mount();                       // joins
+  findButton(c.host, 'Try again').click();   // generation 3 — the live one
+  assert.equal(f.gets.length, 3, 'fixture check: three previews are open');
+
+  // The MIDDLE episode answers. It is superseded and must leave generation
+  // 3's exclusion intact.
+  f.releaseGet(1);
+  await b.ui.settled();
+
+  c.host.innerHTML = '';
+  const d = f.mount();
+  assert.equal(f.gets.length, 3,
+    'a fourth mount must join the live episode, not start a fourth preview alongside it');
+  assert.match(allText(d.host), /account/i);
+
+  f.releaseGet(2);
+  f.releaseGet(0);
+  await c.ui.settled();
+  await a.ui.settled();
+  await d.ui.settled();
+});
+
+// M55. The ORDINARY joining path is the one that simply waits. Deleting the
+// re-render leaves it on "Checking the account…" forever — the very wedge the
+// joining branch exists to avoid — and the takeover tests never catch it
+// because they always click.
+test('a joining mount that never clicks leaves the joining view once the live episode settles', async (t) => {
+  const f = await concurrencyFixture();
+  t.after(() => f.releaseAll());
+  const a = f.mount();
+  a.host.innerHTML = '';
+  const b = f.mount();
+  assert.match(allText(b.host), /already under way/, 'fixture check: b is waiting');
+
+  f.releaseGet(0);
+  await a.ui.settled();
+  await b.ui.settled();
+  assert.doesNotMatch(allText(b.host), /already under way/,
+    'a mount that only waits must be re-rendered when the episode it joined finishes');
+  // The 'ask' stage lives in the episode's own mount; this one re-derives
+  // from stored state, which still has the gate raised — so it must offer the
+  // way back in rather than a dead "Checking the account…".
+  assert.ok(findButton(b.host, 'Continue'),
+    'a mount that only waited must end up with a way forward, not a frozen busy view');
 });
 
 // Minor 2. I argued these counts could not go stale because "the panel is the
@@ -791,50 +1073,148 @@ test('a request that never settles does not wedge every later panel open', async
 // covers only feed syncing), and open() installs no focus trap, so app.js's
 // own add path is reachable too. Reproduced against the real syncOnce: the
 // dialog said "1 item and 1 calendar", a second calendar was added, Replace
-// was clicked, and BOTH calendars were destroyed — the user consented to
-// discarding one.
-test('a choice made against counts that have since changed re-asks instead of acting', async () => {
-  const { host, ui, syncCalls } = await setup({
-    seed: () => { saveItems([it('local')]); saveFeeds([fd('existing')]); },
+// was clicked, and BOTH calendars were destroyed.
+//
+// EVERY limb of the check and BOTH buttons are covered: the Merge button
+// bypassing the check entirely survived when only Replace was exercised.
+async function dialogFixture(seed) {
+  return setup({
+    seed,
     fetchImpl: async () => ({
-      ok: true, status: 200, json: async () => ({ version: 4, blob: await encryptBlob(currentKey, st({ items: [it('r')] })) }),
+      ok: true,
+      status: 200,
+      json: async () => ({
+        version: 4,
+        blob: await encryptBlob(currentKey, st({
+          items: [it('r'), it('r2')],
+          tombstones: [{ id: 'doomed', kind: 'item', deletedAt: '2026-08-04T00:00:00.000Z' }],
+        })),
+      }),
     }),
   });
-  assert.ok(findButton(host, 'Replace this device'));
-  assert.match(allText(host), /1 calendar\b/, 'fixture check: the dialog is showing one calendar');
+}
 
-  // The calendar section directly above is live while this dialog is open.
-  saveFeeds([fd('existing'), fd('justAdded')]);
+for (const button of ['Merge', 'Replace this device']) {
+  test(`${button}: a count that moved while the dialog was open re-asks instead of acting`, async () => {
+    const { host, ui, syncCalls } = await dialogFixture(() => {
+      saveItems([it('local')]);
+      saveFeeds([fd('existing')]);
+    });
+    assert.match(allText(host), /1 calendar\b/, 'fixture check: the dialog shows one calendar');
 
-  findButton(host, 'Replace this device').click();
+    saveFeeds([fd('existing'), fd('justAdded')]);
+    findButton(host, button).click();
+    await ui.settled();
+
+    assert.equal(syncCalls.length, 0, `${button} must not act on counts the user never saw`);
+    assert.match(allText(host), /2 calendars/, 'the dialog must be re-presented with what this device now holds');
+    assert.match(allText(host), /changed while the dialog was open/i, 'and must say why');
+    assert.deepEqual(loadFeeds().map((f) => f.id), ['existing', 'justAdded'], 'nothing may have been discarded');
+
+    findButton(host, button).click();
+    await ui.settled();
+    assert.equal(syncCalls.length, 1, 'confirming against the CURRENT counts must go through');
+  });
+}
+
+test('an item added while the dialog was open re-asks — localItems is part of the check', async () => {
+  const { host, ui, syncCalls } = await dialogFixture(() => { saveItems([it('local')]); });
+  saveItems([it('local'), it('alsoLocal')]);
+  findButton(host, 'Merge').click();
   await ui.settled();
-  assert.equal(syncCalls.length, 0, 'the discard must not run against counts the user never saw');
-  assert.match(allText(host), /2 calendars/, 'the dialog must be re-presented with what this device now holds');
-  assert.deepEqual(loadFeeds().map((f) => f.id), ['existing', 'justAdded'], 'nothing may have been discarded yet');
-
-  // Confirming against the CURRENT counts goes through.
-  findButton(host, 'Replace this device').click();
-  await ui.settled();
-  assert.equal(syncCalls.length, 1);
-  assert.equal(syncCalls[0].adoptChoice, 'adopt-replace');
+  assert.equal(syncCalls.length, 0);
+  assert.match(allText(host), /2 items/);
 });
 
-// Minor 6. The only control on these two states was "Re-link this device", and
-// closing/reopening re-previews straight back into them. A user who pasted a
-// bare token on a second device therefore could not stop syncing from the UI
-// without a valid 86-character code — which is exactly the user who has none.
-test('the unrecoverable failure states offer a way to stop syncing', async () => {
-  for (const fetchImpl of [
-    async () => ({ ok: false, status: 401, json: async () => ({}) }),
-    async () => ({ ok: true, status: 200, json: async () => ({ version: 2, blob: await encryptBlob(generateEncKey(), st({ items: [it('r')] })) }) }),
-  ]) {
+test('a deletion recorded while the dialog was open re-asks — localDeletesRemote is part of the check', async () => {
+  const { host, ui, syncCalls } = await dialogFixture(() => { saveItems([it('local')]); });
+  assert.doesNotMatch(allText(host), /records in the account/i, 'fixture check: no local deletions yet');
+  // The user deletes one of the ACCOUNT's records from the live list above.
+  saveTombstones([{ id: 'r', kind: 'item', deletedAt: '2026-08-04T00:00:00.000Z' }]);
+  findButton(host, 'Merge').click();
+  await ui.settled();
+  assert.equal(syncCalls.length, 0, 'a Merge that now deletes an account record must be re-confirmed');
+  assert.match(allText(host), /1 of the records in the account/i);
+});
+
+// Minor 3: remoteDeletesLocal is part of the rendered description, so it is
+// part of the check. Isolated: local COUNTS stay identical while the account's
+// pending deletions stop applying to what is here.
+test('a swap that changes only remoteDeletesLocal still re-asks', async () => {
+  const { host, ui, syncCalls } = await dialogFixture(() => {
+    saveItems([it('local'), it('doomed')]);
+  });
+  assert.match(allText(host), /1 of the items and calendars on this device/i, 'fixture check');
+  // Same count, different records: 'doomed' (which the account deletes) is
+  // replaced by one it does not.
+  saveItems([it('local'), it('safe')]);
+  findButton(host, 'Replace this device').click();
+  await ui.settled();
+  assert.equal(syncCalls.length, 0, 'the description changed, so the choice must be re-confirmed');
+  assert.doesNotMatch(allText(host), /1 of the items and calendars on this device/i);
+});
+
+// Minor 4: the re-ask must go back through chooseAdoption. If local emptied
+// while the dialog sat open, re-rendering the old dialog reads "This device
+// holds 0 items and 0 calendars" beside a Replace button — the exact shape
+// DA-C2 named as not an informed choice. chooseAdoption says 'auto'.
+test('a device that emptied while the dialog was open is no longer asked to choose', async () => {
+  const { host, ui, syncCalls } = await dialogFixture(() => {
+    saveItems([it('local')]);
+    saveFeeds([fd('existing')]);
+  });
+  saveItems([]);
+  saveFeeds([]);
+  findButton(host, 'Merge').click();
+  await ui.settled();
+  assert.equal(findButton(host, 'Replace this device'), null,
+    'there is nothing left on this device to replace — offering it is not an informed choice');
+  assert.doesNotMatch(allText(host), /holds 0 items/);
+  assert.deepEqual(syncCalls.map((c) => c.adoptChoice), ['adopt-bootstrap'],
+    "an empty device adopts; it does not 'merge' with nothing");
+});
+
+// M39: stageData must carry the previewed remote state, or the fresh counts
+// are computed against nothing and every local deletion silently reads as
+// zero. Confirming with NO local change must go straight through.
+test('a dialog whose device records account deletions still confirms in one click', async () => {
+  const { host, ui, syncCalls } = await dialogFixture(() => {
+    saveItems([it('local')]);
+    saveTombstones([{ id: 'r', kind: 'item', deletedAt: '2026-08-04T00:00:00.000Z' }]);
+  });
+  assert.match(allText(host), /1 of the records in the account/i, 'fixture check');
+  findButton(host, 'Merge').click();
+  await ui.settled();
+  assert.deepEqual(syncCalls.map((c) => c.adoptChoice), ['adopt-merge'],
+    'nothing changed, so the click must act rather than re-ask');
+});
+
+// Minor 6/7 + Minor 1. 'unauthorized' and 'undecryptable' offered only
+// "Re-link this device", and closing/reopening re-previews straight back into
+// them — so a user who pasted a bare token on a second device, precisely the
+// user with no valid 86-character code, could never stop syncing. 'malformed'
+// is worse: its only control re-previews the same unusable blob forever. And
+// the note describing Unlink was rendered on states that had no Unlink button
+// at all, offline being the most common of them.
+test('every failure state offers a way to stop syncing, and says so only where it does', async () => {
+  const cases = [
+    ['offline', async () => { throw new TypeError('Failed to fetch'); }],
+    ['unauthorized', async () => ({ ok: false, status: 401, json: async () => ({}) })],
+    ['undecryptable', async () => ({ ok: true, status: 200, json: async () => ({ version: 2, blob: await encryptBlob(generateEncKey(), st({ items: [it('r')] })) }) })],
+    ['malformed', async () => ({ ok: true, status: 200, json: async () => ({ version: 2, blob: await encryptBlob(currentKey, { schemaVersion: SCHEMA_VERSION, items: [it('r')], feeds: [], tombstones: [null] }) }) })],
+  ];
+  for (const [label, fetchImpl] of cases) {
     const { host, ui } = await setup({ fetchImpl });
-    assert.ok(findInput(host, 'Link code'), 'fixture check: this state offers re-linking');
     const unlinkBtn = findButton(host, 'Unlink');
-    assert.ok(unlinkBtn, 'a state the user cannot re-link out of must still let them unlink');
+    assert.ok(unlinkBtn, `${label}: the user must always be able to stop syncing`);
+    assert.match(allText(host), /Unlinking stops syncing/,
+      `${label}: the note describing Unlink must be rendered with the button`);
     unlinkBtn.click();
     await ui.settled();
-    assert.equal(isLinked(), false);
+    assert.equal(isLinked(), false, label);
+    assert.equal(findButton(host, 'Unlink'), null, `${label}: and must be gone once unlinked`);
+    assert.doesNotMatch(allText(host), /Unlinking stops syncing/,
+      `${label}: the note must not outlive the button it describes`);
   }
 });
 
@@ -980,13 +1360,21 @@ test('Unlink keeps local data and says so', async () => {
   const { host, ui } = await setup({
     clearGate: true,
     unlinkedCalls,
-    seed: () => { saveItems([it('keep')]); saveFeeds([fd('keepfeed')]); },
+    seed: () => {
+      saveItems([it('keep')]);
+      saveFeeds([fd('keepfeed')]);
+      saveTombstones([{ id: 'deletedEarlier', kind: 'item', deletedAt: '2026-08-01T00:00:00.000Z' }]);
+    },
   });
   findButton(host, 'Unlink').click();
   await ui.settled();
   assert.equal(isLinked(), false);
   assert.deepEqual(loadItems().map((i) => i.id), ['keep'], 'unlinking never deletes local data (spec 4.4)');
   assert.deepEqual(loadFeeds().map((f) => f.id), ['keepfeed']);
+  // A wiped tombstone set resurrects every deleted record on the next link.
+  // Task 4's ledger records the identical gap for auth.unlink.
+  assert.deepEqual(loadTombstones().map((t) => t.id), ['deletedEarlier'],
+    'tombstones are local data too — wiping them resurrects every deleted record on the next link');
   assert.match(allText(host), /kept/i, 'the user must be told local data was kept');
   assert.equal(unlinkedCalls.length, 1);
 });

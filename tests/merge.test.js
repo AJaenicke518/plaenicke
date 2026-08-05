@@ -285,9 +285,25 @@ test('applyTombstones still lets a record re-created after the newest deletion s
 // turn a corrupt blob into a NO-DIALOG adoption in linkui's classifier —
 // exactly the silent-loss shape this module's other guards exist to prevent.
 test('applyTombstones refuses a malformed list instead of reading it as "nothing deleted"', () => {
-  assert.throws(() => applyTombstones([item('a', '2026-08-01T00:00:00.000Z')], null, 'item'), /tombstone/i);
-  assert.throws(() => applyTombstones([item('a', '2026-08-01T00:00:00.000Z')], undefined, 'item'), /tombstone/i);
-  assert.throws(() => applyTombstones([item('a', '2026-08-01T00:00:00.000Z')], {}, 'item'), /tombstone/i);
-  assert.throws(() => applyTombstones(null, [], 'item'), /record/i);
-  assert.throws(() => applyTombstones(undefined, [], 'item'), /record/i);
+  // The predicate must pin OUR error, not merely "something threw". Deleting
+  // the tombstones guard entirely still throws — `for (const t of null)` gives
+  // "TypeError: tombstones is not iterable", and V8 interpolates the parameter
+  // name — so a bare /tombstone/i regex passes against the unguarded code.
+  const ours = (re) => (err) => err.constructor === Error && re.test(err.message);
+  const records = [item('a', '2026-08-01T00:00:00.000Z')];
+  for (const bad of [null, undefined, {}, 'nope']) {
+    assert.throws(() => applyTombstones(records, bad, 'item'), ours(/needs a tombstones array/));
+  }
+  for (const bad of [null, undefined, {}, 'nope']) {
+    assert.throws(() => applyTombstones(bad, [], 'item'), ours(/needs a records array/));
+  }
+});
+
+// A junk ELEMENT must not be skipped either: skipping reads as "this
+// tombstone deletes nothing", which in linkui's classifier is the difference
+// between a dialog and a silent adoption.
+test('applyTombstones refuses a junk element rather than skipping it', () => {
+  const records = [item('a', '2026-08-01T00:00:00.000Z')];
+  assert.throws(() => applyTombstones(records, [null], 'item'));
+  assert.throws(() => applyTombstones(records, [{ id: 'a', kind: 'item', deletedAt: 'x' }, undefined], 'item'));
 });
