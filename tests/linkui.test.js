@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { installFakeLocalStorage } from './fake-localstorage.js';
 import {
   describeSyncStatus, classifyPastedCode, chooseAdoption, renderSyncStatus,
-  initLinkUI, SYNC_STATUS_ID,
+  initLinkUI, failureText, SYNC_STATUS_ID,
 } from '../js/linkui.js';
 import { linkWithCode, clearAdoptionPending, isLinked } from '../js/auth.js';
 import {
@@ -1608,6 +1608,60 @@ test('an unlinked device warns that a bare device token creates a NEW account', 
   input.value = composeLinkCode(bytesToBase64url(generateEncKey()), generateEncKey());
   fire(input, 'input');
   assert.doesNotMatch(allText(host), /creates? a new/i, 'a full link code must not carry the new-account warning');
+});
+
+// --- a failure after the write must not claim nothing happened -------------
+//
+// syncOnce applies BEFORE the push loop, so 'offline', 'error' and 'conflict'
+// are all reachable with the local write already landed. The panel said
+// "Nothing has been combined yet" on every one of them, and on adopt-replace
+// the local wipe is complete and irreversible by then — with Unlink offered
+// right beside the false report, so the user can act on it. Same divergence
+// class as round 3's Critical (a Cancel reversed while the panel said it was
+// not), which this branch treated as blocking.
+
+test('a failure AFTER the write says the device was combined; the same failure before it does not', async () => {
+  for (const status of ['offline', 'error', 'conflict']) {
+    const before = await setup({
+      seed: () => { saveItems([it('local')]); },
+      syncResults: [{ status, applied: false }],
+      fetchImpl: async () => ({
+        ok: true, status: 200, json: async () => ({ version: 4, blob: await encryptBlob(currentKey, st({ items: [it('r')] })) }),
+      }),
+    });
+    findButton(before.host, 'Merge').click();
+    await before.ui.settled();
+    assert.match(allText(before.host), /nothing has been combined/i,
+      `${status} before the write really did combine nothing`);
+
+    const after = await setup({
+      seed: () => { saveItems([it('local')]); },
+      syncResults: [{ status, applied: true }],
+      fetchImpl: async () => ({
+        ok: true, status: 200, json: async () => ({ version: 4, blob: await encryptBlob(currentKey, st({ items: [it('r')] })) }),
+      }),
+    });
+    findButton(after.host, 'Merge').click();
+    await after.ui.settled();
+    const text = allText(after.host);
+    assert.doesNotMatch(text, /nothing has been combined/i,
+      `${status} after applyState wrote must not report that nothing happened — on Replace the local wipe is already irreversible`);
+    assert.match(text, /already been combined/i, `${status} must say what actually happened`);
+    assert.match(text, /nothing is lost|next sync/i, 'and what happens next');
+  }
+});
+
+// A table check rather than one hand-picked path: every status syncOnce can
+// return with applied:true must be safe to show in that state. Without this,
+// adding a status whose text claims "nothing has been combined" and forgetting
+// its applied variant puts the defect straight back.
+test('no failure message reachable after the write claims nothing was combined', () => {
+  for (const status of ['offline', 'unauthorized', 'error', 'conflict', 'undecryptable']) {
+    assert.doesNotMatch(failureText(status, true), /nothing (has been|was) combined/i,
+      `${status} is returned by syncOnce after applyState may have written`);
+  }
+  // And the pre-write wording is still the honest one where it applies.
+  assert.match(failureText('offline', false), /nothing has been combined/i);
 });
 
 test('mounting a linked, settled device makes no network call', async () => {

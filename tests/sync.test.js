@@ -496,6 +496,110 @@ test('the pushed blob is what applyState returned, not what it was given', async
   assert.ok(pushed.items.some(i => i.id === 'added-by-apply'));
 });
 
+// --- `applied`: has this device already been changed? ----------------------
+//
+// syncOnce applies BEFORE the push loop, so 'offline', 'error' and 'conflict'
+// are all reachable with the local write already landed — a Wi-Fi drop between
+// the GET and the PUT reaches every one of them. The caller cannot infer it
+// from the status, and linkui.js's failure text said "Nothing has been
+// combined yet" on all three. On adopt-replace the local wipe is complete and
+// irreversible by that point, and Unlink is offered right beside the false
+// report.
+
+test('applied is false on every status returned before applyState could run', async () => {
+  await linked();
+  saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
+
+  const offline = await syncOnce({ fetchImpl: async () => { throw new TypeError('Failed to fetch'); },
+    now: NOW, apiBase: 'https://w.example', applyState: echo });
+  assert.deepEqual([offline.status, offline.applied], ['offline', false]);
+
+  await linked();
+  const unauth = await syncOnce({ fetchImpl: async () => ({ ok: false, status: 401, json: async () => ({}) }),
+    now: NOW, apiBase: 'https://w.example', applyState: echo });
+  assert.deepEqual([unauth.status, unauth.applied], ['unauthorized', false]);
+
+  await linked();
+  const httpErr = await syncOnce({ fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) }),
+    now: NOW, apiBase: 'https://w.example', applyState: echo });
+  assert.deepEqual([httpErr.status, httpErr.applied], ['error', false]);
+
+  await linked();
+  const bad = fakeServer({ version: 2, blob: await encryptBlob(generateEncKey(), state()) });
+  const undec = await syncOnce({ fetchImpl: bad.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo });
+  assert.deepEqual([undec.status, undec.applied], ['undecryptable', false]);
+
+  // linked() re-installs storage and mints a FRESH key, so the blob below must
+  // be encrypted with THIS device's key, not the one captured at the top.
+  const fresh = await linked();
+  const applyThrew = await syncOnce({
+    fetchImpl: fakeServer({ version: 2, blob: await encryptBlob(fresh.encKey, state()) }).fetchImpl,
+    now: NOW,
+    apiBase: 'https://w.example',
+    applyState: () => { throw new Error('quota'); },
+  });
+  assert.deepEqual([applyThrew.status, applyThrew.applied], ['error', false],
+    'an applyState that threw wrote nothing — this one really is "nothing has been combined"');
+});
+
+test('a PUT that never lands still reports that the local write DID — the Wi-Fi drop between GET and PUT', async () => {
+  const link = await linked();
+  saveItems([item('mine', '2026-08-01T00:00:00.000Z')]);
+  let wrote = null;
+  const fetchImpl = async (url, opts = {}) => {
+    if ((opts.method || 'GET') === 'PUT') throw new TypeError('Failed to fetch');
+    return { ok: true, status: 200, json: async () => ({ version: 3, blob: await encryptBlob(link.encKey, state({ items: [item('theirs', '2026-08-01T00:00:00.000Z')] })) }) };
+  };
+  const res = await syncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: (s) => { wrote = s; return s; } });
+  assert.equal(res.status, 'offline');
+  assert.equal(res.applied, true,
+    'the account records are already on this device — reporting "nothing has been combined" would be false');
+  assert.deepEqual(wrote.items.map(i => i.id).sort(), ['mine', 'theirs'], 'fixture check: the apply really ran');
+});
+
+test('a non-409 HTTP failure on the PUT reports applied, because the apply already happened', async () => {
+  const link = await linked();
+  saveItems([item('mine', '2026-08-01T00:00:00.000Z')]);
+  const fetchImpl = async (url, opts = {}) => {
+    if ((opts.method || 'GET') === 'PUT') return { ok: false, status: 500, json: async () => ({}) };
+    return { ok: true, status: 200, json: async () => ({ version: 3, blob: await encryptBlob(link.encKey, state({ items: [item('theirs', '2026-08-01T00:00:00.000Z')] })) }) };
+  };
+  const res = await syncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo });
+  assert.deepEqual([res.status, res.applied], ['error', true]);
+});
+
+test('CAS exhaustion reports applied — the merge is on this device, only the push failed', async () => {
+  await linked();
+  saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
+  const fetchImpl = async (url, opts = {}) => {
+    if ((opts.method || 'GET') === 'PUT') {
+      return { ok: false, status: 409, json: async () => ({ error: 'version_conflict', version: 99, blob: '' }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) };
+  };
+  const res = await syncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo });
+  assert.deepEqual([res.status, res.applied], ['conflict', true]);
+});
+
+test('a successful sync also reports applied, and a version mismatch does not', async () => {
+  const link = await linked();
+  saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer();
+  const ok = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo });
+  assert.deepEqual([ok.status, ok.applied], ['ok', true]);
+
+  installFakeLocalStorage();
+  const link2 = await linkWithCode(bytesToBase64url(generateEncKey()));
+  saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
+  const moved = fakeServer({ version: 9, blob: await encryptBlob(link2.encKey, state({ items: [item('r', '2026-08-01T00:00:00.000Z')] })) });
+  const changed = await syncOnce({ fetchImpl: moved.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: () => { throw new Error('must not be called'); }, adoptChoice: 'adopt-replace', expectVersion: 4 });
+  assert.deepEqual([changed.status, changed.applied], ['changed', false],
+    "'changed' is the guard that hands the decision back — it applies nothing by construction");
+  assert.ok(link.encKey.length === 32); // fixture sanity
+});
+
 // --- Second-pass review findings ---
 
 // Finding 1: fetch() resolves as soon as headers arrive. A connection dropped

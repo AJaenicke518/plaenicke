@@ -229,6 +229,41 @@ const FAILURE_TEXT = {
     + 'A device still running an older version of plaenicke can cause this; sync from that device first.',
 };
 
+// THE SAME STATUS MEANS TWO DIFFERENT THINGS, EITHER SIDE OF applyState.
+//
+// syncOnce applies BEFORE the push loop (spec 7: write the merged blob first,
+// advance the cursor second), so 'offline', 'error' and 'conflict' are all
+// reachable with the local write already landed — a Wi-Fi drop between the GET
+// and the PUT reaches every one of them. The messages above say "Nothing has
+// been combined yet", and on adopt-replace that is not merely imprecise: the
+// local wipe is complete and irreversible (applySyncedState has already run
+// saveItems, applyRemoteFeeds — which calls removeFeed for every local feed —
+// and saveTombstones), and the panel offers Unlink right beside the false
+// report. Round 3's Critical on this branch was the same divergence class: a
+// user's Cancel reversed while the panel said it was not.
+//
+// syncOnce answers the question directly (`applied`), so these are keyed on it
+// rather than guessed at. Only the three statuses whose ORIGINAL text makes
+// the false claim need an entry: 'unauthorized', 'undecryptable' and
+// 'malformed' describe a condition rather than an outcome and read correctly
+// either way, and everything else here is returned before any apply.
+const APPLIED_FAILURE_TEXT = {
+  offline: 'This device has already been combined with the account, but it could not send the result back — the connection dropped part way through. '
+    + 'What you see on this device is the combined data. Nothing is lost: the next successful sync sends it to the account.',
+  error: 'This device has already been combined with the account, but the server refused the result. '
+    + 'What you see on this device is the combined data. Nothing is lost: the next successful sync sends it to the account.',
+  conflict: 'This device has already been combined with the account, but other devices kept changing the account while it was sending the result back, so the account does not have it yet. '
+    + 'What you see on this device is the combined data, and the next sync will send it.',
+};
+
+// EXPORTED so the "no message may claim nothing was combined on a status
+// reachable after the write" check is a test over this table, not over one
+// hand-picked path through the UI.
+export function failureText(status, applied) {
+  if (applied && APPLIED_FAILURE_TEXT[status]) return APPLIED_FAILURE_TEXT[status];
+  return FAILURE_TEXT[status] || `Something went wrong (${status}).`;
+}
+
 // Statuses where the sensible next step is to try the same thing again, as
 // opposed to re-linking with a different code.
 const RETRYABLE = new Set(['offline', 'error', 'conflict', 'skipped', 'no-apply', 'kept-changing', 'malformed']);
@@ -474,7 +509,10 @@ export function initLinkUI(options = {}) {
   async function handlePreview(preview, attempt, generation) {
     if (preview.status !== 'ok') {
       stage = 'failed';
-      stageData = { status: preview.status };
+      // A preview never applies anything, so `applied` is false by
+      // construction here — stated rather than omitted, because omitting it is
+      // what makes the failure text default silently.
+      stageData = { status: preview.status, applied: false };
       render();
       return;
     }
@@ -487,7 +525,7 @@ export function initLinkUI(options = {}) {
     const remote = preview.state;
     if (remote !== null && !isWellFormedState(remote)) {
       stage = 'failed';
-      stageData = { status: 'malformed' };
+      stageData = { status: 'malformed', applied: false };
       render();
       return;
     }
@@ -557,7 +595,7 @@ export function initLinkUI(options = {}) {
     if (generation !== adoptionGeneration) return;
     if (!applyState) {
       stage = 'failed';
-      stageData = { status: 'no-apply' };
+      stageData = { status: 'no-apply', applied: false };
       render();
       return;
     }
@@ -587,7 +625,9 @@ export function initLinkUI(options = {}) {
       // would spin forever. Same reasoning as syncOnce's CAS bound.
       if (attempt >= MAX_ADOPT_ATTEMPTS) {
         stage = 'failed';
-        stageData = { status: 'kept-changing' };
+        // 'changed' means syncOnce applied and pushed NOTHING (it is the guard
+        // that hands the decision back), so nothing has been combined.
+        stageData = { status: 'kept-changing', applied: false };
         render();
         return;
       }
@@ -603,7 +643,10 @@ export function initLinkUI(options = {}) {
       return;
     }
     stage = 'failed';
-    stageData = { status: res.status };
+    // res.applied is syncOnce's own answer to "has this device already been
+    // changed?" — never inferred from the status, which means opposite things
+    // either side of the apply.
+    stageData = { status: res.status, applied: res.applied === true };
     render();
   }
 
@@ -809,7 +852,7 @@ export function initLinkUI(options = {}) {
     const status = stageData.status;
     wrap.appendChild(el('p', {
       className: 'note link-failure',
-      text: FAILURE_TEXT[status] || `Something went wrong (${status}).`,
+      text: failureText(status, stageData.applied === true),
     }));
     if (RETRYABLE.has(status)) {
       const retry = el('button', { type: 'button', text: 'Try again' });
