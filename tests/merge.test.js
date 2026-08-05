@@ -292,6 +292,35 @@ test('a peer device does not resurrect a feed dedupeState collapsed away', () =>
   assert.deepEqual(peerResult.feeds.map(f => f.id), ['f2'], 'f1 must not come back');
 });
 
+// Task 2's deferred minor, marked FOR FINAL REVIEW, and it widened rather
+// than closed: the feed half of droppedTombstones has since been pinned twice
+// over (the two tests above, plus convergence.test.js's fourth op), while
+// deleting the ITEM half passed 548/548. The item branch is the same silent
+// cross-device resurrection — of every item adoption deduplicated — reached
+// through the other kind.
+test('dedupeState tombstones the ITEM ids it drops, and does not tombstone the survivor', () => {
+  const out = dedupeState(state({
+    items: [
+      { ...item('i1', '2026-08-01T00:00:00.000Z'), title: 'Dentist', date: '2026-08-05', time: '09:00' },
+      { ...item('i2', '2026-08-02T00:00:00.000Z'), title: 'Dentist', date: '2026-08-05', time: '09:00' }],
+  }), NOW);
+  assert.deepEqual(out.items.map(i => i.id), ['i2']);
+  assert.deepEqual(out.tombstones, [{ id: 'i1', kind: 'item', deletedAt: NOW.toISOString() }]);
+  assert.ok(!out.tombstones.some(t => t.id === 'i2'), 'the survivor must not be tombstoned');
+});
+
+test('a peer device does not resurrect an ITEM dedupeState collapsed away', () => {
+  const dup = (id, updatedAt) => ({ ...item(id, updatedAt), title: 'Dentist', date: '2026-08-05', time: '09:00' });
+  // Device B never ran adoption, so it still holds i1 with no tombstone of its
+  // own — and a local-only record with no tombstone always survives merge.
+  const deviceB = state({ items: [dup('i1', '2026-08-01T00:00:00.000Z')] });
+  const deviceAAdopted = dedupeState(state({
+    items: [dup('i1', '2026-08-01T00:00:00.000Z'), dup('i2', '2026-08-02T00:00:00.000Z')],
+  }), NOW);
+  assert.deepEqual(merge(deviceB, deviceAAdopted, NOW).items.map(i => i.id), ['i2'],
+    'i1 must not come back — adoption would otherwise be a no-op in the two-device case it exists for');
+});
+
 // Review finding 2: `${i.time}` stringifies null -> "null" and undefined ->
 // "undefined", so a legacy pre-V5 item with no time key at all, one with
 // time: null and one with time: undefined would land in three different
