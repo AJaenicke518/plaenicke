@@ -338,6 +338,8 @@ export function initLinkUI(options = {}) {
   let mintedCode = '';
   let inflight = Promise.resolve();
   let joinTimer = null;
+  // Bumped whenever THIS mount starts an episode of its own — see joinActive.
+  let mountEpisode = 0;
 
   function guarded(fn) {
     return (async () => {
@@ -378,7 +380,26 @@ export function initLinkUI(options = {}) {
         if (stage === 'joining' && activeAdoption) joinActive();
       }, Math.max(0, staleAfterMs - elapsed));
     }
+    // A JOINED EPISODE'S SETTLE HANDLER MUST NOT REPAINT A VIEW THIS MOUNT HAS
+    // SINCE TAKEN OWNERSHIP OF. If this mount goes on to take over, its own
+    // episode owns the view — but the abandoned episode's promise still
+    // settles, and an unconditional `stage = null; render()` there throws away
+    // a dialog the user is in the middle of. Reproduced: b joins a stalled
+    // preview, clicks Try again, b's own preview returns and renders Merge /
+    // Replace / Cancel, then the first preview finally answers and replaces
+    // the dialog with the Continue screen. No wrong write is possible — the
+    // superseded episode is generation-gated out of adopt() — but a decision
+    // in progress is discarded.
+    //
+    // The discriminator is PER MOUNT, not `activeAdoption`. By the time this
+    // handler runs the joined episode has already cleared `activeAdoption` in
+    // its own finally, so comparing against it would never fire; and if some
+    // OTHER mount took over, this mount has taken ownership of nothing and
+    // still needs its re-render — leaving it on "Checking the account…" is the
+    // wedge the joining branch exists to avoid.
+    const joinedAt = mountEpisode;
     inflight = activeAdoption.then(() => {
+      if (mountEpisode !== joinedAt) return;
       clearTimeout(joinTimer);
       stage = null;
       stageData = {};
@@ -398,6 +419,7 @@ export function initLinkUI(options = {}) {
     // way this becomes the live episode; anything still previewing from
     // before is superseded and will refuse to write.
     const generation = (adoptionGeneration += 1);
+    mountEpisode += 1;
     activeStartedAt = now().getTime();
     const episode = (async () => {
       try {
@@ -653,9 +675,35 @@ export function initLinkUI(options = {}) {
       + 'Everything is encrypted here first — the server only ever holds ciphertext.');
   }
 
+  // THE WRITE-PHASE RULE IS NOT ABOUT runAdoption, IT IS ABOUT EVERY CONTROL.
+  //
+  // renderSaving offers no controls precisely because nothing may interfere
+  // with an unabandonable write — but a control rendered BEFORE the write
+  // began is still on screen after it starts, and this button is rendered from
+  // renderJoiningStale, renderFailed and renderLinked. renderJoiningStale
+  // appends it in the SAME call as the takeover control, so the interleaving
+  // that motivated runAdoption's `|| writeInFlight` reaches this button
+  // identically: panel open, preview stalls past the threshold, the user
+  // closes and re-opens Settings, the live episode's preview returns and
+  // enters its write, and both controls are still clickable.
+  //
+  // Routing that click to doUnlink is worse than the takeover it sits beside.
+  // syncOnce captured `link = getLink()` at entry (js/sync.js:83), so the
+  // in-flight write goes on pushing with a credential the user just revoked,
+  // and its applyState has already landed the account's records locally.
+  // Reproduced: isLinked() false, local items replaced by the account's, and
+  // the panel reading "Unlinked. Everything on this device was kept."
+  //
+  // So it refuses the same way and, like the takeover, ACTS on the refusal —
+  // it shows what is actually happening rather than doing nothing. The button
+  // itself must stay: omitting it is what leaves 'unauthorized' and
+  // 'undecryptable' with no way to stop syncing at all.
   function unlinkButton(text) {
     const btn = el('button', { type: 'button', className: 'remove', text });
-    btn.addEventListener('click', doUnlink);
+    btn.addEventListener('click', () => {
+      if (activeAdoption && writeInFlight) return joinActive();
+      return doUnlink();
+    });
     return btn;
   }
 

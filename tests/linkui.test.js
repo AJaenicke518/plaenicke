@@ -748,6 +748,30 @@ function makeClock(startMs) {
 
 const settle = () => new Promise((resolve) => { setTimeout(resolve, 0); });
 
+// A SINGLE setTimeout(0) IS NOT ENOUGH to wait out an adoption episode, and
+// treating it as if it were made this file's concurrency block flaky on
+// UNMUTATED source: measured 4/15 failing under `npm test` and 7/10 running
+// this file alone under load, always on the same fixture check.
+//
+// Releasing a held fetch does not put the episode one microtask away from its
+// write: it still has to traverse previewRemote -> fetchRemote -> decryptBlob,
+// and decryptBlob is real WebCrypto. It resolves on a libuv thread-pool
+// completion — a MACROTASK that routinely lands AFTER a setTimeout(0) queued
+// before it, so the settle returns with the episode still mid-decrypt.
+//
+// That matters beyond noise. The write-in-flight test below is the SOLE killer
+// of the mutant that deletes `|| writeInFlight` from runAdoption, and a run
+// that aborts at the fixture check never exercises the guard at all — so the
+// flake both hides the guard and contaminates mutation batteries, which
+// mis-attributed 13 of 24 mutants in one pass to this test.
+//
+// Poll the condition. Never a fixed sleep: a sleep long enough to be reliable
+// on a loaded machine is a sleep paid on every green run, and it would still
+// only be a guess.
+async function settleUntil(pred) {
+  for (let i = 0; i < 200 && !pred(); i += 1) await settle();
+}
+
 // Mounts a linked, adoption-pending device with a preview that can be held
 // open, and a syncOnceImpl that can be held open independently.
 async function concurrencyFixture({ staleAfterMs, clock, localEmpty = false } = {}) {
@@ -828,7 +852,7 @@ test('a mount arriving while a write is in flight cannot take over from it', asy
 
   f.holdNextWrite();
   findButton(a.host, 'Merge').click();
-  await settle();
+  await settleUntil(() => f.syncCalls.length > 0);
   assert.deepEqual(f.syncCalls, ['adopt-merge'], 'fixture check: the write is in flight');
 
   // The panel is closed and re-opened while that write is still running.
@@ -952,9 +976,13 @@ test('a takeover control left on screen from before the write cannot fire once t
   // The live episode's preview answers and it goes straight into its write.
   f.holdNextWrite();
   f.releaseGet(0);
-  await settle();
+  await settleUntil(() => f.syncCalls.length > 0);
   assert.deepEqual(f.syncCalls, ['adopt-bootstrap'], 'fixture check: a write is now in flight');
 
+  // No poll here, deliberately: the refusal is SYNCHRONOUS (runAdoption ->
+  // joinActive -> render, no await), so one macrotask is already more than the
+  // path needs. Polling on "syncCalls stayed at 1" would also be polling on a
+  // negative, which can only ever time out into a pass.
   takeOver.click();
   await settle();
   assert.deepEqual(f.syncCalls, ['adopt-bootstrap'],
@@ -1002,7 +1030,10 @@ test('a mount that joined a healthy preview is offered a takeover once it stalls
   assert.equal(findButton(b.host, 'Try again'), null, 'fixture check: nothing looks stuck yet');
 
   clock.advance(120);
-  await new Promise((resolve) => { setTimeout(resolve, 80); });
+  // Polled, not slept: the wall-clock delay under test is 30 ms, and any fixed
+  // wait picked to clear it is either flaky on a loaded machine or paid in
+  // full on every green run.
+  await settleUntil(() => findButton(b.host, 'Try again'));
   assert.ok(findButton(b.host, 'Try again'),
     'the joining view must promote itself when the episode it joined stalls, not wait for another panel open');
 });
@@ -1034,7 +1065,26 @@ test('a superseded episode that finishes does not release the live episode exclu
   const d = f.mount();
   assert.equal(f.gets.length, 3,
     'a fourth mount must join the live episode, not start a fourth preview alongside it');
-  assert.match(allText(d.host), /account/i);
+  // WHAT WAS HERE — assert.match(allText(d.host), /account/i) — could not
+  // fail. render() appends the status line unconditionally before every
+  // branch (js/linkui.js), the adoption gate is raised throughout this test,
+  // and that line therefore always reads "Linked — but nothing syncs until you
+  // choose how to combine this device with the account." The regex matched
+  // whatever rendered, including the failure states.
+  //
+  // What is actually unpinned at this point is that runAdoption RESTARTS the
+  // staleness clock when an episode takes over. Generation 3 began at
+  // clock+120 and d mounts at clock+120, so d has joined a BRAND NEW episode
+  // and nothing looks stuck yet. Leave activeStartedAt at the first episode's
+  // start and d sees an elapsed of 120 against a 50 ms threshold: every mount
+  // after a takeover is instantly invited to start yet another one — the
+  // "instant takeover invites a second episode" defect, restored on the
+  // takeover path. This is the only mount in the file that opens AFTER a
+  // takeover, so it is the only place that can see it.
+  assert.match(allText(d.host), /already under way/,
+    'a mount joining a fresh takeover episode is waiting on it, not reporting one of its own');
+  assert.equal(findButton(d.host, 'Try again'), null,
+    'the takeover episode restarted the staleness clock — nothing looks stuck yet');
 
   f.releaseGet(2);
   f.releaseGet(0);
@@ -1065,6 +1115,165 @@ test('a joining mount that never clicks leaves the joining view once the live ep
   // way back in rather than a dead "Checking the account…".
   assert.ok(findButton(b.host, 'Continue'),
     'a mount that only waited must end up with a way forward, not a frozen busy view');
+});
+
+// R4-2. The write-phase rule was applied to the takeover control and not to
+// the control appended beside it in the SAME call. Both come from
+// renderJoiningStale's `wrap.append(takeOver, unlinkButton(...))`, so the
+// interleaving is identical — a control rendered before the write began, still
+// on screen after it started — but unlinkButton wired straight to doUnlink()
+// with no gate. syncOnce captured `link = getLink()` at entry (js/sync.js:83),
+// so the in-flight write goes on pushing with a credential the user just
+// revoked, and its applyState has already replaced this device's items with
+// the account's. Reproduced: isLinked() false, local items ['remoteA',
+// 'remoteB'], syncState {version: 4, tokenHash: null, adoptionPending: false},
+// under a panel reading "Unlinked. Everything on this device was kept."
+test('an Unlink control left on screen from before the write cannot fire once the write starts', async (t) => {
+  const clock = makeClock(Date.parse('2026-08-05T12:00:00.000Z'));
+  const f = await concurrencyFixture({ staleAfterMs: 50, clock, localEmpty: true });
+  t.after(() => f.releaseAll());
+  const a = f.mount();
+  a.host.innerHTML = '';
+  clock.advance(60);
+  const b = f.mount();
+  const unlinkBtn = findButton(b.host, 'Unlink');
+  assert.ok(unlinkBtn, 'fixture check: the stalled-preview view offers Unlink beside Try again');
+
+  // The live episode's preview answers and it goes straight into its write.
+  f.holdNextWrite();
+  f.releaseGet(0);
+  await settleUntil(() => f.syncCalls.length > 0);
+  assert.deepEqual(f.syncCalls, ['adopt-bootstrap'], 'fixture check: a write is now in flight');
+
+  unlinkBtn.click();
+  await settle();
+  assert.equal(isLinked(), true,
+    'the credential the in-flight write is still pushing with must not be revoked under it');
+  assert.match(allText(b.host), /Saving your choice/,
+    'and the refusal must say what is actually happening, not silently do nothing');
+
+  f.letWriteFinish();
+  await a.ui.settled();
+  await b.ui.settled();
+});
+
+// R4-3. joinActive closed over `activeAdoption` at CALL time, so a mount that
+// went on to take over still had the abandoned episode's settle handler wired
+// to `stage = null; render()`. View-only — the superseded episode is
+// generation-gated out of adopt, so no wrong write is possible — but it
+// discards a decision the user is in the middle of making.
+test('a superseded episode settling does not wipe the taking-over mount mid-decision', async (t) => {
+  const clock = makeClock(Date.parse('2026-08-05T12:00:00.000Z'));
+  const f = await concurrencyFixture({ staleAfterMs: 50, clock });
+  t.after(() => f.releaseAll());
+  const a = f.mount();
+  a.host.innerHTML = '';
+  clock.advance(60);
+  const b = f.mount();                       // joins the stalled episode
+  findButton(b.host, 'Try again').click();   // and then takes over from it
+  f.releaseGet(1);
+  await b.ui.settled();
+  assert.ok(findButton(b.host, 'Merge'), 'fixture check: b is mid-decision on its own preview');
+
+  // The abandoned first preview finally answers.
+  f.releaseGet(0);
+  await a.ui.settled();
+  await settle();
+  assert.ok(findButton(b.host, 'Merge'),
+    'a superseded episode settling must not discard a dialog the user is deciding in');
+  assert.ok(findButton(b.host, 'Replace'), 'all three choices, not a half-rendered view');
+  assert.ok(findButton(b.host, 'Cancel'));
+});
+
+// R4-4. Every other concurrency test injects staleAfterMs or runs on a frozen
+// clock where elapsed === 0, so ANY default >= 1 behaves identically and
+// STALE_ADOPTION_MS was pinned by nothing. Setting it to 1 restores exactly
+// the "instant takeover invites a second episode" defect the threshold was
+// added to fix, with the suite green. Both edges are asserted, so a default
+// that is too LARGE fails too.
+test('the production staleness threshold is ten seconds — not instant, and not a minute', async (t) => {
+  const clock = makeClock(Date.parse('2026-08-05T12:00:00.000Z'));
+  const f = await concurrencyFixture({ clock });   // no override: the real default
+  t.after(() => f.releaseAll());
+  const a = f.mount();
+  a.host.innerHTML = '';
+
+  clock.advance(9999);
+  const b = f.mount();
+  assert.equal(findButton(b.host, 'Try again'), null,
+    'a ten-second-shy adoption is healthy; a takeover control here invites a second episode');
+  assert.match(allText(b.host), /already under way/);
+  b.host.innerHTML = '';
+
+  clock.advance(1);
+  const c = f.mount();
+  assert.ok(findButton(c.host, 'Try again'),
+    'at ten seconds it looks stuck, and a preview is a side-effect-free read that is safe to abandon');
+
+  f.releaseGet(0);
+  await a.ui.settled();
+  await b.ui.settled();
+  await c.ui.settled();
+});
+
+// R4-5. Deleting the clearTimeout in joinActive's settle handler took
+// `node --test tests/linkui.test.js` from 0.22 s to 10.22 s — an uncleared
+// 10 000 ms timer holding the event loop open — with the suite still green.
+// Asserted directly rather than by timing the run: a wall-clock assertion on
+// the whole file would be the flakiest thing in it.
+//
+// linkui.js calls bare `setTimeout` / `clearTimeout`, which resolve to the
+// globals at call time, so the globals can be observed without changing the
+// module's surface for testability. Only long timers are tracked; settle()'s
+// own 0 ms ones are noise here.
+test('the joining view clears its re-check timer when the episode it joined settles', async (t) => {
+  const realSet = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  const live = new Set();
+  globalThis.setTimeout = (fn, ms) => {
+    const h = realSet(fn, ms);
+    if (ms >= 1000) live.add(h);
+    return h;
+  };
+  globalThis.clearTimeout = (h) => { live.delete(h); return realClear(h); };
+  t.after(() => { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; });
+
+  const f = await concurrencyFixture();            // 10 000 ms default threshold
+  t.after(() => f.releaseAll());
+  const a = f.mount();
+  a.host.innerHTML = '';
+  const b = f.mount();
+  assert.match(allText(b.host), /already under way/, 'fixture check: b joined and is waiting');
+  assert.equal(live.size, 1, 'fixture check: the joining view armed a re-check timer');
+
+  f.releaseGet(0);
+  await a.ui.settled();
+  await b.ui.settled();
+  assert.equal(live.size, 0,
+    'a settled episode must not leave a ten-second timer holding the event loop open');
+});
+
+// R4-6. `Math.max(0, staleAfterMs - elapsed)` -> `staleAfterMs` survived
+// everything: the only test that exercised the re-check timer joined at
+// elapsed 0, where the two expressions are equal. A mount that joins an
+// already-almost-stale episode would wait the whole threshold over again.
+test('a mount joining an already-stale-ish episode waits the remaining time, not the whole threshold', async (t) => {
+  const clock = makeClock(Date.parse('2026-08-05T12:00:00.000Z'));
+  const f = await concurrencyFixture({ staleAfterMs: 5000, clock });
+  t.after(() => f.releaseAll());
+  const a = f.mount();
+  a.host.innerHTML = '';
+
+  // 4990 ms of a 5000 ms threshold already spent: 10 ms remain, and the
+  // mutant would arm for 5000.
+  clock.advance(4990);
+  const b = f.mount();
+  assert.equal(findButton(b.host, 'Try again'), null, 'fixture check: not stale yet');
+
+  clock.advance(10);
+  await settleUntil(() => findButton(b.host, 'Try again'));
+  assert.ok(findButton(b.host, 'Try again'),
+    'the re-check must be armed for the time REMAINING, not for the whole threshold again');
 });
 
 // Minor 2. I argued these counts could not go stale because "the panel is the
