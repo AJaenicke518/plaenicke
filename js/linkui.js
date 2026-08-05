@@ -447,8 +447,17 @@ export function initLinkUI(options = {}) {
   // across every mounted panel — see `activeAdoption` above.
   function runAdoption(fn, { takeOver = false } = {}) {
     // Takeover is refused outright while a write is in flight — see
-    // `writeInFlight`. `takeOver` is only ever passed by a control that is
-    // only rendered when it is false, so this is belt-and-braces.
+    // `writeInFlight`.
+    //
+    // `|| writeInFlight` IS LOAD-BEARING. It is tempting to read it as
+    // belt-and-braces, because the only control that passes `takeOver` is
+    // rendered from renderJoiningStale, which is only reached when
+    // writeInFlight is false. That reasoning is wrong, and deleting the clause
+    // is measured at one failing test, not zero: the check that matters
+    // happens at RENDER time and the click happens later, so the write can
+    // begin in between and leave a live takeover button on screen. The note
+    // above unlinkButton() sets out that interleaving in full — it is the same
+    // one, reaching the sibling control.
     if (activeAdoption && (!takeOver || writeInFlight)) return joinActive();
     // Starting fresh, or taking over a preview that appears stalled. Either
     // way this becomes the live episode; anything still previewing from
