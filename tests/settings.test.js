@@ -123,9 +123,18 @@ function openPanel(feeds) {
 
   const button = document.createElement('button');
   const host = document.createElement('div');
-  initSettings({ button, host, onFeedsChanged: () => {} });
+  // Every notification this panel emits, in order, tagged by kind: 'view' for
+  // onFeedsChanged (this device's own re-render) and 'synced' for
+  // onSyncedDataChanged (something the account must be told about).
+  const notified = [];
+  initSettings({
+    button,
+    host,
+    onFeedsChanged: () => notified.push('view'),
+    onSyncedDataChanged: () => notified.push('synced'),
+  });
   button.click(); // host.childElementCount === 0 -> open()
-  return { host };
+  return { host, notified };
 }
 
 // --- the second-writer fix --------------------------------------------------
@@ -179,6 +188,93 @@ test('settings: cycling a feed\'s color does not discard a feed that arrived in 
   assert.deepEqual(stored.map((f) => f.id).sort(), ['feedA', 'feedC']);
 });
 
+// --- synced mutations vs per-device view preferences (spec 6.3) ------------
+//
+// The panel's seven notification sites are NOT interchangeable. Two of them
+// mutate plaenicke.feeds/plaenicke.syncTombstones — the data the account
+// actually holds — and must reach app.js's scheduleSync, or a subscription
+// added or dropped on the laptop sits unpushed until the next page load,
+// `visibilitychange` or `online` event. Closing this modal fires none of
+// those, so the obvious gesture triggers nothing at all, and a feed URL is
+// the one record in this app that cannot be re-entered from anything on
+// screen. The other five are per-device: `color` and `hidden` are stripped by
+// toWire and never reach the wire (spec 6.3), and the feed cache is not
+// synced at all — pushing on those would fire a sync on every colour tap.
+
+test('settings: removing a calendar is a SYNCED change, not just a re-render', () => {
+  const feedA = {
+    id: 'feedA', url: 'https://example.com/a.ics', name: 'A', color: 'var(--feed-palette-1)', hidden: false,
+    updatedAt: '2026-07-01T00:00:00.000Z',
+  };
+  const { host, notified } = openPanel([feedA]);
+  notified.length = 0;
+
+  findButtonByText(host, 'Remove').click();
+
+  assert.deepEqual(loadFeeds(), [], 'fixture check: the feed really was removed');
+  assert.ok(notified.includes('synced'),
+    'an unsubscribe writes a feed tombstone the account must be told about — nothing else in the app pushes it');
+});
+
+test('settings: adding a calendar is a SYNCED change, not just a re-render', async () => {
+  const { host, notified } = openPanel([]);
+  notified.length = 0;
+
+  const originalFetch = globalThis.fetch;
+  // handleAdd's own first syncFeed() goes to the real /feed proxy; this suite
+  // makes no network calls, so answer it with a plain server error. syncFeed
+  // returns {ok:false} rather than throwing, which is the path the panel
+  // already handles.
+  globalThis.fetch = async () => ({ ok: false, status: 500, json: async () => ({ error: 'server' }) });
+  try {
+    const urlInput = host.querySelectorAll('input').find((i) => i.getAttribute('aria-label') === 'Calendar link');
+    assert.ok(urlInput, 'fixture check: the Add form must offer a URL field');
+    urlInput.value = 'https://example.com/new.ics';
+    findButtonByText(host, 'Add calendar').click();
+
+    // saveFeeds and the notification both run synchronously, before
+    // handleAdd's first await — the assertion does not depend on the sync.
+    assert.deepEqual(loadFeeds().map((f) => f.url), ['https://example.com/new.ics'], 'fixture check');
+    assert.ok(notified.includes('synced'),
+      'a new subscription must be pushed — a feed URL is unrecoverable if this device is lost before it syncs');
+    await waitFor(() => findButtonByText(host, 'Add calendar') !== null, 'the initial sync to settle');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('settings: colour and hidden are per-device preferences and never schedule a sync', () => {
+  const feedA = {
+    id: 'feedA', url: 'https://example.com/a.ics', name: 'A', color: 'var(--feed-palette-1)', hidden: false,
+    updatedAt: '2026-07-01T00:00:00.000Z',
+  };
+  const { host, notified } = openPanel([feedA]);
+  notified.length = 0;
+
+  host.querySelectorAll('button').find((b) => b.getAttribute('aria-label') === 'Change color for A').click();
+  findButtonByText(host, 'Hide').click();
+  findButtonByText(host, 'Show').click();
+
+  assert.ok(notified.includes('view'), 'fixture check: the panel must still re-render on a view change');
+  assert.ok(!notified.includes('synced'),
+    'toWire strips color and hidden, so pushing on them would burn a sync per colour tap and change nothing anywhere else');
+});
+
+test('settings: initSettings refuses to mount without a synced-change callback', () => {
+  globalThis.window = makeFakeWindow();
+  globalThis.document = makeFakeDocument();
+  installFakeLocalStorage();
+  assert.throws(
+    () => initSettings({
+      button: document.createElement('button'),
+      host: document.createElement('div'),
+      onFeedsChanged: () => {},
+    }),
+    /onSyncedDataChanged/,
+    'a missing wire here is silent data loss, not a degraded feature — it must fail at mount',
+  );
+});
+
 // --- the linking UI mounted inside this panel (Task 8) ---------------------
 //
 // End-to-end through the REAL mount: initSettings -> open() -> initLinkUI ->
@@ -229,6 +325,7 @@ test('settings: the calendar list refreshes when an adoption lands while the pan
       button,
       host,
       onFeedsChanged: () => {},
+      onSyncedDataChanged: () => {},
       // Stands in for app.js's applySyncedState: the feed owner assigns a
       // real colour before saving (merge.js hands a first-seen feed
       // color: null, and deserializeFeeds drops any feed whose color is not

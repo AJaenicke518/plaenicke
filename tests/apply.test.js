@@ -5,7 +5,7 @@ import { SCHEMA_VERSION } from '../js/merge.js';
 import {
   saveItems, loadItems, saveTombstones, saveFeeds, loadFeeds, loadTombstones, loadSyncState,
 } from '../js/storage.js';
-import { linkWithCode } from '../js/auth.js';
+import { linkWithCode, clearAdoptionPending } from '../js/auth.js';
 import { bytesToBase64url, TOKEN_BYTES } from '../js/crypto.js';
 import { SYNC_STATUS_ID } from '../js/linkui.js';
 
@@ -343,6 +343,64 @@ test('the storage listener ignores plaenicke.syncState and only reacts to the th
   saveItems([item('cross-tab-item-tombstones-key', '2026-08-01T00:00:00.000Z')]);
   for (const fn of storageListeners) fn({ key: 'plaenicke.syncTombstones' });
   assert.ok(allText(list).includes('t-cross-tab-item-tombstones-key'), 'a plaenicke.syncTombstones write must also trigger a reload/re-render');
+});
+
+// --- a calendar added or removed in Settings must actually PUSH ------------
+//
+// scheduleSync had exactly three call sites in app.js — addItems, deleteItem
+// and runSync's pending re-arm — and onFeedsChanged was not one of them. A
+// subscription added or removed on the laptop therefore sat unpushed until the
+// next page load, `visibilitychange` or `online` event; closing the settings
+// modal fires none of those. Items pushed in 2s and feeds never pushed at all,
+// and a feed URL is the one record in this app that nothing on screen can
+// restore.
+//
+// Driven through the REAL settings panel that app.js mounts at module scope,
+// so this pins the WIRE (app.js -> initSettings -> onSyncedDataChanged ->
+// scheduleSync), not just settings.js's own classification.
+test('removing a calendar in Settings pushes it, without waiting for a reload', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js'); // cached; initSettings already wired to els.settingsBtn
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending(); // steady state — the adoption dialog is a different path
+
+  saveFeeds([{
+    id: 'feedGone', url: 'https://example.com/gone.ics', name: 'Gone',
+    color: 'var(--feed-palette-1)', hidden: false, updatedAt: '2026-08-01T00:00:00.000Z',
+  }]);
+
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts = {}) => {
+    requests.push({ url: String(url), method: (opts && opts.method) || 'GET' });
+    return { ok: true, status: 200, json: async () => ({ version: 0, blob: '' }), text: async () => '' };
+  };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const settingsBtn = globalThis.document.getElementById('settings-btn');
+    for (const fn of settingsBtn._listeners.click || []) fn({ target: settingsBtn });
+    const host = globalThis.document.getElementById('settings-host');
+    const remove = host.querySelectorAll('button').find((b) => b.textContent === 'Remove');
+    assert.ok(remove, 'fixture check: the open panel must offer a Remove button for the seeded calendar');
+
+    remove.click();
+    assert.deepEqual(loadFeeds(), [], 'fixture check: the calendar really was removed');
+    assert.deepEqual(requests.filter((r) => r.url.includes('/data')), [],
+      'the push is debounced, so nothing may go out before the timer fires');
+
+    t.mock.timers.tick(2000);
+    // runSync -> syncOnce is async; let its awaits drain against the real
+    // microtask queue (only setTimeout is mocked).
+    for (let i = 0; i < 50; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+  } finally {
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.ok(requests.some((r) => r.url.includes('/data') && r.method === 'GET'),
+    'removing a calendar must schedule a sync — nothing else pushes the feed tombstone until the page is reloaded');
+  assert.ok(requests.some((r) => r.url.includes('/data') && r.method === 'PUT'),
+    'and the tombstone must actually reach the account');
 });
 
 // --- runSync must not run while adoption is pending (mutation M3) ----------

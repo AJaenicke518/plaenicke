@@ -58,12 +58,44 @@ function getSetting() {
 // already supplies app.js with renderSyncStatus; importing applySyncedState
 // back would close a cycle that drags the whole DOM-bound app.js into
 // linkui.js's unit tests (DA-C6).
-export function initSettings({ button, host, onFeedsChanged, applyState }) {
+export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged, applyState }) {
+  // A missing wire here is silent data loss, not a degraded feature: without
+  // it a calendar added or removed in this panel never reaches the account
+  // until something unrelated happens to trigger a sync. Fail at mount, where
+  // it is a one-line fix, rather than at the moment a subscription is lost.
+  if (typeof onSyncedDataChanged !== 'function') {
+    throw new Error('initSettings requires an onSyncedDataChanged callback');
+  }
+
   // Follow the phone while in auto.
   window.matchMedia('(prefers-color-scheme: dark)')
     .addEventListener('change', () => applyTheme(getSetting()));
 
-  function notifyChanged() { if (onFeedsChanged) onFeedsChanged(); }
+  // TWO KINDS OF CHANGE, AND THEY ARE NOT INTERCHANGEABLE (spec 6.3).
+  //
+  // notifyViewChanged: this device's own view moved and nothing the account
+  // holds did. `color` and `hidden` are per-device preferences that toWire
+  // strips before anything is encrypted, and the feed cache is not synced at
+  // all — so pushing on these would fire a sync on every colour tap and change
+  // nothing on any other device. They are also this panel's highest-frequency
+  // writes, which is exactly why spec 6.3 keeps them off the wire.
+  //
+  // notifySyncedChanged: plaenicke.feeds (and, on a removal, the feed
+  // tombstone in plaenicke.syncTombstones) changed — that IS what the account
+  // holds. It must reach app.js's scheduleSync, because nothing else will: a
+  // feed change has no other push trigger, closing this modal changes neither
+  // `visibilityState` nor connectivity, and a feed URL is the single record in
+  // this app that cannot be re-entered from anything on screen (this file
+  // never re-displays one). An unpushed item is a re-typed line; an unpushed
+  // feed lost with the device is gone.
+  function notifyViewChanged() { if (onFeedsChanged) onFeedsChanged(); }
+
+  function notifySyncedChanged() {
+    // View first: app.js reloads its snapshot before the sync it is about to
+    // schedule reads storage back.
+    notifyViewChanged();
+    onSyncedDataChanged();
+  }
 
   function onKey(e) { if (e.key === 'Escape') close(); }
 
@@ -202,7 +234,7 @@ export function initSettings({ button, host, onFeedsChanged, applyState }) {
       feedCache = loadFeedCache();
       syncingFeedId = null;
       renderCalendars();
-      notifyChanged();
+      notifyViewChanged();
     }
 
     function renderCalendars() {
@@ -232,7 +264,7 @@ export function initSettings({ button, host, onFeedsChanged, applyState }) {
           dot.addEventListener('click', () => {
             reapplyFeedField(feed.id, (f) => ({ color: nextColor(f.color) }));
             renderCalendars();
-            notifyChanged();
+            notifyViewChanged();
           });
 
           const name = document.createElement('span');
@@ -255,7 +287,7 @@ export function initSettings({ button, host, onFeedsChanged, applyState }) {
           toggle.addEventListener('click', () => {
             reapplyFeedField(feed.id, (f) => ({ hidden: !f.hidden }));
             renderCalendars();
-            notifyChanged();
+            notifyViewChanged();
           });
 
           const syncBtn = document.createElement('button');
@@ -288,7 +320,9 @@ export function initSettings({ button, host, onFeedsChanged, applyState }) {
             delete feedCache[feed.id];
             delete syncErrors[feed.id];
             renderCalendars();
-            notifyChanged();
+            // SYNCED: removeFeed wrote a feed tombstone, and nothing else in
+            // the app will push it.
+            notifySyncedChanged();
           });
 
           actions.append(toggle, syncBtn, removeBtn);
@@ -367,7 +401,10 @@ export function initSettings({ button, host, onFeedsChanged, applyState }) {
         addBusy = true;
         syncingFeedId = feed.id;
         renderCalendars();
-        notifyChanged();
+        // SYNCED: the subscription is already in plaenicke.feeds. Push it now
+        // rather than after the ICS fetch below — the URL is unrecoverable and
+        // the fetch may never succeed.
+        notifySyncedChanged();
 
         let result;
         try {
@@ -382,7 +419,7 @@ export function initSettings({ button, host, onFeedsChanged, applyState }) {
         addBusy = false;
         syncingFeedId = null;
         renderCalendars();
-        notifyChanged();
+        notifyViewChanged();
       }
 
       addBtn.addEventListener('click', handleAdd);
@@ -401,7 +438,7 @@ export function initSettings({ button, host, onFeedsChanged, applyState }) {
       feeds = loadFeeds();
       feedCache = loadFeedCache();
       renderCalendars();
-      notifyChanged();
+      notifyViewChanged();
     }
 
     renderCalendars();

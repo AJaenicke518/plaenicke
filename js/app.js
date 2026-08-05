@@ -108,6 +108,15 @@ initSettings({
   button: els.settingsBtn,
   host: els.settingsHost,
   onFeedsChanged: () => { feeds = loadFeeds(); feedCache = loadFeedCache(); render(); },
+  // Adding or removing a calendar mutates SYNCED data (spec 6.3): the feed
+  // record itself, and for a removal the feed tombstone removeFeed() writes.
+  // onFeedsChanged fires on every colour tap too, so it is the wrong signal to
+  // push on — settings.js separates the two and only this one means "the
+  // account needs to know". Without it a feed change had NO push trigger at
+  // all: the three scheduleSync call sites below are addItems, deleteItem and
+  // runSync's re-arm, and closing the settings modal changes neither
+  // visibilityState nor connectivity.
+  onSyncedDataChanged: () => scheduleSync(),
   applyState: applySyncedState,
 });
 
