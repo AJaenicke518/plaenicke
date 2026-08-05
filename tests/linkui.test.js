@@ -882,6 +882,58 @@ test('a mount arriving while a write is in flight cannot take over from it', asy
     'the joining mount must leave that view once the write settles');
 });
 
+// THE SAME HOLE, REACHED THROUGH THE RE-ASK BRANCH.
+//
+// adoptAgainstFreshCounts re-decides when the dialog's counts moved, and it
+// does so by calling decideAndAct — which, when the device has since emptied,
+// resolves to 'auto' and goes STRAIGHT into a write with no human in the loop.
+// Drop the `await` on that one call and adoptAgainstFreshCounts resolves
+// immediately: guarded() resolves, runAdoption's `finally` clears
+// `activeAdoption`, and the write is still running underneath it. The next
+// panel open then sees no live episode and starts a second one freely — the
+// exclusion `writeInFlight` exists to hold, breached by a different route.
+//
+// Every dialog test above stays green under that mutant because they all end
+// on the 'ask' branch, which is synchronous to render(). Measured: 553/553.
+test('the re-ask branch is awaited, so an episode that re-decides still holds the exclusion', async (t) => {
+  const f = await concurrencyFixture();
+  t.after(() => f.releaseAll());
+  const a = f.mount();
+  f.releaseGet(0);
+  await a.ui.settled();
+  assert.ok(findButton(a.host, 'Merge'), 'fixture check: the dialog is up');
+
+  // The device empties while the dialog sits open — renderCalendars' Remove
+  // control and app.js's own delete path are both live directly above it, and
+  // open() installs no focus trap. The counts moved, so the click re-decides.
+  saveItems([]);
+  f.holdNextWrite();
+  findButton(a.host, 'Merge').click();
+  await settleUntil(() => f.syncCalls.length > 0);
+  assert.deepEqual(f.syncCalls, ['adopt-bootstrap'],
+    'fixture check: the re-ask resolved to auto and went straight into a write');
+  // Drain to the next MACROTASK before mounting. The episode's `finally` sits
+  // three or four microtask ticks past the point the write becomes observable,
+  // so a mount taken immediately would still see the stale `activeAdoption`
+  // even under the mutant and pass for the wrong reason — measured: this test
+  // passed 1/1 against the mutated source until this line was added.
+  await settle();
+  await settle();
+
+  // Closed and re-opened while that write is still running.
+  a.host.innerHTML = '';
+  const b = f.mount();
+  assert.match(allText(b.host), /Saving your choice/,
+    'the re-deciding episode must still be the live one while its write is in flight');
+  assert.equal(f.gets.length, 1,
+    'a joining mount must not start its own preview — that is how a second concurrent write begins');
+
+  f.letWriteFinish();
+  await a.ui.settled();
+  await b.ui.settled();
+  assert.deepEqual(f.syncCalls, ['adopt-bootstrap'], 'exactly one write may run');
+});
+
 // A healthy adoption takes a second or two. Offering a takeover instantly
 // turns every ordinary wait into an invitation to start a second episode.
 test('a takeover is not offered until the live preview has been running long enough to look stuck', async (t) => {
