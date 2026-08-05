@@ -1761,6 +1761,67 @@ test('a link attempt that throws renders the error and never echoes the pasted c
   });
 });
 
+// NO TEST EVER LINKED SUCCESSFULLY THROUGH THE UI. The only click test above
+// pastes 'this is not a link code', so doLink's failure path was covered and
+// its success path was not: deleting `await doPreview(1, generation)` from it
+// passed 548/548. A user who pasted a valid code would get a linked device,
+// the adoption gate permanently raised, no dialog and no network call — the
+// panel would sit on "Linked — but nothing syncs until you choose how to
+// combine this device" with nothing offering the choice.
+test('pasting a valid link code links the device AND goes straight on to the choice', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  const host = doc.createElement('div');
+  doc.body.appendChild(host);
+  saveItems([it('local')]); // this device holds data, so the account choice is a real one
+
+  const encKey = generateEncKey();
+  const code = composeLinkCode(bytesToBase64url(generateEncKey()), encKey);
+  const fetchCalls = [];
+  const syncCalls = [];
+  const linkedCalls = [];
+  const ui = initLinkUI({
+    host,
+    applyState: (s) => s,
+    onLinked: () => linkedCalls.push(true),
+    fetchImpl: async (url, opts) => {
+      fetchCalls.push({ url: String(url), method: (opts && opts.method) || 'GET' });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ version: 6, blob: await encryptBlob(encKey, st({ items: [it('r')] })) }),
+      };
+    },
+    apiBase: 'https://w.example',
+    now: () => NOW,
+    syncOnceImpl: async (d) => { syncCalls.push(d); return { status: 'ok', pushed: true, applied: true }; },
+  });
+  await ui.settled();
+  assert.deepEqual(fetchCalls, [], 'fixture check: an unlinked device fires nothing on mount');
+
+  const input = findInput(host, 'Link code');
+  assert.ok(input, 'fixture check: an unlinked device offers the paste field');
+  input.value = code;
+  findButton(host, 'Link this device').click();
+  await ui.settled();
+
+  assert.equal(isLinked(), true, 'the pasted code must actually be stored');
+  assert.equal(linkedCalls.length, 1, 'the owner of the feed list must be told a link happened');
+  assert.deepEqual(fetchCalls, [{ url: 'https://w.example/data', method: 'GET' }],
+    'linking must check the account in the SAME click — nothing else in the app will start that');
+  assert.ok(findButton(host, 'Merge'), 'and must lead to the choice, not to a raised gate with no way forward');
+  assert.ok(findButton(host, 'Replace this device'));
+  assert.ok(findButton(host, 'Cancel'));
+  assert.equal(syncCalls.length, 0, 'nothing may be adopted before the user chooses');
+
+  // ...and the choice completes, so this covers paste -> preview -> dialog ->
+  // adopt as one path rather than stopping at the dialog.
+  findButton(host, 'Merge').click();
+  await ui.settled();
+  assert.deepEqual(syncCalls.map((c) => c.adoptChoice), ['adopt-merge']);
+  assert.equal(syncCalls[0].expectVersion, 6, 'pinned to the version this device previewed');
+});
+
 // An end-to-end pass through the REAL syncOnce, so the deps initLinkUI hands
 // it are exercised rather than stubbed: every other test above injects
 // syncOnceImpl to observe the adoptChoice directly.
