@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { merge, dedupeState, toWire, emptyState, SCHEMA_VERSION } from '../js/merge.js';
+import { merge, dedupeState, toWire, emptyState, applyTombstones, SCHEMA_VERSION } from '../js/merge.js';
 
 const NOW = new Date('2026-08-02T12:00:00.000Z');
 const item = (id, updatedAt, extra = {}) => ({ id, title: `t-${id}`, date: '2026-08-02', time: null, updatedAt, ...extra });
@@ -246,4 +246,48 @@ test('dedupeState keeps two items sharing title and date but differing only in t
 
 test('emptyState is a valid mergeable state', () => {
   assert.deepEqual(merge(emptyState(), emptyState(), NOW), emptyState());
+});
+
+// --- applyTombstones is now a PUBLIC entry point (Task 8) -------------------
+//
+// linkui.js's chooseAdoption asks "how many of these records would that side's
+// tombstones actually delete?" and reuses this function rather than copying
+// the `deletedAt > updatedAt` rule. That gave it a caller which, unlike
+// merge(), hands it a RAW un-merged tombstone list straight off a server blob
+// — so the preconditions merge() used to guarantee no longer hold.
+
+test('applyTombstones takes the NEWEST deletion for an id, not the last one in the array', () => {
+  // mergeTombstones and storage.addTombstone both dedupe by (kind, id), so an
+  // honest device never produces this — but a server blob is not required to
+  // be honest, and last-wins here counts ZERO deletions where merge() deletes
+  // the record: a no-dialog wipe in linkui's classifier.
+  const records = [item('a', '2026-06-01T00:00:00.000Z')];
+  const newestFirst = [
+    { id: 'a', kind: 'item', deletedAt: '2026-07-01T00:00:00.000Z' },
+    { id: 'a', kind: 'item', deletedAt: '2026-01-01T00:00:00.000Z' },
+  ];
+  assert.deepEqual(applyTombstones(records, newestFirst, 'item'), [],
+    'the newest deletion must win regardless of array order');
+  assert.deepEqual(applyTombstones(records, [...newestFirst].reverse(), 'item'), [],
+    'and the answer must not depend on that order');
+});
+
+test('applyTombstones still lets a record re-created after the newest deletion survive', () => {
+  const records = [item('a', '2026-08-01T00:00:00.000Z')];
+  const tombstones = [
+    { id: 'a', kind: 'item', deletedAt: '2026-07-01T00:00:00.000Z' },
+    { id: 'a', kind: 'item', deletedAt: '2026-01-01T00:00:00.000Z' },
+  ];
+  assert.deepEqual(applyTombstones(records, tombstones, 'item').map(r => r.id), ['a']);
+});
+
+// Escalate, never degrade: coercing a malformed list to "no deletions" would
+// turn a corrupt blob into a NO-DIALOG adoption in linkui's classifier —
+// exactly the silent-loss shape this module's other guards exist to prevent.
+test('applyTombstones refuses a malformed list instead of reading it as "nothing deleted"', () => {
+  assert.throws(() => applyTombstones([item('a', '2026-08-01T00:00:00.000Z')], null, 'item'), /tombstone/i);
+  assert.throws(() => applyTombstones([item('a', '2026-08-01T00:00:00.000Z')], undefined, 'item'), /tombstone/i);
+  assert.throws(() => applyTombstones([item('a', '2026-08-01T00:00:00.000Z')], {}, 'item'), /tombstone/i);
+  assert.throws(() => applyTombstones(null, [], 'item'), /record/i);
+  assert.throws(() => applyTombstones(undefined, [], 'item'), /record/i);
 });

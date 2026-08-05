@@ -350,28 +350,82 @@ test('expectVersion that no longer matches applies nothing, pushes nothing and h
 });
 
 // expectVersion is checked once, right after the initial fetchRemote — NOT
-// again on the CAS-retry path, where a 409 could hand back a server state the
-// user never saw. That gap is unreachable, but not for the obvious reason
-// ("applyState has already written"), since the retry re-runs applyState.
-// It is unreachable because merge(emptyState(), remote) is wire-identical to
-// remote, so `pushed` is false and adopt-replace NEVER ISSUES A PUT — there is
-// no 409 to reach. Nothing pinned that invariant, so a future change making
-// replace push would silently turn the gap into a live defect instead of a
-// failing test.
-test('adopt-replace issues no PUT at all, which is what keeps the CAS-retry expectVersion gap unreachable', async () => {
+// again on the CAS-retry path, where a 409 hands back a server state the user
+// never saw and the retry adopts it.
+//
+// AN EARLIER VERSION OF THIS COMMENT CLAIMED THE PATH WAS UNREACHABLE
+// ("adopt-replace never issues a PUT"). That is FALSE, and the next test
+// proves it: merge() prunes tombstones past 90 days, so an account carrying an
+// ancient tombstone makes toWire(merged) differ from toWire(remote) and the
+// replace does push. What is actually true is narrower, and is what these two
+// tests pin between them:
+//   1. against an account with nothing prunable — the ordinary case — a
+//      replace is wire-identical to what it pulled and pushes nothing, so the
+//      409 path is not routinely reached;
+//   2. when it IS reached, the retry adopts the account's CURRENT state,
+//      which is what the user asked for ("discard local, take the account").
+//      Local was already discarded on their explicit instruction one apply
+//      earlier, so there is nothing left to re-confirm before.
+// Both are pinned so a change to either turns into a failing test rather than
+// a silent widening of the gap.
+test('adopt-replace against an ordinary account is wire-identical to what it pulled and pushes nothing', async () => {
   const link = await linked();
   saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
   saveFeeds([{ id: 'fLocal', url: 'https://cal.example/l.ics', name: 'L', color: '#111', hidden: false, updatedAt: '2026-08-01T00:00:00.000Z' }]);
   const server = fakeServer({ version: 2, blob: await encryptBlob(link.encKey, state({
     items: [item('remote', '2026-08-01T00:00:00.000Z')],
     feeds: [{ id: 'fRemote', url: 'https://cal.example/r.ics', name: 'R', updatedAt: '2026-08-01T00:00:00.000Z' }],
+    tombstones: [{ id: 'recent', kind: 'item', deletedAt: '2026-07-30T00:00:00.000Z' }],
   })) });
   const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
     applyState: echo, adoptChoice: 'adopt-replace', expectVersion: 2 });
   assert.equal(res.status, 'ok');
   assert.equal(res.pushed, false);
   assert.deepEqual(server.calls.filter(c => c.method === 'PUT'), [],
-    'a replace that pushed could hit a 409 and adopt a server state the user never saw, with expectVersion no longer consulted');
+    'nothing differs from the pulled state, so there is no PUT and therefore no 409 to reach');
+});
+
+test('adopt-replace DOES push when merge prunes an expired tombstone — the 409 path is reachable', async () => {
+  const link = await linked();
+  saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
+  // Older than merge.js's 90-day prune window relative to NOW.
+  const server = fakeServer({ version: 2, blob: await encryptBlob(link.encKey, state({
+    items: [item('remote', '2026-08-01T00:00:00.000Z')],
+    tombstones: [{ id: 'ancient', kind: 'item', deletedAt: '2026-01-01T00:00:00.000Z' }],
+  })) });
+  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: echo, adoptChoice: 'adopt-replace', expectVersion: 2 });
+  assert.equal(res.status, 'ok');
+  assert.equal(res.pushed, true,
+    'pruning makes the merged state differ from the pulled one, so a replace CAN push — the "never PUTs" claim was false');
+  assert.ok(server.calls.some(c => c.method === 'PUT'));
+});
+
+test('a replace that 409s mid-retry adopts the account CURRENT state, which is what Replace means', async () => {
+  const link = await linked();
+  saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer({ version: 2, blob: await encryptBlob(link.encKey, state({
+    items: [item('remote', '2026-08-01T00:00:00.000Z')],
+    tombstones: [{ id: 'ancient', kind: 'item', deletedAt: '2026-01-01T00:00:00.000Z' }],
+  })) });
+  let forced = false;
+  const fetchImpl = async (url, opts = {}) => {
+    if ((opts.method || 'GET') === 'PUT' && !forced) {
+      forced = true;
+      server.row.version += 1;
+      server.row.blob = await encryptBlob(link.encKey, state({ items: [item('moved', '2026-08-01T00:00:00.000Z')] }));
+      return { ok: false, status: 409, json: async () => ({ error: 'version_conflict', version: server.row.version, blob: server.row.blob }) };
+    }
+    return server.fetchImpl(url, opts);
+  };
+  let lastApplied = null;
+  const res = await syncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: (s) => { lastApplied = s; return s; }, adoptChoice: 'adopt-replace', expectVersion: 2 });
+  assert.equal(res.status, 'ok');
+  assert.deepEqual(lastApplied.items.map(i => i.id), ['moved'],
+    'the retry must adopt the account as it now stands, not silently convert the replace into a merge');
+  assert.ok(!lastApplied.items.some(i => i.id === 'local'),
+    'the record the user chose to discard must not come back through the retry');
 });
 
 test('a failed adoption leaves the gate up so the user is asked again', async () => {

@@ -10,7 +10,7 @@ import {
   bytesToBase64url, generateEncKey, composeLinkCode, encryptBlob, parseLinkCode,
 } from '../js/crypto.js';
 import {
-  saveItems, saveFeeds, saveAuth, loadItems, loadFeeds, loadSyncState, saveSyncState,
+  saveItems, saveFeeds, saveAuth, saveTombstones, loadItems, loadFeeds, loadSyncState, saveSyncState,
 } from '../js/storage.js';
 import { SCHEMA_VERSION, toWire } from '../js/merge.js';
 import { WORKER_URL } from '../js/config.js';
@@ -595,6 +595,26 @@ test('the dialog names pending deletions instead of showing a bare "0 items" nex
   assert.match(text, /2 of the items/i);
 });
 
+// Minor 1: the OTHER direction of that sentence. This is the one where Merge
+// deletes the ACCOUNT's records on every other device, so it is if anything
+// the more important half — and `if (false)` in its place survived the suite.
+test('the dialog also names the deletions THIS device would push to the account', async () => {
+  const { host } = await setup({
+    seed: () => {
+      saveItems([it('mine')]);
+      saveTombstones([{ id: 'r', kind: 'item', deletedAt: '2026-08-04T00:00:00.000Z' }]);
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ version: 6, blob: await encryptBlob(currentKey, st({ items: [it('r')] })) }),
+    }),
+  });
+  assert.ok(findButton(host, 'Merge'));
+  assert.match(allText(host), /1 of the records in the account/i,
+    'a Merge that deletes an account record on every other device must say so first');
+});
+
 // I5. chooseAdoption's own unit tests cover local feeds; the CALLER's read of
 // them did not. Proven: changing handlePreview's `local` to `feeds: []` left
 // the whole suite green, while a device whose only local data is calendar
@@ -610,6 +630,40 @@ test('a device whose only local data is a calendar subscription still gets the d
   });
   assert.equal(syncCalls.length, 0, 'a local calendar subscription is data — it must not be adopted over silently');
   assert.ok(findButton(host, 'Replace this device'));
+});
+
+// IR1. The sibling read (local FEEDS) is pinned by the test above; the local
+// TOMBSTONE read at handlePreview was not — chooseAdoption's local-tombstone
+// logic was verified only as a pure function, so changing the caller's
+// loadTombstones() to [] left the whole suite green while turning this exact
+// scenario into a no-dialog wipe of the account.
+test('a device that cleared its list while unlinked still gets the dialog, not a silent account wipe', async () => {
+  const { host, syncCalls } = await setup({
+    seed: () => {
+      // Signed-out plaenicke is a complete app (spec 4.4): the user deleted
+      // their records while unlinked, so items/feeds are empty and only the
+      // tombstones remain.
+      saveItems([]);
+      saveFeeds([]);
+      saveTombstones([
+        { id: 'r', kind: 'item', deletedAt: '2026-08-04T00:00:00.000Z' },
+        { id: 'rf', kind: 'feed', deletedAt: '2026-08-04T00:00:00.000Z' },
+      ]);
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        version: 5,
+        blob: await encryptBlob(currentKey, st({ items: [it('r')], feeds: [fd('rf')] })),
+      }),
+    }),
+  });
+  assert.equal(syncCalls.length, 0,
+    "adopting here deletes the account's item AND calendar and tombstones both to every other device, with no dialog");
+  assert.ok(findButton(host, 'Replace this device'), 'the choice must be presented');
+  assert.match(allText(host), /2 of the records in the account/i,
+    'the deletions this device would push must be named');
 });
 
 // I1. adopt() on status 'changed' re-previews, which on a 'none'/'auto'
@@ -675,6 +729,113 @@ test('re-opening the panel mid-adoption does not start a second, concurrent adop
   assert.deepEqual(log, ['GET', 'SYNC:adopt-bootstrap'],
     'a second mount must join the adoption already running, not start a parallel one');
   assert.equal(link.authToken.length, 43); // fixture sanity
+});
+
+// IR2. activeAdoption is cleared only in the episode's finally, and nothing in
+// previewRemote/fetchRemote has an AbortController or a timeout — so an
+// episode that never settles held it for the page's lifetime and every later
+// panel open rendered a busy view with NO controls at all. A flaky connection
+// could cost the user the whole linking UI until they reloaded, with nothing
+// on screen saying so. The exclusion must not be able to outlive its purpose.
+test('a request that never settles does not wedge every later panel open', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  await linkWithCode(bytesToBase64url(generateEncKey()));
+
+  let releaseStuck;
+  const stuck = new Promise((resolve) => { releaseStuck = resolve; });
+  let gets = 0;
+  const fetchImpl = async () => {
+    gets += 1;
+    if (gets === 1) await stuck;
+    return { ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) };
+  };
+  const syncCalls = [];
+  const deps = {
+    applyState: (s) => s,
+    fetchImpl,
+    apiBase: 'https://w.example',
+    now: () => NOW,
+    syncOnceImpl: async (d) => { syncCalls.push(d.adoptChoice); return { status: 'ok', pushed: false }; },
+  };
+
+  const hostA = doc.createElement('div');
+  doc.body.appendChild(hostA);
+  const first = initLinkUI({ host: hostA, ...deps });
+
+  // The panel is closed and re-opened on a now-healthy network.
+  hostA.innerHTML = '';
+  const hostB = doc.createElement('div');
+  doc.body.appendChild(hostB);
+  const second = initLinkUI({ host: hostB, ...deps });
+
+  const takeOver = findButton(hostB, 'Try again');
+  assert.ok(takeOver, 'a mount that joins a stalled episode must still offer a way out');
+  assert.ok(findButton(hostB, 'Unlink'), 'and a way to stop syncing entirely');
+
+  takeOver.click();
+  await second.settled();
+  assert.deepEqual(syncCalls, ['adopt-bootstrap'], 'taking over must actually complete the adoption');
+
+  // The stalled episode finally answers. It has been superseded and must NOT
+  // adopt a second time — that is the very race the exclusion exists to stop.
+  releaseStuck();
+  await first.settled();
+  assert.deepEqual(syncCalls, ['adopt-bootstrap'],
+    'a superseded episode must not write when it eventually completes');
+});
+
+// Minor 2. I argued these counts could not go stale because "the panel is the
+// only writer during adoption". That was wrong: renderCalendars()'s Add /
+// Remove / colour controls sit live directly above this dialog (isBusy()
+// covers only feed syncing), and open() installs no focus trap, so app.js's
+// own add path is reachable too. Reproduced against the real syncOnce: the
+// dialog said "1 item and 1 calendar", a second calendar was added, Replace
+// was clicked, and BOTH calendars were destroyed — the user consented to
+// discarding one.
+test('a choice made against counts that have since changed re-asks instead of acting', async () => {
+  const { host, ui, syncCalls } = await setup({
+    seed: () => { saveItems([it('local')]); saveFeeds([fd('existing')]); },
+    fetchImpl: async () => ({
+      ok: true, status: 200, json: async () => ({ version: 4, blob: await encryptBlob(currentKey, st({ items: [it('r')] })) }),
+    }),
+  });
+  assert.ok(findButton(host, 'Replace this device'));
+  assert.match(allText(host), /1 calendar\b/, 'fixture check: the dialog is showing one calendar');
+
+  // The calendar section directly above is live while this dialog is open.
+  saveFeeds([fd('existing'), fd('justAdded')]);
+
+  findButton(host, 'Replace this device').click();
+  await ui.settled();
+  assert.equal(syncCalls.length, 0, 'the discard must not run against counts the user never saw');
+  assert.match(allText(host), /2 calendars/, 'the dialog must be re-presented with what this device now holds');
+  assert.deepEqual(loadFeeds().map((f) => f.id), ['existing', 'justAdded'], 'nothing may have been discarded yet');
+
+  // Confirming against the CURRENT counts goes through.
+  findButton(host, 'Replace this device').click();
+  await ui.settled();
+  assert.equal(syncCalls.length, 1);
+  assert.equal(syncCalls[0].adoptChoice, 'adopt-replace');
+});
+
+// Minor 6. The only control on these two states was "Re-link this device", and
+// closing/reopening re-previews straight back into them. A user who pasted a
+// bare token on a second device therefore could not stop syncing from the UI
+// without a valid 86-character code — which is exactly the user who has none.
+test('the unrecoverable failure states offer a way to stop syncing', async () => {
+  for (const fetchImpl of [
+    async () => ({ ok: false, status: 401, json: async () => ({}) }),
+    async () => ({ ok: true, status: 200, json: async () => ({ version: 2, blob: await encryptBlob(generateEncKey(), st({ items: [it('r')] })) }) }),
+  ]) {
+    const { host, ui } = await setup({ fetchImpl });
+    assert.ok(findInput(host, 'Link code'), 'fixture check: this state offers re-linking');
+    const unlinkBtn = findButton(host, 'Unlink');
+    assert.ok(unlinkBtn, 'a state the user cannot re-link out of must still let them unlink');
+    unlinkBtn.click();
+    await ui.settled();
+    assert.equal(isLinked(), false);
+  }
 });
 
 // Minor 1: Cancel must leave a way to finish. Deleting the Continue button
@@ -755,6 +916,31 @@ test('a structurally incomplete account blob gets its own message, not a generic
     'a malformed blob is a diagnosable condition, not an unexplained crash');
   assert.match(text, /incomplete|malformed/i);
   assert.ok(findButton(host, 'Try again'), 'the user needs a way forward');
+});
+
+// Element shape matters as much as the arrays themselves: these lists go
+// STRAIGHT to merge.js's applyTombstones, which now — correctly — throws
+// rather than reading junk as "nothing was deleted". Without the element
+// check the user gets the generic "Something went wrong on this device"
+// instead of a message naming a diagnosable cause.
+test('an account blob carrying a junk record is reported as malformed, not as an unexplained crash', async () => {
+  for (const bad of [
+    { schemaVersion: SCHEMA_VERSION, items: [it('r')], feeds: [], tombstones: [null] },
+    { schemaVersion: SCHEMA_VERSION, items: [null], feeds: [], tombstones: [] },
+    { schemaVersion: SCHEMA_VERSION, items: [], feeds: ['not-a-feed'], tombstones: [] },
+  ]) {
+    const { host, syncCalls } = await setup({
+      seed: () => { saveItems([it('local')]); },
+      fetchImpl: async () => ({
+        ok: true, status: 200, json: async () => ({ version: 2, blob: await encryptBlob(currentKey, bad) }),
+      }),
+    });
+    assert.equal(syncCalls.length, 0);
+    const text = allText(host);
+    assert.doesNotMatch(text, /Something went wrong on this device/,
+      'a junk element is a diagnosable condition, not an unexplained crash');
+    assert.match(text, /incomplete/i);
+  }
 });
 
 test('an unlinked device warns that a bare device token creates a NEW account', () => {

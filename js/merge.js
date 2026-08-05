@@ -74,12 +74,31 @@ function mergeTombstones(localList, remoteList) {
 // updatedAt` comparison. A second copy of that rule is a second place for it
 // to drift — the ledger already records a near-miss of exactly that shape
 // (mergeTombstones ties go LOCAL while unionById ties go REMOTE).
+//
+// Exporting it also cost this function a precondition. merge() only ever fed
+// it a list that mergeTombstones had already collapsed to one entry per
+// (kind, id); linkui.js feeds it a RAW list straight off a server blob, which
+// carries no such guarantee. So:
+//   - the newest deletion for an id wins, never simply the last one in the
+//     array. Last-wins counted ZERO deletions for a blob listing two
+//     tombstones for one id newest-first, where merge() deletes the record —
+//     a no-dialog wipe in linkui's classifier.
+//   - a malformed list THROWS rather than reading as "nothing was deleted".
+//     Coercing it would turn a corrupt blob into a silent no-dialog adoption,
+//     which is the failure this module's other guards exist to prevent.
 export function applyTombstones(records, tombstones, kind) {
+  if (!Array.isArray(records)) throw new Error('applyTombstones needs a records array');
+  if (!Array.isArray(tombstones)) throw new Error('applyTombstones needs a tombstones array');
   const dead = new Map();
-  for (const t of tombstones || []) if (t && t.kind === kind) dead.set(t.id, ts(t.deletedAt));
+  for (const t of tombstones) {
+    if (t.kind !== kind) continue;
+    const at = ts(t.deletedAt);
+    const prior = dead.get(t.id);
+    if (prior === undefined || at > prior) dead.set(t.id, at);
+  }
   // A record whose updatedAt is at or after the deletion was re-created after
   // it and must survive.
-  return (records || []).filter(r => !(dead.has(r.id) && dead.get(r.id) > ts(r.updatedAt)));
+  return records.filter(r => !(dead.has(r.id) && dead.get(r.id) > ts(r.updatedAt)));
 }
 
 function prune(tombstones, now) {
