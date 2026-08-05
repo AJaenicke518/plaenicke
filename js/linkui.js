@@ -22,7 +22,8 @@
 import { getLink, linkWithCode, unlink, isAdoptionPending } from './auth.js';
 import { composeForNewDevice, base64urlToBytes, TOKEN_BYTES, KEY_BYTES } from './crypto.js';
 import { previewRemote, syncOnce } from './sync.js';
-import { loadAuth, loadSyncState, loadItems, loadFeeds } from './storage.js';
+import { applyTombstones } from './merge.js';
+import { loadAuth, loadSyncState, loadItems, loadFeeds, loadTombstones } from './storage.js';
 import { WORKER_URL } from './config.js';
 
 const LINK_CODE_BYTES = TOKEN_BYTES + KEY_BYTES;
@@ -103,7 +104,7 @@ export function classifyPastedCode(input) {
   }
 }
 
-// chooseAdoption — how this device should join the account.
+// adoptionCounts / chooseAdoption — how this device should join the account.
 //
 // THE EMPTINESS PREDICATE IS LITERAL, not left to judgement (DA-C2).
 // previewRemote returns `state: null` ONLY when the response carries no blob
@@ -113,17 +114,65 @@ export function classifyPastedCode(input) {
 // this device, and wipes every local item and every feed URL — unrecoverably,
 // since js/settings.js never re-displays a feed URL.
 //
-// TOMBSTONES ARE NEVER COUNTED, on either side: a tombstone is the record of
-// something that is gone, not something to keep.
+// BUT A SIDE'S TOMBSTONES ARE PART OF WHAT IT WOULD DO TO THE OTHER SIDE.
+// The plan said "tombstones are never counted on either side"; that stopped a
+// tombstone-only account being offered "Replace this device" (a ONE-click
+// unrecoverable wipe) but classified it 'none' instead — and 'none'/'auto'
+// route to adopt-bootstrap, which runs AUTOMATICALLY on panel mount with no
+// user interaction. That is a ZERO-click wipe, and it was reproduced in both
+// directions:
+//   - an account holding only tombstones silently deleted this device's items
+//     and calendar subscriptions;
+//   - a device that cleared its list while unlinked (spec 4.4: signed-out is
+//     a complete app) silently deleted the account's records and tombstoned
+//     them to every other device.
 //
-// remoteEmpty is checked FIRST, so both-empty resolves to 'none'.
+// Counting tombstones outright is the wrong fix too: it sends a tombstone-only
+// account back to 'ask', re-creating the original defect — a Replace button
+// beside a dialog reading "0 items, 0 calendars". What matters is how many
+// records a side's tombstones would ACTUALLY suppress on the other side, and
+// that rule is merge.js's applyTombstones (`deletedAt > updatedAt`, so a
+// record re-created after the deletion survives). It is imported, never
+// re-implemented: a second copy is a second place for it to drift.
+//
+// remoteEffective is checked FIRST, so both-empty still resolves to 'none'.
+function suppressedCount(records, tombstones, kind) {
+  const list = records || [];
+  return list.length - applyTombstones(list, tombstones, kind).length;
+}
+
+export function adoptionCounts(localState, remoteState) {
+  const local = localState || {};
+  const remote = remoteState || null;
+  const n = (state, key) => ((state && state[key]) || []).length;
+  const remoteDeletesLocal = remote
+    ? suppressedCount(local.items, remote.tombstones, 'item')
+      + suppressedCount(local.feeds, remote.tombstones, 'feed')
+    : 0;
+  const localDeletesRemote = remote
+    ? suppressedCount(remote.items, local.tombstones, 'item')
+      + suppressedCount(remote.feeds, local.tombstones, 'feed')
+    : 0;
+  const localItems = n(local, 'items');
+  const localFeeds = n(local, 'feeds');
+  const remoteItems = n(remote, 'items');
+  const remoteFeeds = n(remote, 'feeds');
+  return {
+    localItems,
+    localFeeds,
+    remoteItems,
+    remoteFeeds,
+    remoteDeletesLocal,
+    localDeletesRemote,
+    remoteEffective: remoteItems + remoteFeeds + remoteDeletesLocal,
+    localEffective: localItems + localFeeds + localDeletesRemote,
+  };
+}
+
 export function chooseAdoption(localState, remoteState) {
-  const count = (state, key) => ((state && state[key]) || []).length;
-  const remoteEmpty = remoteState == null
-    || (count(remoteState, 'items') === 0 && count(remoteState, 'feeds') === 0);
-  if (remoteEmpty) return 'none';
-  const localEmpty = count(localState, 'items') === 0 && count(localState, 'feeds') === 0;
-  if (localEmpty) return 'auto';
+  const c = adoptionCounts(localState, remoteState);
+  if (c.remoteEffective === 0) return 'none';
+  if (c.localEffective === 0) return 'auto';
   return 'ask';
 }
 
@@ -174,11 +223,36 @@ const FAILURE_TEXT = {
   skipped: 'This device is not linked.',
   conflict: 'Another device kept changing the account while this one was combining. Nothing has been combined yet.',
   'no-apply': 'This device cannot save synced data — the app is wired up wrong. Reload the page and try again.',
+  'kept-changing': 'The account kept changing while this device was trying to join it, so nothing has been combined. '
+    + 'That usually means another device is busy syncing — wait a moment and try again.',
+  malformed: "The account's data is incomplete — this device cannot tell what it holds, so nothing has been combined. "
+    + 'A device still running an older version of plaenicke can cause this; sync from that device first.',
 };
 
 // Statuses where the sensible next step is to try the same thing again, as
 // opposed to re-linking with a different code.
-const RETRYABLE = new Set(['offline', 'error', 'conflict', 'skipped', 'no-apply']);
+const RETRYABLE = new Set(['offline', 'error', 'conflict', 'skipped', 'no-apply', 'kept-changing', 'malformed']);
+
+// Bounded for the same reason syncOnce's CAS loop is (js/sync.js:217): a
+// condition that looks transient can be permanent. An account whose version
+// advances on every GET — a caching proxy, or simply a busy account — turns
+// the 'changed' -> re-preview -> adopt cycle into an unbounded loop with no
+// error surface. Measured at 201 GETs before the harness cap, two per
+// iteration, with the panel stuck on "Combining…" forever.
+const MAX_ADOPT_ATTEMPTS = 3;
+
+// MODULE SCOPE, deliberately. settings.js mounts a NEW initLinkUI on every
+// panel open (js/settings.js:70 rebuilds the whole panel; close() empties the
+// host at :65), and close() cannot cancel the previous closure's in-flight
+// work. Each mount owns its own `inflight` and neither sees the other, so
+// with the gate still raised a user who opens Settings, closes it
+// mid-adoption and re-opens starts a SECOND concurrent adoption — measured
+// ['GET','GET','SYNC','SYNC']. The realistic worst case is clicking "Replace
+// this device", closing, re-opening on a slow connection, getting the dialog
+// again and clicking "Merge": two applyState writes with conflicting
+// semantics, resolved by arrival order. app.js's own syncInFlight guard does
+// not cover linkui's syncOnce calls.
+let activeAdoption = null;
 
 function el(tag, props = {}) {
   const node = document.createElement(tag);
@@ -214,8 +288,8 @@ export function initLinkUI(options = {}) {
   let mintedCode = '';
   let inflight = Promise.resolve();
 
-  function run(fn) {
-    inflight = (async () => {
+  function guarded(fn) {
+    return (async () => {
       try {
         await fn();
       } catch (err) {
@@ -226,7 +300,37 @@ export function initLinkUI(options = {}) {
         render();
       }
     })();
+  }
+
+  // Local-only work (composing a code for a second device). Never touches the
+  // account, so it needs no cross-mount exclusion.
+  function run(fn) {
+    inflight = guarded(fn);
     return inflight;
+  }
+
+  // Anything that talks to the account. At most ONE adoption episode runs
+  // across every mounted panel — see `activeAdoption` above.
+  function runAdoption(fn) {
+    if (activeAdoption) {
+      // A previous mount is still mid-adoption. Show its progress and wait
+      // for it rather than racing it with a second, conflicting write.
+      stage = 'busy';
+      stageData = { text: 'Checking the account…' };
+      render();
+      inflight = activeAdoption.then(() => { stage = null; stageData = {}; render(); });
+      return inflight;
+    }
+    const episode = (async () => {
+      try {
+        await guarded(fn);
+      } finally {
+        activeAdoption = null;
+      }
+    })();
+    activeAdoption = episode;
+    inflight = episode;
+    return episode;
   }
 
   // --- actions -------------------------------------------------------------
@@ -247,11 +351,14 @@ export function initLinkUI(options = {}) {
     await doPreview();
   }
 
-  async function doPreview() {
+  // `attempt` counts one adoption EPISODE's automatic re-previews. A human
+  // clicking a button starts a fresh episode at 1 — the loop being bounded
+  // here is the automatic one, which nothing else gates.
+  async function doPreview(attempt = 1) {
     stage = 'busy';
     stageData = { text: 'Checking the account…' };
     render();
-    await handlePreview(await previewRemote({ fetchImpl, apiBase }));
+    await handlePreview(await previewRemote({ fetchImpl, apiBase }), attempt);
   }
 
   // BRANCH ON preview.status BEFORE CONSULTING chooseAdoption (DA-C3).
@@ -261,24 +368,33 @@ export function initLinkUI(options = {}) {
   // is exactly the signature of pasting a bare token on a second device.
   // chooseAdoption is only ever called with preview.state from a status: 'ok'
   // preview.
-  async function handlePreview(preview) {
+  async function handlePreview(preview, attempt = 1) {
     if (preview.status !== 'ok') {
       stage = 'failed';
       stageData = { status: preview.status };
       render();
       return;
     }
-    const local = { items: loadItems(), feeds: loadFeeds() };
-    const decision = chooseAdoption(local, preview.state);
+    // A blob can decrypt and carry the right schemaVersion and still be
+    // structurally incomplete — `items` present, no `feeds` key. That is a
+    // diagnosable condition with a real cause, not an unexplained crash, and
+    // it must not be papered over by coercing the missing array to empty:
+    // "the account has no calendars" and "this device cannot tell what
+    // calendars the account has" have opposite safe responses.
+    const remote = preview.state;
+    if (remote !== null && !(Array.isArray(remote.items)
+      && Array.isArray(remote.feeds) && Array.isArray(remote.tombstones))) {
+      stage = 'failed';
+      stageData = { status: 'malformed' };
+      render();
+      return;
+    }
+    // tombstones are load-bearing on BOTH sides — see adoptionCounts.
+    const local = { items: loadItems(), feeds: loadFeeds(), tombstones: loadTombstones() };
+    const decision = chooseAdoption(local, remote);
     if (decision === 'ask') {
       stage = 'ask';
-      stageData = {
-        version: preview.version,
-        localItems: local.items.length,
-        localFeeds: local.feeds.length,
-        remoteItems: preview.state.items.length,
-        remoteFeeds: preview.state.feeds.length,
-      };
+      stageData = { version: preview.version, ...adoptionCounts(local, remote) };
       render();
       return;
     }
@@ -294,10 +410,10 @@ export function initLinkUI(options = {}) {
     // uploads AS-IS. On 'auto' there is nothing local to dedupe *against*,
     // yet it would deduplicate the account's OWN records and propagate the
     // tombstones to every other device.
-    await adopt('adopt-bootstrap', preview.version);
+    await adopt('adopt-bootstrap', preview.version, attempt);
   }
 
-  async function adopt(adoptChoice, expectVersion) {
+  async function adopt(adoptChoice, expectVersion, attempt = 1) {
     if (!applyState) {
       stage = 'failed';
       stageData = { status: 'no-apply' };
@@ -316,8 +432,18 @@ export function initLinkUI(options = {}) {
       // against an account that emptied in between would be a silent full
       // local wipe with no re-confirmation (DA-I5). Re-preview and re-ask
       // rather than acting on a stale choice.
+      //
+      // BOUNDED. On a 'none'/'auto' decision the re-preview adopts again with
+      // no human in the loop, so an account whose version keeps advancing
+      // would spin forever. Same reasoning as syncOnce's CAS bound.
+      if (attempt >= MAX_ADOPT_ATTEMPTS) {
+        stage = 'failed';
+        stageData = { status: 'kept-changing' };
+        render();
+        return;
+      }
       notice = 'The account changed while you were deciding. Here is what it holds now — please choose again.';
-      await doPreview();
+      await doPreview(attempt + 1);
       return;
     }
     if (res.status === 'ok') {
@@ -384,8 +510,8 @@ export function initLinkUI(options = {}) {
     };
     input.addEventListener('input', refresh);
     const button = el('button', { type: 'button', text: buttonText });
-    button.addEventListener('click', () => run(() => doLink(input.value)));
-    input.addEventListener('keydown', (e) => { if (e && e.key === 'Enter') run(() => doLink(input.value)); });
+    button.addEventListener('click', () => runAdoption(() => doLink(input.value)));
+    input.addEventListener('keydown', (e) => { if (e && e.key === 'Enter') runAdoption(() => doLink(input.value)); });
     wrap.append(input, warning, button);
   }
 
@@ -410,22 +536,31 @@ export function initLinkUI(options = {}) {
       text: 'This device is linked but has not been combined with the account yet. Nothing syncs until you choose.',
     }));
     const go = el('button', { type: 'button', text: 'Continue' });
-    go.addEventListener('click', () => run(doPreview));
+    go.addEventListener('click', () => runAdoption(() => doPreview()));
     wrap.appendChild(go);
   }
 
   function renderAsk(wrap) {
     const d = stageData;
-    wrap.appendChild(el('p', {
-      className: 'note',
-      text: `This device holds ${plural(d.localItems, 'item', 'items')} and ${plural(d.localFeeds, 'calendar', 'calendars')}. `
-        + `The account already holds ${plural(d.remoteItems, 'item', 'items')} and ${plural(d.remoteFeeds, 'calendar', 'calendars')}. `
-        + 'Choose how to combine them.',
-    }));
+    // A side can show 0 items and 0 calendars and still carry pending
+    // DELETIONS that would remove records from the other side — that is
+    // exactly how this dialog gets reached against a tombstone-only account.
+    // A bare "0 items, 0 calendars" beside a Replace button is not an
+    // informed choice, so the deletions are named.
+    let text = `This device holds ${plural(d.localItems, 'item', 'items')} and ${plural(d.localFeeds, 'calendar', 'calendars')}. `
+      + `The account holds ${plural(d.remoteItems, 'item', 'items')} and ${plural(d.remoteFeeds, 'calendar', 'calendars')}.`;
+    if (d.remoteDeletesLocal > 0) {
+      text += ` The account also records deletions that would remove ${d.remoteDeletesLocal} of the items and calendars on this device.`;
+    }
+    if (d.localDeletesRemote > 0) {
+      text += ` This device records deletions that would remove ${d.localDeletesRemote} of the records in the account.`;
+    }
+    text += ' Choose how to combine them.';
+    wrap.appendChild(el('p', { className: 'note', text }));
     const mergeBtn = el('button', { type: 'button', className: 'primary', text: 'Merge (recommended)' });
-    mergeBtn.addEventListener('click', () => run(() => adopt('adopt-merge', d.version)));
+    mergeBtn.addEventListener('click', () => runAdoption(() => adopt('adopt-merge', d.version)));
     const replaceBtn = el('button', { type: 'button', text: 'Replace this device' });
-    replaceBtn.addEventListener('click', () => run(() => adopt('adopt-replace', d.version)));
+    replaceBtn.addEventListener('click', () => runAdoption(() => adopt('adopt-replace', d.version)));
     const cancelBtn = el('button', { type: 'button', text: 'Cancel' });
     cancelBtn.addEventListener('click', () => {
       notice = 'Nothing was combined. This device will not sync until you choose.';
@@ -450,7 +585,7 @@ export function initLinkUI(options = {}) {
     }));
     if (RETRYABLE.has(status)) {
       const retry = el('button', { type: 'button', text: 'Try again' });
-      retry.addEventListener('click', () => run(doPreview));
+      retry.addEventListener('click', () => runAdoption(() => doPreview()));
       wrap.appendChild(retry);
     } else {
       pasteField(wrap, 'Re-link this device');
@@ -542,7 +677,7 @@ export function initLinkUI(options = {}) {
   // and empties the host on close (:65), so this runs once per panel open
   // against a fresh sub-element — never accumulating listeners, and never
   // firing a request just because the user opened Settings.
-  if (getLink() && isAdoptionPending()) run(doPreview);
+  if (getLink() && isAdoptionPending()) runAdoption(() => doPreview());
 
   return { settled: () => inflight };
 }

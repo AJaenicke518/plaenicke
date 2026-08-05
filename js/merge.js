@@ -69,12 +69,17 @@ function mergeTombstones(localList, remoteList) {
   return [...out.values()];
 }
 
-function applyTombstones(records, tombstones, kind) {
+// EXPORTED so linkui.js can ask "how many of these records would this side's
+// tombstones actually delete?" without re-implementing the `deletedAt >
+// updatedAt` comparison. A second copy of that rule is a second place for it
+// to drift — the ledger already records a near-miss of exactly that shape
+// (mergeTombstones ties go LOCAL while unionById ties go REMOTE).
+export function applyTombstones(records, tombstones, kind) {
   const dead = new Map();
-  for (const t of tombstones) if (t.kind === kind) dead.set(t.id, ts(t.deletedAt));
+  for (const t of tombstones || []) if (t && t.kind === kind) dead.set(t.id, ts(t.deletedAt));
   // A record whose updatedAt is at or after the deletion was re-created after
   // it and must survive.
-  return records.filter(r => !(dead.has(r.id) && dead.get(r.id) > ts(r.updatedAt)));
+  return (records || []).filter(r => !(dead.has(r.id) && dead.get(r.id) > ts(r.updatedAt)));
 }
 
 function prune(tombstones, now) {

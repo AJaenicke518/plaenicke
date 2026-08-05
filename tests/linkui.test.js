@@ -13,6 +13,7 @@ import {
   saveItems, saveFeeds, saveAuth, loadItems, loadFeeds, loadSyncState, saveSyncState,
 } from '../js/storage.js';
 import { SCHEMA_VERSION, toWire } from '../js/merge.js';
+import { WORKER_URL } from '../js/config.js';
 
 // --- minimal fake DOM ------------------------------------------------------
 //
@@ -113,10 +114,21 @@ function allText(el) {
 
 // Everything a screen reader or a devtools inspector can see EXCEPT the value
 // of an input — i.e. every place a link code must never appear.
+//
+// This enumerates the element's OWN enumerable primitive properties rather
+// than a hand-written list. js/linkui.js's el() helper assigns most
+// attribute-ish things (placeholder, autocomplete, type, title) as DOM
+// PROPERTIES, not via setAttribute, so a fixed list that read only
+// textContent/id/className/_attrs missed all of them: proven by adding
+// `placeholder: mintedCode` — a real 86-character link code in the
+// accessibility tree — and watching the whole suite stay green.
 function allNonValueStrings(el) {
-  let out = `${el.textContent || ''} ${el.id || ''} ${el.className || ''}`;
+  let out = ` ${el.className}`;
+  for (const [key, val] of Object.entries(el)) {
+    if (key === 'value') continue;
+    if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') out += ` ${val}`;
+  }
   for (const v of Object.values(el._attrs)) out += ` ${v}`;
-  if (el.title) out += ` ${el.title}`;
   for (const c of el.children) out += ` ${allNonValueStrings(c)}`;
   return out;
 }
@@ -265,22 +277,55 @@ test('chooseAdoption resolves both-empty to none, not auto', () => {
   assert.equal(chooseAdoption(st(), null), 'none');
 });
 
-// DA-C2. previewRemote returns state: null ONLY when the response carries no
-// blob at all; an account whose records were all deleted returns a NON-NULL
-// {schemaVersion, items: [], feeds: [], tombstones: [...]}. Reading emptiness
-// as `state === null` classifies that account as "has data", offers Replace
-// this device, and wipes every local item and every feed URL — unrecoverably,
-// since js/settings.js never re-displays a feed URL.
-test('an account holding only tombstones is EMPTY and is never offered for Replace', () => {
-  const remote = st({ tombstones: [{ id: 'gone', kind: 'item', deletedAt: '2026-08-01T00:00:00.000Z' }] });
-  assert.equal(chooseAdoption(st({ items: [it('l')] }), remote), 'none');
-  assert.equal(chooseAdoption(st({ feeds: [fd('l')] }), remote), 'none');
-  assert.equal(chooseAdoption(st(), remote), 'none');
+// --- emptiness must count tombstones THAT ACTUALLY DELETE SOMETHING -------
+//
+// The plan said "tombstones are never counted on either side". That was
+// adjudicated to stop a tombstone-only account being classified 'ask' and
+// offered "Replace this device" — a one-click unrecoverable wipe. But 'none'
+// and 'auto' both route to adopt-bootstrap, which runs AUTOMATICALLY on panel
+// mount with no user interaction: it traded a one-click wipe for a ZERO-click
+// one, in both directions. Reproduced.
+//
+// A pure count of tombstones is the wrong fix too — it sends a tombstone-only
+// account back to 'ask', re-creating the original defect. What counts is
+// whether a side's tombstones would actually suppress a record on the OTHER
+// side.
+
+test('remote tombstones that would delete local records must ASK, never bootstrap silently', () => {
+  const local = st({ items: [it('a')], feeds: [fd('f')] });
+  const remote = st({
+    tombstones: [
+      { id: 'a', kind: 'item', deletedAt: '2026-08-04T00:00:00.000Z' },
+      { id: 'f', kind: 'feed', deletedAt: '2026-08-04T00:00:00.000Z' },
+    ],
+  });
+  assert.equal(chooseAdoption(local, remote), 'ask',
+    'bootstrapping here deletes both local records with no dialog at all — and a feed URL is a capability token that is never re-displayed');
 });
 
-test('chooseAdoption never counts tombstones on the local side either', () => {
-  const local = st({ tombstones: [{ id: 'gone', kind: 'item', deletedAt: '2026-08-01T00:00:00.000Z' }] });
-  assert.equal(chooseAdoption(local, st({ items: [it('r')] })), 'auto');
+test('local tombstones that would delete account records must ASK, never adopt silently', () => {
+  // Signed-out plaenicke is a complete app (spec 4.4): the user cleared their
+  // list while unlinked, so items/feeds are empty but the tombstones remain.
+  const local = st({ tombstones: [{ id: 'r', kind: 'item', deletedAt: '2026-08-04T00:00:00.000Z' }] });
+  const remote = st({ items: [it('r')] });
+  assert.equal(chooseAdoption(local, remote), 'ask',
+    "'auto' here deletes the account's record and tombstones it to every other device, with no dialog");
+});
+
+test('tombstones that suppress nothing on the other side are not data', () => {
+  const unrelated = st({ tombstones: [{ id: 'never-seen-here', kind: 'item', deletedAt: '2026-08-04T00:00:00.000Z' }] });
+  assert.equal(chooseAdoption(st({ items: [it('l')] }), unrelated), 'none',
+    'an account carrying only deletions this device never had is still an empty account');
+  assert.equal(chooseAdoption(unrelated, st({ items: [it('r')] })), 'auto');
+});
+
+// The suppression rule is merge.js's, reused rather than re-implemented: a
+// record whose updatedAt is at or after the deletion was RE-CREATED after it
+// and survives. A naive id match would call this a deletion and ask.
+test('a tombstone older than the record it names suppresses nothing', () => {
+  const local = st({ items: [{ ...it('a'), updatedAt: '2026-08-06T00:00:00.000Z' }] });
+  const remote = st({ tombstones: [{ id: 'a', kind: 'item', deletedAt: '2026-08-04T00:00:00.000Z' }] });
+  assert.equal(chooseAdoption(local, remote), 'none');
 });
 
 // =========================================================================
@@ -523,6 +568,195 @@ test('a version that moved between the preview and the write re-asks instead of 
   assert.equal(syncCalls[1].expectVersion, 9, 'the re-asked choice must be pinned to the NEW version');
 });
 
+// The dialog can now be reached against a side showing 0 items and 0
+// calendars but carrying pending deletions. It must say so — a bare
+// "0 items, 0 calendars" next to a Replace button is not an informed choice.
+test('the dialog names pending deletions instead of showing a bare "0 items" next to Replace', async () => {
+  const { host, syncCalls } = await setup({
+    seed: () => { saveItems([it('a'), it('b')]); },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        version: 3,
+        blob: await encryptBlob(currentKey, st({
+          tombstones: [
+            { id: 'a', kind: 'item', deletedAt: '2026-08-04T00:00:00.000Z' },
+            { id: 'b', kind: 'item', deletedAt: '2026-08-04T00:00:00.000Z' },
+          ],
+        })),
+      }),
+    }),
+  });
+  assert.equal(syncCalls.length, 0, 'a tombstone-only account must not be adopted with no dialog');
+  assert.ok(findButton(host, 'Replace this device'), 'the choice must be presented');
+  const text = allText(host);
+  assert.match(text, /deletion/i, 'the pending deletions must be named, not hidden behind a bare "0 items"');
+  assert.match(text, /2 of the items/i);
+});
+
+// I5. chooseAdoption's own unit tests cover local feeds; the CALLER's read of
+// them did not. Proven: changing handlePreview's `local` to `feeds: []` left
+// the whole suite green, while a device whose only local data is calendar
+// subscriptions would classify 'auto', adopt with no dialog, and have
+// applyRemoteFeeds delete every feed absent from the merged list — the Task 5
+// unrecoverable-subscription shape again.
+test('a device whose only local data is a calendar subscription still gets the dialog', async () => {
+  const { host, syncCalls } = await setup({
+    seed: () => { saveItems([]); saveFeeds([fd('localfeed')]); },
+    fetchImpl: async () => ({
+      ok: true, status: 200, json: async () => ({ version: 4, blob: await encryptBlob(currentKey, st({ items: [it('r')] })) }),
+    }),
+  });
+  assert.equal(syncCalls.length, 0, 'a local calendar subscription is data — it must not be adopted over silently');
+  assert.ok(findButton(host, 'Replace this device'));
+});
+
+// I1. adopt() on status 'changed' re-previews, which on a 'none'/'auto'
+// decision adopts again — with no counter and no error surface. Reproduced
+// against an account whose version advances on every GET: 201 GETs before the
+// harness cap, panel stuck on "Combining…" forever. syncOnce's own CAS loop
+// twenty lines away is bounded for exactly this reason.
+test('an account that keeps changing gives up instead of looping forever', async () => {
+  let version = 0;
+  const { host, syncCalls } = await setup({
+    fetchImpl: async () => {
+      version += 1;
+      return { ok: true, status: 200, json: async () => ({ version, blob: '' }) };
+    },
+    syncResults: Array.from({ length: 50 }, (_, i) => ({ status: 'changed', version: 100 + i })),
+  });
+  assert.ok(syncCalls.length > 0, 'the adoption must actually have been attempted');
+  assert.ok(syncCalls.length <= 5, `the changed/re-preview cycle must be bounded, got ${syncCalls.length} attempts`);
+  assert.match(allText(host), /kept changing/i, 'giving up must be surfaced, not left spinning on "Combining…"');
+  assert.ok(findButton(host, 'Try again'), 'exhaustion must leave a way forward');
+  assert.equal(loadSyncState().adoptionPending, true, 'the gate stays raised');
+});
+
+// I2. settings.js calls initLinkUI per open(), and close() cannot cancel the
+// previous closure's in-flight work: each mount owns its own `inflight` and
+// the gate is still raised, so a second mount fires its own adoption.
+// Reproduced: ['GET','GET','SYNC','SYNC']. Worst realistic case is Replace
+// then Merge — two applyState writes with conflicting semantics, resolved by
+// arrival order.
+test('re-opening the panel mid-adoption does not start a second, concurrent adoption', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  const link = await linkWithCode(bytesToBase64url(generateEncKey()));
+  saveItems([it('local')]);
+
+  const log = [];
+  let releaseFirstGet;
+  const held = new Promise((resolve) => { releaseFirstGet = resolve; });
+  let gets = 0;
+  const fetchImpl = async () => {
+    gets += 1;
+    log.push('GET');
+    if (gets === 1) await held;
+    return { ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) };
+  };
+  const syncOnceImpl = async (deps) => { log.push(`SYNC:${deps.adoptChoice}`); return { status: 'ok', pushed: true }; };
+  const deps = { applyState: (s) => s, fetchImpl, apiBase: 'https://w.example', now: () => NOW, syncOnceImpl };
+
+  const hostA = doc.createElement('div');
+  doc.body.appendChild(hostA);
+  const first = initLinkUI({ host: hostA, ...deps });
+
+  // The user closes the panel and opens it again while that GET is still out.
+  hostA.innerHTML = '';
+  const hostB = doc.createElement('div');
+  doc.body.appendChild(hostB);
+  const second = initLinkUI({ host: hostB, ...deps });
+
+  releaseFirstGet();
+  await first.settled();
+  await second.settled();
+
+  assert.deepEqual(log, ['GET', 'SYNC:adopt-bootstrap'],
+    'a second mount must join the adoption already running, not start a parallel one');
+  assert.equal(link.authToken.length, 43); // fixture sanity
+});
+
+// Minor 1: Cancel must leave a way to finish. Deleting the Continue button
+// entirely used to pass the whole suite, leaving a raised gate and no
+// in-panel route back.
+test('after Cancel the panel still offers a way to finish the adoption', async () => {
+  const { host, ui, syncCalls } = await setup({
+    seed: () => { saveItems([it('local')]); },
+    fetchImpl: async () => ({
+      ok: true, status: 200, json: async () => ({ version: 4, blob: await encryptBlob(currentKey, st({ items: [it('r')] })) }),
+    }),
+  });
+  findButton(host, 'Cancel').click();
+  await ui.settled();
+  const resume = findButton(host, 'Continue');
+  assert.ok(resume, 'Cancel must not strand the device with a raised gate and no way forward');
+  resume.click();
+  await ui.settled();
+  assert.ok(findButton(host, 'Merge'), 'Continue must lead back to the choice');
+  assert.equal(syncCalls.length, 0);
+});
+
+// Minor 2: settings.js passes none of fetchImpl / apiBase / now, so all three
+// defaults ARE the production wiring. Breaking any of them used to pass the
+// whole suite.
+test('the injected effects default to the production wiring', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  await linkWithCode(bytesToBase64url(generateEncKey()));
+  const host = doc.createElement('div');
+  doc.body.appendChild(host);
+
+  const seen = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    seen.push({ url: String(url), opts });
+    return { ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) };
+  };
+  const syncCalls = [];
+  try {
+    const ui = initLinkUI({
+      host,
+      applyState: (s) => s,
+      syncOnceImpl: async (d) => { syncCalls.push(d); return { status: 'ok', pushed: false }; },
+    });
+    await ui.settled();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(seen.length, 1, 'the default fetchImpl must reach global fetch');
+  assert.equal(seen[0].url, `${WORKER_URL}/data`, 'apiBase must default to the deployed Worker');
+  assert.ok(seen[0].opts && seen[0].opts.headers && /^Bearer /.test(seen[0].opts.headers.authorization),
+    'the default fetchImpl must forward (url, opts) in that order — swapping them drops the Authorization header');
+  assert.equal(syncCalls.length, 1);
+  const stamped = syncCalls[0].now();
+  assert.ok(stamped instanceof Date);
+  assert.ok(Math.abs(stamped.getTime() - Date.now()) < 60_000,
+    'now must default to the real clock — an epoch default would stamp every lastSyncedAt as 1970');
+});
+
+// Minor 5: a blob with `items` but no `feeds` key passed chooseAdoption (its
+// count is null-safe) and then threw on preview.state.feeds.length. run()
+// caught it, so the user got the generic "Something went wrong on this
+// device" with no way forward.
+test('a structurally incomplete account blob gets its own message, not a generic crash', async () => {
+  const { host, syncCalls } = await setup({
+    seed: () => { saveItems([it('local')]); },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ version: 2, blob: await encryptBlob(currentKey, { schemaVersion: SCHEMA_VERSION, items: [it('r')] }) }),
+    }),
+  });
+  assert.equal(syncCalls.length, 0, 'an account this device cannot make sense of must not be adopted');
+  const text = allText(host);
+  assert.doesNotMatch(text, /Something went wrong on this device/,
+    'a malformed blob is a diagnosable condition, not an unexplained crash');
+  assert.match(text, /incomplete|malformed/i);
+  assert.ok(findButton(host, 'Try again'), 'the user needs a way forward');
+});
+
 test('an unlinked device warns that a bare device token creates a NEW account', () => {
   installFakeLocalStorage();
   const doc = installDom();
@@ -627,7 +861,12 @@ test('a link attempt that throws renders the error and never echoes the pasted c
   findButton(host, 'Link this device').click();
   return ui.settled().then(() => {
     assert.equal(isLinked(), false);
-    assert.match(allText(host), /base64url|link/i, 'the failure must be surfaced, not swallowed');
+    // Anchored on the LIBRARY's own message. The earlier /base64url|link/i
+    // could not fail: the unlinked view's own copy says "Link this device",
+    // "link code" and "linked", so replacing doLink's catch body with
+    // `notice = ''` — the error completely swallowed — still passed.
+    assert.match(allText(host), /Not a base64url string/,
+      "crypto.js's own message must reach the user, not a generic one");
     assert.ok(!allNonValueStrings(host).includes('this is not a link code'),
       'the pasted string must never be echoed — on a transient failure it IS a real link code');
   });

@@ -349,6 +349,31 @@ test('expectVersion that no longer matches applies nothing, pushes nothing and h
   assert.equal(loadSyncState().version, 0, 'the cursor must not advance past a pull that was never applied');
 });
 
+// expectVersion is checked once, right after the initial fetchRemote — NOT
+// again on the CAS-retry path, where a 409 could hand back a server state the
+// user never saw. That gap is unreachable, but not for the obvious reason
+// ("applyState has already written"), since the retry re-runs applyState.
+// It is unreachable because merge(emptyState(), remote) is wire-identical to
+// remote, so `pushed` is false and adopt-replace NEVER ISSUES A PUT — there is
+// no 409 to reach. Nothing pinned that invariant, so a future change making
+// replace push would silently turn the gap into a live defect instead of a
+// failing test.
+test('adopt-replace issues no PUT at all, which is what keeps the CAS-retry expectVersion gap unreachable', async () => {
+  const link = await linked();
+  saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
+  saveFeeds([{ id: 'fLocal', url: 'https://cal.example/l.ics', name: 'L', color: '#111', hidden: false, updatedAt: '2026-08-01T00:00:00.000Z' }]);
+  const server = fakeServer({ version: 2, blob: await encryptBlob(link.encKey, state({
+    items: [item('remote', '2026-08-01T00:00:00.000Z')],
+    feeds: [{ id: 'fRemote', url: 'https://cal.example/r.ics', name: 'R', updatedAt: '2026-08-01T00:00:00.000Z' }],
+  })) });
+  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: echo, adoptChoice: 'adopt-replace', expectVersion: 2 });
+  assert.equal(res.status, 'ok');
+  assert.equal(res.pushed, false);
+  assert.deepEqual(server.calls.filter(c => c.method === 'PUT'), [],
+    'a replace that pushed could hit a 409 and adopt a server state the user never saw, with expectVersion no longer consulted');
+});
+
 test('a failed adoption leaves the gate up so the user is asked again', async () => {
   installFakeLocalStorage();
   await linkWithCode(bytesToBase64url(generateEncKey()));

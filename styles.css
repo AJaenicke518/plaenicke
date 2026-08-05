@@ -373,6 +373,57 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 .feed-add button { width: 100%; }
 .feed-add button:disabled { opacity: 0.5; }
 
+/* ---------- sync / device linking (Task 8) ---------- */
+/* Deliberately the same idiom as .feed-add / .feed-actions above: inputs are
+   full-width bordered blocks on --card, buttons are flexible --bg chips. */
+.sync-status {
+  font-size: 0.8rem;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.sync-status-problem { color: var(--danger); }
+.link-ui > .note { margin: 0 0 8px; }
+.link-ui h4 {
+  font-size: 0.8rem;
+  margin: 12px 0 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.link-ui input {
+  display: block;
+  width: 100%;
+  font-size: 0.9rem;
+  font-family: inherit;
+  padding: 8px;
+  margin-bottom: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--ink);
+}
+.link-ui button {
+  width: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  font-size: 0.85rem;
+  padding: 8px 4px;
+  margin-bottom: 6px;
+}
+.link-ui button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.link-ui button.remove { color: var(--danger); }
+.link-warning:empty, .link-notice:empty, .link-failure:empty { display: none; }
+.link-failure { color: var(--danger); }
+/* A link code is 86 characters and must stay readable in a 360px panel
+   without wrapping into something that copies wrong: monospace, small, and
+   left to scroll horizontally inside its own field. */
+.link-code-input, .link-code-output, .link-token-input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.7rem;
+}
+.link-code-output { background: var(--bg); }
+
 /* ---------- tags & preview (restyled) ---------- */
 .tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
 .tag { font-size: 0.7rem; background: var(--chip-bg); color: var(--chip-ink); border-radius: 999px; padding: 1px 8px; }

@@ -1,8 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { installFakeLocalStorage } from './fake-localstorage.js';
-import { loadFeeds, saveFeeds } from '../js/storage.js';
+import { loadFeeds, saveFeeds, saveItems, loadSyncState } from '../js/storage.js';
 import { initSettings } from '../js/settings.js';
+import { linkWithCode } from '../js/auth.js';
+import { bytesToBase64url, generateEncKey, encryptBlob } from '../js/crypto.js';
+import { SCHEMA_VERSION } from '../js/merge.js';
 
 // --- minimal fake DOM ------------------------------------------------------
 //
@@ -174,6 +177,78 @@ test('settings: cycling a feed\'s color does not discard a feed that arrived in 
 
   const stored = loadFeeds();
   assert.deepEqual(stored.map((f) => f.id).sort(), ['feedA', 'feedC']);
+});
+
+// --- the linking UI mounted inside this panel (Task 8) ---------------------
+//
+// End-to-end through the REAL mount: initSettings -> open() -> initLinkUI ->
+// previewRemote -> chooseAdoption -> syncOnce -> applyState. Nothing here is
+// stubbed except the network and the state owner.
+//
+// The bug: onLinked was `notifyChanged`, which refreshes app.js's snapshot but
+// not open()'s own `feeds`/`feedCache` bindings, and never re-runs
+// renderCalendars(). After adopting an account with calendars the panel still
+// read "No calendars linked yet". Display only — reapplyFeedField, handleAdd
+// and removeFeed all re-read storage before writing — but wrong on screen.
+function allText(el) {
+  let out = el.textContent || '';
+  for (const c of el.children) out += ` ${allText(c)}`;
+  return out;
+}
+
+async function waitFor(predicate, label) {
+  for (let i = 0; i < 200; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => { setTimeout(resolve, 0); });
+  }
+  throw new Error(`timed out waiting for: ${label}`);
+}
+
+test('settings: the calendar list refreshes when an adoption lands while the panel is open', async () => {
+  globalThis.window = makeFakeWindow();
+  globalThis.document = makeFakeDocument();
+  installFakeLocalStorage();
+  saveFeeds([]);
+  saveItems([]); // empty device + an account with data -> 'auto', no dialog
+
+  const link = await linkWithCode(bytesToBase64url(generateEncKey()));
+  const remoteFeed = {
+    id: 'fRemote', url: 'https://cal.example/r.ics', name: 'Pulled Calendar',
+    updatedAt: '2026-08-01T00:00:00.000Z',
+  };
+  const blob = await encryptBlob(link.encKey, {
+    schemaVersion: SCHEMA_VERSION, items: [], feeds: [remoteFeed], tombstones: [],
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ version: 3, blob }) });
+
+  try {
+    const button = document.createElement('button');
+    const host = document.createElement('div');
+    initSettings({
+      button,
+      host,
+      onFeedsChanged: () => {},
+      // Stands in for app.js's applySyncedState: the feed owner assigns a
+      // real colour before saving (merge.js hands a first-seen feed
+      // color: null, and deserializeFeeds drops any feed whose color is not
+      // a string).
+      applyState: (s) => {
+        const assigned = s.feeds.map((f) => (typeof f.color === 'string' ? f : { ...f, color: 'var(--feed-palette-1)' }));
+        saveFeeds(assigned);
+        return { ...s, feeds: assigned };
+      },
+    });
+    button.click();
+
+    await waitFor(() => loadSyncState().adoptionPending === false, 'the adoption to complete');
+    assert.deepEqual(loadFeeds().map((f) => f.id), ['fRemote'], 'the pulled calendar must have been written');
+    await waitFor(() => allText(host).includes('Pulled Calendar'), 'the panel to show the pulled calendar');
+    assert.ok(!allText(host).includes('No calendars linked yet'),
+      'the panel must not still claim the device has no calendars after adopting an account that has one');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 // Note: Add is deliberately NOT exercised here the same way — handleAdd

@@ -394,6 +394,16 @@ export function initSettings({ button, host, onFeedsChanged, applyState }) {
       body.appendChild(addWrap);
     }
 
+    // Re-read this panel's own snapshot from storage and redraw the list.
+    // Used when something OUTSIDE this panel's own handlers wrote feeds —
+    // today that is only an adoption landing while the panel sits open.
+    function refreshCalendars() {
+      feeds = loadFeeds();
+      feedCache = loadFeedCache();
+      renderCalendars();
+      notifyChanged();
+    }
+
     renderCalendars();
 
     // --- Sync (Task 8) ------------------------------------------------
@@ -422,11 +432,15 @@ export function initSettings({ button, host, onFeedsChanged, applyState }) {
     initLinkUI({
       host: linkHost,
       applyState,
-      // Adoption can pull an entire account's worth of calendars, so app.js
-      // must reload its own feeds/feedCache snapshot and re-render — the same
-      // path a feed edit already takes.
-      onLinked: notifyChanged,
-      onUnlinked: notifyChanged,
+      // Adoption can pull an entire account's worth of calendars. notifyChanged
+      // alone only refreshes app.js's snapshot — THIS panel's own `feeds` and
+      // `feedCache` bindings were captured when open() ran, and
+      // renderCalendars() would never re-run, so the list sitting directly
+      // above still read "No calendars linked yet" next to five freshly pulled
+      // subscriptions. Display only (reapplyFeedField, handleAdd and Remove
+      // all re-read storage before writing), but wrong on screen.
+      onLinked: refreshCalendars,
+      onUnlinked: refreshCalendars,
     });
     document.body.style.overflow = 'hidden'; // no scrolling behind the modal (iOS)
     document.addEventListener('keydown', onKey);
