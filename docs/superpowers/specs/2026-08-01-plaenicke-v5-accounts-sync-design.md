@@ -49,7 +49,20 @@ linkCode = base64url( authToken(32 bytes) || encKey(32 bytes) )
 - **`authToken`** — proves the device may talk to the Worker. Stored server-side **hashed** (SHA-256), one row per device, individually revocable.
 - **`encKey`** — the AES-GCM key for the blob. **Never transmitted, never stored server-side.** The server cannot decrypt your data even with full database access.
 
-Minted by the owner via `POST /admin/device` (gated by an `ADMIN_SECRET` Worker secret), then pasted into each device once. Rotating a compromised token is one command; rotating `encKey` requires a re-upload from a device that still holds it.
+Minted by the owner via `POST /admin/device` (gated by an `ADMIN_SECRET` Worker secret).
+
+**A minted token is the right thing to paste into the FIRST device only.** `POST /admin/device` returns a bare 43-character `authToken`, and `linkWithCode` (`js/auth.js`) branches on decoded byte length: 32 bytes means *bootstrap*, so it calls `composeLinkCode(token, generateEncKey())` and mints a **brand-new `encKey`**. Pasting a fresh token into a second device therefore does not join the account — it silently starts a new, empty one, and that device can never decrypt what the first device wrote. (This is caught rather than destructive: the paste field warns before you confirm, `previewRemote` returns `undecryptable`, and the adoption gate stays raised so the account blob is never overwritten. But it is a dead end.)
+
+**To add a second device**, the 86-character *link code* must be composed on a device that already holds `encKey`:
+
+1. Mint a token: `POST /admin/device` with the admin secret.
+2. On the **already-linked** device, open Settings → Sync → **Link another device**.
+3. Paste the minted token there. The device returns `composeForNewDevice(token, getLink())` — an 86-character code carrying **this account's** `encKey`.
+4. Paste **that** code into the new device.
+
+Rotating a compromised token needs its `token_hash`, and `DELETE /admin/device` takes the hash rather than the token — with no list route, that means a `wrangler d1 execute` against `devices` first. Rotating `encKey` requires a re-upload from a device that still holds it.
+
+**There is no way to re-display a device's own link code.** `renderNewDevice` shows a code exactly once, only for a freshly minted token. Since `encKey` is never stored server-side, the codes held in your devices' `localStorage` are the account's only decryption credential — mint one spare at setup and store it somewhere durable.
 
 ### 4.2 Worker routes
 
@@ -242,8 +255,8 @@ Matches the existing `node --test` setup and the injected-effects pattern.
 
 1. **`crypto.randomUUID()` + `updatedAt` + client tombstones.** No server involvement; app behaves identically. Ships the ID-collision fix immediately.
 2. **Explicit Worker routing + 404**, `ALLOWED_ORIGIN` consolidation. No behavior change.
-3. **D1 + device tokens + `/data` endpoints + encryption.** Link the desktop, verify adoption is non-destructive.
-4. **Link the phone.** Verify the dedupe path with real duplicate calendars.
+3. **D1 + device tokens + `/data` endpoints + encryption.** Link the desktop with a freshly minted token (bootstrap — this is the one place a bare token is correct). Verify adoption is non-destructive.
+4. **Link the phone** — with an **86-character code composed on the desktop** via Settings → Sync → *Link another device*, **not** with a second minted token. See § 4.1; a fresh token would start a new empty account instead of joining. Choose **Merge**, never *Replace this device*: Replace discards that device's local data, and a feed URL is never re-displayed anywhere, so a discarded calendar subscription cannot be typed back in. Verify the dedupe path with real duplicate calendars.
 5. **Last: `POST /smart-add` requires auth.** Flipping this earlier breaks your own smart-add while sync is unproven.
 
 ## 10. Deferred (available later, not foreclosed)
