@@ -132,6 +132,10 @@ function openPanel(feeds) {
     host,
     onFeedsChanged: () => notified.push('view'),
     onSyncedDataChanged: () => notified.push('synced'),
+    // Not exercised by any test that uses this helper — they drive the theme
+    // and calendar controls — but open() mounts initLinkUI, which refuses to
+    // mount without one. app.js always passes applySyncedState here.
+    applyState: (s) => s,
   });
   button.click(); // host.childElementCount === 0 -> open()
   return { host, notified };
@@ -304,6 +308,27 @@ test('settings: initSettings refuses to mount without a synced-change callback',
     /onSyncedDataChanged/,
     'a missing wire here is silent data loss, not a degraded feature — it must fail at mount',
   );
+});
+
+// Pins the WIRE, not just linkui.js's own guard. settings.js destructures
+// applyState and forwards it without using or checking it, so if that forward
+// were dropped, linkui.js's mount guard would still be green in its own suite
+// and only this test would notice. Same shape as the unpinned reads this branch
+// has already been bitten by (the newly-pulled-feed fetch; the caller's
+// loadTombstones read).
+test('settings: the panel refuses to open its sync section without an applyState', () => {
+  globalThis.window = makeFakeWindow();
+  globalThis.document = makeFakeDocument();
+  installFakeLocalStorage();
+  const button = document.createElement('button');
+  initSettings({
+    button,
+    host: document.createElement('div'),
+    onFeedsChanged: () => {},
+    onSyncedDataChanged: () => {},
+  });
+  assert.throws(() => button.click(), /applyState/,
+    'a settings panel that cannot save synced data must say so at mount, not after a round trip to the account');
 });
 
 // --- the linking UI mounted inside this panel (Task 8) ---------------------

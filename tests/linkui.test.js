@@ -377,6 +377,40 @@ test('renderSyncStatus renders a corrupt stored code as its own state, not a fro
 // initLinkUI
 // =========================================================================
 
+// applyState is a STATIC WIRING FACT, known the instant the panel is
+// constructed. Before this guard the only check was inside adopt(), so
+// initSettings({button, host, onFeedsChanged}) — one missing key — mounted the
+// whole panel, rendered the status line, fired the mount-time GET against the
+// account and walked the user through Merge/Replace before reporting "the app
+// is wired up wrong. Reload the page and try again" — advice that cannot
+// possibly help, at the end of a network round trip, with a decision already
+// taken. Zero fallback: escalate at mount, where it is a one-line fix.
+test('initLinkUI refuses to mount without an applyState', () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  for (const bad of [undefined, null, 'applySyncedState', {}]) {
+    assert.throws(
+      () => initLinkUI({ host: doc.createElement('div'), applyState: bad }),
+      /applyState/,
+      `initLinkUI must refuse to mount with applyState = ${JSON.stringify(bad) ?? String(bad)}`,
+    );
+  }
+});
+
+test('initLinkUI mounts with an applyState and makes no network call doing it', () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  const calls = [];
+  // Fixture check for the guard above: the SAME call, one key restored, must
+  // mount cleanly — otherwise the throws above prove nothing about applyState.
+  assert.doesNotThrow(() => initLinkUI({
+    host: doc.createElement('div'),
+    applyState: (s) => s,
+    fetchImpl: async (url) => { calls.push(String(url)); throw new Error('no network call was expected here'); },
+  }));
+  assert.deepEqual(calls, []);
+});
+
 async function setup(o = {}) {
   installFakeLocalStorage();
   const doc = installDom();

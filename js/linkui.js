@@ -222,7 +222,17 @@ const FAILURE_TEXT = {
   error: 'The account could not be checked — the server returned an error. Nothing has been combined yet.',
   skipped: 'This device is not linked.',
   conflict: 'Another device kept changing the account while this one was combining. Nothing has been combined yet.',
-  'no-apply': 'This device cannot save synced data — the app is wired up wrong. Reload the page and try again.',
+  // There is no 'no-apply' entry, and that is deliberate. A missing applyState
+  // is a wiring bug, not a condition a user can be in: initLinkUI now refuses
+  // to mount without one (:392), applyState is a const closure binding that
+  // nothing reassigns, and adopt() is unreachable except through a completed
+  // mount — so no code path can set this status. It was REMOVED rather than
+  // kept as a belt-and-braces guard because it was not a guard: it converted a
+  // static wiring fact into a user-facing failure stage with a "Try again"
+  // button (it was in RETRYABLE) and the advice "Reload the page", none of
+  // which can ever help. Keeping it would leave the degradation path this fix
+  // exists to remove, ready for a future weakening of the mount check to
+  // silently reinstate with no test failing.
   'kept-changing': 'The account kept changing while this device was trying to join it, so nothing has been combined. '
     + 'That usually means another device is busy syncing — wait a moment and try again.',
   malformed: "The account's data is incomplete — this device cannot tell what it holds, so nothing has been combined. "
@@ -266,7 +276,7 @@ export function failureText(status, applied) {
 
 // Statuses where the sensible next step is to try the same thing again, as
 // opposed to re-linking with a different code.
-const RETRYABLE = new Set(['offline', 'error', 'conflict', 'skipped', 'no-apply', 'kept-changing', 'malformed']);
+const RETRYABLE = new Set(['offline', 'error', 'conflict', 'skipped', 'kept-changing', 'malformed']);
 
 // Bounded for the same reason syncOnce's CAS loop is (js/sync.js:217): a
 // condition that looks transient can be permanent. An account whose version
@@ -365,6 +375,23 @@ export function initLinkUI(options = {}) {
     syncOnceImpl = syncOnce,
     staleAfterMs = STALE_ADOPTION_MS,
   } = options;
+
+  // A STATIC WIRING FACT, checked where it becomes known. Everything this
+  // module does with the account ends in applyState — it is the only way merged
+  // records reach storage — so a mount without one cannot do the job it is
+  // being mounted for, and no amount of retrying or reloading changes that.
+  //
+  // It used to be checked inside adopt() instead, at the far end of a network
+  // round trip: initSettings({button, host, onFeedsChanged}) mounted the whole
+  // panel, painted the status line, fired the mount-time GET against the
+  // account and walked the user through Merge / Replace before answering "the
+  // app is wired up wrong. Reload the page and try again" — advice that cannot
+  // possibly help, delivered after the user had already made a decision.
+  // Zero fallback: escalate at mount, where it is a one-line fix at the call
+  // site, rather than degrade into a failure stage the user cannot act on.
+  if (typeof applyState !== 'function') {
+    throw new Error('initLinkUI requires an applyState function');
+  }
 
   // stage === null means "derive the view from stored state".
   let stage = null;
@@ -602,12 +629,6 @@ export function initLinkUI(options = {}) {
     // whether one is already under way. `writeInFlight` below is what
     // excludes concurrent writes.
     if (generation !== adoptionGeneration) return;
-    if (!applyState) {
-      stage = 'failed';
-      stageData = { status: 'no-apply', applied: false };
-      render();
-      return;
-    }
     stage = 'busy';
     stageData = { text: 'Combining…' };
     render();
