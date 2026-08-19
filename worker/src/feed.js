@@ -8,7 +8,8 @@
 // SECURITY: the target `url` query param is a capability token (an iCloud/
 // Google published-calendar URL embeds a secret). It must NEVER be logged.
 
-const ALLOWED_ORIGIN = 'https://ajaenicke518.github.io';
+import { ALLOWED_ORIGIN } from './cors.js';
+
 const MAX_BYTES = 1024 * 1024; // 1 MB
 const MAX_REDIRECTS = 3;
 const CACHE_TTL_SECONDS = 15 * 60;
