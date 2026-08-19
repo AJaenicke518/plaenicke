@@ -13,6 +13,7 @@ test('two devices converge and stop pushing', () => {
   const NOW = new Date('2026-09-01T00:00:00.000Z');
   let tieTrials = 0; // coverage counter — see the assertion after the loop
   let divergentTrials = 0; // ditto: trials that entered quiesce genuinely divergent
+  let crossKindTrials = 0; // ditto: trials where one id is held as BOTH kinds
 
   for (let trial = 0; trial < 100; trial += 1) {
     const server = { version: 0, wire: emptyState() };
@@ -89,6 +90,11 @@ test('two devices converge and stop pushing', () => {
       // a tie broken the wrong way makes the devices push at each other forever.
       const at = new Date(Date.UTC(2026, 7, 1) + Math.floor(step / 4) * 3600000).toISOString();
       const atMs = Date.parse(at);
+      // ONE id space for BOTH kinds, and it is load-bearing — see the
+      // crossKindTrials assertion after the loop. Splitting this into `i${n}`
+      // for items and `f${n}` for feeds is the obvious readability change, and
+      // it silently removes the only two mutant kills this file achieves that
+      // nothing else in the suite does.
       const id = `r${rnd(8)}`;
       const op = rnd(4);
       // `by` makes the two devices' writes for the same id at the same instant
@@ -144,12 +150,58 @@ test('two devices converge and stop pushing', () => {
       .map(([k]) => k.slice(kind.length + 1)).sort();
     assert.deepEqual(w0.items.map((i) => i.id).sort(), alive('item'), `trial ${trial}: item set does not match the op log`);
     assert.deepEqual(w0.feeds.map((f) => f.id).sort(), alive('feed'), `trial ${trial}: feed set does not match the op log`);
+
+    // Cross-kind coverage. Counted off the OP LOG, not off the converged state,
+    // for the same reason `alive` is: a merge.js mutant must not be able to
+    // move a coverage counter. `deleted` holding both `item:X` and `feed:X`
+    // means this trial produced two tombstones that share an id and differ only
+    // in `kind` — the precondition both unique kills below depend on.
+    const tombKinds = (kind) => new Set([...deleted.keys()]
+      .filter((k) => k.startsWith(`${kind}:`)).map((k) => k.slice(kind.length + 1)));
+    const itemTombIds = tombKinds('item');
+    if ([...tombKinds('feed')].some((fid) => itemTombIds.has(fid))) crossKindTrials += 1;
   }
+
+  // --- coverage floors -------------------------------------------------------
+  //
+  // Every floor below is a MEASURED number, not a taste. Method: the trial loop
+  // above was lifted verbatim into a harness parameterised by seed and run over
+  // ten seeds — 987654321 (the one this test uses), 1, 2, 3, 42, 1337,
+  // 20260805, 123456789, 2147483647, 55555 — at 100 trials each. The ranges are
+  // quoted per counter. Each floor sits well under the observed minimum, so
+  // ordinary drift in the draw order cannot make this test flap, and well over
+  // the trivial value, so a counter that collapses to a handful of trials
+  // fails instead of quietly reporting coverage it no longer has. `> 0` does
+  // not do the second job: a regression to 1 trial in 100 satisfies it.
 
   // Coverage, not behaviour: if no trial ever produced a same-id/same-instant
   // write from both devices, the tie rules were never exercised and the
   // ties-go-remote mutant would pass for want of a scenario, not for merit.
-  assert.ok(tieTrials > 0, 'no trial exercised a cross-device timestamp tie — the tie rules are untested');
+  // Measured 18–27 over the ten seeds (23 on this one).
+  assert.ok(tieTrials >= 10,
+    `only ${tieTrials} trials exercised a cross-device timestamp tie (floor 10, measured 18-27) — the tie rules are barely tested`);
+
+  // THE PROPERTY NOBODY ASSERTED UNTIL NOW. Items and feeds share one id space
+  // (`r0`-`r7`), so a trial routinely holds `r3` as an item AND as a feed, and
+  // writes tombstones for both. That collision is the ONLY reason this file
+  // kills two mutants nothing else in the suite touches:
+  //
+  //   - `byTombstone` (js/merge.js:136) sorting on `id` alone: the item and
+  //     feed tombstones for `r3` compare equal, the sort is stable, so the two
+  //     devices' wire forms differ by input order and `devices diverged` fires.
+  //   - `mergeTombstones` (js/merge.js:65) keying on `t.id` instead of
+  //     `${t.kind}:${t.id}`: the two tombstones collapse to whichever is newer,
+  //     the other kind's record is no longer suppressed, and `item set does not
+  //     match the op log` / `feed set does not match the op log` fires.
+  //
+  // Split the id spaces — `i${n}` for items, `f${n}` for feeds, a change any
+  // maintainer might make for readability — and both mutants SURVIVE while
+  // `tieTrials`, `divergentTrials` and every behaviour assertion here stay
+  // green. Measured 98–100 over the ten seeds (98 on this one); 0/100 on every
+  // seed with the id spaces split.
+  assert.ok(crossKindTrials >= 80,
+    `only ${crossKindTrials} trials held an id as both an item and a feed (floor 80, measured 98-100) — `
+    + 'the item and feed id spaces have been separated, and the cross-kind tombstone mutants are no longer caught');
 
   // The POSITIVE case of the fixed-point assertion above. `rounds < 50` only
   // ever fires on a mutant that never converges; on healthy source it needs a
@@ -176,6 +228,11 @@ test('two devices converge and stop pushing', () => {
   // with syncing disabled entirely during the op loop (100/100 trials fully
   // divergent, ~5.9 items + 5.3 feeds + 17.7 tombstones accumulated
   // independently): the round histogram is {1: 100}. Never once a 2.
-  assert.ok(divergentTrials > 0,
-    'no trial entered quiesce divergent — operations and syncs have re-coupled and convergence is untested');
+  //
+  // Measured 93–100 over the ten seeds (99 on this one). The 93 is seed 3; the
+  // brief for this fix quoted 95–100, which a floor of 95 would have over-fitted
+  // to the seeds that happened to be sampled.
+  assert.ok(divergentTrials >= 75,
+    `only ${divergentTrials} trials entered quiesce divergent (floor 75, measured 93-100) — `
+    + 'operations and syncs have re-coupled and convergence is barely tested');
 });
