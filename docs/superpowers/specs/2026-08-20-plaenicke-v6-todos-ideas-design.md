@@ -1,11 +1,11 @@
 # plaenicke V6 — To-dos, Ideas, and the Day-view Reorder
 
-**Date:** 2026-08-20
-**Status:** Draft. Design approved in conversation (Approach A); this file is the written form of that decision, pending Alex's review before planning.
+**Date:** 2026-08-20 (revised 2026-08-21 after Alex's review)
+**Status:** Approved. All three open questions answered — see § 11.
 **Owner:** Alexander Jaenicke
 **Baseline:** `main` at `f1a2f0e`.
 
-> **Scope note.** All three changes are client-only except one prompt edit in the Worker. Nothing here touches the sync protocol, the D1 schema, the Worker routes, or the crypto. It does, however, cross an invariant the V5 spec relied on — that every item has a `date` string — and § 7 is the part of this document that matters most.
+> **Scope note.** Nothing here touches the sync protocol, the D1 schema, the Worker routes, or the crypto. It does cross an invariant the V5 spec relied on — that every item has a `date` string — and § 7 is the part of this document that matters most. The Worker's smart-add prompt and response schema also change (§ 8); because the Worker deploys globally in one step while clients update per device, that edit is the rollout's tightest constraint rather than an afterthought (§ 9.1).
 
 ## 1. Goal
 
@@ -29,7 +29,8 @@ The unifying constraint: **do this without re-deriving sync correctness.** V5's 
 | New item fields | `done` (boolean), `notes` (string or null) | Fields, not arrays. Ride through an old device untouched — see § 3.2. |
 | Undated items | **`date: null` is now legal** | An idea has no date. The alternative — a sentinel date like `9999-12-31` — keeps `deserializeItems` happy but pollutes every date-ordered view and the month grid, and would need un-picking later. |
 | Ideas capture | Free text, split client-side | Under ~15 words the whole text is the title. Longer: first sentence → `title`, remainder → `notes`. No network call, works offline. |
-| Smart-add | **Prompt edit only, no new route** | `worker/src/prompt.js:37` currently routes "personal to-dos" to `"event"`, which is why to-dos land on the calendar. Adding `task` to the enum is a two-line change. |
+| **Who decides an item is a to-do** | **The smart-add model, via `type`** | Alex's capture path is voice in practice: speak into the phone, Web Speech transcribes, the Worker classifies. So the model decides, and no new UI is needed to declare intent. This makes the prompt load-bearing for correctness — see § 8. |
+| Smart-add | **Prompt and schema edit, no new route** | Was scoped as "add `task` to the enum". Because voice is the primary path, smart-add must also be able to produce **ideas**, which means `date` becomes nullable in the response schema. That is a bigger change than a prompt tweak and it reorders the rollout — see § 8 and § 9. |
 
 ## 3. Data model
 
@@ -55,13 +56,19 @@ The array case is the opposite: `merge()` only merges `items`, `feeds` and `tomb
 
 ### 3.3 Which page shows which item
 
+**The pages overlap by design.** A dated to-do appears on the calendar views *and* on the To-do page. In Alex's words: if it has a date it always goes on the calendar, and if it is also something that needs doing it goes on the to-do list as well. Nothing is moved off the calendar by being a to-do.
+
 | Page | Predicate |
 |---|---|
 | List / Month / Week / Day | `date` is a string (unchanged — undated items are excluded, see § 7.3) |
 | To-do | `type ∈ {due, start, milestone, task}` **and** `done !== true` |
 | Ideas | `type === 'idea'` |
 
-**Open question for Alex (§ 11):** manual add sets `type: 'general'` (`js/app.js:143`) and smart-add's catch-all is `'event'`. Neither appears on the To-do page under the predicate above. That is the approved shape, but it means an item typed into the box with a date lands on the calendar and *not* on the to-do list. If the intent is "anything not done and not an idea is a to-do", the predicate should be `type !== 'idea' && done !== true` instead. This needs a one-word answer before implementation.
+A completed to-do (`done === true`) leaves the To-do page but **stays on the calendar** — it still happened on that day. Style it as completed rather than hiding it.
+
+**Where `type` comes from.** Almost always the smart-add model: Alex speaks into the phone, `js/voice.js` transcribes to the entry box, and `handleAdd` sends it to the Worker when no date is picked. The model already assigns `type`, so classifying "buy milk" as a `task` and "dentist at 2pm" as an `event` is the model's job and needs no new control.
+
+**Accepted gap:** the manual path (`js/app.js:143`) hard-codes `type: 'general'`, and `general` is not on the To-do predicate. Manual add is the offline/no-Worker fallback — it fires only when Alex picks a date himself. An item added that way lands on the calendar and not the to-do list. This is accepted rather than fixed, because the alternatives are a new control on the add box (rejected — voice makes it unnecessary) or treating every `general` item as a to-do (rejected — it would put birthdays and appointments on the to-do list). If it turns out to bite in practice, the fix is a type selector on the manual path, which is additive.
 
 ## 4. Change 1 — day view reorder
 
@@ -77,19 +84,36 @@ This is genuinely a few lines and has no interaction with anything else in V6.
 
 New behaviour beyond the plumbing:
 
-- Each row gets a checkbox that sets `done`. Toggling `done` is the app's **first edit path** — until now `app.js` only adds and deletes. See § 7.4, which is not optional.
+- Each row gets a checkbox that sets `done`. Toggling `done` is the app's **first edit path** — until now `app.js` only adds and deletes. See § 5.1, which is not optional.
 - Rows show the date when there is one, and no date otherwise.
 - Ordering: dated items first by date ascending, then undated by `createdAt`. This needs the `sortItemsByDate` fix in § 7.2 regardless.
+- **No add box on this page.** To-dos are captured by voice through the main entry box like everything else (§ 3.3); the To-do page is a view plus the checkbox.
+
+### 5.1 Toggling `done` is the first edit path, and `merge.js` has a warning about exactly this
+
+`js/merge.js:10-15` says, verbatim, that per-record last-write-wins is tolerable **only** because the app has no edit path — "app.js adds and deletes, nothing rewrites a record — so the same id is almost never written on both devices. Anyone adding an edit feature must revisit this before shipping it."
+
+A `done` checkbox is that edit feature. Two devices can now write the same `id`, and the winner is decided by wall-clock `updatedAt` from two clocks that are never compared.
+
+The honest assessment: for this field the failure is **benign and self-correcting**. The values are `true` and `false`, both devices converge on one of them, and if the wrong one wins Alex sees an unticked box and ticks it again. That is not the case for a future edit path that rewrites `title` or `date`, where the loser's text is gone.
+
+So: ship the checkbox, and **update `merge.js`'s header comment** to say that an edit path now exists, that it is deliberately confined to a boolean, and that the next field to become editable re-opens the question. Leaving the comment claiming "no edit path" while shipping one is how the next person reasons from a false premise.
 
 ## 6. Change 3 — the Ideas page
 
-Same nav/section mechanism as § 5. An idea is created from a single text box:
+Same nav/section mechanism as § 5. An idea record is `type: 'idea'`, `date: null`, `time: null`, `endTime: null`, `done: false`, with the text split into `title` and `notes`:
 
 - Word count ≤ 15 → `title` is the whole text, `notes` is `null`.
 - Word count > 15 → `title` is the first sentence, `notes` is the remainder.
-- `type: 'idea'`, `date: null`, `time: null`, `endTime: null`, `done: false`.
 
 The sentence split is a pure function and belongs in its own module with table tests (empty string, no terminal punctuation, an abbreviation like "e.g.", a single 200-word sentence with no split point). "First sentence" must have a defined fallback when there is no sentence boundary: take the first 15 words as the title and the rest as notes rather than putting the entire text in the title.
+
+**Two capture paths, and the split function is shared.**
+
+1. **The Ideas page's own text box** — offline, no network, deterministic. This is the fallback and the way to add an idea when the Worker is unreachable.
+2. **Voice through the main entry box**, which is how Alex actually adds things. The model returns `type: 'idea'` with `date: null`; the client applies the same split to the returned `title` if no `notes` came back.
+
+Path 2 is why § 8 grew. It is also the path that makes the Ideas page reachable in normal use — an ideas feature that can only be typed, on a phone, by someone who captures everything by voice, would not get used.
 
 ## 7. The undated-item hazard
 
@@ -134,32 +158,67 @@ The first is simpler and matches the intent. Either way this must be decided bef
 
 `js/app.js:250` is `` `${it.date} — ${it.title}` ``. Cosmetic, and § 7.3's filter prevents it from ever being reached — but only as long as that filter is actually in place.
 
-## 8. Smart-add prompt change
+## 8. Smart-add: the classification path
 
-`worker/src/prompt.js:19` — add `'task'` to the `type` enum.
+This section was scoped as a two-line prompt tweak. Alex's review changed that: **voice through smart-add is the primary way items get created**, so the model's `type` choice is what decides which page a record lands on. The prompt is now load-bearing for correctness, and smart-add must be able to emit ideas as well as tasks.
 
-`worker/src/prompt.js:37` currently reads:
+### 8.1 Schema changes (`worker/src/prompt.js:4-29`)
+
+- `type` enum gains **`task`** and **`idea`**: `['due', 'start', 'milestone', 'event', 'task', 'idea']`.
+- **`date` becomes nullable** — `{ anyOf: [{ type: 'string' }, { type: 'null' }] }`. It is currently `{ type: 'string' }` and listed in `required`. Keep it in `required` so the model must state a date or state its absence explicitly, rather than omitting the key.
+- Add **`notes`**: `{ anyOf: [{ type: 'string' }, { type: 'null' }] }`, also required.
+
+### 8.2 Prompt changes (`worker/src/prompt.js:31-42`)
+
+Line 37 currently reads:
 
 > `"event"` for anything else (meetings, appointments, personal to-dos).
 
-Split it: `"event"` for meetings and appointments; `"task"` for a personal to-do with no fixed time. `date` stays required in the schema — smart-add always resolves a date, and ideas are not created through smart-add.
+Split it three ways: `"event"` for meetings and appointments — something that happens at a place and time; `"task"` for something Alex has to *do*, with or without a fixed time; `"idea"` for a thought to keep, with no date at all.
 
-The Worker deploys separately via `wrangler` with roughly 20 seconds of edge propagation, so the first smoke test after deploy can hit the old prompt.
+The `date` instruction needs a matching clause: resolve a date as today, **except** for `type: "idea"`, where `date` must be `null`. And a guard in the other direction — `null` is only correct for an idea; if a note implies something must happen but states no date, it is still a `task` and the model should resolve a date rather than reaching for `null`.
+
+### 8.3 Misclassification is caught by machinery that already exists
+
+The risk of letting the model choose is that a real appointment is classified as an `idea` and disappears from the calendar. `needsReview` already handles this: the prompt sets it true whenever the note is complex or the type is uncertain, and `decideFlow` (`js/smartadd.js:6-10`) routes anything with `needsReview` — or more than one item — to the preview UI for confirmation. Extend the existing instruction so an `idea` classification on a note that mentions any time or date words always sets `needsReview: true`.
+
+### 8.4 `js/preview.js` has a second, hard-coded type list
+
+`js/preview.js:2` is `const TYPES = ['due', 'start', 'milestone', 'event', 'general'];` — a duplicate of the Worker's enum that will silently disagree with it. A returned `task` or `idea` renders a `<select>` with **no option selected**, and the first `change` event rewrites the record's type to whatever the user happens to land on.
+
+Also in that file: `date.value = it.date` on an `<input type="date">` (line 24). Assigning `null` yields `''` rather than the string `"null"` (the IDL attribute is `[LegacyNullToEmptyString]`), so this does not visibly break — but an undated idea and a dated item whose date the model failed to resolve then look **identical** in the review UI. The preview needs to distinguish "intentionally undated" from "no date yet", and it needs a `notes` field, which it does not have at all today.
+
+### 8.5 Deployment
+
+The Worker deploys separately via `wrangler`, with roughly 20 seconds of edge propagation — the first smoke test after a deploy can hit the old prompt and look like a broken release. Note that the Worker and the client deploy through **different mechanisms with different timing**, which is exactly what § 9 has to sequence.
 
 ## 9. Rollout order
 
-The ordering is forced by § 7.1 and is not a matter of taste.
+The ordering is forced by § 7.1 and is not a matter of taste. Alex's decision to ship all three changes together applies to the *user-visible release* — the three pages arrive at once. It does not collapse the two deploy gates below, which exist because the client and the Worker deploy through different mechanisms.
 
-1. **Reader-side relaxation only, shipped and confirmed live on both devices.** `deserializeItems`, `sortItemsByDate`, `groupItemsByDate`, `dedupeState`, `makeItem` — every change that lets a device *tolerate* an undated record. No UI that can create one.
-2. **Confirm both devices are running it.** GitHub Pages serves `main` directly, so merging is the deploy; the service worker's `CACHE` name (`service-worker.js:13`, currently `plaenicke-v5-2`) must be bumped or a device keeps serving the old modules from cache and step 1 has not actually happened on that device. Verify by loading each device and checking the served `js/storage.js`, not by assuming.
-3. **Day-view reorder** (§ 4) — independent of everything above; can ship in step 1's release or its own.
-4. **To-do page** (§ 5). Creates no undated records, but introduces the `done` edit path.
-5. **Ideas page** (§ 6) — the first thing that creates `date: null`. Ships last.
-6. **Worker prompt change** (§ 8) — independent, any time.
+**Step 0 — sync visibility, before any of V6.** Alex's call, and the punchlist already promoted it (`~/punchlists/punchlist-plaenicke.md`, the RE-TRIAGE item). `renderSyncStatus()` looks up `#sync-status`, which exists only inside a mounted settings panel; `index.html` has no such element. So a revoked token, an undecryptable blob, a corrupt stored code, or a device stuck at `adoptionPending` all present as an app that works perfectly and quietly stops agreeing with the other device. V6 sharpens this: the Ideas page's entire content is undated records, which are precisely what goes missing when sync half-works. One dot on the app shell; `sync-status-problem` styling already exists in `paintStatus`.
 
-Steps 4 and 5 must not be merged before step 2 has been *observed*, not inferred.
+**Step 1 — client reader-side relaxation, shipped.** `deserializeItems`, `sortItemsByDate`, `groupItemsByDate`, `dedupeState`, `makeItem` — every change that lets a device *tolerate* an undated record. No UI that can create one. `js/preview.js`'s `TYPES` list (§ 8.4) belongs here too: it must accept `task` and `idea` before the Worker can return them.
 
-**This assumes the two-device link has actually been done.** As of 2026-08-20 it has not: no part of the client sync has run in a browser or against real D1. If V6 ships to a single unlinked device the rollout rule is vacuous — but it becomes live the moment the second device is linked, and a device linked *later* while running old code will drop every undated item and push the deletion. Prefer doing the link first.
+**Step 2 — confirm both devices are actually running step 1.** GitHub Pages serves `main` directly, so merging is the deploy, but the service worker's `CACHE` name (`service-worker.js:13`, currently `plaenicke-v5-2`) must be bumped or a device keeps serving the old modules from its cache and step 1 has not happened there. Verify by loading each device and checking the served `js/storage.js`. **Observed, not inferred.**
+
+**Step 3 — the three V6 pages together** (§ 4, § 5, § 6). This is the release Alex sees. The Ideas page is the first thing that can create `date: null`, which is why step 2 gates it.
+
+**Step 4 — the Worker prompt and schema change** (§ 8), last.
+
+### 9.1 Why the Worker change goes last, and why it is the sharpest gate
+
+The client deploys per device — each browser picks up new modules on its own schedule, subject to its service-worker cache. **The Worker deploys once, globally, for every device at the same instant.**
+
+So the moment `worker/src/prompt.js` can return `type: 'idea'` with `date: null`, *any* device that uses voice can create an undated record — including a device still serving old client modules from cache. That device's `deserializeItems` drops the record on the next load, and its next sync pushes the shortened list to the account. The item is gone from every device, with no tombstone and no trace.
+
+A device on old code hitting the new Worker fails *loudly* at first — `makeItem` throws `'Date is required'` and `handleAdd` surfaces it via `setMessage`, so nothing is added. That is the good case. The bad case is the same device after it has pulled an undated record created elsewhere, where the loss is silent.
+
+This is why step 4 is last and why step 2 must be observed on both devices rather than assumed.
+
+### 9.2 This assumes the two-device link has been done
+
+As of 2026-08-21 it has not: no part of the client sync has run in a browser or against real D1. If V6 ships to a single unlinked device the rollout rule is vacuous — but it goes live the moment the second device is linked, and **a device linked later while running old code will drop every undated item and push the deletion.** Do the link first. It is also the only way to test step 0's indicator against a real failure.
 
 ## 10. Deferred, not foreclosed
 
@@ -167,11 +226,17 @@ Steps 4 and 5 must not be merged before step 2 has been *observed*, not inferred
 
 Also deferred: to-do ordering/priority, recurring to-dos, converting an idea into a dated item, and any notification path.
 
-## 11. Open questions for Alex
+## 11. Questions asked, and what Alex answered (2026-08-21)
 
-1. **To-do predicate** (§ 3.3) — is a `general`-typed dated item a to-do or not? One word decides it.
-2. **Ship together or separately** — the day-view reorder is a few lines and has no dependency on the rest. Alex leaned "all three, keep it simple" but did not answer directly. § 9 works either way.
-3. **V6 before or after the sync-visibility fix.** There is no sync indicator outside the Settings panel, so a broken sync presents as an app that works perfectly and quietly stops agreeing with the other device. The devil's advocate argued a passive indicator should precede Plan 4. V6 adds a page whose whole content is undated records, which are exactly the records that go missing when sync half-works — that argues for the indicator first.
+1. **Do the pages overlap, and what makes an item a to-do?** — A dated item *always* stays on the calendar; if it is also something that needs doing it appears on the To-do page as well. The two are not exclusive (§ 3.3).
+
+   On how the app knows: **the model decides.** Alex captures by voice in practice, so smart-add classifies, and no new UI is needed to declare intent. This is the answer that reshaped § 8 — it pulled ideas into the smart-add path, which made `date` nullable in the response schema and turned the Worker deploy into the rollout's sharpest gate (§ 9.1). Both UI alternatives (a to-do capture box, a checkbox on the add box) were considered and rejected as unnecessary given voice.
+
+2. **Ship together or separately?** — **All three together.** § 9 step 3.
+
+3. **V6 before or after the sync-visibility fix?** — **Indicator first.** § 9 step 0.
+
+Nothing here is open. The remaining prerequisite is not a decision but an action: the physical two-device link (§ 9.2).
 
 ## 12. Testing
 
@@ -179,13 +244,22 @@ Also deferred: to-do ordering/priority, recurring to-dos, converting an idea int
 - **`sortItemsByDate` needs an anti-symmetry test**, not just a "nulls come last" test — assert that `cmp(a,b)` and `cmp(b,a)` have opposite signs for every pairing of dated and undated. The current bug passes a naive expected-order assertion on small arrays.
 - **A round-trip test through `deserializeItems`** proving an undated record survives, and that `date: undefined` / `date: 42` are still rejected.
 - **A `dedupeState` test** with two distinct undated items sharing a title, asserting both survive and no tombstone is written.
-- **Extend the convergence simulation** with undated records, including the case where one side holds an undated item and the other does not.
+- **A test that `js/preview.js`'s `TYPES` and the Worker's `type` enum cannot drift** (§ 8.4). The two lists are in different deploy units, so a divergence ships silently. Either assert equality across the two modules or derive both from one exported constant — the latter is better, and the repo already set that precedent with `tests/fake-localstorage.js`.
+- **Extend the convergence simulation** with undated records, including the case where one side holds an undated item and the other does not, and a `done` toggle racing on both devices (§ 5.1).
 - **Mutation-test the new assertions.** Several tests in this repo have passed under implementations that were badly wrong; the V5 ledger records nine occasions where a defect lived in reviewed-and-cleared code and every one was caught by *running* it, not reading it.
+
+Two things in this spec are **not** covered by any test that can run in `node --test`, and should be checked by hand on a real device rather than assumed: that a bumped service-worker `CACHE` actually caused a device to fetch new modules (§ 9 step 2), and that the smart-add prompt classifies Alex's real phrasing into the right `type` (§ 8.2). The second is a prompt-quality question and the only honest way to answer it is to speak a dozen realistic notes at the deployed Worker and read the output.
 
 Run with `npm test` (bare `node --test`, which recurses and already includes `worker/`). `node --test tests/` runs zero tests and reports one spurious failure. Storage-touching tests need `installFakeLocalStorage()` from `tests/fake-localstorage.js`.
 
 ## 13. What this document verified rather than assumed
 
-Every file-and-line reference above was read at `f1a2f0e`. Four items in § 7 were **not** in the approved design as discussed and were found while writing this spec: `sortItemsByDate`'s broken comparator (§ 7.2), `groupItemsByDate`'s accidental `"null"` bucket (§ 7.3), `dedupeState`'s title collision with a propagating tombstone (§ 7.4), and `makeItem`'s outright rejection (§ 7.5). The conversation had recorded only `deserializeItems`.
+Every file-and-line reference above was read at `f1a2f0e`, and the three JavaScript coercion claims in § 7 were confirmed by execution, not by reading: `cmp(null, str)` and `cmp(str, null)` both return `1`; the `dedupeState` key for two same-titled undated items is byte-identical; `map[null]` produces the key `"null"`.
 
-That changes the size of the change: V6 is not "two new pages plus a filter relaxation". It is a five-call-site change to the undated-item contract, three of whose failure modes are silent and one of which destroys data at link time.
+**First pass** (writing the spec) found four undated-item break points the conversation had not recorded, beyond the known `deserializeItems` filter: `sortItemsByDate` (§ 7.2), `groupItemsByDate` (§ 7.3), `dedupeState` (§ 7.4), `makeItem` (§ 7.5). Three fail silently; one destroys data at link time.
+
+**Second pass** (after Alex's answer that the model decides `type`) found two more, both on the smart-add path that the first pass had treated as a two-line prompt edit: `js/preview.js`'s duplicated `TYPES` list (§ 8.4), and the fact that `date` is `required: string` in the Worker's response schema, so ideas cannot come through smart-add at all without a schema change (§ 8.1).
+
+The second pass also produced the one structural insight in this document: **the Worker deploys globally in a single step while clients update per device.** Making smart-add able to emit undated records therefore arms every device at once, including one still serving old modules from its service-worker cache — which is why the Worker change is now last in the rollout rather than "independent, any time" (§ 9.1).
+
+The pattern is worth naming, because it is the same one the V5 ledger records nine times: each pass over the *actual code* found defects that reading the design did not. V6 is not "two new pages plus a filter relaxation."
