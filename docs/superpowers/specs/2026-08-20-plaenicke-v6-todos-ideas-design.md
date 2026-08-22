@@ -1,36 +1,35 @@
 # plaenicke V6 — To-dos, Ideas, and the Day-view Reorder
 
-**Date:** 2026-08-20 (revised 2026-08-21 after Alex's review)
-**Status:** Approved. All three open questions answered — see § 11.
+**Date:** 2026-08-20 (revised 2026-08-21 after Alex's review; revised again 2026-08-22 after adversarial + constructive review)
+**Status:** Approved. Design questions all answered (§ 11); the second revision changed the *mechanism*, not the shape.
 **Owner:** Alexander Jaenicke
-**Baseline:** `main` at `f1a2f0e`.
+**Baseline:** `main` at `83b1774`.
 
-> **Scope note.** Nothing here touches the sync protocol, the D1 schema, the Worker routes, or the crypto. It does cross an invariant the V5 spec relied on — that every item has a `date` string — and § 7 is the part of this document that matters most. The Worker's smart-add prompt and response schema also change (§ 8); because the Worker deploys globally in one step while clients update per device, that edit is the rollout's tightest constraint rather than an afterthought (§ 9.1).
+> **What the 2026-08-22 review changed.** The previous draft made `date` nullable for ideas. Two independent reviews rejected that, and one found that the draft's own prescribed fix for `dedupeState` would have **tombstoned every idea on the account** — strictly worse than the bug it cured, which is the V5 ledger's most-repeated failure shape. `date` is now never null. § 13 records what was verified by execution and what changed.
 
 ## 1. Goal
 
-Three changes to how existing data is presented, plus one new kind of record:
+Three changes:
 
 1. **Day view** shows the untimed block *above* the hour grid, not below it.
-2. **To-do page** — a fifth view listing actionable items that are not done, independent of date.
-3. **Ideas page** — a sixth view for undated notes-to-self, captured as free text.
+2. **To-do page** — a fifth view listing actionable items that are not done.
+3. **Ideas page** — a sixth view for notes-to-self with no scheduled date.
 
-The unifying constraint: **do this without re-deriving sync correctness.** V5's client sync took ten tasks and roughly forty-five defects to establish, nine of which were found in the plan's own prescribed code after adversarial review had cleared it. The design below is chosen to keep the merge path, the tombstone kinds, and `schemaVersion` untouched.
+The unifying constraint: **do this without re-deriving sync correctness.** V5's client sync took ten tasks and roughly forty-five defects to establish, nine of them found in the plan's own prescribed code *after* adversarial review had cleared it. Every decision below is made to keep the merge function, the tombstone kinds, `schemaVersion`, and the deploy sequence untouched.
 
-**Non-goals:** AI summarisation of long ideas (§ 10); recurring to-dos; due-date reminders or notifications; reordering or prioritising to-dos; any change to the merge function, the CAS protocol, the Worker's data routes, or the link flow.
+**Non-goals:** AI summarisation of long ideas (§ 10); recurring to-dos; reminders; to-do ordering or priority; any change to `merge()`'s protocol, the CAS loop, the Worker's data routes, the D1 schema, or the crypto.
 
 ## 2. Decisions
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Record shape | **Everything stays an `item`** | A separate `todos`/`ideas` array in the synced blob means a `schemaVersion` bump, a migration, new `merge()` branches and new tombstone kinds. All four are load-bearing sync code. Discriminating on `type` costs nothing. |
-| `schemaVersion` | **Stays 1** | No new arrays in the blob. An un-updated device merging a blob it partly ignores would push the data back missing; adding only *fields* avoids that entirely (§ 3.2). |
-| New `type` values | `task`, `idea` | Joins the existing `due`, `start`, `milestone`, `event`, `general`. |
-| New item fields | `done` (boolean), `notes` (string or null) | Fields, not arrays. Ride through an old device untouched — see § 3.2. |
-| Undated items | **`date: null` is now legal** | An idea has no date. The alternative — a sentinel date like `9999-12-31` — keeps `deserializeItems` happy but pollutes every date-ordered view and the month grid, and would need un-picking later. |
-| Ideas capture | Free text, split client-side | Under ~15 words the whole text is the title. Longer: first sentence → `title`, remainder → `notes`. No network call, works offline. |
-| **Who decides an item is a to-do** | **The smart-add model, via `type`** | Alex's capture path is voice in practice: speak into the phone, Web Speech transcribes, the Worker classifies. So the model decides, and no new UI is needed to declare intent. This makes the prompt load-bearing for correctness — see § 8. |
-| Smart-add | **Prompt and schema edit, no new route** | Was scoped as "add `task` to the enum". Because voice is the primary path, smart-add must also be able to produce **ideas**, which means `date` becomes nullable in the response schema. That is a bigger change than a prompt tweak and it reorders the rollout — see § 8 and § 9. |
+| Record shape | **Everything stays an `item`** | Separate `todos`/`ideas` arrays mean new `merge()` branches, new `toWire()` entries, new tombstone kinds and new convergence coverage — all load-bearing sync code, for zero user-visible benefit. |
+| `schemaVersion` | **Stays 1** | See § 3.2, and note the corrected reasoning there — the usual justification for this is false. |
+| New `type` values | `task`, `idea` | Joins `due`, `start`, `milestone`, `event`, `general`. |
+| New item fields | `done` (boolean), `notes` (string or null) | Fields, not arrays. They ride through an old device untouched (§ 3.2). |
+| **Unscheduled records** | **`date` is NEVER null. An idea carries its capture date, and `type === 'idea'` is the discriminator.** | This is the reversal. See § 3.4 — it removes five of six break points and the entire multi-step rollout gate. |
+| Who decides an item is a to-do | **The smart-add model, via `type`** | Alex captures by voice, so the model classifies and no new UI is needed. |
+| Smart-add | **Prompt + enum edit only** | With no nullable date, the Worker's response schema keeps `date` as required `string`. Only the `type` enum and the instructions change. |
 
 ## 3. Data model
 
@@ -41,225 +40,218 @@ The unifying constraint: **do this without re-deriving sync correctness.** V5's 
   id, title, date, time, endTime, createdAt, updatedAt,
   type,      // 'general' | 'due' | 'start' | 'milestone' | 'event' | 'task' | 'idea'
   project, subject, category,
-  done,      // NEW — boolean. Absent on every pre-V6 record; read as false.
-  notes,     // NEW — string or null. Absent on every pre-V6 record; read as null.
+  done,      // NEW — boolean. Absent on pre-V6 records; read as `it.done === true`.
+  notes,     // NEW — string or null. Absent on pre-V6 records; read as null.
 }
 ```
 
-`date` may now be `null`. `time` and `endTime` must be `null` whenever `date` is `null` — a time without a day has nowhere to render.
+`date` is **always** a `YYYY-MM-DD` string, as it is today. For an idea it is the capture date and is never displayed.
 
-### 3.2 Why adding fields is safe and adding arrays is not
+### 3.2 Why adding fields is safe — and the usual reason for keeping `schemaVersion` at 1 is wrong
 
-**Verified at `f1a2f0e`:** `deserializeItems` (`js/storage.js:27-37`) filters, then `.map`s each surviving record to *itself* when `updatedAt` is already a string. It does not rebuild from a field whitelist. An old device that pulls a blob containing `done` and `notes` therefore stores those fields verbatim and pushes them back intact on its next sync. The same is true of `merge()`'s `unionById` (`js/merge.js:39-48`), which sets whole records into a Map and never inspects their fields.
+**Verified:** `deserializeItems` (`js/storage.js:27-37`) filters, then maps each surviving record to *itself*. It does not rebuild from a whitelist. `unionById` (`js/merge.js:39-48`) sets whole records into a Map without inspecting fields. So `done` and `notes` genuinely survive a round trip through a device running old code.
 
-The array case is the opposite: `merge()` only merges `items`, `feeds` and `tombstones`, and `toWire()` only serialises those three. A `todos` array added to the blob would be dropped by any device that had not been updated, and that device's next push would write the truncated blob back over the account. That is why `schemaVersion` exists and why `merge()` throws on anything other than 1.
+**But `makeItem` (`js/items.js:17-29`) IS a whitelist rebuilder.** It returns an object literal with eleven fixed keys. Passing `notes` into it today returns a record with no `notes`. This was missed by the previous draft and would have shipped ideas with their body text silently discarded at creation. `makeItem` must carry `done` and `notes`.
+
+**The correction to the `schemaVersion` argument.** Earlier drafts (and CLAUDE.md) said a new array is dangerous because "an un-updated device merges while ignoring it and pushes the data back missing." That is only true if you add the array *without* bumping the version. If you bump it, `requireKnownVersion` (`js/merge.js:31-35`) **throws**, `syncOnce` applies nothing and pushes nothing, and the device surfaces an error. A version bump is a loud, non-destructive halt — the codebase's own fail-closed idiom.
+
+`schemaVersion` still stays 1, but for the honest reason: the cost is *code surface* in the sync layer, not data loss. The next person must not reason from the false premise.
 
 ### 3.3 Which page shows which item
 
-**The pages overlap by design.** A dated to-do appears on the calendar views *and* on the To-do page. In Alex's words: if it has a date it always goes on the calendar, and if it is also something that needs doing it goes on the to-do list as well. Nothing is moved off the calendar by being a to-do.
+**The pages overlap by design.** A dated to-do appears on the calendar views *and* on the To-do page. In Alex's words: if it has a date it always goes on the calendar, and if it is also something that needs doing it goes on the to-do list as well.
 
 | Page | Predicate |
 |---|---|
-| List / Month / Week / Day | `date` is a string (unchanged — undated items are excluded, see § 7.3) |
-| To-do | `type ∈ {due, start, milestone, task}` **and** `done !== true` |
+| List / Month / Week / Day | `isScheduled(it)` — i.e. `it.type !== 'idea'` |
+| To-do | `type ∈ {due, start, milestone, task}` **and** `it.done !== true` |
 | Ideas | `type === 'idea'` |
 
-A completed to-do (`done === true`) leaves the To-do page but **stays on the calendar** — it still happened on that day. Style it as completed rather than hiding it.
+A completed to-do leaves the To-do page but **stays on the calendar** — it still happened that day. Style it as completed; `itemTypeClass` (`js/calendar.js:53`) is the documented home for that class rule and this is the only V6 change that lands there.
 
-**Where `type` comes from.** Almost always the smart-add model: Alex speaks into the phone, `js/voice.js` transcribes to the entry box, and `handleAdd` sends it to the Worker when no date is picked. The model already assigns `type`, so classifying "buy milk" as a `task` and "dentist at 2pm" as an `event` is the model's job and needs no new control.
+The To-do and Ideas pages read `items` directly, **not** `visibleItems()` — external feed instances carry no `type`, so they would fail the predicates by accident rather than by design.
 
-**Accepted gap:** the manual path (`js/app.js:143`) hard-codes `type: 'general'`, and `general` is not on the To-do predicate. Manual add is the offline/no-Worker fallback — it fires only when Alex picks a date himself. An item added that way lands on the calendar and not the to-do list. This is accepted rather than fixed, because the alternatives are a new control on the add box (rejected — voice makes it unnecessary) or treating every `general` item as a to-do (rejected — it would put birthdays and appointments on the to-do list). If it turns out to bite in practice, the fix is a type selector on the manual path, which is additive.
+**Accepted gap:** manual add hard-codes `type: 'general'` (`js/app.js:143`), which is not on the To-do predicate. Manual add is the offline fallback, used only when Alex picks a date himself. Rejected alternatives: a control on the add box (unnecessary given voice), and treating every `general` item as a to-do (would put birthdays on the to-do list).
+
+### 3.4 Why `date` is never null
+
+An idea's `date` is the day it was captured — the same `toISO(new Date())` value `addItems` already writes to `createdAt`. `type === 'idea'` is what marks it unscheduled, exported from `items.js` as:
+
+```js
+export function isScheduled(it) { return it.type !== 'idea'; }
+```
+
+This works because under § 8, **`idea` is the only unscheduled record kind that exists** — the model resolves a real date for every `task`. A second "is it scheduled" signal would be redundant with `type`.
+
+What this buys, against the previous draft's own list of break points:
+
+| Break point | Under `date: null` | Under capture-date |
+|---|---|---|
+| `deserializeItems` drops the record | **Silent loss** | Avoided — `date` is a string |
+| `sortItemsByDate` is not a strict weak ordering | Broken (verified) | Avoided — no null reaches it |
+| `groupItemsByDate` buckets under `"null"` | Accidentally correct | One explicit filter in `visibleItems()` |
+| `dedupeState` collapses same-titled ideas | Any two ideas sharing a title | Narrowed to same title *and* same capture day — still fixed (§ 6.1) |
+| `makeItem` throws `'Date is required'` | Must be relaxed | Avoided |
+| `renderList` prints `"null — …"` | Reachable (verified) | Avoided |
+| **The whole staged rollout gate** | Required, human-executed | **Dissolved** |
+
+The decisive argument is what happens on a device running old code. Under nulls, it silently drops the record. Under a capture date, it keeps the idea and merely renders it on the calendar on its capture day — **ugly, never destructive.** Given that no part of this sync has ever run against a real browser or real D1, deleting a correctness gate that a non-programmer has to execute correctly across two devices is worth more than the semantic tidiness of a null.
+
+**The honest cost:** `date` on an idea means "captured on", not "happens on". That is contained by `isScheduled()` and a comment on `makeItem`. The real debt is that unscheduled-ness is not composable — a genuinely undated *task* would need real nulls. § 8 forecloses that for V6.
+
+**Ship the tolerance anyway.** Relax `deserializeItems` to `it.date === null || typeof it.date === 'string'` in V6 as **deliberate dead code**, with no record relying on it. Then a future version can adopt real nulls with the tolerance already provably deployed on both devices, instead of gating a user-visible feature on a rollout executed by hand. The relaxed predicate must still *reject* `undefined`, numbers and objects.
+
+**Watch the empty string.** `''` passes `typeof x === 'string'`, is falsy, and is exactly what a cleared `<input type="date">` yields (`js/preview.js:25`). It is a third state that behaves like neither. `makeItem` must keep rejecting it — the guard is `if (!fields.date) throw`, which is correct today and must not be loosened to a null check.
 
 ## 4. Change 1 — day view reorder
 
-`js/dayview.js:61-88` builds the "Other tasks" block inside a trailing `if (untimed.length > 0)` and appends it *after* `container.appendChild(grid)` at line 58. The change is to append it before the grid.
+`js/dayview.js:61-88` builds the "Other tasks" block and appends it *after* `container.appendChild(grid)` at line 58. Append it before the grid instead.
 
-**One ordering trap, concrete:** line 59 sets `grid.scrollTop`, which only takes effect once `grid` is in the document. Building the untimed block first and appending it first is fine; moving the `container.appendChild(grid)` / `grid.scrollTop = …` pair apart is not. Keep those two lines adjacent and after both appends.
+**One ordering trap:** line 59 sets `grid.scrollTop`, which only takes effect once `grid` is in the document. Keep `container.appendChild(grid)` and the `grid.scrollTop` assignment adjacent, and after both appends.
 
-This is genuinely a few lines and has no interaction with anything else in V6.
+No data-model or sync surface. Genuinely a few lines.
 
 ## 5. Change 2 — the To-do page
 
-`index.html:48-53` is a `.view-toggle` nav of four buttons; `index.html:55-84` is four `<section>` elements toggled by the `hidden` attribute. `showView()` (`js/app.js:359-365`) drives both from two parallel object literals. Adding a fifth entry to each is the whole mechanism.
+`index.html:48-53` is a four-button `.view-toggle`; `index.html:55-84` is four `<section>`s toggled by `hidden`. `showView()` (`js/app.js:359-365`) drives both from two parallel object literals. Adding entries to each is the whole mechanism.
 
-New behaviour beyond the plumbing:
+- Each row gets a checkbox that sets `done`.
+- Rows show the date.
+- Ordering: by date ascending, then `createdAt`.
+- **No add box.** To-dos are captured by voice through the main entry box (§ 3.3).
 
-- Each row gets a checkbox that sets `done`. Toggling `done` is the app's **first edit path** — until now `app.js` only adds and deletes. See § 5.1, which is not optional.
-- Rows show the date when there is one, and no date otherwise.
-- Ordering: dated items first by date ascending, then undated by `createdAt`. This needs the `sortItemsByDate` fix in § 7.2 regardless.
-- **No add box on this page.** To-dos are captured by voice through the main entry box like everything else (§ 3.3); the To-do page is a view plus the checkbox.
+**Where the write lands.** CLAUDE.md's ownership invariant: `app.js` owns `plaenicke.items` and writes from its module-scope snapshot. The checkbox handler must mutate the record inside that array, then `saveItems(items)`, `render()`, `scheduleSync()` — the same shape as `deleteItem`. A writer anywhere else fails silently.
 
-### 5.1 Toggling `done` is the first edit path, and `merge.js` has a warning about exactly this
+### 5.1 The checkbox is the first edit path, and it can resurrect a deleted item
 
-`js/merge.js:10-15` says, verbatim, that per-record last-write-wins is tolerable **only** because the app has no edit path — "app.js adds and deletes, nothing rewrites a record — so the same id is almost never written on both devices. Anyone adding an edit feature must revisit this before shipping it."
+`js/merge.js:10-15` says per-record last-write-wins is tolerable **only** because the app has no edit path: "app.js adds and deletes, nothing rewrites a record… Anyone adding an edit feature must revisit this before shipping it." The checkbox is that feature. Both reviews independently found the same consequence, and it is not the one the previous draft analysed.
 
-A `done` checkbox is that edit feature. Two devices can now write the same `id`, and the winner is decided by wall-clock `updatedAt` from two clocks that are never compared.
+**The previous draft's argument was wrong.** It reasoned that because `done` is a boolean, a race is self-correcting. That is about which *value* wins. It never asked what bumping `updatedAt` does. Both answers are load-bearing:
 
-The honest assessment: for this field the failure is **benign and self-correcting**. The values are `true` and `false`, both devices converge on one of them, and if the wrong one wins Alex sees an unticked box and ticks it again. That is not the case for a future edit path that rewrites `title` or `date`, where the loser's text is gone.
+- **If the toggle does not bump `updatedAt`:** `unionById` ties go to remote (`>=`, line 45), so the tick is silently reverted on the next sync. Self-*reverting*, not self-correcting. Verified.
+- **If the toggle does bump `updatedAt`:** `applyTombstones` (`js/merge.js:99-101`) keeps any record whose `updatedAt` is at or after the deletion, on the documented assumption that a later `updatedAt` means "re-created after the deletion". With an edit path that assumption is false. Verified: item deleted on the laptop at 09:00, ticked on the phone at 12:00 → **the item comes back on every device**, with `done: true`, so it is off the To-do page and reappears only on the calendar.
 
-So: ship the checkbox, and **update `merge.js`'s header comment** to say that an edit path now exists, that it is deliberately confined to a boolean, and that the next field to become editable re-opens the question. Leaving the comment claiming "no edit path" while shipping one is how the next person reasons from a false premise.
+**Decision: bump `updatedAt` (the second horn) and accept the resurrection.** It is the only horn that converges. The failure needs a delete on one device racing a tick on another before they sync; the result is a reappearing calendar entry, which is annoying and re-deletable, not lost data. The alternative — teaching `applyTombstones` to distinguish an edit from a re-creation — is a change to the single most defect-prone function in the codebase, on the eve of a first real link. The ledger records four occasions where exactly that kind of fix introduced a worse defect than the one it cured.
+
+Required alongside shipping it:
+- **Update `merge.js`'s header comment.** Leaving it claiming "no edit path" while shipping one is how the next person reasons from a false premise. It must say an edit path now exists, that it is deliberately confined to a boolean, that deletions are losable to a concurrent edit, and that the next editable field re-opens the question.
+- **Pin the behaviour with a test** so it is a known property rather than a surprise (§ 12).
 
 ## 6. Change 3 — the Ideas page
 
-Same nav/section mechanism as § 5. An idea record is `type: 'idea'`, `date: null`, `time: null`, `endTime: null`, `done: false`, with the text split into `title` and `notes`:
+Same nav/section mechanism. An idea record is `type: 'idea'`, `date` = capture date, `time: null`, `endTime: null`, `done: false`.
 
-- Word count ≤ 15 → `title` is the whole text, `notes` is `null`.
-- Word count > 15 → `title` is the first sentence, `notes` is the remainder.
+**Text handling — simplified from the previous draft.** `notes` holds the **complete original text**; `title` is a derived display label (first sentence, or the first 15 words when there is no sentence boundary). Short text (≤ 15 words) sets `title` to the whole text and `notes` to `null`.
 
-The sentence split is a pure function and belongs in its own module with table tests (empty string, no terminal punctuation, an abbreviation like "e.g.", a single 200-word sentence with no split point). "First sentence" must have a defined fallback when there is no sentence boundary: take the first 15 words as the title and the rest as notes rather than putting the entire text in the title.
+The previous draft had `notes` hold "the remainder" after the split, which means a split bug can lose words. Keeping the full text in `notes` makes that structurally impossible: the title is only ever a label, and no information depends on getting the split right. This also collapses the edge-case list — an abbreviation like "e.g." producing an early split is now cosmetic.
 
-**Two capture paths, and the split function is shared.**
+Two capture paths sharing one pure split function:
 
-1. **The Ideas page's own text box** — offline, no network, deterministic. This is the fallback and the way to add an idea when the Worker is unreachable.
-2. **Voice through the main entry box**, which is how Alex actually adds things. The model returns `type: 'idea'` with `date: null`; the client applies the same split to the returned `title` if no `notes` came back.
+1. **The Ideas page's text box** — offline, deterministic, and the fallback when the Worker is unreachable.
+2. **Voice through the main entry box** — how Alex actually adds things. The model returns `type: 'idea'`; the client applies the same split.
 
-Path 2 is why § 8 grew. It is also the path that makes the Ideas page reachable in normal use — an ideas feature that can only be typed, on a phone, by someone who captures everything by voice, would not get used.
+### 6.1 `dedupeState` — and the trap in the previous draft's fix
 
-## 7. The undated-item hazard
+`js/merge.js:185` collapses items on `` `${title}${date}${time || ''}` `` (a literal U+0001 separator). Two ideas captured on the same day with the same title collapse to one, and the loser gets a **real tombstone** (`js/merge.js:196-201`) that propagates the deletion everywhere. This runs once, at link time, on an explicit Merge.
 
-This section is the reason V6 is not a small change. `date: null` breaks five call sites, four of which fail **silently**. All five were verified against `f1a2f0e`.
+**The previous draft recommended excluding undated items from `collapse` and called it "simpler". That fix destroys every idea on the account.** `survivingItemIds` is derived from `collapse`'s *output* (line 195); anything filtered out of its input is absent from that set, so line 199 writes a tombstone for it. Verified by execution: the naive fix produced zero survivors and two tombstones, where the bug itself produced one survivor and one tombstone.
 
-### 7.1 `deserializeItems` drops undated items — and the drop propagates
+**The fix is to include `id` in the collapse key for ideas.** Every idea then forms its own group, survives `collapse`, lands in `survivingItemIds`, and generates no tombstone. The safety comes precisely from the records still passing *through* `collapse` rather than around it.
 
-`js/storage.js:32` filters on `typeof it.date === 'string'`. An item with `date: null` is discarded on load. Worse: the device then holds a state that is missing the record, and `applySyncedState` → `saveItems` → the next push writes that shorter list to the account. The item is gone everywhere.
+## 7. Break points that survive the redesign
 
-**The rollout rule is hard and it is stated again in § 9:** the relaxed filter must be live on **both** devices before the first undated record is created. There is no way to recover an item this drops — it never reaches storage, so there is no tombstone and no trace.
+Dropping nulls removes most of the previous § 7. What remains:
 
-The relaxed predicate is `it.date === null || typeof it.date === 'string'`. It must stay a *rejection* of every other type: `undefined`, a number, or an object must still be filtered out, because everything downstream now branches on exactly `null` versus string.
+1. **`visibleItems()`** (`js/app.js:76-78`) must filter on `isScheduled`. This is the single chokepoint feeding list, month, week and day, so one filter covers all four. Forgetting it is *visible* — an idea shows up on the calendar — rather than silently correct.
+2. **`renderList` is not gated by `groupItemsByDate`.** `js/app.js:236` calls `sortItemsByDate(visibleItems(...))` directly and iterates it at line 244; `groupItemsByDate` is never involved. List is the default view (`index.html:49`). The `visibleItems` filter in (1) is what covers it — nothing else does.
+3. **`makeItem` must carry `done` and `notes`** (§ 3.2) and must keep rejecting `''` (§ 3.4).
+4. **`dedupeState`** (§ 6.1).
+5. **`js/preview.js:2`** — a second hard-coded `TYPES` list, `['due','start','milestone','event','general']`, that omits `task` and `idea`. A returned `task` renders a `<select>` with nothing selected while `draft[i].type` still holds `'idea'`; the first `change` event overwrites the record's type. The two lists live in different deploy units and can diverge silently.
+6. **`js/feeds.js:424-434`** is a second copy of the `sortItemsByDate` comparator, commented "same ordering as items.js's sortItemsByDate". It cannot receive unscheduled input today. Drift risk only — noted so a future change to one is made to both.
 
-### 7.2 `sortItemsByDate` has no ordering for null — this is not "undated sorts last"
+## 8. Smart-add
 
-`js/items.js:34` is `if (a.date !== b.date) return a.date < b.date ? -1 : 1;`. With `a.date = null` and `b.date = '2026-08-20'`, the comparison `null < '2026-08-20'` evaluates `0 < NaN` → `false`, so it returns `1`. Reversing the arguments also returns `1`. The comparator claims each item comes after the other, which is not a strict weak ordering, and the resulting array order is whatever the engine's sort happens to produce.
+### 8.1 Schema (`worker/src/prompt.js:4-29`)
 
-Fix: an explicit branch before the string comparison — both null → fall through to `createdAt`; one null → the null sorts last (or first; pick one and test it).
+- `type` enum gains **`task`** and **`idea`**.
+- Add **`notes`**: `{ anyOf: [{ type: 'string' }, { type: 'null' }] }`, required.
+- **`date` stays `{ type: 'string' }` and required.** This is the change from the previous draft. For an `idea` the model returns today's date, which the client treats as the capture date.
 
-### 7.3 `groupItemsByDate` buckets undated items under the string `"null"`
+### 8.2 Prompt (`worker/src/prompt.js:31-42`)
 
-`js/calendar.js:23` uses `map[it.date]`, and a `null` key coerces to `"null"`. Nothing ever reads that bucket, so day, week and month views appear to behave correctly — by accident. Make it deliberate: filter undated items out before grouping, so the exclusion is visible in the code rather than a property of object-key coercion.
+Line 37 currently reads: *`"event"` for anything else (meetings, appointments, personal to-dos).*
 
-### 7.4 `dedupeState` can silently merge two distinct ideas — with a tombstone
+Split it three ways: `"event"` for meetings and appointments — something that happens at a place and time; `"task"` for something Alex has to *do*; `"idea"` for a thought to keep, with no scheduled day. For `idea`, `date` is today.
 
-`js/merge.js:185` collapses items on the key `` `${i.title}${i.date}${i.time || ''}` ``. A null `date` stringifies to the literal `"null"`, so **two different undated ideas with the same title collapse to one, and `dedupeState` writes a real tombstone for the loser** (`js/merge.js:196-201`), which then propagates the deletion to every device.
+### 8.3 Misclassification is caught by machinery that exists
 
-This runs once, at link time, on the user's explicit choice of Merge — so it is not an every-sync hazard. But ideas are exactly the record most likely to repeat a title ("app idea", "read later"), and the tombstone makes it unrecoverable.
-
-Two candidate fixes, both **concrete**:
-
-- **Exclude undated items from `collapse` entirely.** Dedupe exists to fix the duplicate-feed and duplicate-event problem from linking two devices that were used independently; undated ideas created on two devices are genuinely different records, never the same one seen twice.
-- **Include `id` in the key for undated items,** which makes every undated record its own group.
-
-The first is simpler and matches the intent. Either way this must be decided before the link-time path can be trusted with undated data.
-
-### 7.5 `makeItem` rejects undated items outright
-
-`js/items.js:8` throws `'Date is required'`. This is a *loud* failure, not a silent one, and it is the only one of the five that will show up the moment anyone tries to create an idea. It needs a relaxation that keeps the existing guarantees: when `date` is null, `time` and `endTime` must also be null, and the `HHMM` validation still applies whenever a time is present.
-
-### 7.6 `renderList` would print `"null — Buy milk"`
-
-`js/app.js:250` is `` `${it.date} — ${it.title}` ``. Cosmetic, and § 7.3's filter prevents it from ever being reached — but only as long as that filter is actually in place.
-
-## 8. Smart-add: the classification path
-
-This section was scoped as a two-line prompt tweak. Alex's review changed that: **voice through smart-add is the primary way items get created**, so the model's `type` choice is what decides which page a record lands on. The prompt is now load-bearing for correctness, and smart-add must be able to emit ideas as well as tasks.
-
-### 8.1 Schema changes (`worker/src/prompt.js:4-29`)
-
-- `type` enum gains **`task`** and **`idea`**: `['due', 'start', 'milestone', 'event', 'task', 'idea']`.
-- **`date` becomes nullable** — `{ anyOf: [{ type: 'string' }, { type: 'null' }] }`. It is currently `{ type: 'string' }` and listed in `required`. Keep it in `required` so the model must state a date or state its absence explicitly, rather than omitting the key.
-- Add **`notes`**: `{ anyOf: [{ type: 'string' }, { type: 'null' }] }`, also required.
-
-### 8.2 Prompt changes (`worker/src/prompt.js:31-42`)
-
-Line 37 currently reads:
-
-> `"event"` for anything else (meetings, appointments, personal to-dos).
-
-Split it three ways: `"event"` for meetings and appointments — something that happens at a place and time; `"task"` for something Alex has to *do*, with or without a fixed time; `"idea"` for a thought to keep, with no date at all.
-
-The `date` instruction needs a matching clause: resolve a date as today, **except** for `type: "idea"`, where `date` must be `null`. And a guard in the other direction — `null` is only correct for an idea; if a note implies something must happen but states no date, it is still a `task` and the model should resolve a date rather than reaching for `null`.
-
-### 8.3 Misclassification is caught by machinery that already exists
-
-The risk of letting the model choose is that a real appointment is classified as an `idea` and disappears from the calendar. `needsReview` already handles this: the prompt sets it true whenever the note is complex or the type is uncertain, and `decideFlow` (`js/smartadd.js:6-10`) routes anything with `needsReview` — or more than one item — to the preview UI for confirmation. Extend the existing instruction so an `idea` classification on a note that mentions any time or date words always sets `needsReview: true`.
-
-### 8.4 `js/preview.js` has a second, hard-coded type list
-
-`js/preview.js:2` is `const TYPES = ['due', 'start', 'milestone', 'event', 'general'];` — a duplicate of the Worker's enum that will silently disagree with it. A returned `task` or `idea` renders a `<select>` with **no option selected**, and the first `change` event rewrites the record's type to whatever the user happens to land on.
-
-Also in that file: `date.value = it.date` on an `<input type="date">` (line 24). Assigning `null` yields `''` rather than the string `"null"` (the IDL attribute is `[LegacyNullToEmptyString]`), so this does not visibly break — but an undated idea and a dated item whose date the model failed to resolve then look **identical** in the review UI. The preview needs to distinguish "intentionally undated" from "no date yet", and it needs a `notes` field, which it does not have at all today.
-
-### 8.5 Deployment
-
-The Worker deploys separately via `wrangler`, with roughly 20 seconds of edge propagation — the first smoke test after a deploy can hit the old prompt and look like a broken release. Note that the Worker and the client deploy through **different mechanisms with different timing**, which is exactly what § 9 has to sequence.
+`needsReview` already routes uncertain results to the preview UI via `decideFlow` (`js/smartadd.js:6-10`). Extend the instruction so an `idea` classification on a note mentioning any time or date words always sets `needsReview: true`. Under the capture-date design a misclassification is recoverable — the record still exists and its type can be changed in the preview.
 
 ## 9. Rollout order
 
-The ordering is forced by § 7.1 and is not a matter of taste. Alex's decision to ship all three changes together applies to the *user-visible release* — the three pages arrive at once. It does not collapse the two deploy gates below, which exist because the client and the Worker deploy through different mechanisms.
+The previous draft's four-step gate existed entirely to manage null dates. It is gone. What remains is ordinary sequencing.
 
-**Step 0 — sync visibility, before any of V6.** Alex's call, and the punchlist already promoted it (`~/punchlists/punchlist-plaenicke.md`, the RE-TRIAGE item). `renderSyncStatus()` looks up `#sync-status`, which exists only inside a mounted settings panel; `index.html` has no such element. So a revoked token, an undecryptable blob, a corrupt stored code, or a device stuck at `adoptionPending` all present as an app that works perfectly and quietly stops agreeing with the other device. V6 sharpens this: the Ideas page's entire content is undated records, which are precisely what goes missing when sync half-works. One dot on the app shell; `sync-status-problem` styling already exists in `paintStatus`.
+**Step 0 — sync visibility, before V6.** Alex's call, and the punchlist had already promoted it. `renderSyncStatus()` looks up `#sync-status`, which exists only inside a mounted settings panel; `index.html` has no such element, so a revoked token, an undecryptable blob, a corrupt code or a stuck adoption all present as an app that works perfectly and quietly stops agreeing with the other device.
 
-**Step 1 — client reader-side relaxation, shipped.** `deserializeItems`, `sortItemsByDate`, `groupItemsByDate`, `dedupeState`, `makeItem` — every change that lets a device *tolerate* an undated record. No UI that can create one. `js/preview.js`'s `TYPES` list (§ 8.4) belongs here too: it must accept `task` and `idea` before the Worker can return them.
+> **Implementation note:** the settings panel mounts its own `#sync-status`. Two elements cannot share an id — `getElementById` returns one of them and the other never updates. Resolve this explicitly rather than discovering it at runtime.
 
-**Step 2 — confirm both devices are actually running step 1.** GitHub Pages serves `main` directly, so merging is the deploy, but the service worker's `CACHE` name (`service-worker.js:13`, currently `plaenicke-v5-2`) must be bumped or a device keeps serving the old modules from its cache and step 1 has not happened there. Verify by loading each device and checking the served `js/storage.js`. **Observed, not inferred.**
+**Step 1 — all three V6 changes, one release** (§ 4, § 5, § 6), together with the reader-side work in § 7 and the deliberate dead-code filter in § 3.4.
 
-**Step 3 — the three V6 pages together** (§ 4, § 5, § 6). This is the release Alex sees. The Ideas page is the first thing that can create `date: null`, which is why step 2 gates it.
+**Step 2 — the Worker prompt and enum change** (§ 8).
 
-**Step 4 — the Worker prompt and schema change** (§ 8), last.
+### 9.1 The Worker still deploys differently, and it still goes last
 
-### 9.1 Why the Worker change goes last, and why it is the sharpest gate
+The client deploys per device; the **Worker deploys once, globally, for every device at the same instant.** Under the previous design that made the Worker a data-loss gate. It no longer is — an old client receiving `type: 'idea'` keeps the record and renders it on the calendar. But the ordering still holds for a plainer reason: a Worker that returns `task`/`idea` to a client whose `preview.js` does not know those types produces a `<select>` that misreports the record (§ 7.5). Ship the client first.
 
-The client deploys per device — each browser picks up new modules on its own schedule, subject to its service-worker cache. **The Worker deploys once, globally, for every device at the same instant.**
+Note also that `service-worker.js` is **network-first** (see its own header comment) — an online device already fetches new modules. Bumping `CACHE` purges stale caches; it is not what causes the fetch. The genuine staleness risk is an iOS home-screen PWA that is *resumed rather than reloaded*, which keeps its old module graph in memory while `app.js:527-528` runs a full sync on `visibilitychange`. Under this design that is cosmetic; it would not have been under the previous one.
 
-So the moment `worker/src/prompt.js` can return `type: 'idea'` with `date: null`, *any* device that uses voice can create an undated record — including a device still serving old client modules from cache. That device's `deserializeItems` drops the record on the next load, and its next sync pushes the shortened list to the account. The item is gone from every device, with no tombstone and no trace.
+### 9.2 The two-device link
 
-A device on old code hitting the new Worker fails *loudly* at first — `makeItem` throws `'Date is required'` and `handleAdd` surfaces it via `setMessage`, so nothing is added. That is the good case. The bad case is the same device after it has pulled an undated record created elsewhere, where the loss is silent.
-
-This is why step 4 is last and why step 2 must be observed on both devices rather than assumed.
-
-### 9.2 This assumes the two-device link has been done
-
-As of 2026-08-21 it has not: no part of the client sync has run in a browser or against real D1. If V6 ships to a single unlinked device the rollout rule is vacuous — but it goes live the moment the second device is linked, and **a device linked later while running old code will drop every undated item and push the deletion.** Do the link first. It is also the only way to test step 0's indicator against a real failure.
+Still not done as of 2026-08-22, and no part of the client sync has run in a browser or against real D1. This no longer gates V6's correctness. It remains the right thing to do first, because it is the only way to test step 0's indicator against a real failure instead of a simulated one.
 
 ## 10. Deferred, not foreclosed
 
-**AI summarisation of long ideas.** Alex asked for it and then agreed to keep V6 simple. It needs a new Worker route, which lands on Plan 4's unwritten auth-and-quota work. The record shape is identical either way — `title` plus `notes` — so adding it later is purely additive and costs nothing now.
+AI summarisation of long ideas — needs a new Worker route, which lands on Plan 4's unwritten auth-and-quota work. The record shape (`title` + `notes`) is identical either way, so it stays purely additive.
 
-Also deferred: to-do ordering/priority, recurring to-dos, converting an idea into a dated item, and any notification path.
+Also deferred: genuinely undated records (§ 3.4 ships the tolerance for it); to-do priority; recurring to-dos; converting an idea into a scheduled item; notifications.
 
 ## 11. Questions asked, and what Alex answered (2026-08-21)
 
-1. **Do the pages overlap, and what makes an item a to-do?** — A dated item *always* stays on the calendar; if it is also something that needs doing it appears on the To-do page as well. The two are not exclusive (§ 3.3).
+1. **Do the pages overlap, and what makes an item a to-do?** — A dated item always stays on the calendar; if it also needs doing it appears on the To-do page too. On how the app knows: **the model decides**, because capture is by voice. Both UI alternatives were rejected.
+2. **Ship together or separately?** — **All three together.**
+3. **V6 before or after the sync-visibility fix?** — **Indicator first.**
 
-   On how the app knows: **the model decides.** Alex captures by voice in practice, so smart-add classifies, and no new UI is needed to declare intent. This is the answer that reshaped § 8 — it pulled ideas into the smart-add path, which made `date` nullable in the response schema and turned the Worker deploy into the rollout's sharpest gate (§ 9.1). Both UI alternatives (a to-do capture box, a checkbox on the add box) were considered and rejected as unnecessary given voice.
-
-2. **Ship together or separately?** — **All three together.** § 9 step 3.
-
-3. **V6 before or after the sync-visibility fix?** — **Indicator first.** § 9 step 0.
-
-Nothing here is open. The remaining prerequisite is not a decision but an action: the physical two-device link (§ 9.2).
+The 2026-08-22 revision changed no answer here. It changed how unscheduled records are represented, which is an internal mechanism none of these answers depended on.
 
 ## 12. Testing
 
-- **Pure functions, table-tested,** in the style of `js/feeds.js` and `js/merge.js`: the idea sentence-split, the relaxed `makeItem`, the fixed `sortItemsByDate` comparator, the to-do and idea predicates.
-- **`sortItemsByDate` needs an anti-symmetry test**, not just a "nulls come last" test — assert that `cmp(a,b)` and `cmp(b,a)` have opposite signs for every pairing of dated and undated. The current bug passes a naive expected-order assertion on small arrays.
-- **A round-trip test through `deserializeItems`** proving an undated record survives, and that `date: undefined` / `date: 42` are still rejected.
-- **A `dedupeState` test** with two distinct undated items sharing a title, asserting both survive and no tombstone is written.
-- **A test that `js/preview.js`'s `TYPES` and the Worker's `type` enum cannot drift** (§ 8.4). The two lists are in different deploy units, so a divergence ships silently. Either assert equality across the two modules or derive both from one exported constant — the latter is better, and the repo already set that precedent with `tests/fake-localstorage.js`.
-- **Extend the convergence simulation** with undated records, including the case where one side holds an undated item and the other does not, and a `done` toggle racing on both devices (§ 5.1).
-- **Mutation-test the new assertions.** Several tests in this repo have passed under implementations that were badly wrong; the V5 ledger records nine occasions where a defect lived in reviewed-and-cleared code and every one was caught by *running* it, not reading it.
+- **Pure functions, table-tested:** the idea text split, `isScheduled`, the To-do and Ideas predicates, `makeItem` with `done`/`notes`.
+- **`makeItem` must be pinned against the whitelist regression** — assert `notes` and `done` survive. This is the defect that would have shipped.
+- **A `dedupeState` test with two same-title, same-capture-day ideas**, asserting both survive **and no tombstone is written**. Assert on tombstone *contents*, not just counts: the ledger flags this exact path as previously unpinned.
+- **A `done`-toggle-races-a-delete convergence case** (§ 5.1), pinning the resurrection as known behaviour. The existing convergence sim compares **id sets only**, so a race case added there proves the devices agree, not that they agree on the right value — this test needs field-level assertions.
+- **A drift test between `js/preview.js`'s `TYPES` and the Worker's `type` enum.** `npm test` already recurses into `worker/`, so a test importing both and asserting set equality is airtight without coupling two deploy units through a shared import.
+- **Re-pin `tests/serviceworker.test.js:32`.** It holds `CACHE_ON_MAIN = 'plaenicke-v5-1'` while `main` is at `plaenicke-v5-2`, so its `got > base` assertion is satisfied forever and **cannot fail for V6** — the exact vacuity the test's own comment was written to prevent.
+- **Mutation-test every new assertion.** Tests here have passed under implementations that were badly wrong.
 
-Two things in this spec are **not** covered by any test that can run in `node --test`, and should be checked by hand on a real device rather than assumed: that a bumped service-worker `CACHE` actually caused a device to fetch new modules (§ 9 step 2), and that the smart-add prompt classifies Alex's real phrasing into the right `type` (§ 8.2). The second is a prompt-quality question and the only honest way to answer it is to speak a dozen realistic notes at the deployed Worker and read the output.
+`npm test` is bare `node --test` and recurses (root count already includes `worker/`). `node --test tests/` runs zero tests. Storage-touching tests need `installFakeLocalStorage()`.
 
-Run with `npm test` (bare `node --test`, which recurses and already includes `worker/`). `node --test tests/` runs zero tests and reports one spurious failure. Storage-touching tests need `installFakeLocalStorage()` from `tests/fake-localstorage.js`.
+Two things no `node --test` can settle, to be checked by hand: that a device actually picked up new modules, and that the prompt classifies Alex's real phrasing correctly — the only honest test of the second is speaking a dozen realistic notes at the deployed Worker.
 
-## 13. What this document verified rather than assumed
+## 13. Review history and what was verified by execution
 
-Every file-and-line reference above was read at `f1a2f0e`, and the three JavaScript coercion claims in § 7 were confirmed by execution, not by reading: `cmp(null, str)` and `cmp(str, null)` both return `1`; the `dedupeState` key for two same-titled undated items is byte-identical; `map[null]` produces the key `"null"`.
+**Pass 1 — writing the spec.** Found four undated-item break points the conversation had not recorded, beyond the known `deserializeItems` filter.
 
-**First pass** (writing the spec) found four undated-item break points the conversation had not recorded, beyond the known `deserializeItems` filter: `sortItemsByDate` (§ 7.2), `groupItemsByDate` (§ 7.3), `dedupeState` (§ 7.4), `makeItem` (§ 7.5). Three fail silently; one destroys data at link time.
+**Pass 2 — Alex's answer that the model classifies.** Pulled ideas onto the smart-add path, exposing that `date` was `required: string` in the response schema and that `js/preview.js` keeps a duplicate type list.
 
-**Second pass** (after Alex's answer that the model decides `type`) found two more, both on the smart-add path that the first pass had treated as a two-line prompt edit: `js/preview.js`'s duplicated `TYPES` list (§ 8.4), and the fact that `date` is `required: string` in the Worker's response schema, so ideas cannot come through smart-add at all without a schema change (§ 8.1).
+**Pass 3 — devil's advocate and constructive sparring, 2026-08-22.** Changed the design. Findings acted on, each verified by executing the real modules rather than reading them:
 
-The second pass also produced the one structural insight in this document: **the Worker deploys globally in a single step while clients update per device.** Making smart-add able to emit undated records therefore arms every device at once, including one still serving old modules from its service-worker cache — which is why the Worker change is now last in the rollout rather than "independent, any time" (§ 9.1).
+- **The draft's own `dedupeState` fix would tombstone every idea on the account** — worse than the bug (§ 6.1). This is the ledger's most-repeated failure shape and it was in prescribed text that had already been through two passes.
+- **The draft's central data-loss claim was false.** It asserted that a device dropping an undated record "pushes the deletion to every other device". Verified false: `merge()` is a monotone union for items and a deserializer drop writes no tombstone. Traced end-to-end, the old device pushes `['d1','n1','idea1']` — the account keeps the idea. The real damage is local invisibility plus a genuinely destructive *adoption* path, not global deletion. **CLAUDE.md carries the same false claim and is corrected alongside this document.**
+- **`makeItem` is a whitelist rebuilder** and would have discarded `notes` and `done` at creation (§ 3.2).
+- **The `done` checkbox loses deletions, not just checkbox states** (§ 5.1). The draft's "benign because boolean" argument examined neither horn.
+- **`renderList` is not gated by `groupItemsByDate`** (§ 7.2); the draft claimed it was.
+- **`''` is a third date state** that behaves like neither null nor a date (§ 3.4).
+- **The service-worker cache-bump test is self-satisfied at HEAD** and the worker is network-first, so the draft's step-2 mechanism was wrong twice over (§ 9.1, § 12).
+- **The `schemaVersion` justification was a conflation** — a version bump is a loud halt, not silent truncation (§ 3.2).
 
-The pattern is worth naming, because it is the same one the V5 ledger records nine times: each pass over the *actual code* found defects that reading the design did not. V6 is not "two new pages plus a filter relaxation."
+The pattern across all three passes is the one the V5 ledger names: reading the design finds shape errors; **executing the code finds real ones.** Pass 3 was the first to run anything, and it is the pass that changed the design.
