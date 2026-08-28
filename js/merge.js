@@ -9,10 +9,35 @@
 //
 // CLOCK SKEW IS THE WEAK JOINT. updatedAt is wall-clock time from two devices
 // whose clocks are never compared. A phone 90 seconds ahead of a laptop wins
-// every tie for 90 seconds, silently. This is tolerable ONLY because the app
-// has no edit path today — app.js adds and deletes, nothing rewrites a record —
-// so the same id is almost never written on both devices. Anyone adding an edit
-// feature must revisit this before shipping it.
+// every tie for 90 seconds, silently.
+//
+// AN EDIT PATH NOW EXISTS, AND IT IS EXACTLY ONE BOOLEAN (V6 § 5.1). The To-do
+// page's checkbox rewrites `done` on a record that already exists. It is
+// confined to that one field on purpose. Two consequences, both examined
+// rather than assumed, and both accepted:
+//
+//   - The toggle DOES bump updatedAt. It has to: unionById's ties go to remote
+//     (`>=`, below), so a toggle that left updatedAt alone would be silently
+//     REVERTED on the next sync. Self-reverting, not self-correcting.
+//   - Because it bumps updatedAt, applyTombstones can resurrect a deleted
+//     record. That function keeps anything whose updatedAt is at or after the
+//     deletion, on the documented assumption that a later updatedAt means
+//     "re-created after the deletion" — and with an edit path that assumption
+//     is false. Delete an item on the laptop at 09:00, tick it on the phone at
+//     12:00 before either syncs, and the item comes back on every device with
+//     done: true (so it is off the To-do page and reappears only on the
+//     calendar). Annoying and re-deletable, not lost data, and it is the only
+//     horn of the two that converges at all.
+//
+// Teaching applyTombstones to tell an edit from a re-creation was considered
+// and rejected: it is a change to the most defect-prone function here, and the
+// ledger records four occasions on this codebase where exactly that kind of
+// fix introduced a worse defect than the one it cured.
+//
+// THE NEXT EDITABLE FIELD RE-OPENS ALL OF THIS. Per-record last-write-wins is
+// tolerable while the same id is almost never rewritten on both devices; a
+// second, less trivial editable field changes that, and the resurrection above
+// stops being merely annoying the moment the field carries content.
 
 export const SCHEMA_VERSION = 1;
 
@@ -182,7 +207,28 @@ export function dedupeState(state, now) {
   // null, an explicit undefined -- into the same bucket. Without it,
   // `${i.time}` stringifies to the literal text "null" or "undefined",
   // splitting one all-day event into up to three ungatherable keys.
-  const items = collapse(state.items, i => `${i.title}\u0001${i.date}\u0001${i.time || ''}`);
+  //
+  // IDEAS ARE KEYED ON THEIR id, AND THEY STILL GO THROUGH collapse (V6 6.1).
+  // An idea's `date` is its CAPTURE date, so two thoughts jotted on the same
+  // day whose first sentences match share the whole of the ordinary key --
+  // adoption would collapse them and write a REAL tombstone for the loser,
+  // propagating that deletion to every device. Keying each idea on its own id
+  // puts every one in its own group, so every one survives.
+  //
+  // DO NOT "SIMPLIFY" THIS BY EXCLUDING IDEAS FROM collapse. survivingItemIds
+  // below is derived from collapse's OUTPUT, so a record filtered out of its
+  // input is absent from that set and gets a tombstone written for it: the
+  // exclusion tombstones EVERY idea on the account. Verified by execution --
+  // it produced ZERO survivors and TWO tombstones where the bug itself
+  // produced one survivor and one tombstone. The safety comes precisely from
+  // the records still passing THROUGH collapse rather than around it.
+  //
+  // Both branches carry a leading KIND field so the two key shapes cannot
+  // collide: without it an idea keyed on its id could meet a scheduled item
+  // whose title happened to be that id.
+  const items = collapse(state.items, i => (i.type === 'idea'
+    ? `idea\u0001${i.id}`
+    : `item\u0001${i.title}\u0001${i.date}\u0001${i.time || ''}`));
   // collapse() silently drops the loser of each group. Without a tombstone
   // for every dropped id, a peer device that never ran adoption (dedupeState
   // runs ONCE, at link time, on ONE device) still holds the loser locally

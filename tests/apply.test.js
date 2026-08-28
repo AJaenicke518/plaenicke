@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
 import { SCHEMA_VERSION } from '../js/merge.js';
 import {
@@ -62,7 +63,16 @@ class FakeElement {
   get classList() {
     const self = this;
     return {
-      add(c) { self._classes.add(c); },
+      // The real classList.add THROWS InvalidCharacterError on a token
+      // containing whitespace. itemTypeClass can now return two tokens
+      // ('type-task done'), so a fake that silently accepted one would let a
+      // call site pass in a browser-fatal string and stay green here.
+      add(...cs) {
+        for (const c of cs) {
+          assert.doesNotMatch(String(c), /\s/, `classList.add token must not contain whitespace: "${c}"`);
+          self._classes.add(c);
+        }
+      },
       remove(c) { self._classes.delete(c); },
       contains(c) { return self._classes.has(c); },
       toggle(c, force) {
@@ -430,6 +440,314 @@ test('removing a calendar in Settings pushes it, without waiting for a reload', 
     'removing a calendar must schedule a sync — nothing else pushes the feed tombstone until the page is reloaded');
   assert.ok(requests.some((r) => r.url.includes('/data') && r.method === 'PUT'),
     'and the tombstone must actually reach the account');
+});
+
+// =========================================================================
+// V6 — the To-do page, the Ideas page, and the checkbox write
+// =========================================================================
+//
+// These drive the REAL app.js — its els cache, its showView table, its
+// render(), and its module-scope `items` array — so they pin the WIRE, not
+// just the pure helpers underneath. Every defect the V5 ledger records as
+// "found by independent review and not by the author's own battery" was a
+// wiring gap, not a logic gap.
+
+// THE FAKE DOCUMENT ABOVE LAZILY CREATES AN ELEMENT FOR ANY ID, so nothing in
+// this file can notice that index.html is missing one. In a real browser a
+// missing id makes els.<name> null and app.js THROWS at module scope — on the
+// listener wiring, before render() ever runs — so the whole app is dead, not
+// merely one page. Adding a page to app.js and forgetting the markup is
+// exactly that, and it stayed green through the whole V6 battery until this
+// existed.
+//
+// Derived from app.js's own source rather than a hand-written list, so a page
+// added later is covered without anyone remembering to extend this.
+test('index.html mounts every element app.js looks up by id', () => {
+  const appSrc = readFileSync(new URL('../js/app.js', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const ids = [...appSrc.matchAll(/document\.getElementById\('([^']+)'\)/g)].map((m) => m[1]);
+  assert.ok(ids.length > 20, `fixture check: expected app.js to look up many ids, found ${ids.length}`);
+  for (const id of ids) {
+    assert.match(html, new RegExp(`id="${id}"`),
+      `index.html has no #${id} — app.js would hold null there and throw at load`);
+  }
+});
+
+const ideaText = () => globalThis.document.getElementById('idea-text');
+const ideaAdd = () => globalThis.document.getElementById('idea-add');
+const todoList = () => globalThis.document.getElementById('todo-list');
+const ideaList = () => globalThis.document.getElementById('idea-list');
+const itemList = () => globalThis.document.getElementById('item-list');
+
+function click(el) { (el._listeners.click || []).forEach((fn) => fn({ target: el })); }
+
+function fire(el, type) { (el._listeners[type] || []).forEach((fn) => fn({ target: el })); }
+
+// Walks for the first checkbox whose aria-label names this title.
+function checkboxFor(root, title) {
+  const found = [];
+  const walk = (el) => {
+    for (const c of el.children) {
+      if (c.tagName === 'INPUT' && c.type === 'checkbox' && (c.getAttribute('aria-label') || '').includes(title)) {
+        found.push(c);
+      }
+      walk(c);
+    }
+  };
+  walk(root);
+  return found[0] || null;
+}
+
+const record = (o) => ({
+  title: 'x', date: '2026-08-20', time: null, endTime: null, type: 'general',
+  createdAt: '2026-08-19', updatedAt: '2026-08-19T00:00:00.000Z',
+  project: null, subject: null, category: null, done: false, notes: null, ...o,
+});
+
+// app.js keeps its own module-scope `items` snapshot and saves from it — that
+// is the ownership invariant, and it means a bare saveItems() leaves app.js
+// holding the PREVIOUS test's array and writing it straight back over the
+// seed. Reload it the way the app itself does, through the cross-tab storage
+// listener, which also re-renders. (The module is imported once for the whole
+// file, so state genuinely carries between tests.)
+function seed(records) {
+  saveItems(records);
+  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.items' });
+  assert.deepEqual(loadItems().map((i) => i.id), records.map((i) => i.id), 'fixture check: the seed is what is stored');
+}
+
+// showView drives two PARALLEL object literals — one of sections, one of
+// buttons — and a page missing from either is silent. Missing from `views`,
+// the button hides every other section and never un-hides its own: a blank
+// page. Missing from `buttons`, the nav never shows which page you are on.
+// Both are invisible to any test that only inspects list contents.
+test('each nav button reveals exactly its own page, and marks itself active', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const pages = [
+    ['show-list', 'list-view'],
+    ['show-month', 'calendar-view'],
+    ['show-week', 'week-view'],
+    ['show-day', 'day-view'],
+    ['show-todo', 'todo-view'],
+    ['show-ideas', 'ideas-view'],
+  ];
+  for (const [buttonId, sectionId] of pages) {
+    click(globalThis.document.getElementById(buttonId));
+    for (const [otherButton, otherSection] of pages) {
+      const section = globalThis.document.getElementById(otherSection);
+      const button = globalThis.document.getElementById(otherButton);
+      const isTarget = otherSection === sectionId;
+      assert.equal(section.hidden, !isTarget,
+        `after clicking #${buttonId}, #${otherSection} should be ${isTarget ? 'visible' : 'hidden'}`);
+      assert.equal(button._classes.has('active'), isTarget,
+        `after clicking #${buttonId}, #${otherButton} should${isTarget ? '' : ' not'} be active`);
+    }
+  }
+  click(globalThis.document.getElementById('show-list')); // leave the default view selected
+});
+
+test('the To-do page lists open to-dos, and nothing else', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([
+    record({ id: 'task1', type: 'task', title: 'Renew the passport' }),
+    record({ id: 'due1', type: 'due', title: 'Physics essay' }),
+    record({ id: 'start1', type: 'start', title: 'Start the essay' }),
+    record({ id: 'ms1', type: 'milestone', title: 'First draft' }),
+    record({ id: 'done1', type: 'task', title: 'Already finished', done: true }),
+    record({ id: 'ev1', type: 'event', title: 'Dentist appointment' }),
+    record({ id: 'gen1', type: 'general', title: 'Someones birthday' }),
+    record({ id: 'idea1', type: 'idea', title: 'Rework the shelves' }),
+  ]);
+  const text = allText(todoList());
+  for (const t of ['Renew the passport', 'Physics essay', 'Start the essay', 'First draft']) {
+    assert.match(text, new RegExp(t), `${t} is actionable and belongs on the To-do page`);
+  }
+  assert.doesNotMatch(text, /Already finished/, 'a completed to-do leaves the To-do page');
+  assert.doesNotMatch(text, /Dentist appointment/, 'an appointment is not a to-do');
+  assert.doesNotMatch(text, /Someones birthday/, 'a general item is not a to-do — birthdays are not chores');
+  assert.doesNotMatch(text, /Rework the shelves/, 'an idea is not a to-do');
+});
+
+// A COMPLETED TO-DO STAYS ON THE CALENDAR (spec § 3.3) — it still happened
+// that day. Only the To-do page drops it.
+test('a completed to-do stays in the list view, styled as done', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'done1', type: 'task', title: 'Already finished', done: true, date: '2099-01-01' })]);
+  assert.match(allText(itemList()), /Already finished/, 'a done to-do must not vanish from the calendar');
+  const row = itemList().children.find((li) => allText(li).includes('Already finished'));
+  assert.ok(row._classes.has('done'), 'and it must be styled as completed');
+  assert.ok(row._classes.has('type-task'), 'without losing its type colour');
+});
+
+// § 7.1/§ 7.2: visibleItems is the single chokepoint feeding list, month, week
+// and day. renderList calls sortItemsByDate(visibleItems(...)) DIRECTLY —
+// groupItemsByDate is never involved — so this one filter is what covers it.
+test('an idea never appears on any calendar view', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([
+    record({ id: 'idea1', type: 'idea', title: 'Rework the shelves', date: '2099-01-01' }),
+    record({ id: 'ev1', type: 'event', title: 'Dentist appointment', date: '2099-01-01' }),
+  ]);
+  assert.doesNotMatch(allText(itemList()), /Rework the shelves/, 'the list view must not show ideas');
+  assert.match(allText(itemList()), /Dentist appointment/, 'fixture check: the same date DOES render');
+  assert.doesNotMatch(allText(globalThis.document.getElementById('calendar-grid')), /Rework the shelves/);
+  assert.doesNotMatch(allText(globalThis.document.getElementById('week-grid')), /Rework the shelves/);
+});
+
+test('the Ideas page lists ideas and nothing else, newest first', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([
+    record({ id: 'i1', type: 'idea', title: 'Older thought', createdAt: '2026-08-01', date: '2026-08-01' }),
+    record({ id: 'i2', type: 'idea', title: 'Newer thought', createdAt: '2026-08-05', date: '2026-08-05' }),
+    record({ id: 't1', type: 'task', title: 'Renew the passport' }),
+  ]);
+  const text = allText(ideaList());
+  assert.doesNotMatch(text, /Renew the passport/, 'a task is not an idea');
+  assert.match(text, /Newer thought[\s\S]*Older thought/, 'newest capture first');
+});
+
+// THE WRITE LANDS IN app.js, mutating its module-scope `items` array, then
+// saveItems / render / scheduleSync — the same shape as deleteItem. That is
+// the ownership invariant; a writer anywhere else is silently overwritten the
+// next time app.js saves from its own snapshot.
+test('ticking a to-do writes done to storage and re-renders both pages', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([
+    record({ id: 'task1', type: 'task', title: 'Renew the passport', date: '2099-01-01' }),
+    record({ id: 'task2', type: 'task', title: 'Book the car service', date: '2099-01-01' }),
+  ]);
+  const box = checkboxFor(todoList(), 'Renew the passport');
+  assert.ok(box, 'fixture check: the To-do page must offer a checkbox for the item');
+  box.checked = true;
+  fire(box, 'change');
+
+  const stored = loadItems();
+  assert.equal(stored.find((i) => i.id === 'task1').done, true, 'the tick must reach storage');
+  assert.equal(stored.find((i) => i.id === 'task2').done, false, 'and must not touch its neighbour');
+  assert.doesNotMatch(allText(todoList()), /Renew the passport/, 'the completed item leaves the To-do page');
+  assert.match(allText(itemList()), /Renew the passport/, 'and stays on the calendar');
+});
+
+// § 5.1, the horn that was CHOSEN. unionById's ties go to REMOTE (`>=`), so a
+// toggle that left updatedAt alone would be silently REVERTED on the next
+// sync — self-reverting, not self-correcting. The resurrection risk that
+// bumping creates is documented in js/merge.js's header and accepted; a toggle
+// that does NOT bump is simply broken.
+test('ticking a to-do bumps updatedAt, or the tick is reverted by the next sync', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const before = '2026-08-19T00:00:00.000Z';
+  seed([record({ id: 'task1', type: 'task', title: 'Renew the passport', updatedAt: before })]);
+  const box = checkboxFor(todoList(), 'Renew the passport');
+  box.checked = true;
+  fire(box, 'change');
+  const after = loadItems().find((i) => i.id === 'task1').updatedAt;
+  assert.notEqual(after, before);
+  assert.ok(Date.parse(after) > Date.parse(before), 'updatedAt must move FORWARD, not merely change');
+  assert.match(after, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+    'a day-only updatedAt loses ties against a same-day tombstone deletedAt');
+});
+
+// A tick is a change to SYNCED data. Without a push trigger it would sit
+// unsent until a reload, a visibilitychange or an online event — the same
+// class of defect as the feed change that had no push trigger at all.
+test('ticking a to-do schedules a sync', async (t) => {
+  installFakeLocalStorage();
+  const { render } = await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  seed([record({ id: 'task1', type: 'task', title: 'Renew the passport' })]);
+
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts = {}) => {
+    requests.push({ url: String(url), method: (opts && opts.method) || 'GET' });
+    return { ok: true, status: 200, json: async () => ({ version: 0, blob: '' }), text: async () => '' };
+  };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const box = checkboxFor(todoList(), 'Renew the passport');
+    box.checked = true;
+    fire(box, 'change');
+    assert.deepEqual(requests.filter((r) => r.url.includes('/data')), [],
+      'the push is debounced, so nothing may go out before the timer fires');
+    t.mock.timers.tick(2000);
+    for (let i = 0; i < 50; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+  } finally {
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+  assert.ok(requests.some((r) => r.url.includes('/data') && r.method === 'PUT'),
+    'a completed to-do must reach the account without waiting for a reload');
+});
+
+// The Ideas page's own capture box: offline, deterministic, and the fallback
+// when the Worker is unreachable (spec § 6).
+test('the Ideas box captures a short thought as an idea dated today', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  ideaText().value = '  Look into a standing desk  ';
+  click(ideaAdd());
+
+  const stored = loadItems();
+  assert.equal(stored.length, 1);
+  const [idea] = stored;
+  assert.equal(idea.type, 'idea');
+  assert.equal(idea.title, 'Look into a standing desk');
+  assert.equal(idea.notes, null, 'a short thought needs no separate body');
+  assert.equal(idea.done, false);
+  assert.match(idea.date, /^\d{4}-\d{2}-\d{2}$/, "an idea's date is its capture date and is NEVER null");
+  assert.equal(idea.date, idea.createdAt, 'the capture date IS today');
+  assert.equal(ideaText().value, '', 'the box must clear so the next thought does not append to this one');
+  assert.match(allText(ideaList()), /standing desk/);
+});
+
+test('the Ideas box keeps the complete text of a long thought in notes', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const full = 'Rework the kitchen shelves. They are far too deep for the mugs and everything at the back '
+    + 'is unreachable, so half of the cupboard is wasted entirely.';
+  ideaText().value = full;
+  click(ideaAdd());
+
+  const [idea] = loadItems();
+  assert.equal(idea.title, 'Rework the kitchen shelves.', 'the title is a derived label');
+  assert.equal(idea.notes, full, 'and the COMPLETE original text is kept, so no split bug can lose words');
+});
+
+test('the Ideas box refuses an empty thought rather than creating a titleless record', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  ideaText().value = '   ';
+  click(ideaAdd());
+  assert.deepEqual(loadItems(), [], 'whitespace is not a thought');
+});
+
+// The model classifies (spec § 3.3), so an idea arriving through the MAIN
+// entry box must get the same treatment as one typed on the Ideas page — one
+// split function, both paths.
+test('an idea returned by the model is normalised through the same split', async () => {
+  installFakeLocalStorage();
+  const { addItems } = await import('../js/app.js');
+  seed([]);
+  const full = 'Rework the kitchen shelves. They are far too deep for the mugs and everything at the back '
+    + 'is unreachable, so half of the cupboard is wasted entirely.';
+  addItems([{
+    title: 'a label the model invented', date: '2026-08-20', type: 'idea',
+    time: null, endTime: null, project: null, subject: null, category: null, notes: full,
+  }]);
+  const [idea] = loadItems();
+  assert.equal(idea.title, 'Rework the kitchen shelves.');
+  assert.equal(idea.notes, full);
 });
 
 // --- runSync must not run while adoption is pending (mutation M3) ----------

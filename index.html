@@ -63,6 +63,8 @@
     <button id="show-month" type="button">Month</button>
     <button id="show-week" type="button">Week</button>
     <button id="show-day" type="button">Day</button>
+    <button id="show-todo" type="button">To-do</button>
+    <button id="show-ideas" type="button">Ideas</button>
   </nav>
 
   <section id="list-view">
@@ -94,6 +96,22 @@
       <button id="next-day" type="button">&rarr;</button>
     </div>
     <div id="day-body"></div>
+  </section>
+
+  <!-- To-do (V6 § 5). No add box: to-dos are captured by voice through the
+       main entry box and classified by the model. -->
+  <section id="todo-view" hidden>
+    <ul id="todo-list"></ul>
+  </section>
+
+  <!-- Ideas (V6 § 6). This box is the offline, deterministic capture path —
+       it works with no Worker at all. -->
+  <section id="ideas-view" hidden>
+    <div class="idea-add">
+      <textarea id="idea-text" rows="3" placeholder="A thought to keep — no date needed"></textarea>
+      <button id="idea-add" type="button">Keep</button>
+    </div>
+    <ul id="idea-list"></ul>
   </section>
 
   <div id="settings-host"></div>

@@ -1,4 +1,6 @@
-// dayview.js — render one day: hour grid of timed items + "Other tasks" below.
+// dayview.js — render one day: "Other tasks" above, then the hour grid of
+// timed items. (V6 § 4 moved the untimed block above the grid; before that it
+// was appended below.)
 import { bucketDayItems, layoutDayBlocks, formatTime, formatTimeRange } from './timegrid.js';
 import { itemTypeClass } from './calendar.js';
 
@@ -55,8 +57,6 @@ export function renderDayView(container, dateISO, dayItems, { onDelete, autoScro
   }
 
   grid.append(hours, canvas);
-  container.appendChild(grid);
-  grid.scrollTop = autoScroll ? SCROLL_TO_HOUR * HOUR_PX : prev;
 
   if (untimed.length > 0) {
     const other = document.createElement('div');
@@ -68,7 +68,9 @@ export function renderDayView(container, dateISO, dayItems, { onDelete, autoScro
     ul.className = 'day-other-list'; // shares the list styling via Task 6's selectors
     for (const it of untimed) {
       const li = document.createElement('li');
-      li.classList.add(itemTypeClass(it));
+      // className, NOT classList.add: itemTypeClass can return two tokens
+      // ('type-task done') and classList.add throws on a token with a space.
+      li.className = itemTypeClass(it);
       if (it.external) li.style.setProperty('--feed-color', it.feedColor);
       const span = document.createElement('span');
       span.textContent = it.title;
@@ -86,4 +88,13 @@ export function renderDayView(container, dateISO, dayItems, { onDelete, autoScro
     other.appendChild(ul);
     container.appendChild(other);
   }
+
+  // THESE TWO LINES MUST STAY ADJACENT, AND MUST STAY LAST (V6 spec § 4).
+  // Assigning scrollTop to an element that is not yet in the document is a
+  // SILENT no-op in a browser — the day view would simply open at midnight
+  // instead of 07:00, with no error anywhere. The untimed block is appended
+  // above, so the grid goes in after it and the scroll position is set once
+  // the tree is complete.
+  container.appendChild(grid);
+  grid.scrollTop = autoScroll ? SCROLL_TO_HOUR * HOUR_PX : prev;
 }

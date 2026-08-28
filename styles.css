@@ -18,6 +18,8 @@
   --type-milestone: #a97a28;
   --type-event: #4a7a54;
   --type-general: #6f6558;
+  --type-task: #7a5aa0;
+  --type-idea: #4a7f8a;
   --on-type: #fffdf8;               /* text on type-colored blocks */
   --shade: rgba(0, 0, 0, 0.25);     /* subtle overlay accents */
   --scrim: rgba(0, 0, 0, 0.35);     /* modal backdrop */
@@ -51,6 +53,8 @@
   --type-milestone: #e0b356;
   --type-event: #63b57e;
   --type-general: #7d828c;
+  --type-task: #a98fd0;
+  --type-idea: #6fb3c0;
   --on-type: #14161a;
   /* linked-calendar palette (Task 8) — lighter/brighter twins of the light
      values above, same contrast strategy as the item-type palette. */
@@ -462,9 +466,65 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 .type-milestone { --type: var(--type-milestone); }
 .type-event     { --type: var(--type-event); }
 .type-general   { --type: var(--type-general); }
+.type-task      { --type: var(--type-task); }
+.type-idea      { --type: var(--type-idea); }
 /* External-feed items (Task 7): color comes from the owning feed, stamped as
    an inline --feed-color custom property at the render site — not from the
    fixed type palette above. Falls back to --type-general if a site somehow
    omits the inline property, same as every other --type consumer. */
 .type-external  { --type: var(--feed-color, var(--type-general)); }
-#item-list li, .day-other-list li { border-left: 4px solid var(--type, var(--type-general)); }
+#item-list li, .day-other-list li, #todo-list li, #idea-list li {
+  border-left: 4px solid var(--type, var(--type-general));
+}
+
+/* A COMPLETED TO-DO STAYS ON THE CALENDAR (V6 3.3) -- it still happened
+   that day. It is struck through and dimmed rather than removed. The class
+   is the second token itemTypeClass returns, so every render site that
+   colours an item gets this for free. */
+.done { opacity: 0.55; }
+#item-list li.done span, .day-other-list li.done span { text-decoration: line-through; }
+.cal-item.done, .week-block.done, .day-block.done, .day-pin.done { opacity: 0.5; }
+
+
+/* ---------- To-do and Ideas (V6) ---------- */
+#todo-list, #idea-list { list-style: none; padding: 0; margin: 0; }
+#todo-list li, #idea-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 8px;
+}
+#todo-list li.empty, #idea-list li.empty { color: var(--muted); justify-content: center; }
+.todo-main, .idea-main { flex: 1 1 auto; min-width: 0; }
+/* A 20px tap target is below the 44px minimum on a phone; the padding on the
+   row is what makes the whole left edge hittable. */
+#todo-list input[type="checkbox"] { width: 20px; height: 20px; flex: 0 0 auto; margin: 0; }
+
+.idea-title { font-weight: 600; }
+/* The complete original text. pre-wrap because notes keeps the user's own
+   line breaks verbatim (js/ideas.js) -- collapsing them here would undo that. */
+.idea-notes {
+  margin: 4px 0 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+
+.idea-add { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 12px; }
+.idea-add textarea {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 1rem;              /* under 16px iOS zooms the page on focus */
+  background: var(--card);
+  color: var(--ink);
+  resize: vertical;
+}
