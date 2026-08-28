@@ -2,7 +2,12 @@ import {
   loadItems, saveItems, loadFeeds, loadFeedCache, addTombstone,
   loadTombstones, saveTombstones,
 } from './storage.js';
-import { makeItem, sortItemsByDate } from './items.js';
+import {
+  makeItem, sortItemsByDate, isScheduled, isTodo, isIdea, sortIdeasNewestFirst,
+} from './items.js';
+import { normalizeIdea } from './ideas.js';
+import { renderTodoView } from './todoview.js';
+import { renderIdeasView } from './ideasview.js';
 import { toISO, nowISO } from './dateparse.js';
 import { buildMonthGrid, groupItemsByDate, monthCellSummary, chronoFirst, itemTypeClass } from './calendar.js';
 import { startOfWeek, addDays, formatTime, formatTimeRange } from './timegrid.js';
@@ -52,6 +57,15 @@ const els = {
   dayBody: document.getElementById('day-body'),
   prevDay: document.getElementById('prev-day'),
   nextDay: document.getElementById('next-day'),
+  // V6 — the To-do and Ideas pages.
+  showTodo: document.getElementById('show-todo'),
+  showIdeas: document.getElementById('show-ideas'),
+  todoView: document.getElementById('todo-view'),
+  todoList: document.getElementById('todo-list'),
+  ideasView: document.getElementById('ideas-view'),
+  ideaList: document.getElementById('idea-list'),
+  ideaText: document.getElementById('idea-text'),
+  ideaAdd: document.getElementById('idea-add'),
 };
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
@@ -73,9 +87,30 @@ let feedCache = loadFeedCache();
 // visibleItems: own items (unbounded) ++ every visible feed's instances for
 // [start, end]. Own items are never range-limited here — only the caller's
 // choice of [start, end] bounds how far external instances are expanded.
+//
+// THE isScheduled FILTER IS THE SINGLE CHOKEPOINT for list, month, week and
+// day (V6 § 7.1), so one filter covers all four. It has to be here and not in
+// groupItemsByDate: renderList calls sortItemsByDate(visibleItems(...))
+// DIRECTLY and iterates the result — groupItemsByDate is never involved on the
+// default view. Forgetting this is visible (an idea turns up on the calendar
+// on its capture day) rather than silently correct.
+//
+// External feed instances carry no `type`, so isScheduled passes them through
+// — by design, not by accident: a feed event is always a scheduled thing.
 function visibleItems(start, end) {
-  return [...items, ...instancesForRange(feeds, feedCache, start, end, DEVICE_TZ)];
+  return [
+    ...items.filter(isScheduled),
+    ...instancesForRange(feeds, feedCache, start, end, DEVICE_TZ),
+  ];
 }
+
+// THE To-do AND Ideas PAGES READ `items` DIRECTLY, never visibleItems (V6
+// § 3.3). External feed instances carry no `type`, so they would fail both
+// predicates by ACCIDENT rather than by design — and a feed that ever grew a
+// type-shaped field would start populating the To-do page.
+function todoItems() { return sortItemsByDate(items.filter(isTodo)); }
+
+function ideaItems() { return sortIdeasNewestFirst(items.filter(isIdea)); }
 
 // In-app dictation — only surface the mic where the browser supports it.
 // (On iPhone, the keyboard's own mic is always available regardless.)
@@ -122,12 +157,21 @@ initSettings({
 
 function setMessage(t) { els.message.textContent = t || ''; }
 
-function addItems(list) {
+export function addItems(list) {
   // createdAt stays a local calendar date (toISO) — sortItemsByDate depends
   // on its current format. updatedAt is a full-precision UTC instant
   // (nowISO), matching feed updatedAt and tombstone deletedAt so sync's
   // last-write-wins comparisons are all apples-to-apples.
-  const made = list.map((it) => makeItem(it, { id: uid(), createdAt: toISO(new Date()), updatedAt: nowISO() }));
+  //
+  // normalizeIdea is applied HERE, at the single point every capture path
+  // funnels through (V6 § 6): the Ideas box, a direct smart-add, and a
+  // preview confirmation — including one where the user changed the type TO
+  // 'idea' in the preview. It re-derives title/notes from the complete text,
+  // so the model's own split never matters and nothing can lose words. It is
+  // idempotent and a no-op on every other type.
+  const made = list.map((it) => makeItem(normalizeIdea(it), {
+    id: uid(), createdAt: toISO(new Date()), updatedAt: nowISO(),
+  }));
   items.push(...made);
   saveItems(items);
   render();
@@ -218,6 +262,55 @@ function handleDelete(id) {
   }
 }
 
+// setDone — V6's To-do checkbox, and THE APP'S FIRST EDIT PATH (spec § 5.1).
+//
+// THE WRITE LANDS HERE, deliberately. app.js owns plaenicke.items and saves
+// from this module-scope array (CLAUDE.md's ownership invariant, spec § 5.5),
+// so the record is mutated IN this array and then saved — exactly the shape of
+// deleteItem above. A write performed anywhere else is silently discarded the
+// next time app.js saves from its own snapshot.
+//
+// updatedAt IS BUMPED, and that is the horn that was chosen after examining
+// both. unionById's ties go to REMOTE (`>=`), so leaving updatedAt alone would
+// make the next sync silently REVERT the tick — self-reverting, not
+// self-correcting. Bumping it means applyTombstones can resurrect an item
+// deleted on another device before the tick synced; that costs a reappearing,
+// re-deletable calendar entry rather than lost data, and it is the only horn
+// that converges. js/merge.js's header carries the full reasoning.
+function setDone(id, done) {
+  const record = items.find((it) => it.id === id);
+  if (!record) return;
+  record.done = done === true;
+  record.updatedAt = nowISO();
+  saveItems(items);
+  render();
+  scheduleSync();
+}
+
+function handleToggleDone(id, done) {
+  try {
+    setDone(id, done);
+  } catch (e) {
+    setMessage(e.message);
+  }
+}
+
+// The Ideas page's own capture box (spec § 6). Offline, deterministic, and the
+// fallback when the Worker is unreachable — it goes through addItems like
+// every other capture, so normalizeIdea and makeItem apply unchanged.
+//
+// The capture DATE is today, and it is a real YYYY-MM-DD string. `type` is
+// what marks an idea unscheduled (spec § 3.4), never a null date.
+function handleIdeaAdd() {
+  const text = els.ideaText.value.trim();
+  if (!text) { setMessage('Type a thought first.'); return; }
+  try {
+    addItems([{ title: text, notes: text, date: toISO(new Date()), type: 'idea', time: null, endTime: null }]);
+  } catch (e) { setMessage(e.message); return; }
+  els.ideaText.value = '';
+  setMessage('Kept.');
+}
+
 function tagChips(it) {
   const wrap = document.createElement('div');
   wrap.className = 'tags';
@@ -243,7 +336,9 @@ function renderList() {
   } else {
     for (const it of sorted) {
       const li = document.createElement('li');
-      li.classList.add(itemTypeClass(it));
+      // className, NOT classList.add: itemTypeClass can return two tokens
+      // ('type-task done') and classList.add throws on a token with a space.
+      li.className = itemTypeClass(it);
       if (it.external) li.style.setProperty('--feed-color', it.feedColor);
       const main = document.createElement('div');
       const info = document.createElement('span');
@@ -354,11 +449,29 @@ function renderDay() {
   if (visible) lastDayRendered = viewDay;
 }
 
-function render() { renderList(); renderCalendar(); renderWeek(); renderDay(); }
+function renderTodos() {
+  renderTodoView(els.todoList, todoItems(), { onDelete: handleDelete, onToggleDone: handleToggleDone });
+}
+
+function renderIdeas() {
+  renderIdeasView(els.ideaList, ideaItems(), { onDelete: handleDelete });
+}
+
+// Every page is re-rendered on every change, so a to-do ticked on the To-do
+// page also leaves the calendar views correct with no second trigger.
+function render() {
+  renderList(); renderCalendar(); renderWeek(); renderDay(); renderTodos(); renderIdeas();
+}
 
 function showView(which) {
-  const views = { list: els.listView, month: els.calView, week: els.weekView, day: els.dayView };
-  const buttons = { list: els.showList, month: els.showMonth, week: els.showWeek, day: els.showDay };
+  const views = {
+    list: els.listView, month: els.calView, week: els.weekView, day: els.dayView,
+    todo: els.todoView, ideas: els.ideasView,
+  };
+  const buttons = {
+    list: els.showList, month: els.showMonth, week: els.showWeek, day: els.showDay,
+    todo: els.showTodo, ideas: els.showIdeas,
+  };
   for (const [name, el] of Object.entries(views)) el.hidden = name !== which;
   for (const [name, b] of Object.entries(buttons)) b.classList.toggle('active', name === which);
   render();
@@ -377,6 +490,9 @@ els.showList.addEventListener('click', () => showView('list'));
 els.showMonth.addEventListener('click', () => showView('month'));
 els.showWeek.addEventListener('click', () => showView('week'));
 els.showDay.addEventListener('click', () => showView('day'));
+els.showTodo.addEventListener('click', () => showView('todo'));
+els.showIdeas.addEventListener('click', () => showView('ideas'));
+els.ideaAdd.addEventListener('click', handleIdeaAdd);
 els.prev.addEventListener('click', () => { viewMonth = new Date(viewMonth.getFullYear(), viewMonth.getMonth() - 1, 1); renderCalendar(); });
 els.next.addEventListener('click', () => { viewMonth = new Date(viewMonth.getFullYear(), viewMonth.getMonth() + 1, 1); renderCalendar(); });
 els.prevDay.addEventListener('click', () => { viewDay = addDays(viewDay, -1); render(); });
@@ -528,6 +644,21 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') runSync();
 });
 window.addEventListener('online', runSync);
+
+// PAINT THE SHELL INDICATOR BEFORE runSync, unconditionally (V6 spec § 9
+// step 0). runSync's `finally` is the only other caller of renderSyncStatus in
+// this file, and runSync returns BEFORE its try/finally whenever
+// `!isLinked() || isAdoptionPending()` — which is exactly the pair of states
+// step 0 exists to make visible: a stuck adoption, and a corrupt stored code
+// (which makes isLinked() read false while a credential is stored). Without
+// this line the indicator would light for every failure EXCEPT the two it was
+// built for.
+//
+// The guard's early return must NOT be changed to paint instead: the assertion
+// that runSync never reaches its finally while adoption is pending is the only
+// live anchor on app.js's "never union silently" guard (see
+// tests/apply.test.js).
+renderSyncStatus();
 runSync();
 
 if ('serviceWorker' in navigator) {

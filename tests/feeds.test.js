@@ -7,6 +7,7 @@ import {
 import {
   loadFeeds, saveFeeds, loadFeedCache, saveFeedCache, loadTombstones,
 } from '../js/storage.js';
+import { isTodo, isIdea, isScheduled } from '../js/items.js';
 
 // --- fakes -------------------------------------------------------------
 
@@ -471,6 +472,37 @@ test('instancesForRange: stamps id, createdAt (untimed -> 00:00), feedId, feedCo
   assert.equal(inst.feedColor, FEED_A.color);
   assert.equal(inst.external, true);
   assert.equal(inst.time, null);
+});
+
+// V6 § 3.3 — THE PROPERTY THE To-do AND Ideas PAGES DEPEND ON.
+//
+// Those pages read `items` directly rather than visibleItems(), and the stated
+// reason is that an external instance "would fail the predicates by accident
+// rather than by design". This pins the accident: an EventInstance carries NO
+// `type` and NO `done`, so isTodo/isIdea reject it because there is nothing to
+// match, not because anything checks `external`.
+//
+// Give an instance a `type` and a subscribed calendar starts populating the
+// To-do page with events the user cannot complete or delete. Whoever adds one
+// has to come back through this comment.
+test('an external instance carries no type and no done, which is why the V6 predicates reject it', () => {
+  const cache = {
+    feedA: {
+      fetchedAt: '2026-07-28T12:00:00.000Z',
+      events: [{
+        uid: 'e1', title: 'Standup', form: 'DATE', dtstart: { value: '20260801', tzid: null },
+        dtend: null, duration: null, rrule: null, exdates: [], recurrenceId: null,
+      }],
+      skipped: [],
+    },
+  };
+  const [inst] = instancesForRange([FEED_A], cache, '2026-08-01', '2026-08-01', 'UTC');
+  assert.ok(inst, 'fixture check: an instance must actually have been produced');
+  assert.equal('type' in inst, false, 'a feed event with a type would land on the To-do page');
+  assert.equal('done' in inst, false, 'and a completable feed event is not a thing the user can act on');
+  assert.equal(isTodo(inst), false);
+  assert.equal(isIdea(inst), false);
+  assert.equal(isScheduled(inst), true, 'a feed event is always a scheduled thing');
 });
 
 test('instancesForRange: timed event stamps createdAt with its time', () => {

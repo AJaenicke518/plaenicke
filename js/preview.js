@@ -1,5 +1,20 @@
 // preview.js — editable confirmation list for multi/uncertain smart-add results.
-const TYPES = ['due', 'start', 'milestone', 'event', 'general'];
+
+// THIS IS THE SECOND HARD-CODED TYPE LIST. The first is the `type` enum in
+// worker/src/prompt.js, and the two live in DIFFERENT DEPLOY UNITS — the
+// client ships by merging to main, the Worker ships separately through
+// wrangler — so they can diverge silently. A type the model returns that is
+// missing here renders a <select> with NO option selected: the browser shows
+// the first option while draft[i].type still holds the real value, and the
+// first change event on that control writes the wrong type into the record.
+//
+// EXPORTED so tests/preview.test.js can assert against the Worker's enum
+// directly (npm test recurses into worker/, so importing both is airtight
+// without coupling the two deploy units through a shared import).
+//
+// 'general' is deliberately client-only: manual add hard-codes it and it is
+// every pre-V6 record's type, but the model is never asked to produce it.
+export const TYPES = ['due', 'start', 'milestone', 'event', 'general', 'task', 'idea'];
 
 export function renderPreview(container, items, { onConfirm, onCancel }) {
   const draft = items.map((it) => ({ ...it }));

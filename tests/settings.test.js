@@ -29,6 +29,8 @@ class FakeElement {
     this.style = { setProperty(name, val) { this[name] = val; } };
     this.dataset = {};
     this.disabled = false;
+    this.hidden = false;
+    this.id = '';
     this.value = '';
     this.textContent = '';
   }
@@ -89,9 +91,23 @@ function makeFakeDocument() {
   const documentElement = new FakeElement('html');
   const body = new FakeElement('body');
   const listeners = {};
+  const walk = (el, pred) => {
+    for (const c of el.children) {
+      if (pred(c)) return c;
+      const found = walk(c, pred);
+      if (found) return found;
+    }
+    return null;
+  };
   return {
     documentElement,
     body,
+    // Real semantics, copied from tests/linkui.test.js: an element that is not
+    // in the document is NOT found. (js/linkui.js's render() looks up the app
+    // shell's sync indicator here; these tests never mount one.) Do NOT make
+    // this lazily create an element per id the way tests/apply.test.js does —
+    // that turns every "safe when unmounted" assertion into a vacuous one.
+    getElementById(id) { return walk(body, (el) => el.id === id); },
     createElement: (tag) => new FakeElement(tag),
     addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
     removeEventListener(type, fn) {

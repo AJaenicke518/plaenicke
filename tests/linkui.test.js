@@ -1,9 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
 import {
   describeSyncStatus, classifyPastedCode, chooseAdoption, renderSyncStatus,
-  initLinkUI, failureText, SYNC_STATUS_ID,
+  initLinkUI, failureText, SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID,
+  classifySyncState, shellNeedsAttention, panelShowsProblem,
+  SYNC_OK, SYNC_NOT_LINKED, SYNC_CORRUPT, SYNC_ADOPTION_PENDING, SYNC_ERROR,
 } from '../js/linkui.js';
 import { linkWithCode, clearAdoptionPending, isLinked } from '../js/auth.js';
 import {
@@ -1889,4 +1892,204 @@ test('a bootstrap adoption drives the real syncOnce, pushes local state and lift
   const pushed = await decryptBlob(link.encKey, row.blob);
   assert.deepEqual(pushed.items.map((i) => i.id), ['local']);
   assert.deepEqual(pushed, toWire(pushed), 'the pushed blob must be canonical wire form');
+});
+
+// =========================================================================
+// V6 step 0 — the app-shell sync indicator (spec § 9 step 0)
+// =========================================================================
+//
+// A broken sync is silent: there is no indicator anywhere outside the settings
+// panel, so a revoked token, a corrupt stored code or a stuck adoption all
+// present as an app that works perfectly and quietly stops agreeing with the
+// other device.
+//
+// THE TRAP THIS PINS. renderSyncStatus() finds its element by id, and the
+// settings panel mounts an element carrying SYNC_STATUS_ID (js/linkui.js's
+// render()). Two elements cannot share an id: getElementById returns exactly
+// one of them and the other silently never updates again. The shell indicator
+// therefore has its own id, and renderSyncStatus paints BOTH.
+
+test('the shell indicator does not share an id with the panel status line', () => {
+  assert.notEqual(SHELL_SYNC_STATUS_ID, SYNC_STATUS_ID,
+    'two elements cannot share an id — getElementById would return one and the other would never update');
+});
+
+// classifySyncState is PURE: no DOM, no storage. Every branch of the status
+// surface is derived from it, so the panel's styling and the shell's
+// attention rule cannot drift apart.
+test('classifySyncState maps every reachable pair of facts to exactly one kind', () => {
+  const facts = (o) => ({ hasCredential: true, codeReadable: true, syncState: {}, ...o });
+  assert.equal(classifySyncState(facts({ hasCredential: false, codeReadable: false })), SYNC_NOT_LINKED);
+  assert.equal(classifySyncState(facts({ codeReadable: false })), SYNC_CORRUPT);
+  assert.equal(classifySyncState(facts({ syncState: { adoptionPending: true } })), SYNC_ADOPTION_PENDING);
+  assert.equal(classifySyncState(facts({ syncState: { lastError: 'unauthorized' } })), SYNC_ERROR);
+  assert.equal(classifySyncState(facts({ syncState: { lastSyncedAt: '2026-08-05T11:00:00.000Z' } })), SYNC_OK);
+  assert.equal(classifySyncState(facts()), SYNC_OK, 'linked and never synced is not a problem yet');
+  // A corrupt code outranks everything downstream of it: the stored syncState
+  // of a device that can no longer decode its own credential is frozen at
+  // whatever it last held, so reading lastSyncedAt/lastError from it is what
+  // produces the permanently frozen "synced N minutes ago" (DA-I2).
+  assert.equal(
+    classifySyncState(facts({ codeReadable: false, syncState: { adoptionPending: true, lastError: 'offline' } })),
+    SYNC_CORRUPT);
+  // Linking while offline sets BOTH; the gate is the load-bearing signal (DA-I1).
+  assert.equal(
+    classifySyncState(facts({ syncState: { adoptionPending: true, lastError: 'offline' } })),
+    SYNC_ADOPTION_PENDING);
+});
+
+// THE SHELL'S PREDICATE IS DELIBERATELY BROADER THAN THE PANEL'S.
+// paintStatus excludes adoptionPending because the panel renders its own
+// dialog for it. The shell has no dialog: a device stuck at adoptionPending
+// never syncs at all, which is precisely the invisible failure the indicator
+// exists to surface.
+test('the shell indicator lights on a pending adoption, which the panel styling excludes', () => {
+  assert.equal(shellNeedsAttention(SYNC_ADOPTION_PENDING), true);
+  assert.equal(panelShowsProblem(SYNC_ADOPTION_PENDING), false,
+    'the panel excludes it — it shows the adoption dialog instead');
+});
+
+test('the shell indicator lights on corrupt and on lastError, and stays dark otherwise', () => {
+  assert.equal(shellNeedsAttention(SYNC_CORRUPT), true);
+  assert.equal(shellNeedsAttention(SYNC_ERROR), true);
+  assert.equal(shellNeedsAttention(SYNC_OK), false);
+  assert.equal(shellNeedsAttention(SYNC_NOT_LINKED), false,
+    'an unlinked device is a complete app (spec 4.4) — nagging it is noise, not a signal');
+});
+
+test('renderSyncStatus paints the shell indicator as well as the panel status line', () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  saveAuth(composeLinkCode(bytesToBase64url(generateEncKey()), generateEncKey()));
+  saveSyncState({ lastError: 'unauthorized', adoptionPending: false });
+  const panel = doc.createElement('div');
+  panel.id = SYNC_STATUS_ID;
+  const shell = doc.createElement('div');
+  shell.id = SHELL_SYNC_STATUS_ID;
+  doc.body.append(panel, shell);
+
+  renderSyncStatus(NOW);
+
+  assert.match(panel.textContent, /problem/i, 'the panel line must still be painted');
+  assert.equal(shell.hidden, false, 'the shell indicator must be visible when sync is broken');
+  assert.match(shell.textContent, /\S/, 'and it must say something');
+  assert.ok(shell.className.includes('sync-indicator-problem'));
+});
+
+// The whole point of step 0: a device stuck at adoptionPending syncs NOTHING,
+// and the only surface that ever said so lives inside the settings panel.
+test('a stuck adoption lights the shell indicator even though the panel line is not styled as a problem', () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  saveAuth(composeLinkCode(bytesToBase64url(generateEncKey()), generateEncKey()));
+  saveSyncState({ adoptionPending: true });
+  const panel = doc.createElement('div');
+  panel.id = SYNC_STATUS_ID;
+  const shell = doc.createElement('div');
+  shell.id = SHELL_SYNC_STATUS_ID;
+  doc.body.append(panel, shell);
+
+  renderSyncStatus(NOW);
+
+  assert.equal(panel.className.includes('sync-status-problem'), false,
+    'the panel deliberately does not style a pending adoption as a problem — it shows the dialog');
+  assert.equal(shell.hidden, false, 'the shell indicator MUST light: this device is not syncing at all');
+});
+
+test('the shell indicator is hidden and empty when sync is healthy, and when not linked', () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  const shell = doc.createElement('div');
+  shell.id = SHELL_SYNC_STATUS_ID;
+  doc.body.appendChild(shell);
+
+  shell.hidden = false;
+  shell.textContent = 'stale problem text';
+  renderSyncStatus(NOW); // nothing stored at all -> not linked
+  assert.equal(shell.hidden, true, 'an unlinked device must not be nagged');
+  assert.equal(shell.textContent, '', 'and stale problem text must be cleared, not merely hidden');
+
+  saveAuth(composeLinkCode(bytesToBase64url(generateEncKey()), generateEncKey()));
+  saveSyncState({ lastSyncedAt: '2026-08-05T11:55:00.000Z', adoptionPending: false });
+  shell.hidden = false;
+  shell.textContent = 'stale problem text';
+  renderSyncStatus(NOW);
+  assert.equal(shell.hidden, true, 'a healthy sync must not show a badge');
+  assert.equal(shell.textContent, '');
+});
+
+// Each surface is mounted independently: the shell indicator lives in
+// index.html and is always present; the panel line exists only while Settings
+// is open. Neither may be a precondition for the other being painted.
+test('renderSyncStatus paints each surface independently of the other being mounted', () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  saveAuth(composeLinkCode(bytesToBase64url(generateEncKey()), generateEncKey()));
+  saveSyncState({ lastError: 'unauthorized', adoptionPending: false });
+
+  const shell = doc.createElement('div');
+  shell.id = SHELL_SYNC_STATUS_ID;
+  doc.body.appendChild(shell);
+  // `hidden` starts FALSE on a fresh element, so asserting false after the
+  // call proves nothing on its own — a renderSyncStatus that returned early
+  // (e.g. `if (!panelEl) return`) would pass. Flip it first, and check the
+  // text too.
+  shell.hidden = true;
+  assert.equal(doc.getElementById(SYNC_STATUS_ID), null,
+    'fixture check: the panel line must be absent, or the assertion below is vacuous');
+  assert.doesNotThrow(() => renderSyncStatus(NOW));
+  assert.equal(shell.hidden, false, 'the shell indicator must paint with no settings panel open');
+  assert.match(shell.textContent, /\S/);
+
+  const doc2 = installDom();
+  const panel = doc2.createElement('div');
+  panel.id = SYNC_STATUS_ID;
+  doc2.body.appendChild(panel);
+  assert.equal(doc2.getElementById(SHELL_SYNC_STATUS_ID), null,
+    'fixture check: the shell indicator must be absent, or the assertion below is vacuous');
+  assert.doesNotThrow(() => renderSyncStatus(NOW));
+  assert.match(panel.textContent, /problem/i);
+});
+
+// Opening Settings rebuilds the panel from scratch (js/settings.js:70). That
+// render must refresh the SHELL too, or a device that just linked — and is
+// therefore sitting at adoptionPending — leaves the shell dark until something
+// unrelated triggers a sync. Nothing does: app.js's runSync returns before its
+// try/finally while the gate is up (js/app.js:484), so renderSyncStatus is
+// never reached on exactly the path that matters most.
+test('opening the settings panel refreshes the shell indicator', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  await linkWithCode(bytesToBase64url(generateEncKey()));
+  saveSyncState({ adoptionPending: true });
+  const shell = doc.createElement('div');
+  shell.id = SHELL_SYNC_STATUS_ID;
+  doc.body.appendChild(shell);
+  assert.equal(shell.hidden, false, 'fixture check: hidden starts false on a fresh element');
+  shell.hidden = true;
+
+  const host = doc.createElement('div');
+  doc.body.appendChild(host);
+  const ui = initLinkUI({
+    host,
+    applyState: (s) => s,
+    fetchImpl: async () => { throw new Error('offline'); },
+    apiBase: 'https://w.example',
+    now: () => NOW,
+  });
+  await ui.settled();
+
+  assert.equal(shell.hidden, false, 'mounting the panel must repaint the shell indicator');
+  assert.match(shell.textContent, /\S/);
+});
+
+// index.html is the app shell. The indicator has to actually BE there, and it
+// must not carry the panel's id — the duplicate-id trap is invisible at
+// runtime and would leave one of the two elements permanently stale.
+test('index.html mounts the shell indicator, and does not duplicate the panel id', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  assert.match(html, new RegExp(`id="${SHELL_SYNC_STATUS_ID}"`),
+    'index.html must carry the shell indicator, or a broken sync is invisible outside Settings');
+  assert.doesNotMatch(html, new RegExp(`id="${SYNC_STATUS_ID}"`),
+    'the app shell must NOT reuse the panel status line id — two elements cannot share one');
 });

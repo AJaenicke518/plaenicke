@@ -149,3 +149,38 @@ test('itemTypeClass: external item always maps to type-external regardless of an
   assert.equal(itemTypeClass({ external: true, type: 'due' }), 'type-external');
   assert.equal(itemTypeClass({ external: true }), 'type-external');
 });
+
+// --- V6 § 3.3: a completed to-do stays on the calendar, styled as done -------
+//
+// It still happened that day, so it is not removed from the calendar views —
+// only from the To-do page. This is the ONLY V6 change that lands in this file.
+
+test('itemTypeClass: a done item keeps its type class and gains a done class', () => {
+  assert.equal(itemTypeClass({ type: 'task', done: true }), 'type-task done');
+  assert.equal(itemTypeClass({ type: 'due', done: true }), 'type-due done');
+});
+
+test('itemTypeClass: not-done, absent and non-boolean done all render undone', () => {
+  assert.equal(itemTypeClass({ type: 'task', done: false }), 'type-task');
+  assert.equal(itemTypeClass({ type: 'task' }), 'type-task');
+  assert.equal(itemTypeClass({ type: 'task', done: 'no' }), 'type-task',
+    "done is read as === true everywhere; the truthy string 'no' must not strike an item through");
+});
+
+// External instances carry no planner type and are not the user's to complete;
+// a `done` field on one (a feed can put anything in an event) must not leak a
+// class the type palette does not own.
+test('itemTypeClass: an external instance is never marked done', () => {
+  assert.equal(itemTypeClass({ external: true, done: true }), 'type-external');
+});
+
+// EVERY CALL SITE MATTERS. app.js and dayview.js pass this straight to
+// classList.add, which throws InvalidCharacterError on a token containing a
+// space in a real browser — and both of the repo's fake DOMs accept one
+// silently. So the multi-class result must be consumed as a className string
+// or split, never handed to classList.add whole.
+test('itemTypeClass returns space-separated tokens, so no caller may pass it to classList.add', () => {
+  const done = itemTypeClass({ type: 'task', done: true });
+  assert.equal(done.split(' ').length, 2);
+  for (const token of done.split(' ')) assert.doesNotMatch(token, /\s/);
+});

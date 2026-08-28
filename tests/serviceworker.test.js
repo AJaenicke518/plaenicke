@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 
 const read = () => readFileSync(new URL('../service-worker.js', import.meta.url), 'utf8');
 
@@ -25,17 +25,44 @@ test('every js/ module is precached — a missing one white-screens a cold offli
   }
 });
 
-// A guard against forgetting on a FUTURE release, not a Task 9 deliverable — this
-// branch already bumped v5-1 -> v5-2 in 1c03057, so it is green on arrival. Stated
-// plainly because the original spelled the assertion as `!sw.includes("'plaenicke-v5-1'")`,
-// which hardcodes one stale value and can therefore never fail again for any release.
-const CACHE_ON_MAIN = 'plaenicke-v5-1';
+// AND THE OTHER DIRECTION, which nothing checked. `cache.addAll` is
+// ALL-OR-NOTHING: one entry that 404s rejects the whole promise, the install
+// event's waitUntil rejects, and the service worker never activates at all —
+// so a single stale filename silently costs the app its entire offline mode
+// and its PWA install, with the app still working perfectly online. Adding an
+// ASSETS line before creating the file (or renaming a module and forgetting
+// this list) is exactly how that happens.
+test('every ASSETS entry actually exists — cache.addAll is all-or-nothing', () => {
+  for (const entry of assets(read())) {
+    if (entry === '.') continue; // the app shell, served by index.html
+    assert.ok(existsSync(new URL(`../${entry}`, import.meta.url)),
+      `service-worker ASSETS lists ${entry}, which does not exist — install would reject and the SW would never activate`);
+  }
+});
+
+// A guard against forgetting on a FUTURE release. It only works if the pinned
+// value is kept CURRENT: this constant sat at 'plaenicke-v5-1' while main had
+// already shipped 'plaenicke-v5-2', so `got > base` was satisfied forever and
+// the assertion could not fail for V6 — the exact vacuity the comment above it
+// was written to prevent. RE-PIN THIS TO main's VALUE ON EVERY RELEASE.
+const CACHE_ON_MAIN = 'plaenicke-v5-2';
+
+// AND COMPARE THE WHOLE VERSION, not just the trailing integer. The original
+// read only the last number, so the legitimate v5-2 -> v6-1 bump would have
+// FAILED (1 > 2 is false) and the tempting way out is to weaken the assertion.
+// A (major, minor) tuple makes the bump the test asks for the one a release
+// actually performs.
+function version(name) {
+  const m = name.match(/-v(\d+)-(\d+)$/);
+  assert.ok(m, `cache name must end in -v<major>-<minor>; got '${name}'`);
+  return [Number(m[1]), Number(m[2])];
+}
 
 test('the cache name is ahead of the release on main', () => {
   const m = read().match(/const CACHE = '([^']+)'/);
   assert.ok(m, 'could not find CACHE in service-worker.js');
-  const got = Number(m[1].match(/(\d+)$/)?.[1]);
-  const base = Number(CACHE_ON_MAIN.match(/(\d+)$/)[1]);
-  assert.ok(Number.isFinite(got) && got > base,
-    `CACHE must end in an integer greater than ${base} so new modules are fetched; got '${m[1]}'`);
+  const [gotMajor, gotMinor] = version(m[1]);
+  const [baseMajor, baseMinor] = version(CACHE_ON_MAIN);
+  assert.ok(gotMajor > baseMajor || (gotMajor === baseMajor && gotMinor > baseMinor),
+    `CACHE must be a later version than main's '${CACHE_ON_MAIN}' so stale caches are purged; got '${m[1]}'`);
 });

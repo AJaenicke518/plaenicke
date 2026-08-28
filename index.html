@@ -27,6 +27,19 @@
     <button id="settings-btn" class="icon-btn" type="button" aria-label="Settings">&#9881;</button>
   </header>
 
+  <!-- The app-shell sync indicator (V6 spec § 9 step 0). A broken sync is
+       otherwise completely silent: the only status line in the app lives
+       inside the settings panel, so a revoked token, a corrupt stored code or
+       a stuck adoption all present as an app that works perfectly and quietly
+       stops agreeing with the other device.
+
+       This id is NOT the settings panel's 'sync-status'. Two elements cannot
+       share an id — getElementById would return one of them and the other
+       would silently never update again. js/linkui.js paints both, each by
+       its own id. Starts hidden; renderSyncStatus() reveals it only when
+       there is a problem. -->
+  <p id="sync-indicator" class="sync-indicator" role="status" hidden></p>
+
   <section class="add-box">
     <div class="text-row">
       <input id="entry-text" type="text" autocomplete="off"
@@ -50,6 +63,8 @@
     <button id="show-month" type="button">Month</button>
     <button id="show-week" type="button">Week</button>
     <button id="show-day" type="button">Day</button>
+    <button id="show-todo" type="button">To-do</button>
+    <button id="show-ideas" type="button">Ideas</button>
   </nav>
 
   <section id="list-view">
@@ -81,6 +96,22 @@
       <button id="next-day" type="button">&rarr;</button>
     </div>
     <div id="day-body"></div>
+  </section>
+
+  <!-- To-do (V6 § 5). No add box: to-dos are captured by voice through the
+       main entry box and classified by the model. -->
+  <section id="todo-view" hidden>
+    <ul id="todo-list"></ul>
+  </section>
+
+  <!-- Ideas (V6 § 6). This box is the offline, deterministic capture path —
+       it works with no Worker at all. -->
+  <section id="ideas-view" hidden>
+    <div class="idea-add">
+      <textarea id="idea-text" rows="3" placeholder="A thought to keep — no date needed"></textarea>
+      <button id="idea-add" type="button">Keep</button>
+    </div>
+    <ul id="idea-list"></ul>
   </section>
 
   <div id="settings-host"></div>

@@ -345,6 +345,221 @@ test('dedupeState keeps two items sharing title and date but differing only in t
   assert.deepEqual(out.items.map(i => i.id).sort(), ['a', 'b']);
 });
 
+// =========================================================================
+// V6 § 6.1 — two ideas captured on the same day must both survive adoption
+// =========================================================================
+//
+// An idea's `date` is its CAPTURE date, so two thoughts jotted on the same day
+// with the same first sentence share a title, a date and a (null) time — the
+// whole of the old collapse key. Adoption would collapse them to one and write
+// a REAL tombstone for the loser, propagating the deletion to every device.
+//
+// THE FIX IS id-IN-THE-KEY, NOT EXCLUSION FROM collapse. The previous draft
+// recommended excluding undated items from collapse() and called it simpler.
+// That destroys EVERY idea on the account: survivingItemIds is derived from
+// collapse's OUTPUT, so anything filtered out of its input is absent from that
+// set and gets a tombstone written for it. The safety comes precisely from the
+// records still passing THROUGH collapse.
+
+const idea = (id, updatedAt, o = {}) => ({
+  ...item(id, updatedAt), type: 'idea', title: 'Rework the shelves.', date: '2026-08-20', time: null, ...o,
+});
+
+test('dedupeState keeps two same-title, same-capture-day ideas AND writes no tombstone', () => {
+  const out = dedupeState(state({
+    items: [idea('n1', '2026-08-20T09:00:00.000Z'), idea('n2', '2026-08-20T17:00:00.000Z')],
+  }), NOW);
+  assert.deepEqual(out.items.map((i) => i.id).sort(), ['n1', 'n2'], 'both ideas must survive');
+  // Assert on CONTENTS, not counts. A count assertion passes against an
+  // implementation that tombstones the wrong id, and against the exclusion
+  // "fix" if it happened to write two.
+  assert.deepEqual(out.tombstones, [],
+    'a tombstone here is a real deletion propagated to every device — the exclusion "fix" writes one per idea');
+});
+
+// The naive fix's exact signature, pinned from the other side: excluding ideas
+// from collapse leaves ZERO survivors and TWO tombstones. This asserts the
+// survivors are the same objects that went in, so an implementation that
+// dropped them from `items` while writing no tombstone still fails.
+test('every idea passes THROUGH collapse and comes out intact, not around it', () => {
+  const a = idea('n1', '2026-08-20T09:00:00.000Z');
+  const b = idea('n2', '2026-08-20T17:00:00.000Z', { title: 'A different thought.' });
+  const out = dedupeState(state({ items: [a, b] }), NOW);
+  assert.deepEqual([...out.items].sort((x, y) => (x.id < y.id ? -1 : 1)), [a, b]);
+  assert.deepEqual(out.tombstones, []);
+});
+
+// Three ideas, one of them a genuine same-title/same-day duplicate of another,
+// plus a real duplicated appointment. Nothing about ideas may weaken the
+// dedupe that adoption exists for.
+test('the ideas exemption does not weaken dedupe for anything else', () => {
+  const dup = (id, updatedAt) => ({ ...item(id, updatedAt), title: 'Dentist', date: '2026-08-05', time: '09:00' });
+  const out = dedupeState(state({
+    items: [
+      idea('n1', '2026-08-20T09:00:00.000Z'),
+      idea('n2', '2026-08-20T17:00:00.000Z'),
+      dup('d1', '2026-08-01T00:00:00.000Z'),
+      dup('d2', '2026-08-02T00:00:00.000Z'),
+    ],
+  }), NOW);
+  assert.deepEqual(out.items.map((i) => i.id).sort(), ['d2', 'n1', 'n2'],
+    'the duplicate appointment must still collapse');
+  assert.deepEqual(out.tombstones, [{ id: 'd1', kind: 'item', deletedAt: NOW.toISOString() }]);
+});
+
+// A round trip, matching the feed/item pairs above: device B never ran
+// adoption. Both of its ideas must still be there afterwards.
+test('a peer device keeps both same-day ideas after another device adopts', () => {
+  const a = idea('n1', '2026-08-20T09:00:00.000Z');
+  const b = idea('n2', '2026-08-20T17:00:00.000Z');
+  const deviceB = state({ items: [a, b] });
+  const deviceAAdopted = dedupeState(state({ items: [a, b] }), NOW);
+  assert.deepEqual(merge(deviceB, deviceAAdopted, NOW).items.map((i) => i.id).sort(), ['n1', 'n2']);
+});
+
+// THE TWO KEY SHAPES SHARE ONE NAMESPACE, so they must be unambiguous.
+// The tempting implementation is to keep the ordinary three-field shape and
+// just swap the id in for the title -- and that one COLLIDES: a scheduled item
+// whose title happens to be the idea's id, on the same date at the same time,
+// lands in the same bucket, and one of the two gets a real tombstone. Ids are
+// random, so that is unlikely rather than impossible -- and "safe by accident
+// of the data shape" is a failure this file has recorded before (the U+0001
+// separator exists because a space separator collapsed 'Call mom' on
+// '2026-08-05' with 'Call' on 'mom 2026-08-05').
+test('an idea key cannot collide with a scheduled item titled with that idea id', () => {
+  const target = idea('n1', '2026-08-20T09:00:00.000Z');
+  const collider = { ...item('x1', '2026-08-21T00:00:00.000Z'), title: 'n1', date: target.date, time: null };
+  const out = dedupeState(state({ items: [target, collider] }), NOW);
+  assert.deepEqual(out.items.map((i) => i.id).sort(), ['n1', 'x1'],
+    'an idea and an unrelated scheduled item must never share a dedupe bucket');
+  assert.deepEqual(out.tombstones, []);
+});
+
+// =========================================================================
+// V6 § 5.1 — the To-do checkbox is the app's FIRST EDIT PATH
+// =========================================================================
+//
+// js/merge.js's header used to say per-record last-write-wins was tolerable
+// only because nothing ever rewrote a record. The checkbox is that feature.
+// These pin BOTH horns of the choice, with FIELD-LEVEL assertions — the
+// convergence simulation compares id sets only, so a race case added there
+// would prove the devices agree, not that they agree on the right value.
+
+// A full two-device round trip against a shared account blob, in wire form.
+// Device A pushes, device B pulls-merges-pushes, device A pulls again.
+function roundTrip(deviceA, deviceB, now) {
+  const account1 = toWire(merge(deviceA, emptyState(), now));
+  const bAfter = merge(deviceB, account1, now);
+  const account2 = toWire(bAfter);
+  const aAfter = merge(deviceA, account2, now);
+  return { aAfter, bAfter, account: account2 };
+}
+
+const todoRec = (o = {}) => ({
+  id: 'task1', title: 'Renew the passport', date: '2026-08-20', time: null, endTime: null,
+  type: 'task', createdAt: '2026-08-19', updatedAt: '2026-08-19T00:00:00.000Z',
+  project: null, subject: null, category: null, done: false, notes: null, ...o,
+});
+
+// THE HORN THAT WAS CHOSEN, pinned as KNOWN behaviour rather than left as a
+// surprise. Deleted on the laptop at 09:00, ticked on the phone at 12:00,
+// neither having synced. applyTombstones keeps any record whose updatedAt is
+// at or after the deletion — on the assumption that a later updatedAt means
+// "re-created after the deletion", which an edit path makes false. So the item
+// comes back on every device.
+//
+// It comes back as done: true, so it is OFF the To-do page and reappears only
+// on the calendar: annoying and re-deletable, not lost data. That is the price
+// of the only horn that converges.
+test('a tick racing a delete resurrects the item on both devices, carrying done: true', () => {
+  const laptop = state({
+    items: [],
+    tombstones: [{ id: 'task1', kind: 'item', deletedAt: '2026-08-20T09:00:00.000Z' }],
+  });
+  const phone = state({ items: [todoRec({ done: true, updatedAt: '2026-08-20T12:00:00.000Z' })] });
+
+  const { aAfter, bAfter } = roundTrip(laptop, phone, NOW);
+
+  for (const [name, side] of [['laptop', aAfter], ['phone', bAfter]]) {
+    assert.deepEqual(side.items.map((i) => i.id), ['task1'], `${name}: the item comes back`);
+    // FIELD-LEVEL, not an id set: the whole point is WHICH version survives.
+    assert.equal(side.items[0].done, true, `${name}: it comes back completed, so it is off the To-do page`);
+    assert.equal(side.items[0].updatedAt, '2026-08-20T12:00:00.000Z', `${name}: the tick's version is the survivor`);
+    assert.equal(side.items[0].title, 'Renew the passport', `${name}: with its content intact`);
+  }
+  assert.deepEqual(aAfter.items, bAfter.items, 'and the two devices agree exactly');
+});
+
+// THE HORN THAT WAS REJECTED, and the reason it had to be. unionById's ties go
+// to REMOTE (`>=`), so a tick that left updatedAt alone is overwritten by the
+// account's untouched copy on the very next sync: the checkbox visibly
+// un-ticks itself. Self-REVERTING, not self-correcting — which is what the
+// previous draft's "benign because it's a boolean" argument missed entirely.
+test('a tick that does NOT bump updatedAt is silently reverted by the account copy', () => {
+  const stamp = '2026-08-19T00:00:00.000Z';
+  const account = toWire(state({ items: [todoRec({ done: false, updatedAt: stamp })] }));
+  const phoneTickedWithoutBump = state({ items: [todoRec({ done: true, updatedAt: stamp })] });
+
+  const merged = merge(phoneTickedWithoutBump, account, NOW);
+  assert.equal(merged.items[0].done, false,
+    'the tie goes to remote, so an un-bumped tick is thrown away — this is why the toggle must bump updatedAt');
+});
+
+// And with the bump, the same sync keeps it. This is the assertion that makes
+// the one above evidence rather than a description of merge()'s tie rule.
+test('the same tick WITH a bumped updatedAt survives that sync', () => {
+  const account = toWire(state({ items: [todoRec({ done: false, updatedAt: '2026-08-19T00:00:00.000Z' })] }));
+  const phone = state({ items: [todoRec({ done: true, updatedAt: '2026-08-20T12:00:00.000Z' })] });
+  assert.equal(merge(phone, account, NOW).items[0].done, true);
+});
+
+// The ordinary, overwhelmingly common case: a tick on one device with no
+// concurrent delete anywhere must simply arrive, and must not resurrect
+// anything else along the way.
+test('a tick with no concurrent delete just propagates', () => {
+  const laptop = state({ items: [todoRec({ done: false })] });
+  const phone = state({ items: [todoRec({ done: true, updatedAt: '2026-08-20T12:00:00.000Z' })] });
+  const { aAfter, bAfter } = roundTrip(laptop, phone, NOW);
+  assert.equal(aAfter.items[0].done, true);
+  assert.equal(bAfter.items[0].done, true);
+  assert.deepEqual(aAfter.tombstones, [], 'a tick is not a deletion');
+});
+
+// A delete that does NOT race an edit must still stick, on both devices. The
+// resurrection above is confined to the race; if it leaked to the ordinary
+// path, deleting anything would stop working.
+test('a delete that does not race a tick still deletes, on both devices', () => {
+  const laptop = state({
+    items: [],
+    tombstones: [{ id: 'task1', kind: 'item', deletedAt: '2026-08-20T09:00:00.000Z' }],
+  });
+  const phone = state({ items: [todoRec({ done: false, updatedAt: '2026-08-19T00:00:00.000Z' })] });
+  const { aAfter, bAfter } = roundTrip(laptop, phone, NOW);
+  assert.deepEqual(aAfter.items, []);
+  assert.deepEqual(bAfter.items, []);
+});
+
+// `done` and `notes` must reach the wire. toWire strips color and hidden by
+// name; a strip list that ever grew to cover a new field would silently send
+// every device an item with no completion state and every idea with no body.
+test('done and notes survive toWire and land on the other device', () => {
+  const full = 'Rework the shelves. They are too deep for the mugs.';
+  const local = state({
+    items: [
+      todoRec({ done: true, updatedAt: '2026-08-20T12:00:00.000Z' }),
+      { ...todoRec({ id: 'idea1', type: 'idea', title: 'Rework the shelves.', notes: full }) },
+    ],
+  });
+  const wire = toWire(local);
+  const byId = Object.fromEntries(wire.items.map((i) => [i.id, i]));
+  assert.equal(byId.task1.done, true, 'a completion state that does not reach the wire is a to-do that never completes');
+  assert.equal(byId.idea1.notes, full, 'and an idea with no notes on the wire arrives as a bare heading');
+
+  const remote = merge(emptyState(), wire, NOW);
+  assert.equal(remote.items.find((i) => i.id === 'task1').done, true);
+  assert.equal(remote.items.find((i) => i.id === 'idea1').notes, full);
+});
+
 test('emptyState is a valid mergeable state', () => {
   assert.deepEqual(merge(emptyState(), emptyState(), NOW), emptyState());
 });

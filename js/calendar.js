@@ -50,8 +50,19 @@ export function monthCellSummary(dayItems, maxChips = 2) {
 // 'type-external' regardless of any type-shaped field, because their color
 // comes from the owning feed (via a --feed-color custom property set inline
 // at the render site), not the fixed type palette in styles.css.
+//
+// V6 § 3.3 added the second token. A COMPLETED to-do leaves the To-do page but
+// STAYS on the calendar — it still happened that day — so it is styled as done
+// rather than removed. `done` is read as `=== true` here as it is everywhere
+// else, and an external instance is never the user's to complete.
+//
+// THE RETURN VALUE IS NOW MULTI-TOKEN. Every caller must assign it as a
+// className or split it: element.classList.add() throws InvalidCharacterError
+// on a token containing a space in a real browser, and BOTH of this repo's
+// fake DOMs accept one silently, so that bug would never surface in the suite.
 export function itemTypeClass(item) {
-  return `type-${item.external ? 'external' : (item.type || 'general')}`;
+  if (item.external) return 'type-external';
+  return `type-${item.type || 'general'}${item.done === true ? ' done' : ''}`;
 }
 
 // chronoFirst — for truncated views (month chips, week's 8-block cap): timed items

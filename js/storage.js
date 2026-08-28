@@ -29,7 +29,18 @@ export function deserializeItems(json) {
       it &&
       typeof it.id === 'string' &&
       typeof it.title === 'string' &&
-      typeof it.date === 'string')
+      // DELIBERATE DEAD CODE IN V6 (spec § 3.4). Nothing creates an undated
+      // record: an idea carries its capture date and makeItem still refuses a
+      // falsy date. The tolerance ships anyway so that a future version can
+      // adopt genuinely undated records with it already provably deployed on
+      // BOTH devices, rather than gating a user-visible feature on a rollout
+      // executed by hand across two devices.
+      //
+      // EXACTLY ONE extra value. undefined, numbers, objects and booleans are
+      // still junk and must still be dropped — do not loosen this to
+      // `it.date != null` or drop the check: a non-string date reaches
+      // sortItemsByDate and every render site.
+      (it.date === null || typeof it.date === 'string'))
     // Records written before V5 have no updatedAt. Backfill from createdAt so
     // conflict resolution has an input; see spec 5.1.
     .map(it => (typeof it.updatedAt === 'string'

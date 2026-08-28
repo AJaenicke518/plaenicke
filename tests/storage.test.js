@@ -52,6 +52,60 @@ test('deserialize drops malformed entries', () => {
   assert.deepEqual(deserializeItems(json), [ITEM]);
 });
 
+// --- V6 § 3.4: the null-date tolerance, shipped as DELIBERATE DEAD CODE -----
+//
+// V6 creates no undated records: an idea carries its capture date and
+// makeItem still refuses a falsy date. This filter is relaxed anyway, so that a
+// FUTURE version can adopt genuinely undated records with the tolerance
+// already provably deployed on both devices — instead of gating a
+// user-visible feature on a rollout a non-programmer has to execute correctly
+// across two devices.
+//
+// Why it matters that this lands first: a device running code that DROPS the
+// record is locally blind to it, and spec § 13 records the genuinely
+// destructive path that follows (adoption, not ordinary sync).
+test('deserializeItems tolerates a null date rather than silently dropping the record', () => {
+  const undated = { ...ITEM, id: 'undated', date: null };
+  const out = deserializeItems(JSON.stringify([ITEM, undated]));
+  assert.deepEqual(out.map((i) => i.id), [ITEM.id, 'undated'],
+    'a record with date: null must survive the load, not vanish from this device only');
+  assert.equal(out[1].date, null, 'and it must survive AS null — not coerced to a string');
+});
+
+// The relaxation is exactly one extra value. Everything else is still junk and
+// must still be dropped: a permissive `date != null` or a dropped check
+// entirely would let a number or an object through into sortItemsByDate and
+// every render site.
+test('the relaxed date filter still rejects undefined, numbers, objects and arrays', () => {
+  const bad = [
+    { ...ITEM, id: 'missing' },
+    { ...ITEM, id: 'undef', date: undefined },
+    { ...ITEM, id: 'num', date: 20260820 },
+    { ...ITEM, id: 'obj', date: { y: 2026 } },
+    { ...ITEM, id: 'arr', date: ['2026-08-20'] },
+    { ...ITEM, id: 'bool', date: true },
+  ];
+  delete bad[0].date;
+  assert.deepEqual(deserializeItems(JSON.stringify(bad)).map((i) => i.id), [],
+    'only a string or an explicit null is a date');
+});
+
+// --- V6 § 3.1: new fields ride through storage untouched --------------------
+//
+// deserializeItems filters, then maps each survivor to ITSELF — it does not
+// rebuild from a whitelist (unlike makeItem). That is what lets `done` and
+// `notes` survive a round trip through a device running pre-V6 code, and it is
+// why the record shape could change without touching schemaVersion.
+test('done and notes survive a storage round trip untouched', () => {
+  const idea = {
+    ...ITEM, id: 'idea1', type: 'idea', title: 'Rework the shelves.',
+    notes: 'Rework the shelves. They are too deep for the mugs.', done: false,
+  };
+  const doneTask = { ...ITEM, id: 'task1', type: 'task', done: true, notes: null };
+  const out = deserializeItems(serializeItems([idea, doneTask]));
+  assert.deepEqual(out, [idea, doneTask]);
+});
+
 // --- feeds ---
 
 test('feeds: serialize then deserialize round-trips', () => {
