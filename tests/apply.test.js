@@ -7,7 +7,7 @@ import {
 } from '../js/storage.js';
 import { linkWithCode, clearAdoptionPending } from '../js/auth.js';
 import { bytesToBase64url, TOKEN_BYTES } from '../js/crypto.js';
-import { SYNC_STATUS_ID } from '../js/linkui.js';
+import { SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID } from '../js/linkui.js';
 
 // --- historical note: the js/linkui.js resolve hook -------------------------
 //
@@ -176,6 +176,35 @@ function allText(el) {
   for (const c of el.children) out += ` ${allText(c)}`;
   return out;
 }
+
+// --- V6 step 0: the shell indicator must be painted at LOAD ----------------
+//
+// THIS TEST MUST RUN FIRST IN THIS FILE. app.js's module-scope code runs
+// exactly once, on the first import; every later test gets the cached module.
+// So the storage state app.js sees at load is whatever this test seeds.
+//
+// Why load-time painting is the load-bearing wire, and not an optimisation:
+// runSync's `finally` is the only other caller of renderSyncStatus, and
+// runSync returns BEFORE its try/finally whenever `!isLinked() || isAdoptionPending()`
+// (js/app.js:484). Those are exactly the two states step 0 exists to surface —
+// a stuck adoption and a corrupt stored code (which makes isLinked() false).
+// Without this call the indicator would light for everything EXCEPT the two
+// failures it was built for. That early return must NOT be made to paint
+// instead: tests/apply.test.js's "runSync does not proceed into its
+// try/finally while adoption is pending" anchors the "never union silently"
+// guard on renderSyncStatus NOT running there.
+test('app.js paints the shell sync indicator at load, so a stuck adoption is visible with no sync', async () => {
+  installFakeLocalStorage();
+  // linkWithCode's bootstrap path always sets adoptionPending: true (spec 5.7).
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  const shell = globalThis.document.getElementById(SHELL_SYNC_STATUS_ID);
+  shell.hidden = true;
+  shell.textContent = '';
+  await import('../js/app.js');
+  assert.equal(shell.hidden, false,
+    'a device sitting at adoptionPending syncs nothing at all — the app shell must say so without opening Settings');
+  assert.match(shell.textContent, /\S/);
+});
 
 // applySyncedState must re-merge against live storage. Between the merge that
 // produced `state` and this call there may have been a full PUT round trip.

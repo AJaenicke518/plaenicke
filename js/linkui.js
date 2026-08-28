@@ -33,6 +33,18 @@ const LINK_CODE_BYTES = TOKEN_BYTES + KEY_BYTES;
 // settings panel is closed and there is no such element.
 export const SYNC_STATUS_ID = 'sync-status';
 
+// THE APP SHELL'S OWN INDICATOR (V6 spec § 9 step 0), in index.html, outside
+// the settings panel — because a broken sync is otherwise completely silent.
+//
+// IT MUST NOT REUSE SYNC_STATUS_ID. The settings panel mounts an element
+// carrying that id on every open (render(), below). Two elements cannot share
+// an id: document.getElementById returns exactly ONE of them, so the other
+// would silently never update again — and which one you get depends on
+// document order, i.e. the shell one would win and the panel line would go
+// permanently stale the moment Settings was opened. renderSyncStatus paints
+// both, each looked up by its own id.
+export const SHELL_SYNC_STATUS_ID = 'sync-indicator';
+
 const NOT_LINKED_TEXT = 'Not linked. Everything stays on this device.';
 const NEVER_SYNCED_TEXT = 'Linked. Nothing has synced yet.';
 const PENDING_TEXT = 'Linked — but nothing syncs until you choose how to combine this device with the account.';
@@ -176,8 +188,12 @@ export function chooseAdoption(localState, remoteState) {
   return 'ask';
 }
 
-// The status text is derived from storage, not from a caller-held snapshot,
-// because renderSyncStatus is called from app.js with no arguments.
+// --- what state is sync actually in? ---------------------------------------
+//
+// PURE, and the SINGLE source of truth for both surfaces. The panel line and
+// the shell indicator disagree on purpose (see shellNeedsAttention), and two
+// independently-written predicates over the same storage is precisely how
+// they would come to disagree by accident instead.
 //
 // A CORRUPT STORED CODE IS ITS OWN STATE (DA-I2). getLink() returns null for
 // an unparseable code (js/auth.js:30), so isLinked() reads false while a
@@ -185,32 +201,101 @@ export function chooseAdoption(localState, remoteState) {
 // plaenicke.syncState keeps showing the last good lastSyncedAt — a
 // permanently frozen "synced N minutes ago" on an app that will never sync
 // again. describeSyncStatus cannot express this; the discriminator is not in
-// syncState, so it is checked here.
+// syncState, so it is decided here and outranks everything read out of a
+// syncState the device can no longer make progress on.
+export const SYNC_OK = 'ok';
+export const SYNC_NOT_LINKED = 'not-linked';
+export const SYNC_CORRUPT = 'corrupt';
+export const SYNC_ADOPTION_PENDING = 'adoption-pending';
+export const SYNC_ERROR = 'error';
+
+export function classifySyncState({ hasCredential, codeReadable, syncState }) {
+  if (!hasCredential) return SYNC_NOT_LINKED;
+  if (!codeReadable) return SYNC_CORRUPT;
+  const s = syncState || {};
+  // adoptionPending outranks lastError, for the same reason describeSyncStatus
+  // orders them this way (DA-I1): linking while offline sets BOTH, and the
+  // gate is the signal that matters — a gated device syncs nothing at all.
+  if (s.adoptionPending === true) return SYNC_ADOPTION_PENDING;
+  if (s.lastError) return SYNC_ERROR;
+  return SYNC_OK;
+}
+
+// The panel's own red styling. It EXCLUDES a pending adoption deliberately:
+// the panel renders the Merge / Replace / Cancel dialog for that state, so
+// colouring the line red on top of it would be noise.
+export function panelShowsProblem(kind) {
+  return kind === SYNC_CORRUPT || kind === SYNC_ERROR;
+}
+
+// THE SHELL'S PREDICATE IS BROADER, AND THAT IS THE WHOLE POINT.
+// A device stuck at adoptionPending never syncs — it is the exact invisible
+// failure step 0 exists to surface — and the shell has no dialog to show
+// instead. SYNC_NOT_LINKED is excluded: signed-out is a complete app
+// (spec 4.4), so a permanent badge there would be nagging, not signal.
+export function shellNeedsAttention(kind) {
+  return kind === SYNC_CORRUPT || kind === SYNC_ADOPTION_PENDING || kind === SYNC_ERROR;
+}
+
+// The one place these pure predicates meet storage.
+function readSyncFacts() {
+  return {
+    hasCredential: loadAuth() !== null,
+    codeReadable: getLink() !== null,
+    syncState: loadSyncState(),
+  };
+}
+
+// Short, actionable, and it names where to go — the shell indicator is a
+// badge, not a paragraph. The panel line carries the full explanation.
+const SHELL_TEXT = {
+  [SYNC_CORRUPT]: 'Sync is broken — open Settings',
+  [SYNC_ADOPTION_PENDING]: 'Sync is waiting for you — open Settings',
+  [SYNC_ERROR]: 'Sync problem — open Settings',
+};
+
+// The status text is derived from storage, not from a caller-held snapshot,
+// because renderSyncStatus is called from app.js with no arguments.
 function statusText(now) {
-  const stored = loadAuth();
-  if (!stored) return NOT_LINKED_TEXT;
-  if (!getLink()) return CORRUPT_TEXT;
-  return describeSyncStatus(loadSyncState(), now);
+  const facts = readSyncFacts();
+  const kind = classifySyncState(facts);
+  if (kind === SYNC_NOT_LINKED) return NOT_LINKED_TEXT;
+  if (kind === SYNC_CORRUPT) return CORRUPT_TEXT;
+  return describeSyncStatus(facts.syncState, now);
 }
 
 function paintStatus(el, now) {
-  const text = statusText(now);
-  el.textContent = text;
-  const state = loadSyncState();
-  const bad = text === CORRUPT_TEXT || (state.adoptionPending !== true && !!state.lastError);
+  el.textContent = statusText(now);
+  const bad = panelShowsProblem(classifySyncState(readSyncFacts()));
   el.className = bad ? 'sync-status sync-status-problem' : 'sync-status';
 }
 
-// Safe to call when the status line is not mounted — which is most of the
-// time, since it lives inside the settings panel and settings.js empties its
-// host on close. app.js invokes this from runSync's `finally` (js/app.js:483),
-// OUTSIDE the try, and runSync is called un-awaited from four sites, so a
-// throw here would be an unhandled rejection that also drops the queued
-// syncPending re-arm at :486.
+// The text is CLEARED, not merely hidden. An indicator left holding stale
+// problem text is one CSS regression away from reporting a failure that was
+// fixed hours ago — and the whole value of this element is that what it says
+// can be trusted.
+function paintShellIndicator(el) {
+  const kind = classifySyncState(readSyncFacts());
+  const attention = shellNeedsAttention(kind);
+  el.hidden = !attention;
+  el.textContent = attention ? SHELL_TEXT[kind] : '';
+  el.className = attention ? 'sync-indicator sync-indicator-problem' : 'sync-indicator';
+}
+
+// Safe to call when either element is not mounted. The panel line lives inside
+// the settings panel and settings.js empties its host on close, so it is
+// absent most of the time; the shell indicator is absent in any host page that
+// is not index.html. Each is looked up and painted independently — neither may
+// be a precondition for the other.
+//
+// app.js invokes this from runSync's `finally`, OUTSIDE the try, and runSync is
+// called un-awaited from four sites, so a throw here would be an unhandled
+// rejection that also drops the queued syncPending re-arm.
 export function renderSyncStatus(now = new Date()) {
   const el = document.getElementById(SYNC_STATUS_ID);
-  if (!el) return;
-  paintStatus(el, now);
+  if (el) paintStatus(el, now);
+  const shell = document.getElementById(SHELL_SYNC_STATUS_ID);
+  if (shell) paintShellIndicator(shell);
 }
 
 // --- the panel -------------------------------------------------------------
@@ -989,6 +1074,17 @@ export function initLinkUI(options = {}) {
 
     if (notice) wrap.appendChild(el('p', { className: 'note link-notice', text: notice }));
     host.appendChild(wrap);
+
+    // Refresh the SHELL indicator too. Linking, unlinking and completing an
+    // adoption all happen in here, and the shell's other repaint sites cannot
+    // see them: app.js paints once at load, and runSync's finally is never
+    // reached while the adoption gate is up or the stored code is corrupt
+    // (js/app.js's runSync returns first). Looked up by id rather than held as
+    // a reference, so a superseded mount rendering into a detached tree still
+    // repaints the live element — from storage, so it can only ever write the
+    // same answer the live mount would.
+    const shell = document.getElementById(SHELL_SYNC_STATUS_ID);
+    if (shell) paintShellIndicator(shell);
   }
 
   render();

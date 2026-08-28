@@ -528,6 +528,21 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') runSync();
 });
 window.addEventListener('online', runSync);
+
+// PAINT THE SHELL INDICATOR BEFORE runSync, unconditionally (V6 spec § 9
+// step 0). runSync's `finally` is the only other caller of renderSyncStatus in
+// this file, and runSync returns BEFORE its try/finally whenever
+// `!isLinked() || isAdoptionPending()` — which is exactly the pair of states
+// step 0 exists to make visible: a stuck adoption, and a corrupt stored code
+// (which makes isLinked() read false while a credential is stored). Without
+// this line the indicator would light for every failure EXCEPT the two it was
+// built for.
+//
+// The guard's early return must NOT be changed to paint instead: the assertion
+// that runSync never reaches its finally while adoption is pending is the only
+// live anchor on app.js's "never union silently" guard (see
+// tests/apply.test.js).
+renderSyncStatus();
 runSync();
 
 if ('serviceWorker' in navigator) {

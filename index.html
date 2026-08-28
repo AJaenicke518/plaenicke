@@ -27,6 +27,19 @@
     <button id="settings-btn" class="icon-btn" type="button" aria-label="Settings">&#9881;</button>
   </header>
 
+  <!-- The app-shell sync indicator (V6 spec § 9 step 0). A broken sync is
+       otherwise completely silent: the only status line in the app lives
+       inside the settings panel, so a revoked token, a corrupt stored code or
+       a stuck adoption all present as an app that works perfectly and quietly
+       stops agreeing with the other device.
+
+       This id is NOT the settings panel's 'sync-status'. Two elements cannot
+       share an id — getElementById would return one of them and the other
+       would silently never update again. js/linkui.js paints both, each by
+       its own id. Starts hidden; renderSyncStatus() reveals it only when
+       there is a problem. -->
+  <p id="sync-indicator" class="sync-indicator" role="status" hidden></p>
+
   <section class="add-box">
     <div class="text-row">
       <input id="entry-text" type="text" autocomplete="off"

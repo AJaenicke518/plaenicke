@@ -383,6 +383,20 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   border-bottom: 1px solid var(--line);
 }
 .sync-status-problem { color: var(--danger); }
+
+/* The app-shell sync indicator (V6 step 0). Deliberately loud — it appears
+   ONLY when sync is broken, stuck or waiting on the user, and its whole reason
+   for existing is that the failure it reports is otherwise invisible. */
+.sync-indicator {
+  font-size: 0.8rem;
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  background: var(--card);
+}
+.sync-indicator[hidden] { display: none; }
 .link-ui > .note { margin: 0 0 8px; }
 .link-ui h4 {
   font-size: 0.8rem;
