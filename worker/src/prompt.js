@@ -1,6 +1,20 @@
 // prompt.js — build the Anthropic Messages API request body.
 // Model: claude-haiku-4-5 (no effort / no thinking params — Haiku rejects them).
 
+// THE type LIST LIVES HERE AND NOWHERE ELSE IN THE WORKER. normalize.js
+// imports it rather than keeping its own copy, because it used to keep its own
+// copy and the two drifted: V6 added `task` and `idea` to the schema below, the
+// model returned them correctly, and normalize's stale allowlist rewrote every
+// one of them to 'event' on the way out — so nothing ever reached the To-do or
+// Ideas page. That was found in production, not by any of V6's three review
+// passes, because normalize's clamp is a COERCING allowlist: an unlisted type
+// is not rejected loudly, it is silently replaced.
+//
+// js/preview.js keeps a separate list ON PURPOSE — different deploy unit, and
+// it must additionally carry 'general' for manual adds. tests/preview.test.js
+// pins the two together as subset-plus-stated-difference.
+export const ITEM_TYPES = ['due', 'start', 'milestone', 'event', 'task', 'idea'];
+
 const SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -24,7 +38,7 @@ const SCHEMA = {
           // no option selected and the first change event writes the wrong
           // type into the record. tests/preview.test.js pins the two together.
           // Ship the CLIENT FIRST (§ 9.1).
-          type: { type: 'string', enum: ['due', 'start', 'milestone', 'event', 'task', 'idea'] },
+          type: { type: 'string', enum: ITEM_TYPES },
           project: { anyOf: [{ type: 'string' }, { type: 'null' }] },
           subject: { anyOf: [{ type: 'string' }, { type: 'null' }] },
           category: { anyOf: [{ type: 'string', enum: ['School', 'Work', 'Personal'] }, { type: 'null' }] },

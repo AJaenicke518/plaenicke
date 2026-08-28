@@ -1,7 +1,13 @@
 // normalize.js — turn Claude's raw JSON into a safe { items, needsReview }.
 // Defensive on purpose: never trust the model's output shape blindly.
 
-const TYPES = ['due', 'start', 'milestone', 'event'];
+// IMPORTED, never re-declared. This file used to keep its own copy of the type
+// list and it silently fell behind the schema — see the comment on ITEM_TYPES
+// in prompt.js. The clamp below REPLACES an unlisted type rather than
+// rejecting it, so a stale list here is invisible: the request succeeds, the
+// item is created, and only the wrong page shows it.
+import { ITEM_TYPES } from './prompt.js';
+
 const CATEGORIES = ['School', 'Work', 'Personal'];
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -28,7 +34,7 @@ export function normalizeClaudeJson(raw) {
       date,
       time,
       endTime,
-      type: TYPES.includes(it.type) ? it.type : 'event',
+      type: ITEM_TYPES.includes(it.type) ? it.type : 'event',
       project: cleanStrOrNull(it.project),
       subject: cleanStrOrNull(it.subject),
       category: CATEGORIES.includes(it.category) ? it.category : null,
