@@ -32,11 +32,13 @@ Read `.superpowers/sdd/2026-08-02-plaenicke-v5-plan3-client-sync/progress.md` fi
 - **`schemaVersion` is 1 and `merge()` throws on anything else.** Adding a new *array* to the synced blob is a real change — but the danger is code surface (new `merge()` branches, `toWire()` entries, tombstone kinds), **not** silent truncation. Bumping the version makes an un-updated device *throw* and apply nothing: a loud, fail-closed halt. Don't repeat the older claim that it "merges while ignoring the array and pushes the data back missing" — that only holds if you add the array *without* bumping.
 - **Adding a new *field* to items is safe on the sync path, but `makeItem` will silently drop it.** `deserializeItems` and `unionById` pass records through whole; `js/items.js:17-29` rebuilds from an eleven-key whitelist. A field added to the model but not to `makeItem` is discarded at creation and everything downstream looks fine.
 
-## Sync is not yet proven in the real world
+## Sync has now run for real — once
 
-As of **2026-08-20**, no part of the client sync has ever run in a browser or against real D1. Every test injects a `fetchImpl` and a fake `localStorage`; the convergence simulation drives `merge.js` directly with no CAS, no interleaving, no serialization and no crypto round trip. The suite is thorough, but "the tests pass" is weaker evidence here than it looks. *(Delete this section once a real two-device link has been done.)*
+**2026-08-28: a real two-device link was completed** (laptop + iPhone, against production D1). That retires the standing "none of this has ever run outside a test" warning: the crypto round trip, the CAS protocol, serialization and adoption have all executed at least once against real infrastructure.
 
-**A broken sync is silent.** There is no sync indicator anywhere outside the Settings panel, so a revoked token, a corrupt stored link code, or a stuck adoption all present as an app that works perfectly and quietly stops agreeing with the other device. After any sync change, verify both devices actually show the same thing — don't infer success from the absence of an error.
+Do not over-read it. One successful link exercises the happy path. It does **not** exercise a CAS conflict, a 409 retry, clock skew between the two devices, quota exhaustion, or a revoked token — and `tests/convergence.test.js` still cannot see any of those (it drives `merge.js` directly: no CAS, no interleaving, no serialization, no crypto). "The tests pass" remains weaker evidence here than it looks.
+
+**A broken sync is still silent**, and this is the property that has not changed. A revoked token, a corrupt stored link code, or a stuck adoption all present as an app that works perfectly and quietly stops agreeing with the other device. After any sync change, verify both devices actually show the same thing — don't infer success from the absence of an error. (V6 adds a shell indicator for exactly this; until V6 is merged, the only signal is inside the Settings panel.)
 
 ## Where things live
 
