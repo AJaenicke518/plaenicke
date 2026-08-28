@@ -96,3 +96,35 @@ test('the prompt forces review when something classified as an idea mentions a t
   const { system } = buildRequestBody('x', '2026-05-01');
   assert.match(system, /needsReview to true[\s\S]*idea|idea[\s\S]*needsReview to true/i);
 });
+
+// =========================================================================
+// V6 follow-up, found against the live Worker on 2026-08-28.
+//
+// "look into utilities for housing" classified as `idea`, because the idea
+// description offered "a thing to look into" as a cue — which is an ERRAND,
+// not a thought. This is worse than the bug it replaced: `event` at least
+// stayed on the calendar, whereas isScheduled() excludes ideas, so the
+// record disappears from Day/Week/Month and lives only on the Ideas page.
+//
+// The boundary is ACTION vs THOUGHT, not vague vs specific. Investigating
+// something is an action.
+// =========================================================================
+
+const system = () => buildRequestBody('x', '2026-08-28').system;
+
+test('the idea cue does not claim "look into" belongs to ideas', () => {
+  const ideaClause = system().match(/"idea" for[^;]*/)?.[0] ?? '';
+  assert.doesNotMatch(ideaClause, /look into/i,
+    '"look into X" is an errand; offering it as an idea cue sends to-dos to the Ideas page, off the calendar');
+});
+
+test('the task description claims investigating as an action', () => {
+  const taskClause = system().match(/"task" for[^;]*/)?.[0] ?? '';
+  assert.match(taskClause, /look into|research|find out|investigat/i,
+    'the model needs an explicit signal that looking something up is a task');
+});
+
+test('the instruction states the action-vs-thought boundary explicitly', () => {
+  assert.match(system(), /\bidea\b[^.]*\bnot\b[^.]*\b(do|action|errand)/i,
+    'without a stated contrast the model splits on vagueness instead of on action');
+});

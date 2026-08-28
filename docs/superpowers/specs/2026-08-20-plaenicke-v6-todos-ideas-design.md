@@ -181,7 +181,11 @@ Dropping nulls removes most of the previous § 7. What remains:
 
 Line 37 currently reads: *`"event"` for anything else (meetings, appointments, personal to-dos).*
 
-Split it three ways: `"event"` for meetings and appointments — something that happens at a place and time; `"task"` for something Alex has to *do*; `"idea"` for a thought to keep, with no scheduled day. For `idea`, `date` is today.
+Split it three ways: `"event"` for meetings and appointments — something that happens at a place and time; `"task"` for something Alex has to *do*; `"idea"` for a thought to keep. For `idea`, `date` is today.
+
+**The task/idea boundary is ACTION vs THOUGHT, and this wording matters — the first attempt got it wrong in production.** The deployed prompt originally offered "a thing to look into" as an *idea* cue, and "look into utilities for housing" — an errand — was duly classified `idea`. That is worse than the `event` misclassification it replaced: `isScheduled()` excludes ideas, so the record leaves the calendar entirely instead of merely missing the To-do page.
+
+Investigating something is an action. `"task"` must explicitly claim looking into, researching, finding out, checking, calling, emailing and buying, **even when vague and undated**; `"idea"` must be restricted to thoughts that are *not* something to do, with signposted examples ("idea for the app: …", "maybe we should …", "remember that …"). Do not let the model split on vague-vs-specific — a vague errand is still an errand. Ambiguous notes prefer `task`, because a stray task on the To-do page is visible and dismissible while a stray idea is off the calendar and easy to miss. `worker/tests/prompt.test.js` pins all three of those properties.
 
 ### 8.3 Misclassification is caught by machinery that exists
 
