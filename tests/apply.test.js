@@ -570,6 +570,23 @@ test('the To-do page lists open to-dos, and nothing else', async () => {
   assert.doesNotMatch(text, /Rework the shelves/, 'an idea is not a to-do');
 });
 
+// § 5: soonest first. The comparator is items.js's sortItemsByDate — the
+// repo's SINGLE ordering rule, reused rather than restated, because § 7.6
+// already flags one drifting second copy of it in feeds.js and a third would
+// be worse than the small extra it applies (untimed before timed on the same
+// day, then createdAt, then title).
+test('the To-do page is ordered soonest first, whatever order storage holds', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([
+    record({ id: 'c', type: 'task', title: 'Latest', date: '2026-12-01' }),
+    record({ id: 'a', type: 'task', title: 'Soonest', date: '2026-09-01' }),
+    record({ id: 'b', type: 'task', title: 'Middle', date: '2026-10-01' }),
+  ]);
+  assert.match(allText(todoList()), /Soonest[\s\S]*Middle[\s\S]*Latest/,
+    'an unsorted to-do list buries whatever is due next');
+});
+
 // A COMPLETED TO-DO STAYS ON THE CALENDAR (spec § 3.3) — it still happened
 // that day. Only the To-do page drops it.
 test('a completed to-do stays in the list view, styled as done', async () => {
@@ -723,13 +740,21 @@ test('the Ideas box keeps the complete text of a long thought in notes', async (
   assert.equal(idea.notes, full, 'and the COMPLETE original text is kept, so no split bug can lose words');
 });
 
-test('the Ideas box refuses an empty thought rather than creating a titleless record', async () => {
+// makeItem's own "Title is required" throw is a second net under this, so
+// "nothing was saved" alone does not distinguish the guard being present from
+// it being absent. What the guard is FOR is the message: an empty box should
+// be told what to do, not shown a validation error about a field it does not
+// know it has.
+test('the Ideas box refuses an empty thought, with guidance rather than a validation error', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
   seed([]);
   ideaText().value = '   ';
   click(ideaAdd());
   assert.deepEqual(loadItems(), [], 'whitespace is not a thought');
+  const message = globalThis.document.getElementById('message').textContent;
+  assert.match(message, /thought/i, 'the empty box must be told what to do');
+  assert.doesNotMatch(message, /required/i, 'a raw field-validation error is not guidance');
 });
 
 // The model classifies (spec § 3.3), so an idea arriving through the MAIN
