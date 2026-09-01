@@ -119,3 +119,22 @@ test('normalize accepts precisely the types the schema can return', async () => 
       `the schema lets the model return '${t}' but normalize rewrites it to '${r.items[0].type}'`);
   }
 });
+
+// Preventive twin of the type drift guard. `category` never drifted, but its
+// clamp is the same coercing shape, so a category added to the schema and not
+// here would silently null out every item carrying it. Proven to have teeth by
+// mutation, not by passing on arrival.
+test('normalize accepts precisely the categories the schema can return', async () => {
+  const { buildRequestBody } = await import('../src/prompt.js');
+  const schemaCats = buildRequestBody('x', '2026-09-01')
+    .output_config.format.schema.properties.items.items.properties.category.anyOf
+    .find((b) => Array.isArray(b.enum)).enum;
+
+  for (const c of schemaCats) {
+    const r = normalizeClaudeJson({ needsReview: false, items: [
+      { title: 't', date: '2026-09-01', type: 'task', project: null, subject: null, category: c },
+    ]});
+    assert.equal(r.items[0].category, c,
+      `the schema lets the model return '${c}' but normalize nulls it`);
+  }
+});

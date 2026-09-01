@@ -6,9 +6,8 @@
 // in prompt.js. The clamp below REPLACES an unlisted type rather than
 // rejecting it, so a stale list here is invisible: the request succeeds, the
 // item is created, and only the wrong page shows it.
-import { ITEM_TYPES } from './prompt.js';
+import { ITEM_TYPES, CATEGORIES } from './prompt.js';
 
-const CATEGORIES = ['School', 'Work', 'Personal'];
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 

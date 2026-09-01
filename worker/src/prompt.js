@@ -15,6 +15,12 @@
 // pins the two together as subset-plus-stated-difference.
 export const ITEM_TYPES = ['due', 'start', 'milestone', 'event', 'task', 'idea'];
 
+// Same rule, same reason. `category` has never drifted, but normalize's clamp
+// for it is the identical shape -- `CATEGORIES.includes(x) ? x : null` -- so a
+// category added to the schema and not to normalize would silently null out
+// every item carrying it. Exported pre-emptively rather than after the fact.
+export const CATEGORIES = ['School', 'Work', 'Personal'];
+
 const SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -41,7 +47,7 @@ const SCHEMA = {
           type: { type: 'string', enum: ITEM_TYPES },
           project: { anyOf: [{ type: 'string' }, { type: 'null' }] },
           subject: { anyOf: [{ type: 'string' }, { type: 'null' }] },
-          category: { anyOf: [{ type: 'string', enum: ['School', 'Work', 'Personal'] }, { type: 'null' }] },
+          category: { anyOf: [{ type: 'string', enum: CATEGORIES }, { type: 'null' }] },
           // V6 § 8.1. The idea's full text; null for everything else. The
           // client re-derives the title/notes split from whatever lands here
           // (js/ideas.js), so nothing depends on the model splitting well.
