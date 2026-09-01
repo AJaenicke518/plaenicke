@@ -75,6 +75,13 @@ body {
   background: var(--bg);
   color: var(--ink);
   padding: env(safe-area-inset-top) 16px 40px;
+  /* There was no line-height rule at all before this, so everything ran at
+     the browser default (~1.2) — tight for a serif read at arm's length.
+     This is a readability change, NOT an attempt to fill the viewport: the
+     item list grows all semester and Safari's chrome collapses on scroll,
+     so "the height of the page" is not a fixed target to tune against.
+     The dense grids opt back out below — see tests/styles.test.js. */
+  line-height: 1.5;
 }
 
 header { display: flex; justify-content: space-between; align-items: center; }
@@ -170,8 +177,8 @@ button {
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: 6px;
-  padding: 12px;
-  margin-bottom: 8px;
+  padding: 14px;
+  margin-bottom: 10px;
 }
 #item-list li.empty { color: var(--muted); justify-content: center; }
 #item-list li.list-note {
@@ -212,6 +219,7 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 .cal-cell.today { border-color: var(--today); box-shadow: 0 0 0 1px var(--today) inset; }
 .cal-day { font-weight: 700; margin-bottom: 2px; }
 .cal-item {
+  line-height: 1.2; /* opts out of body's 1.5 — see tests/styles.test.js */
   background: var(--type, var(--type-general));
   color: var(--on-type);
   border-radius: 3px;
@@ -259,6 +267,9 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 .day-canvas { flex: 1; position: relative; border-left: 1px solid var(--grid-line); }
 .day-canvas .hour-line { position: absolute; left: 0; right: 0; height: 0; border-top: 1px solid var(--grid-line); }
 .day-block, .day-pin {
+  /* Height comes from js/dayview.js (HOUR_PX = 48), so a 30-minute event is
+     ~22px tall with overflow:hidden. Body's 1.5 clips the title. */
+  line-height: 1.2;
   position: absolute;
   border-radius: 4px;
   padding: 2px 18px 2px 6px; /* right padding clears the × button */
@@ -496,8 +507,8 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: 6px;
-  padding: 12px;
-  margin-bottom: 8px;
+  padding: 14px;
+  margin-bottom: 10px;
 }
 #todo-list li.empty, #idea-list li.empty { color: var(--muted); justify-content: center; }
 .todo-main, .idea-main { flex: 1 1 auto; min-width: 0; }
