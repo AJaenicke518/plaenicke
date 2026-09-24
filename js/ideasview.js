@@ -9,7 +9,9 @@
 // thing that marks a record unscheduled, so the date is a real YYYY-MM-DD
 // string like every other record's — it is simply not about time.
 
-export function renderIdeasView(container, ideas, { onDelete }) {
+export function renderIdeasView(container, ideas, { onOpen, onDelete }) {
+  // Required: a missing one would render titles that do nothing on tap.
+  if (typeof onOpen !== 'function') throw new Error('renderIdeasView requires onOpen');
   container.innerHTML = '';
 
   if (ideas.length === 0) {
@@ -26,9 +28,13 @@ export function renderIdeasView(container, ideas, { onDelete }) {
 
     const main = document.createElement('div');
     main.className = 'idea-main';
-    const title = document.createElement('span');
-    title.className = 'idea-title';
+    // The title opens the idea. Delete is a SIBLING of the row's content,
+    // never inside anything with a click handler.
+    const title = document.createElement('button');
+    title.type = 'button';
+    title.className = 'item-open idea-title';
     title.textContent = it.title;
+    title.addEventListener('click', () => onOpen(it));
     main.appendChild(title);
 
     // `notes` holds the COMPLETE original text and `title` is a derived label,

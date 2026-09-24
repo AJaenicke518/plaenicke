@@ -7,7 +7,9 @@ import { itemTypeClass } from './calendar.js';
 const HOUR_PX = 48;
 const SCROLL_TO_HOUR = 7; // grid shows 24h; auto-scroll to 07:00
 
-export function renderDayView(container, dateISO, dayItems, { onDelete, autoScroll = true }) {
+export function renderDayView(container, dateISO, dayItems, { onOpen, onDelete, autoScroll = true }) {
+  // Required: a missing one would render blocks that do nothing on tap.
+  if (typeof onOpen !== 'function') throw new Error('renderDayView requires onOpen');
   const prev = container.querySelector('.day-grid')?.scrollTop ?? 0;
   container.innerHTML = '';
   const { untimed, timed } = bucketDayItems(dayItems);
@@ -43,7 +45,15 @@ export function renderDayView(container, dateISO, dayItems, { onDelete, autoScro
     const when = row.item.endTime
       ? formatTimeRange(row.item.time, row.item.endTime)
       : formatTime(row.item.time);
-    el.textContent = `${when} ${row.item.title}`;
+    // The block itself carries NO click handler: it contains the ×, and a tap
+    // on the × must not also open the sheet. The open control is a button
+    // inside the block, and the × is its sibling.
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'item-open';
+    open.textContent = `${when} ${row.item.title}`;
+    open.addEventListener('click', () => onOpen(row.item));
+    el.appendChild(open);
     // External items aren't deletable — no × for them.
     if (!row.item.external) {
       const del = document.createElement('button');
@@ -72,9 +82,13 @@ export function renderDayView(container, dateISO, dayItems, { onDelete, autoScro
       // ('type-task done') and classList.add throws on a token with a space.
       li.className = itemTypeClass(it);
       if (it.external) li.style.setProperty('--feed-color', it.feedColor);
-      const span = document.createElement('span');
-      span.textContent = it.title;
-      li.appendChild(span);
+      // Delete stays a sibling of the open button (see the timed blocks).
+      const open = document.createElement('button');
+      open.type = 'button';
+      open.className = 'item-open';
+      open.textContent = it.title;
+      open.addEventListener('click', () => onOpen(it));
+      li.appendChild(open);
       // Not deletable — same rule as the timed blocks above.
       if (!it.external) {
         const del = document.createElement('button');

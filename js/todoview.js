@@ -11,10 +11,12 @@
 import { itemTypeClass } from './calendar.js';
 import { formatDayLabel } from './freshness.js';
 
-export function renderTodoView(container, todos, { todayISO, onDelete, onToggleDone }) {
+export function renderTodoView(container, todos, { todayISO, onOpen, onDelete, onToggleDone }) {
   // Required, not defaulted: without it every row would silently fall back to
   // a raw ISO date, and "Today"/"Tomorrow" are computed against it.
   if (!/^\d{4}-\d{2}-\d{2}$/.test(todayISO || '')) throw new Error('renderTodoView requires todayISO');
+  // Required too: a missing one would render titles that do nothing on tap.
+  if (typeof onOpen !== 'function') throw new Error('renderTodoView requires onOpen');
   container.innerHTML = '';
 
   if (todos.length === 0) {
@@ -46,9 +48,15 @@ export function renderTodoView(container, todos, { todayISO, onDelete, onToggleD
 
     const main = document.createElement('div');
     main.className = 'todo-main';
-    const info = document.createElement('span');
-    info.textContent = `${formatDayLabel(it.date, todayISO)} — ${it.title}`;
-    main.appendChild(info);
+    // The title opens the item. The checkbox and Delete are SIBLINGS of this
+    // button, never inside it and never inside anything with a click handler:
+    // a tap on either must not also open the sheet.
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'item-open';
+    open.textContent = `${formatDayLabel(it.date, todayISO)} — ${it.title}`;
+    open.addEventListener('click', () => onOpen(it));
+    main.appendChild(open);
 
     const del = document.createElement('button');
     del.className = 'delete';

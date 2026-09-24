@@ -18,7 +18,8 @@ import { renderWeekView } from './weekview.js';
 import { renderPreview } from './preview.js';
 import { isVoiceSupported, dictate } from './voice.js';
 import { initSettings } from './settings.js';
-import { instancesForRange, syncStale, applyRemoteFeeds } from './feeds.js';
+import { instancesForRange, syncStale, applyRemoteFeeds, inferName } from './feeds.js';
+import { openItemSheet } from './itemsheet.js';
 import { uid } from './uid.js';
 import { syncOnce } from './sync.js';
 import { isLinked, isAdoptionPending } from './auth.js';
@@ -44,6 +45,7 @@ const els = {
   calGrid: document.getElementById('calendar-grid'),
   settingsBtn: document.getElementById('settings-btn'),
   settingsHost: document.getElementById('settings-host'),
+  sheetHost: document.getElementById('sheet-host'),
   showList: document.getElementById('show-list'),
   showMonth: document.getElementById('show-month'),
   showWeek: document.getElementById('show-week'),
@@ -294,6 +296,49 @@ function setDone(id, done) {
   scheduleSync();
 }
 
+// The handle of the toast currently on screen, or null. Tasks 4b and 4c assign
+// it (delete and edit both offer Undo); openItem only ever dismisses it.
+let activeToast = null;
+
+// openItem — tapping any item's title opens its sheet (edit-items spec § 3.2).
+//
+// The sheet gets a calendar NAME and an optional Google day link, NEVER the
+// feed's URL: that URL is a capability token that is never re-displayed
+// (CLAUDE.md, "Feed URLs are unrecoverable"). inferName reads the URL here, in
+// app.js, and only its one-word verdict crosses into the sheet.
+function openItem(item) {
+  // Only the latest action can be undone, and an Undo left sitting over the
+  // sheet's own buttons is a mis-tap waiting to happen. Dismissing settles
+  // the toast (for a delete, that commits it).
+  if (activeToast) activeToast.dismiss();
+  let calendarName = null;
+  let googleDayUrl = null;
+  if (item.external) {
+    const feed = feeds.find((f) => f.id === item.feedId);
+    calendarName = feed ? feed.name : 'a linked calendar';
+    if (feed && inferName(feed.url) === 'Google') {
+      const [y, m, d] = item.date.split('-').map(Number);
+      googleDayUrl = `https://calendar.google.com/calendar/r/day/${y}/${m}/${d}`;
+    }
+  }
+  // openItemSheet validates BEFORE touching the host (an unknown type, a
+  // missing callback), so on a throw the screen is unchanged and only the
+  // message says why.
+  try {
+    openItemSheet(els.sheetHost, item, {
+      todayISO: toISO(new Date()),
+      calendarName,
+      googleDayUrl,
+      // Placeholders until Tasks 4b (delete with Undo) and 4c (editing).
+      onSave: () => ({ ok: false, error: 'Editing arrives in the next step.' }),
+      onDelete: () => handleDelete(item.id),
+      onClose: () => {},
+    });
+  } catch (e) {
+    setMessage(`This item can't be edited here (${e.message}).`);
+  }
+}
+
 function handleToggleDone(id, done) {
   try {
     setDone(id, done);
@@ -348,9 +393,15 @@ function renderList() {
       li.className = itemTypeClass(it);
       if (it.external) li.style.setProperty('--feed-color', it.feedColor);
       const main = document.createElement('div');
-      const info = document.createElement('span');
-      info.textContent = `${formatDayLabel(it.date, todayISO)} — ${it.title}`;
-      main.appendChild(info);
+      // The title opens the item. Delete is appended to the <li> below, a
+      // SIBLING of `main` — never inside anything with a click handler, so a
+      // tap on Delete cannot also open the sheet.
+      const open = document.createElement('button');
+      open.type = 'button';
+      open.className = 'item-open';
+      open.textContent = `${formatDayLabel(it.date, todayISO)} — ${it.title}`;
+      open.addEventListener('click', () => openItem(it));
+      main.appendChild(open);
       if (it.time) {
         const t = document.createElement('div');
         t.className = 'time-line';
@@ -446,6 +497,7 @@ function renderDay() {
   const byDate = groupItemsByDate(sortItemsByDate(visibleItems(viewDay, viewDay)));
   const visible = !els.dayView.hidden;
   renderDayView(els.dayBody, viewDay, byDate[viewDay] || [], {
+    onOpen: openItem,
     onDelete: handleDelete,
     // Auto-scroll to 07:00 only on a genuine day change while visible; otherwise
     // dayview.js restores the grid's own prior scrollTop (see its `prev` capture).
@@ -458,12 +510,12 @@ function renderDay() {
 
 function renderTodos() {
   renderTodoView(els.todoList, todoItems(), {
-    todayISO: toISO(new Date()), onDelete: handleDelete, onToggleDone: handleToggleDone,
+    todayISO: toISO(new Date()), onOpen: openItem, onDelete: handleDelete, onToggleDone: handleToggleDone,
   });
 }
 
 function renderIdeas() {
-  renderIdeasView(els.ideaList, ideaItems(), { onDelete: handleDelete });
+  renderIdeasView(els.ideaList, ideaItems(), { onOpen: openItem, onDelete: handleDelete });
 }
 
 // Every page is re-rendered on every change, so a to-do ticked on the To-do

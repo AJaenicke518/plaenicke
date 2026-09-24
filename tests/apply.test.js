@@ -971,3 +971,221 @@ test('the To-do page shows human dates too', async () => {
   assert.match(allText(todoList()), /Today — Essay/);
   seed([]);
 });
+
+// =========================================================================
+// Edit-items Task 4a — tapping an item opens its sheet
+// =========================================================================
+//
+// These drive the REAL app.js: its renderList / renderDay / renderTodos /
+// renderIdeas each hand the view an onOpen, and openItem builds the sheet's
+// options. A view test alone cannot see a call site that passes a no-op.
+// Every id here is prefixed `open-`: the module is imported once per file, so
+// state carries between tests. Each test closes the sheet it opened.
+
+const sheetHost = () => globalThis.document.getElementById('sheet-host');
+const dayBody = () => globalThis.document.getElementById('day-body');
+const messageText = () => globalThis.document.getElementById('message').textContent;
+
+// The .item-open control of the first row under `root` whose text mentions `title`.
+function openControlFor(root, title) {
+  const found = [];
+  const walk = (el) => {
+    for (const c of el.children) {
+      if (c.tagName === 'BUTTON' && c._classes.has('item-open') && (c.textContent || '').includes(title)) found.push(c);
+      walk(c);
+    }
+  };
+  walk(root);
+  return found[0] || null;
+}
+
+function closeSheet() {
+  const host = sheetHost();
+  const btn = host.querySelector('.sheet-cancel') || host.querySelector('.sheet-close');
+  if (btn) click(btn);
+  assert.equal(host.children.length, 0, 'fixture check: the sheet closed');
+}
+
+// Cleanup for `finally`: never asserts, so a failing test cannot leave its
+// sheet mounted and cascade into the next one.
+function forceCloseSheet() {
+  const host = sheetHost();
+  const btn = host.querySelector('.sheet-cancel') || host.querySelector('.sheet-close');
+  if (btn) click(btn);
+}
+
+// Every string a node exposes: text, attributes, and plain properties such as
+// href, value, target — anything a real DOM could show or send.
+function stringsOf(root) {
+  const out = [];
+  const visit = (el) => {
+    for (const [k, v] of Object.entries(el)) {
+      if (k === 'children' || k === 'parentNode' || k === '_listeners') continue;
+      if (typeof v === 'string') out.push(v);
+      else if (v && typeof v === 'object' && !(v instanceof Set)) {
+        for (const x of Object.values(v)) if (typeof x === 'string') out.push(x);
+      }
+    }
+    out.push(...el._classes);
+    for (const c of el.children) visit(c);
+  };
+  visit(root);
+  return out;
+}
+
+const localTodayCompact = () => localISO(new Date()).replace(/-/g, '');
+
+function seedFeed(feed) {
+  saveFeeds([feed]);
+  localStorage.setItem('plaenicke.feedCache', JSON.stringify({
+    [feed.id]: {
+      fetchedAt: new Date().toISOString(),
+      events: [{
+        uid: 'open-e1', title: 'Standup from the feed', form: 'DATE',
+        dtstart: { value: localTodayCompact(), tzid: null },
+        dtend: null, duration: null, rrule: null, exdates: [], recurrenceId: null,
+      }],
+      skipped: [],
+    },
+  }));
+  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.feeds' });
+}
+
+function unseedFeeds() {
+  saveFeeds([]);
+  localStorage.removeItem('plaenicke.feedCache');
+  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.feeds' });
+}
+
+test('open: tapping an item in the List opens its sheet in #sheet-host', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'open-list1', title: 'Open me from the list', date: '2099-02-01' })]);
+  assert.equal(sheetHost().children.length, 0, 'fixture check: no sheet before the tap');
+  const btn = openControlFor(itemList(), 'Open me from the list');
+  assert.ok(btn, 'the list row must offer an .item-open control');
+  click(btn);
+  assert.ok(sheetHost().querySelector('.sheet'), 'a .sheet must be mounted in #sheet-host');
+  assert.equal(sheetHost().querySelector('.sheet-title').value, 'Open me from the list', 'and it is THIS item');
+  closeSheet();
+  seed([]);
+});
+
+// Each render call site passes its own onOpen; a no-op at any one of them
+// would leave that page's titles dead and every view test green.
+test('open: the Day, To-do and Ideas pages each open the sheet too', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const today = localISO(new Date());
+  seed([
+    record({ id: 'open-task1', type: 'task', title: 'Open me as a task', date: today }),
+    record({ id: 'open-idea1', type: 'idea', title: 'Open me as an idea', date: today }),
+  ]);
+  for (const [name, root, title] of [
+    ['Day', dayBody(), 'Open me as a task'],
+    ['To-do', todoList(), 'Open me as a task'],
+    ['Ideas', ideaList(), 'Open me as an idea'],
+  ]) {
+    const btn = openControlFor(root, title);
+    assert.ok(btn, `the ${name} page must offer an .item-open control`);
+    click(btn);
+    assert.ok(sheetHost().querySelector('.sheet'), `tapping on the ${name} page must mount a sheet`);
+    closeSheet();
+  }
+  seed([]);
+});
+
+test("open: an external item's sheet names its calendar and never contains the feed URL", async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const url = 'https://example.com/private/open-SECRET-TOKEN-123/basic.ics';
+  seedFeed({
+    id: 'open-feed1', url, name: 'Work calendar', color: 'var(--feed-palette-1)', hidden: false,
+    updatedAt: '2026-08-01T00:00:00.000Z',
+  });
+  try {
+    const btn = openControlFor(itemList(), 'Standup from the feed');
+    assert.ok(btn, 'fixture check: the feed event is listed with an open control');
+    click(btn);
+    const host = sheetHost();
+    assert.ok(host.querySelector('.sheet'), 'the read-only sheet must mount');
+    assert.match(allText(host), /From Work calendar/, 'the sheet says which calendar the event came from');
+    const strings = stringsOf(host);
+    assert.ok(strings.length > 10, 'fixture check: the walk actually collected the tree');
+    for (const s of strings) {
+      assert.ok(!s.includes(url) && !s.includes('open-SECRET-TOKEN-123'),
+        `the feed URL is a capability token and must appear nowhere in the sheet; found it in ${JSON.stringify(s)}`);
+    }
+    assert.equal(host.querySelector('.sheet-google'), null, 'a non-Google feed gets no Google Calendar link');
+  } finally {
+    forceCloseSheet();
+    unseedFeeds();
+  }
+});
+
+test('open: a Google feed event links to that day in Google Calendar, unpadded', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const url = 'https://calendar.google.com/calendar/ical/open-SECRET-G/private-abc/basic.ics';
+  seedFeed({
+    id: 'open-feed2', url, name: 'Google (me)', color: 'var(--feed-palette-1)', hidden: false,
+    updatedAt: '2026-08-01T00:00:00.000Z',
+  });
+  try {
+    click(openControlFor(itemList(), 'Standup from the feed'));
+    const link = sheetHost().querySelector('.sheet-google');
+    assert.ok(link, 'a Google feed gets the link');
+    const d = new Date();
+    assert.equal(link.href, `https://calendar.google.com/calendar/r/day/${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`);
+    for (const s of stringsOf(sheetHost())) {
+      assert.ok(!s.includes('open-SECRET-G'), `the Google feed URL must not leak either; found it in ${JSON.stringify(s)}`);
+    }
+  } finally {
+    forceCloseSheet();
+    unseedFeeds();
+  }
+});
+
+test('open: an item of an unknown type shows a message and mounts no sheet', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'open-bogus', type: 'bogus', title: 'Open me with a strange type', date: '2099-02-01' })]);
+  globalThis.document.getElementById('message').textContent = '';
+  assert.equal(sheetHost().children.length, 0, 'fixture check: no sheet left over from an earlier test');
+  const btn = openControlFor(itemList(), 'Open me with a strange type');
+  assert.ok(btn, 'fixture check: the row renders');
+  assert.doesNotThrow(() => click(btn), 'a sheet that refuses to open must not throw out of the tap');
+  assert.equal(sheetHost().children.length, 0, 'no sheet may be mounted');
+  assert.match(messageText(), /can't be edited here/);
+  assert.match(messageText(), /bogus/, 'the message carries the reason');
+  seed([]);
+});
+
+// Tasks 4b and 4c replace both callbacks. Until then Save must say so rather
+// than silently closing over an unsaved edit, and Delete deletes as before.
+test('open: Save says editing is not here yet, and changes nothing', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'open-save1', title: 'Open me and save', date: '2099-02-01' })]);
+  click(openControlFor(itemList(), 'Open me and save'));
+  sheetHost().querySelector('.sheet-title').value = 'Renamed';
+  click(sheetHost().querySelector('.sheet-save'));
+  assert.equal(sheetHost().querySelector('.sheet-error').textContent, 'Editing arrives in the next step.');
+  assert.equal(loadItems()[0].title, 'Open me and save', 'nothing was written');
+  closeSheet();
+  seed([]);
+});
+
+test("open: the sheet's Delete deletes through the existing path, tombstone and all", async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'open-del1', title: 'Open me and delete', date: '2099-02-01' })]);
+  click(openControlFor(itemList(), 'Open me and delete'));
+  click(sheetHost().querySelector('.sheet-delete'));
+  assert.deepEqual(loadItems(), [], 'the item is gone from storage');
+  assert.ok(loadTombstones().some((t) => t.id === 'open-del1'), 'and the delete is tombstoned so it syncs');
+  assert.equal(sheetHost().children.length, 0, 'the sheet closed');
+  assert.doesNotMatch(allText(itemList()), /Open me and delete/);
+});

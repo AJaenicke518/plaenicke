@@ -119,6 +119,11 @@
   </section>
 
   <div id="settings-host"></div>
+  <!-- The item sheet (js/itemsheet.js) mounts here. -->
+  <div id="sheet-host"></div>
+  <!-- The toast (js/toast.js). The live region is this PERSISTENT host, not
+       the toast: a live region inserted already filled is often not announced. -->
+  <div id="toast-host" role="status" aria-live="polite"></div>
 
   <script type="module" src="js/app.js"></script>
 </body>

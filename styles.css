@@ -191,6 +191,25 @@ button {
   box-shadow: none;
 }
 button.delete { background: transparent; color: var(--danger); padding: 6px 10px; }
+/* Every item title is a button that opens the item sheet (edit-items 4a).
+   Reset from the global accent-chip `button` rule so it reads as text. It
+   must stay ABOVE .idea-title: `font: inherit` resets font-weight, and the
+   two have equal specificity, so the later rule wins. */
+.item-open {
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  padding: 0;
+  width: 100%;
+  min-height: 44px;
+  border: none;
+  border-radius: 0;
+  cursor: pointer;
+}
+/* A Day block is ~22px tall with overflow:hidden (js/dayview.js, HOUR_PX =
+   48). The list's 44px minimum would push the title out of it. */
+.day-block .item-open, .day-pin .item-open { min-height: 0; line-height: inherit; }
 .time-line { color: var(--muted); font-size: 0.8rem; font-style: italic; }
 
 /* ---------- calendar controls (shared by month/week/day) ---------- */
@@ -493,7 +512,8 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
    is the second token itemTypeClass returns, so every render site that
    colours an item gets this for free. */
 .done { opacity: 0.55; }
-#item-list li.done span, .day-other-list li.done span { text-decoration: line-through; }
+#item-list li.done span, .day-other-list li.done span,
+#item-list li.done .item-open, .day-other-list li.done .item-open { text-decoration: line-through; }
 .cal-item.done, .week-block.done, .day-block.done, .day-pin.done { opacity: 0.5; }
 
 

@@ -113,3 +113,34 @@ test('.sheet scrolls inside itself and clears the home indicator', () => {
   assert.equal(declOf('.sheet', 'overflow-y'), 'auto');
   assert.equal(declOf('.sheet', 'padding-bottom'), 'env(safe-area-inset-bottom)');
 });
+
+// --- the open control (edit-items plan, Task 4a) ---------------------------
+// Every item title is now a <button class="item-open">. The global `button`
+// rule paints buttons as accent-filled chips with 10px 16px padding, so the
+// reset is what keeps a title looking like a title. In a list it is a 44px
+// tap target; inside a Day block (~22px tall, overflow hidden) that same
+// minimum would push the title out of view, so the block override is pinned.
+
+test('.item-open is reset to look like text', () => {
+  assert.ok(ruleExists('.item-open'), 'no rule for .item-open');
+  assert.equal(declOf('.item-open', 'background'), 'transparent');
+  assert.equal(declOf('.item-open', 'color'), 'inherit');
+  assert.equal(declOf('.item-open', 'font'), 'inherit');
+  assert.equal(declOf('.item-open', 'text-align'), 'left');
+  assert.equal(declOf('.item-open', 'padding'), '0');
+  assert.equal(declOf('.item-open', 'width'), '100%');
+});
+
+test('.item-open is at least 44px tall in a list', () => {
+  const mh = declOf('.item-open', 'min-height');
+  assert.ok(mh !== null, '.item-open declares no min-height');
+  assert.ok(px(mh) >= 44, `expected .item-open min-height >= 44px, got ${mh}`);
+});
+
+for (const sel of ['.day-block .item-open', '.day-pin .item-open']) {
+  test(`${sel} drops the 44px minimum so the title stays visible in a ~22px block`, () => {
+    assert.ok(ruleExists(sel), `no rule for ${sel}`);
+    assert.equal(declOf(sel, 'min-height'), '0');
+    assert.equal(declOf(sel, 'line-height'), 'inherit');
+  });
+}
