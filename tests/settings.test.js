@@ -131,11 +131,12 @@ function findButtonByText(el, text) {
   return null;
 }
 
-function openPanel(feeds) {
+function openPanel(feeds, seed = () => {}) {
   globalThis.window = makeFakeWindow();
   globalThis.document = makeFakeDocument();
   installFakeLocalStorage();
   saveFeeds(feeds);
+  seed(); // extra storage the panel should see when it opens
 
   const button = document.createElement('button');
   const host = document.createElement('div');
@@ -426,3 +427,16 @@ test('settings: the calendar list refreshes when an adoption lands while the pan
 // network calls. The :330-337 write site gets the identical
 // re-read-before-write fix as the two sites above; app.js/Task 7's
 // integration tests are where an Add flow with a real fetchImpl belongs.
+
+// --- Phase 0 baseline: the launch count is readable in Settings -------------
+import { recordLaunch } from '../js/storage.js';
+
+test('settings: shows how often the app was opened in the last 7 days', () => {
+  const now = Date.now();
+  const { host } = openPanel([], () => {
+    recordLaunch(new Date(now - 60 * 60 * 1000).toISOString());
+    recordLaunch(new Date(now - 2 * 24 * 60 * 60 * 1000).toISOString());
+    recordLaunch(new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString()); // outside the window
+  });
+  assert.match(allText(host), /Opened 2 times in the last 7 days\./);
+});

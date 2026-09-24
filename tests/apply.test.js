@@ -5,6 +5,7 @@ import { installFakeLocalStorage } from './fake-localstorage.js';
 import { SCHEMA_VERSION } from '../js/merge.js';
 import {
   saveItems, loadItems, saveTombstones, saveFeeds, loadFeeds, loadTombstones, loadSyncState,
+  loadLaunches,
 } from '../js/storage.js';
 import { linkWithCode, clearAdoptionPending } from '../js/auth.js';
 import { bytesToBase64url, TOKEN_BYTES } from '../js/crypto.js';
@@ -214,6 +215,9 @@ test('app.js paints the shell sync indicator at load, so a stuck adoption is vis
   assert.equal(shell.hidden, false,
     'a device sitting at adoptionPending syncs nothing at all — the app shell must say so without opening Settings');
   assert.match(shell.textContent, /\S/);
+  // Phase 0 baseline: a cold load is an open, and it is logged. Asserted here
+  // because this is the only test that sees app.js's module-scope code run.
+  assert.equal(loadLaunches().length, 1, 'loading the app must record one launch');
 });
 
 // applySyncedState must re-merge against live storage. Between the merge that
@@ -842,4 +846,128 @@ test('runSync does not proceed into its try/finally while adoption is pending', 
     'nothing may be pulled or pushed before the user has chosen Merge / Replace / Cancel');
   assert.equal(JSON.stringify(loadSyncState()), syncStateBefore,
     'a sync that must not run must not move the cursor either');
+});
+
+// --- Phase 0: the app opens on today, and stays on today across a resume ----
+//
+// iOS resumes a home-screen web app rather than reloading it. app.js used to
+// compute its day cursor and fetch calendar feeds ONLY at module load, so an
+// app opened at 23:00 and resumed at 08:00 showed yesterday, with yesterday's
+// calendar data. These tests fire the real visibilitychange listener with a
+// mocked clock a day ahead.
+
+const DAY_LABEL_OPTS = { weekday: 'short', month: 'short', day: 'numeric' };
+const labelFor = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).toLocaleDateString('en-US', DAY_LABEL_OPTS);
+const localISO = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+function resume() {
+  for (const fn of globalThis.document._listeners.visibilitychange || []) fn();
+}
+
+test('index.html opens on the Day view, not the List', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  assert.match(html, /<button id="show-day"[^>]*class="active"/, 'the Day button must be the active one on load');
+  assert.doesNotMatch(html, /<button id="show-list"[^>]*class="active"/, 'List must no longer be the default');
+  assert.match(html, /<section id="day-view"(?![^>]*hidden)[^>]*>/, 'the Day section must be visible on load');
+  assert.match(html, /<section id="list-view"[^>]*hidden/, 'the List section must start hidden');
+});
+
+test('resuming the next morning moves the Day view to the new today', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const realNow = Date.now();
+  const dayLabel = globalThis.document.getElementById('day-label');
+  assert.equal(dayLabel.textContent, labelFor(new Date(realNow)), 'fixture check: the Day view starts on today');
+  t.mock.timers.enable({ apis: ['Date'], now: realNow + 24 * 60 * 60 * 1000 });
+  try {
+    resume();
+    assert.equal(dayLabel.textContent, labelFor(new Date(Date.now())),
+      'a Day view that was showing today must follow the clock across a resume');
+  } finally {
+    t.mock.timers.reset();
+  }
+  // And back again, so later tests see today. This also proves the cursor
+  // follows in both directions from whatever app.js last thought today was.
+  resume();
+  assert.equal(dayLabel.textContent, labelFor(new Date()));
+});
+
+test('resuming leaves a Day view the user moved elsewhere where they put it', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const dayLabel = globalThis.document.getElementById('day-label');
+  click(globalThis.document.getElementById('next-day'));
+  click(globalThis.document.getElementById('next-day'));
+  const moved = dayLabel.textContent;
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 24 * 60 * 60 * 1000 });
+  try {
+    resume();
+    assert.equal(dayLabel.textContent, moved, 'a day the user navigated to is not today, and must not jump');
+  } finally {
+    t.mock.timers.reset();
+  }
+  click(globalThis.document.getElementById('prev-day'));
+  click(globalThis.document.getElementById('prev-day'));
+  resume();
+});
+
+test('resuming re-fetches calendar feeds whose cache is stale', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const feed = { id: 'feedR', url: 'https://example.com/r.ics', name: 'R', color: 'var(--feed-palette-1)', hidden: false, updatedAt: '2026-08-01T00:00:00.000Z' };
+  saveFeeds([feed]);
+  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.feeds' });
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => { calls.push(String(url)); return { ok: true, text: async () => '' }; };
+  try {
+    resume();
+    await new Promise((resolve) => { setTimeout(resolve, 0); });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.ok(calls.some((u) => u.includes('/feed?url=') && u.includes(encodeURIComponent(feed.url))),
+    'a resume must refresh stale calendars, not leave last night\'s data on screen');
+  saveFeeds([]);
+  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.feeds' });
+});
+
+test('resuming records a launch and stamps when the screen was refreshed', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const stamp = globalThis.document.getElementById('updated-stamp');
+  stamp.textContent = '';
+  resume();
+  assert.equal(loadLaunches().length, 1, 'each resume is an open, for the Phase 0 baseline');
+  assert.match(stamp.textContent, /^Updated \d{1,2}:\d{2}\s?(AM|PM)$/);
+});
+
+test('a hidden-tab visibilitychange is not a launch and does not refresh', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  globalThis.document.visibilityState = 'hidden';
+  try {
+    resume();
+  } finally {
+    globalThis.document.visibilityState = 'visible';
+  }
+  assert.equal(loadLaunches().length, 0);
+});
+
+test('the List shows human dates, with today named as Today', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const today = localISO(new Date());
+  seed([record({ id: 'h1', title: 'Dentist', date: today })]);
+  assert.match(allText(itemList()), /Today — Dentist/);
+  assert.doesNotMatch(allText(itemList()), new RegExp(`${today} — Dentist`), 'raw ISO dates must not reach the screen');
+  seed([]);
+});
+
+test('the To-do page shows human dates too', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const today = localISO(new Date());
+  seed([record({ id: 'h2', title: 'Essay', date: today, type: 'task' })]);
+  assert.match(allText(todoList()), /Today — Essay/);
+  seed([]);
 });

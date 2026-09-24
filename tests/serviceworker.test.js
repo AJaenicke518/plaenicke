@@ -45,7 +45,7 @@ test('every ASSETS entry actually exists — cache.addAll is all-or-nothing', ()
 // already shipped 'plaenicke-v5-2', so `got > base` was satisfied forever and
 // the assertion could not fail for V6 — the exact vacuity the comment above it
 // was written to prevent. RE-PIN THIS TO main's VALUE ON EVERY RELEASE.
-const CACHE_ON_MAIN = 'plaenicke-v5-2';
+const CACHE_ON_MAIN = 'plaenicke-v6-1';
 
 // AND COMPARE THE WHOLE VERSION, not just the trailing integer. The original
 // read only the last number, so the legitimate v5-2 -> v6-1 bump would have

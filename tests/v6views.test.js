@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { renderTodoView } from '../js/todoview.js';
+
+// A fixed "today" so relative labels (Today/Tomorrow) are deterministic.
+const TODAY = '2026-08-30';
 import { renderIdeasView } from '../js/ideasview.js';
 
 // --- minimal fake DOM ------------------------------------------------------
@@ -91,7 +94,7 @@ const ideaRec = (id, o = {}) => todo(id, { type: 'idea', done: false, ...o });
 
 test('the To-do view renders one row per item, in the order it was given', () => {
   const el = host();
-  renderTodoView(el, [todo('a'), todo('b'), todo('c')], { onDelete() {}, onToggleDone() {} });
+  renderTodoView(el, [todo('a'), todo('b'), todo('c')], { todayISO: TODAY, onDelete() {}, onToggleDone() {} });
   assert.deepEqual(rows(el).length, 3);
   // Ordering is the CALLER's (app.js sorts with the repo's single comparator);
   // the view must not reorder behind its back.
@@ -101,15 +104,15 @@ test('the To-do view renders one row per item, in the order it was given', () =>
 test('each To-do row shows the date and the title', () => {
   const el = host();
   renderTodoView(el, [todo('a', { date: '2026-09-01', title: 'Renew the passport' })],
-    { onDelete() {}, onToggleDone() {} });
+    { todayISO: TODAY, onDelete() {}, onToggleDone() {} });
   const text = allText(el);
-  assert.match(text, /2026-09-01/, 'a to-do without its date is not actionable');
+  assert.match(text, /Tue, Sep 1 — Renew the passport/, 'a to-do without its date is not actionable');
   assert.match(text, /Renew the passport/);
 });
 
 test('each To-do row carries a real unchecked checkbox', () => {
   const el = host();
-  renderTodoView(el, [todo('a')], { onDelete() {}, onToggleDone() {} });
+  renderTodoView(el, [todo('a')], { todayISO: TODAY, onDelete() {}, onToggleDone() {} });
   const boxes = findAll(el, 'INPUT').filter((i) => i.type === 'checkbox');
   assert.equal(boxes.length, 1);
   assert.equal(boxes[0].checked, false, 'the page only lists items that are NOT done');
@@ -121,6 +124,7 @@ test('ticking the checkbox calls onToggleDone with the id and true', () => {
   const el = host();
   const calls = [];
   renderTodoView(el, [todo('a'), todo('b')], {
+    todayISO: TODAY,
     onDelete() {},
     onToggleDone: (id, done) => calls.push([id, done]),
   });
@@ -136,7 +140,7 @@ test('ticking the checkbox calls onToggleDone with the id and true', () => {
 test('the checkbox reports the control state, not a hard-coded true', () => {
   const el = host();
   const calls = [];
-  renderTodoView(el, [todo('a', { done: true })], { onDelete() {}, onToggleDone: (id, d) => calls.push([id, d]) });
+  renderTodoView(el, [todo('a', { done: true })], { todayISO: TODAY, onDelete() {}, onToggleDone: (id, d) => calls.push([id, d]) });
   const box = findAll(el, 'INPUT').filter((i) => i.type === 'checkbox')[0];
   assert.equal(box.checked, true, 'a done item, were it ever shown, must render ticked');
   box.checked = false;
@@ -147,22 +151,22 @@ test('the checkbox reports the control state, not a hard-coded true', () => {
 test('Delete on a To-do row calls onDelete with that id', () => {
   const el = host();
   const deleted = [];
-  renderTodoView(el, [todo('a'), todo('b')], { onDelete: (id) => deleted.push(id), onToggleDone() {} });
+  renderTodoView(el, [todo('a'), todo('b')], { todayISO: TODAY, onDelete: (id) => deleted.push(id), onToggleDone() {} });
   findAll(el, 'BUTTON')[1].fire('click');
   assert.deepEqual(deleted, ['b']);
 });
 
 test('the To-do view says so when there is nothing to do', () => {
   const el = host();
-  renderTodoView(el, [], { onDelete() {}, onToggleDone() {} });
+  renderTodoView(el, [], { todayISO: TODAY, onDelete() {}, onToggleDone() {} });
   assert.equal(rows(el).length, 0);
   assert.match(allText(el), /\S/, 'an empty page must say something rather than look broken');
 });
 
 test('a re-render replaces the previous rows rather than appending to them', () => {
   const el = host();
-  renderTodoView(el, [todo('a')], { onDelete() {}, onToggleDone() {} });
-  renderTodoView(el, [todo('b')], { onDelete() {}, onToggleDone() {} });
+  renderTodoView(el, [todo('a')], { todayISO: TODAY, onDelete() {}, onToggleDone() {} });
+  renderTodoView(el, [todo('b')], { todayISO: TODAY, onDelete() {}, onToggleDone() {} });
   assert.equal(rows(el).length, 1);
   assert.match(allText(el), /t-b/);
   assert.doesNotMatch(allText(el), /t-a/);
@@ -170,7 +174,7 @@ test('a re-render replaces the previous rows rather than appending to them', () 
 
 test('a To-do row carries its type class so it colours like the same item elsewhere', () => {
   const el = host();
-  renderTodoView(el, [todo('a', { type: 'due' })], { onDelete() {}, onToggleDone() {} });
+  renderTodoView(el, [todo('a', { type: 'due' })], { todayISO: TODAY, onDelete() {}, onToggleDone() {} });
   assert.ok(rows(el)[0]._classes.has('type-due'));
 });
 
@@ -229,4 +233,10 @@ test('an Ideas re-render replaces the previous rows', () => {
   renderIdeasView(el, [ideaRec('b')], { onDelete() {} });
   assert.equal(rows(el).length, 1);
   assert.doesNotMatch(allText(el), /t-a/);
+});
+
+// No silent fallback to raw ISO dates: a caller that forgets todayISO would
+// otherwise render every row as "2026-09-01 — …" with nothing failing.
+test('renderTodoView refuses to render without todayISO', () => {
+  assert.throws(() => renderTodoView(host(), [todo('a')], { onDelete() {}, onToggleDone() {} }), /todayISO/);
 });

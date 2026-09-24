@@ -539,3 +539,8 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   color: var(--ink);
   resize: vertical;
 }
+
+/* ---------- Phase 0: freshness stamp ---------- */
+/* Quiet on purpose: it answers "is this current?" at a glance and should not
+   compete with the title. Sits between the title and the settings button. */
+.stamp { color: var(--muted); font-size: 0.75rem; margin-left: auto; margin-right: 10px; }

@@ -410,3 +410,43 @@ test('saveSyncState with a complete object overwrites every field, including lif
   assert.deepEqual(loadSyncState(),
     { version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false });
 });
+
+// --- launch log (Phase 0 baseline) ------------------------------------------
+//
+// Local-only and never synced: it answers "is this device's app actually being
+// opened?", which is a per-device question.
+import { recordLaunch, loadLaunches, MAX_LAUNCHES } from '../js/storage.js';
+
+test('recordLaunch appends to the launch log, oldest first', () => {
+  installFakeLocalStorage();
+  recordLaunch('2026-09-22T08:00:00.000Z');
+  recordLaunch('2026-09-23T08:00:00.000Z');
+  assert.deepEqual(loadLaunches(), ['2026-09-22T08:00:00.000Z', '2026-09-23T08:00:00.000Z']);
+});
+
+test('the launch log keeps only the most recent MAX_LAUNCHES entries', () => {
+  installFakeLocalStorage();
+  for (let i = 0; i < MAX_LAUNCHES + 3; i += 1) recordLaunch(new Date(Date.UTC(2026, 0, 1) + i * 60000).toISOString());
+  const log = loadLaunches();
+  assert.equal(log.length, MAX_LAUNCHES);
+  assert.equal(log[log.length - 1], new Date(Date.UTC(2026, 0, 1) + (MAX_LAUNCHES + 2) * 60000).toISOString());
+});
+
+test('a corrupt launch log reads as empty and non-string entries are dropped', () => {
+  installFakeLocalStorage();
+  localStorage.setItem('plaenicke.launches', '{not json');
+  assert.deepEqual(loadLaunches(), []);
+  localStorage.setItem('plaenicke.launches', JSON.stringify(['2026-09-23T08:00:00.000Z', 7, null]));
+  assert.deepEqual(loadLaunches(), ['2026-09-23T08:00:00.000Z']);
+});
+
+test('recordLaunch raises QuotaError on a full device, like every other writer', () => {
+  installFakeLocalStorage();
+  const real = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = () => { const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; };
+  try {
+    assert.throws(() => recordLaunch('2026-09-23T08:00:00.000Z'), QuotaError);
+  } finally {
+    localStorage.setItem = real;
+  }
+});

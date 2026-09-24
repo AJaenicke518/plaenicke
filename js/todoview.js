@@ -9,8 +9,12 @@
 // No add box, deliberately: to-dos are captured by voice through the main
 // entry box and classified by the model (spec § 3.3).
 import { itemTypeClass } from './calendar.js';
+import { formatDayLabel } from './freshness.js';
 
-export function renderTodoView(container, todos, { onDelete, onToggleDone }) {
+export function renderTodoView(container, todos, { todayISO, onDelete, onToggleDone }) {
+  // Required, not defaulted: without it every row would silently fall back to
+  // a raw ISO date, and "Today"/"Tomorrow" are computed against it.
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(todayISO || '')) throw new Error('renderTodoView requires todayISO');
   container.innerHTML = '';
 
   if (todos.length === 0) {
@@ -43,7 +47,7 @@ export function renderTodoView(container, todos, { onDelete, onToggleDone }) {
     const main = document.createElement('div');
     main.className = 'todo-main';
     const info = document.createElement('span');
-    info.textContent = `${it.date} — ${it.title}`;
+    info.textContent = `${formatDayLabel(it.date, todayISO)} — ${it.title}`;
     main.appendChild(info);
 
     const del = document.createElement('button');

@@ -274,3 +274,35 @@ export function saveSyncState(s) {
     throw err;
   }
 }
+
+// --- launch log ---
+// Timestamps of each time the app was opened or resumed on THIS device. Local
+// only, never synced: it is the Phase 0 baseline for "is plaenicke actually
+// being used?" (docs/superpowers/research/2026-09-23-plaenicke-ui-research.md).
+// Capped so it can never grow into the quota the feed cache depends on.
+
+const LAUNCHES_KEY = 'plaenicke.launches';
+export const MAX_LAUNCHES = 500;
+
+export function loadLaunches() {
+  const json = localStorage.getItem(LAUNCHES_KEY);
+  if (!json) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.filter((t) => typeof t === 'string');
+}
+
+export function recordLaunch(iso) {
+  const next = [...loadLaunches(), iso].slice(-MAX_LAUNCHES);
+  try {
+    localStorage.setItem(LAUNCHES_KEY, JSON.stringify(next));
+  } catch (err) {
+    if (err && err.name === 'QuotaExceededError') throw new QuotaError('Launch log exceeded storage quota');
+    throw err;
+  }
+}

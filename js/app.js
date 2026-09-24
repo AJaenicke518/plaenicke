@@ -1,7 +1,8 @@
 import {
   loadItems, saveItems, loadFeeds, loadFeedCache, addTombstone,
-  loadTombstones, saveTombstones,
+  loadTombstones, saveTombstones, recordLaunch,
 } from './storage.js';
+import { followToday, formatDayLabel } from './freshness.js';
 import {
   makeItem, sortItemsByDate, isScheduled, isTodo, isIdea, sortIdeasNewestFirst,
 } from './items.js';
@@ -66,6 +67,7 @@ const els = {
   ideaList: document.getElementById('idea-list'),
   ideaText: document.getElementById('idea-text'),
   ideaAdd: document.getElementById('idea-add'),
+  updatedStamp: document.getElementById('updated-stamp'),
 };
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
@@ -75,6 +77,11 @@ let items = loadItems();
 let viewMonth = new Date();
 let viewDay = toISO(new Date());
 let viewWeekStart = startOfWeek(viewDay);
+// What app.js believed "today" was the last time it looked. iOS resumes a
+// home-screen web app instead of reloading it, so the cursors above would
+// otherwise stay on the day the app was first opened. refreshForToday() moves
+// every cursor that was showing this day onto the real one.
+let lastToday = viewDay;
 
 // External calendars (Task 6/7) — feeds + cache are read once at load; the
 // only thing that changes them afterward is a background sync settling (see
@@ -342,7 +349,7 @@ function renderList() {
       if (it.external) li.style.setProperty('--feed-color', it.feedColor);
       const main = document.createElement('div');
       const info = document.createElement('span');
-      info.textContent = `${it.date} — ${it.title}`;
+      info.textContent = `${formatDayLabel(it.date, todayISO)} — ${it.title}`;
       main.appendChild(info);
       if (it.time) {
         const t = document.createElement('div');
@@ -450,7 +457,9 @@ function renderDay() {
 }
 
 function renderTodos() {
-  renderTodoView(els.todoList, todoItems(), { onDelete: handleDelete, onToggleDone: handleToggleDone });
+  renderTodoView(els.todoList, todoItems(), {
+    todayISO: toISO(new Date()), onDelete: handleDelete, onToggleDone: handleToggleDone,
+  });
 }
 
 function renderIdeas() {
@@ -501,6 +510,8 @@ els.prevWeek.addEventListener('click', () => { viewWeekStart = addDays(viewWeekS
 els.nextWeek.addEventListener('click', () => { viewWeekStart = addDays(viewWeekStart, 7); render(); });
 
 render();
+noteLaunch();
+stampUpdated();
 
 // Background sync: never block first paint on the network — render() above
 // already ran from whatever's in cache. Feeds sync sequentially inside
@@ -640,8 +651,48 @@ window.addEventListener('storage', (e) => {
   render();
 });
 
+// --- Phase 0: staying current across a resume -----------------------------
+//
+// A cursor the user navigated away from is left alone (followToday); only one
+// that was showing the old today follows the clock.
+function refreshForToday() {
+  const today = toISO(new Date());
+  if (today === lastToday) return;
+  viewDay = followToday(viewDay, lastToday, today);
+  viewWeekStart = followToday(viewWeekStart, startOfWeek(lastToday), startOfWeek(today));
+  const shownMonth = toISO(viewMonth).slice(0, 7);
+  if (followToday(shownMonth, lastToday.slice(0, 7), today.slice(0, 7)) !== shownMonth) {
+    const now = new Date();
+    viewMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  }
+  lastToday = today;
+}
+
+// The Phase 0 baseline. A failed write is reported, not swallowed — but it
+// must never stop the app from opening, so it does not propagate.
+function noteLaunch() {
+  try {
+    recordLaunch(nowISO());
+  } catch (err) {
+    console.error('plaenicke: launch log write failed', err && err.name);
+  }
+}
+
+function stampUpdated() {
+  const d = new Date();
+  els.updatedStamp.textContent = `Updated ${formatTime(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`)}`;
+}
+
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') runSync();
+  if (document.visibilityState !== 'visible') return;
+  refreshForToday();
+  noteLaunch();
+  render();
+  stampUpdated();
+  // Honours syncStale's 30-minute threshold, so a quick app switch does not
+  // refetch every calendar.
+  backgroundSyncFeeds(feeds);
+  runSync();
 });
 window.addEventListener('online', runSync);
 
