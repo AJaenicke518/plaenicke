@@ -1927,3 +1927,332 @@ test('sweep: records with a null or empty date render instead of crashing the ap
   assert.match(allText(todoList()), /Undated empty/);
   seed([]);
 });
+
+// --- sweep batch S ------------------------------------------------------------
+//
+// Clock-skew tests seed a record stamped 60 s AFTER this device's (mocked)
+// clock: exactly what a record from a device whose clock runs ahead looks
+// like. Each sync goes through applySyncedState, the real merge path;
+// simulateSync overwrites storage and cannot exercise last-write-wins.
+
+const S_NOW = Date.parse('2026-09-23T12:00:00.000Z');
+const S_AHEAD = '2026-09-23T12:01:00.000Z';
+const clearMessage = () => { globalThis.document.getElementById('message').textContent = ''; };
+const storedTombstone = (id) => loadTombstones().find((x) => x.id === id);
+
+// F1: an edit of a record from a clock-ahead device is stamped strictly after
+// it, so the next sync carrying that same record does not revert the edit.
+test('sweep S: an edit of a record stamped in the future survives a sync of the original', async (t) => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  const original = record({ id: 'sS-skew-edit', title: 'Skewed before', date: '2099-07-01', updatedAt: S_AHEAD });
+  seed([original]);
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  try {
+    click(openControlFor(itemList(), 'Skewed before'));
+    sheetHost().querySelector('.sheet-title').value = 'Skewed after';
+    click(sheetHost().querySelector('.sheet-save'));
+    t.mock.timers.tick(5000);
+    applySyncedState(state({ items: [original] }));
+    assert.equal(storedById('sS-skew-edit').title, 'Skewed after', 'the edit must not lose to the copy it replaced');
+    assert.match(allText(itemList()), /Skewed after/);
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  assert.equal(toastHost().children.length, 0);
+  seed([]);
+});
+
+// F1: the same for a tick.
+test('sweep S: a tick of a to-do stamped in the future survives a sync of the original', async (t) => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  const original = record({ id: 'sS-skew-tick', type: 'task', title: 'Skewed tick', date: '2099-07-02', updatedAt: S_AHEAD });
+  seed([original]);
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  try {
+    const box = checkboxFor(todoList(), 'Skewed tick');
+    box.checked = true;
+    fire(box, 'change');
+    applySyncedState(state({ items: [original] }));
+    assert.equal(storedById('sS-skew-tick').done, true, 'the tick must not lose to the copy it replaced');
+  } finally {
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  assert.equal(toastHost().children.length, 0);
+  seed([]);
+});
+
+// F1: an Undo in the same millisecond as its edit must still be later than the
+// edit, or the pushed edit ties it and (ties go to remote) reverts it.
+test('sweep S: an Undo in the same millisecond as its edit survives a sync of the edit', async (t) => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  seed([record({ id: 'sS-skew-undo', title: 'Undo skew orig', date: '2099-07-03', updatedAt: S_AHEAD })]);
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  try {
+    click(openControlFor(itemList(), 'Undo skew orig'));
+    sheetHost().querySelector('.sheet-title').value = 'Undo skew edited';
+    click(sheetHost().querySelector('.sheet-save'));
+    const pushed = { ...storedById('sS-skew-undo') };
+    click(toastHost().querySelector('.toast-undo'));
+    applySyncedState(state({ items: [pushed] }));
+    assert.equal(storedById('sS-skew-undo').title, 'Undo skew orig', 'the undo must win over the edit it undid');
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  assert.equal(toastHost().children.length, 0);
+  seed([]);
+});
+
+// F2: a delete of a record from a clock-ahead device must stay deleted.
+// applyTombstones keeps a record whose updatedAt is at or after deletedAt.
+test('sweep S: a delete of a record stamped in the future stays deleted after a sync of the original', async (t) => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  const original = record({ id: 'sS-skew-del', title: 'Skewed delete', date: '2099-07-04', updatedAt: S_AHEAD });
+  seed([original]);
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  try {
+    click(deleteControlFor(itemList(), 'Skewed delete'));
+    t.mock.timers.tick(5000);
+    assert.ok(tombstoned('sS-skew-del'), 'fixture check: the delete committed');
+    applySyncedState(state({ items: [original] }));
+    assert.ok(!stored('sS-skew-del'), 'the deleted item must not come back');
+    assert.doesNotMatch(allText(itemList()), /Skewed delete/);
+  } finally {
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  assert.equal(toastHost().children.length, 0);
+  seed([]);
+});
+
+// F3: Undo restores a field only while it still holds what the edit wrote. A
+// field the other device changed since is kept, and the user is told.
+test('sweep S: Undo keeps a field a sync changed since the edit, restores the rest, and says so', async (t) => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  seed([record({ id: 'sS-undo-theirs', title: 'Undo base', date: '2099-07-05' })]);
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  try {
+    clearMessage();
+    click(openControlFor(itemList(), 'Undo base'));
+    sheetHost().querySelector('.sheet-title').value = 'mine';
+    sheetHost().querySelector('.sheet-date').value = '2099-07-06';
+    click(sheetHost().querySelector('.sheet-save'));
+    applySyncedState(state({ items: [{ ...storedById('sS-undo-theirs'), title: 'theirs', updatedAt: S_AHEAD }] }));
+    assert.equal(storedById('sS-undo-theirs').title, 'theirs', 'fixture check: the newer sync landed');
+    click(toastHost().querySelector('.toast-undo'));
+    const r = storedById('sS-undo-theirs');
+    assert.equal(r.title, 'theirs', 'Undo must not write over a newer value from the other device');
+    assert.equal(r.date, '2099-07-05', 'Undo still restores the field nobody else changed');
+    assert.equal(messageText(), 'Some changes from your other device were kept.');
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  assert.equal(toastHost().children.length, 0);
+  clearMessage();
+  seed([]);
+});
+
+// F3: when EVERY field was changed since, there is nothing to restore: no
+// write at all (a write would bump updatedAt for no change), and still a message.
+test('sweep S: Undo with every edited field changed since writes nothing and says so', async (t) => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  seed([record({ id: 'sS-undo-none', title: 'Undo none base', date: '2099-07-07' })]);
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  try {
+    clearMessage();
+    click(openControlFor(itemList(), 'Undo none base'));
+    sheetHost().querySelector('.sheet-title').value = 'mine only';
+    click(sheetHost().querySelector('.sheet-save'));
+    applySyncedState(state({ items: [{ ...storedById('sS-undo-none'), title: 'theirs only', updatedAt: S_AHEAD }] }));
+    const before = rawStored();
+    click(toastHost().querySelector('.toast-undo'));
+    assert.equal(rawStored(), before, 'nothing to restore, so nothing is written');
+    assert.equal(messageText(), 'Some changes from your other device were kept.');
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  assert.equal(toastHost().children.length, 0);
+  clearMessage();
+  seed([]);
+});
+
+// F4: the sheet is built for the type it opened with (the idea sheet has one
+// text box; the others have title/date/time). If a sync changed the type while
+// it was open, its diff no longer describes the record: refuse, don't guess.
+test('sweep S: saving a sheet whose item changed type underneath it is refused', async (t) => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  seed([record({ id: 'sS-type-under', type: 'task', title: 'Type under', date: '2099-07-08' })]);
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  try {
+    click(openControlFor(itemList(), 'Type under'));
+    applySyncedState(state({ items: [{ ...storedById('sS-type-under'), type: 'due', updatedAt: S_AHEAD }] }));
+    const before = rawStored();
+    sheetHost().querySelector('.sheet-title').value = 'Type under, renamed';
+    click(sheetHost().querySelector('.sheet-save'));
+    assert.equal(sheetHost().querySelector('.sheet-error').textContent,
+      'This item changed on your other device — close and reopen it.');
+    assert.equal(rawStored(), before, 'nothing was written');
+    assert.equal(toastHost().children.length, 0, 'a refused save offers no Undo');
+    closeSheet();
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  assert.equal(toastHost().children.length, 0);
+  seed([]);
+});
+
+// F5: a failed tick must not leave `done: true` in app.js's in-memory list,
+// where the next successful save of ANY item would write it to storage.
+test('sweep S: a tick that fails on quota is not saved by a later, unrelated edit', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([
+    record({ id: 'sS-rb-tick', type: 'task', title: 'Rollback tick', date: '2099-07-09' }),
+    record({ id: 'sS-rb-other', title: 'Rollback other', date: '2099-07-10' }),
+  ]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const real = localStorage.setItem.bind(localStorage);
+  try {
+    localStorage.setItem = (k, v) => {
+      if (k === 'plaenicke.items') { const e = new Error('The quota has been exceeded.'); e.name = 'QuotaExceededError'; throw e; }
+      return real(k, v);
+    };
+    try {
+      const box = checkboxFor(todoList(), 'Rollback tick');
+      box.checked = true;
+      fire(box, 'change');
+    } finally {
+      localStorage.setItem = real;
+    }
+    assert.equal(storedById('sS-rb-tick').done, false, 'fixture check: the tick was not saved');
+    click(openControlFor(itemList(), 'Rollback other'));
+    sheetHost().querySelector('.sheet-title').value = 'Rollback other, renamed';
+    click(sheetHost().querySelector('.sheet-save'));
+    assert.equal(storedById('sS-rb-other').title, 'Rollback other, renamed', 'fixture check: the edit saved');
+    assert.equal(storedById('sS-rb-tick').done, false, 'the failed tick must not ride along with the edit');
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  assert.equal(toastHost().children.length, 0);
+  seed([]);
+});
+
+// F5: the same for a capture (addItems) that fails on quota.
+test('sweep S: an add that fails on quota is not saved by a later, unrelated edit', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'sS-rb-add-other', title: 'Rollback add other', date: '2099-07-11' })]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const real = localStorage.setItem.bind(localStorage);
+  try {
+    localStorage.setItem = (k, v) => {
+      if (k === 'plaenicke.items') { const e = new Error('The quota has been exceeded.'); e.name = 'QuotaExceededError'; throw e; }
+      return real(k, v);
+    };
+    try {
+      ideaText().value = 'sS failed capture thought';
+      click(ideaAdd());
+    } finally {
+      localStorage.setItem = real;
+    }
+    assert.match(messageText(), /quota/i, 'fixture check: the add failed visibly');
+    click(openControlFor(itemList(), 'Rollback add other'));
+    sheetHost().querySelector('.sheet-title').value = 'Rollback add other, renamed';
+    click(sheetHost().querySelector('.sheet-save'));
+    assert.equal(storedById('sS-rb-add-other').title, 'Rollback add other, renamed', 'fixture check: the edit saved');
+    assert.ok(!loadItems().some((it) => /sS failed capture thought/.test(`${it.title} ${it.notes}`)),
+      'the failed add must not ride along with the edit');
+  } finally {
+    forceCloseSheet();
+    ideaText().value = '';
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  assert.equal(toastHost().children.length, 0);
+  clearMessage();
+  seed([]);
+});
+
+// S-3 (E8), through the real idea sheet: the text is edited AND the type
+// switched in one save. The new text wins over the idea's old notes.
+test('sweep S: editing an idea\'s text and switching it to a task in one save keeps the new text', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({
+    id: 'sS-idea-switch', type: 'idea', title: 'Old idea words',
+    notes: 'Old idea words, the complete original thought', date: '2099-07-12',
+  })]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    click(openControlFor(ideaList(), 'Old idea words'));
+    sheetHost().querySelector('.sheet-text').value = 'Fresh task text';
+    sheetHost().querySelector('.sheet-type').value = 'task';
+    click(sheetHost().querySelector('.sheet-save'));
+    assert.equal(sheetHost().children.length, 0, 'the save succeeded');
+    const r = storedById('sS-idea-switch');
+    assert.equal(r.type, 'task');
+    assert.equal(r.title, 'Fresh task text');
+    assert.doesNotMatch(JSON.stringify(r), /Old idea words/, 'the old text is not written back');
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  assert.equal(toastHost().children.length, 0);
+  seed([]);
+});
+
+// S-5: going to the background commits a pending delete through the toast's
+// dismiss AND sweeps pendingDeletes; the tombstone must be written once, at
+// the moment of backgrounding, and never again by a later timer.
+test('sweep S: backgrounding commits a pending delete\'s tombstone exactly once', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'sS-bg-once', title: 'Background once', date: '2099-07-13' })]);
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  const real = localStorage.setItem.bind(localStorage);
+  let writes = 0;
+  try {
+    click(deleteControlFor(itemList(), 'Background once'));
+    localStorage.setItem = (k, v) => {
+      if (k === 'plaenicke.syncTombstones' && JSON.parse(v).some((x) => x.id === 'sS-bg-once')) writes += 1;
+      return real(k, v);
+    };
+    globalThis.document.visibilityState = 'hidden';
+    try {
+      resume();
+    } finally {
+      globalThis.document.visibilityState = 'visible';
+    }
+    t.mock.timers.tick(5000);
+    t.mock.timers.tick(5000);
+    assert.equal(writes, 1, 'the tombstone is written exactly once');
+    assert.equal(storedTombstone('sS-bg-once').deletedAt, new Date(S_NOW).toISOString(),
+      'stamped when the app went to the background');
+  } finally {
+    localStorage.setItem = real;
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  assert.equal(toastHost().children.length, 0);
+  seed([]);
+});

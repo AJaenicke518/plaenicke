@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { EDITABLE_FIELDS, applyEdit, diffPatch, snapshotOf, quickMoves, typeChangePatch }
-  from '../js/edit.js';
+import {
+  EDITABLE_FIELDS, applyEdit, diffPatch, snapshotOf, quickMoves, typeChangePatch, nextStamp,
+} from '../js/edit.js';
 
 // =========================================================================
 // js/edit.js — the pure half of editing your own items (edit-items spec § 3.1)
@@ -367,4 +368,65 @@ test('an idea never carries a time after an edit', () => {
   const out = applyEdit(record, { type: 'idea', notes: 'x', title: 'x' }, T1);
   assert.equal(out.time, null);
   assert.equal(out.endTime, null);
+});
+
+// --- sweep batch S ----------------------------------------------------------
+
+// F1/F2: a user write must be stamped STRICTLY later than the record it
+// replaces. unionById's ties go to remote and applyTombstones keeps a record
+// whose updatedAt is at or after the deletion, so a write stamped at or before
+// the record's own updatedAt (a record from a device whose clock runs ahead)
+// loses to the very copy it replaced on the next sync.
+test('nextStamp returns now when the record is older', () => {
+  assert.equal(nextStamp('2026-09-23T12:00:00.000Z', '2026-09-23T11:00:00.000Z'), '2026-09-23T12:00:00.000Z');
+});
+
+test('nextStamp returns one millisecond after a record stamped at or after now', () => {
+  assert.equal(nextStamp('2026-09-23T12:00:00.000Z', '2026-09-23T12:01:00.000Z'), '2026-09-23T12:01:00.001Z');
+  assert.equal(nextStamp('2026-09-23T12:00:00.000Z', '2026-09-23T12:00:00.000Z'), '2026-09-23T12:00:00.001Z',
+    'a same-millisecond stamp would tie, and ties go to remote');
+});
+
+test('nextStamp returns now when the record has no usable updatedAt', () => {
+  for (const prev of [undefined, null, '', 'not a date', 42]) {
+    assert.equal(nextStamp('2026-09-23T12:00:00.000Z', prev), '2026-09-23T12:00:00.000Z', String(prev));
+  }
+});
+
+// F6: "the notes already contain the title" needs a word boundary. A bare
+// startsWith read "Calloway about the invoice" as containing the title "Call"
+// and dropped the title.
+test('typeChangePatch to idea keeps a title that is only a prefix of a word in the notes', () => {
+  const record = task({ title: 'Call', notes: 'Calloway about the invoice' });
+  const patch = typeChangePatch(record, { type: 'idea' });
+  assert.equal(patch.notes, 'Call\n\nCalloway about the invoice');
+});
+
+test('typeChangePatch to idea treats notes equal to the title as the whole text', () => {
+  const record = task({ title: 'Paint the fence', notes: 'Paint the fence' });
+  assert.equal(typeChangePatch(record, { type: 'idea' }).notes, 'Paint the fence');
+});
+
+test('typeChangePatch to idea treats notes that begin with the title and a space as the whole text', () => {
+  const record = task({ title: 'Paint the fence', notes: 'Paint the fence before the frost' });
+  assert.equal(typeChangePatch(record, { type: 'idea' }).notes, 'Paint the fence before the frost');
+  const nl = task({ title: 'Paint the fence', notes: 'Paint the fence\nbefore the frost' });
+  assert.equal(typeChangePatch(nl, { type: 'idea' }).notes, 'Paint the fence\nbefore the frost');
+});
+
+test('typeChangePatch to idea with the title cleared in the same save takes the notes as the text', () => {
+  const record = task({ title: 'Old', notes: 'details' });
+  assert.equal(typeChangePatch(record, { type: 'idea', title: '' }).notes, 'details');
+});
+
+// S-3 (E8): an idea's text edited AND its type switched in one save. The idea
+// sheet sends the text as both title and notes; the NEW text must win over the
+// record's own (non-null, different) notes.
+test('typeChangePatch from idea: text edited in the same save wins over the record\'s notes', () => {
+  const record = idea({ title: 'Old thought', notes: 'Old thought, written out at length' });
+  const patch = typeChangePatch(record, { type: 'task', title: 'Brand new thought', notes: 'Brand new thought' });
+  assert.equal(patch.title, 'Brand new thought');
+  const out = applyEdit(record, patch, T1);
+  assert.equal(out.title, 'Brand new thought');
+  assert.doesNotMatch(JSON.stringify(out), /Old thought/);
 });

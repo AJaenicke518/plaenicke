@@ -21,7 +21,7 @@ import { initSettings } from './settings.js';
 import { instancesForRange, syncStale, applyRemoteFeeds, inferName } from './feeds.js';
 import { openItemSheet } from './itemsheet.js';
 import { showToast } from './toast.js';
-import { applyEdit, typeChangePatch, snapshotOf, EDITABLE_FIELDS } from './edit.js';
+import { applyEdit, typeChangePatch, snapshotOf, nextStamp, EDITABLE_FIELDS } from './edit.js';
 import { uid } from './uid.js';
 import { syncOnce } from './sync.js';
 import { isLinked, isAdoptionPending } from './auth.js';
@@ -193,8 +193,17 @@ export function addItems(list) {
   const made = list.map((it) => makeItem(normalizeIdea(it), {
     id: uid(), createdAt: toISO(new Date()), updatedAt: nowISO(),
   }));
-  items.push(...made);
-  saveItems(items);
+  // A failed save must not leave the new records in `items`: app.js saves
+  // from that array, so the next successful save of ANY item would quietly
+  // write a capture the user was told had failed.
+  const prev = items;
+  items = [...items, ...made];
+  try {
+    saveItems(items);
+  } catch (e) {
+    items = prev;
+    throw e;
+  }
   render();
   scheduleSync();
 }
@@ -263,7 +272,11 @@ function deleteItem(id) {
   // (save first, tombstone second) let a tombstone-write failure delete the
   // item locally with no tombstone to propagate — a silent, self-reversing
   // delete once sync ships.
-  addTombstone(id, 'item', nowISO());
+  //
+  // deletedAt is strictly later than the record's own updatedAt (nextStamp),
+  // or a record from a clock-ahead device outlives its own deletion.
+  const rec = items.find((it) => it.id === id);
+  addTombstone(id, 'item', nextStamp(nowISO(), rec && rec.updatedAt));
   items = items.filter((it) => it.id !== id);
   saveItems(items);
   render();
@@ -306,12 +319,21 @@ function handleDelete(id) {
 // deleted on another device before the tick synced; that costs a reappearing,
 // re-deletable calendar entry rather than lost data, and it is the only horn
 // that converges. js/merge.js's header carries the full reasoning.
+//
+// The stamp is strictly later than the record's own (nextStamp), and a failed
+// save restores the record, as editItem does: `items` is what the next save
+// of any item writes.
 function setDone(id, done) {
-  const record = items.find((it) => it.id === id);
-  if (!record) return;
-  record.done = done === true;
-  record.updatedAt = nowISO();
-  saveItems(items);
+  const idx = items.findIndex((it) => it.id === id);
+  if (idx < 0) return;
+  const before = items[idx];
+  items[idx] = { ...before, done: done === true, updatedAt: nextStamp(nowISO(), before.updatedAt) };
+  try {
+    saveItems(items);
+  } catch (e) {
+    items[idx] = before;
+    throw e;
+  }
   render();
   scheduleSync();
 }
@@ -335,16 +357,28 @@ function setDone(id, done) {
 // snapshot already holds every field the edit changed; re-running the type
 // adjustment on it would treat undoing task -> idea as an idea -> task switch
 // and split the idea's text instead of restoring the task's own fields.
-function editItem(id, patch, { toast = true, raw = false } = {}) {
+//
+// `openedType` is the type the sheet was built for (openItem passes it). The
+// idea sheet and the others collect different fields, so if a sync changed
+// the type while the sheet was open, its diff no longer describes the record:
+// refuse rather than guess. Undo passes none.
+//
+// The stamp is strictly later than the record's own (nextStamp), so an edit —
+// or an Undo in the same millisecond as its edit — never loses to the copy it
+// replaced because of clock skew.
+function editItem(id, patch, { toast = true, raw = false, openedType } = {}) {
   if (pendingDeletes.has(id)) return { ok: false, error: 'This item is being deleted.' };
   const idx = items.findIndex((it) => it.id === id);
   if (idx < 0) return { ok: false, error: 'This item no longer exists.' };
   const before = items[idx];
+  if (openedType !== undefined && before.type !== openedType) {
+    return { ok: false, error: 'This item changed on your other device — close and reopen it.' };
+  }
   let applied;
   let next;
   try {
     applied = raw ? patch : typeChangePatch(before, patch);
-    next = applyEdit(before, applied, nowISO());
+    next = applyEdit(before, applied, nextStamp(nowISO(), before.updatedAt));
   } catch (e) {
     return { ok: false, error: e.message };
   }
@@ -367,8 +401,27 @@ function editItem(id, patch, { toast = true, raw = false } = {}) {
     const undoSnap = snapshotOf(before, [...keys]);
     activeToast = showToast(els.toastHost, 'Saved', {
       undo: () => {
-        const r = editItem(id, undoSnap, { toast: false, raw: true });
-        if (!r.ok) setMessage(r.error);
+        // Restore a field only while it still holds what this edit wrote. A
+        // sync may have brought a newer value from the other device since;
+        // Undo must not write over it. A record that is gone falls through to
+        // editItem, which says so.
+        const current = items.find((it) => it.id === id);
+        let restore = undoSnap;
+        let kept = false;
+        if (current) {
+          restore = {};
+          for (const k of Object.keys(undoSnap)) {
+            if (current[k] === next[k]) restore[k] = undoSnap[k];
+            else kept = true;
+          }
+        }
+        // Nothing left to restore: write nothing, since a write would only
+        // bump updatedAt over the other device's version.
+        if (!current || Object.keys(restore).length > 0) {
+          const r = editItem(id, restore, { toast: false, raw: true });
+          if (!r.ok) { setMessage(r.error); return; }
+        }
+        if (kept) setMessage('Some changes from your other device were kept.');
       },
     });
   }
@@ -450,7 +503,7 @@ function openItem(item) {
       todayISO: toISO(new Date()),
       calendarName,
       googleDayUrl,
-      onSave: (p) => editItem(item.id, p),
+      onSave: (p) => editItem(item.id, p, { openedType: item.type }),
       onDelete: () => requestDelete(item.id),
       onClose: () => {},
     });

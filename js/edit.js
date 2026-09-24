@@ -118,6 +118,15 @@ export function quickMoves(record, todayISO) {
 // From idea: the idea's full text is split with the same splitIdeaText the
 // capture path uses, so a long idea becomes a short title with the complete
 // text kept in notes — nothing the user wrote is lost.
+// The notes already hold the title only when they ARE the title, or begin with
+// it as a whole word (followed by whitespace). A bare startsWith read
+// "Calloway about the invoice" as containing the title "Call" and dropped it.
+function notesContainTitle(notes, title) {
+  // No title to lose (cleared in the same save): the notes are the text, as before.
+  if (typeof title !== 'string' || title === '') return true;
+  return notes === title || (notes.startsWith(title) && /\s/.test(notes.charAt(title.length)));
+}
+
 export function typeChangePatch(record, patch) {
   const wasIdea = record.type === 'idea';
   if (!wasIdea && patch.type === 'idea') {
@@ -125,7 +134,7 @@ export function typeChangePatch(record, patch) {
     const title = patch.title ?? record.title;
     const hasNotes = typeof notes === 'string' && notes.trim() !== '';
     let text = title;
-    if (hasNotes) text = notes.startsWith(title) ? notes : `${title}\n\n${notes}`;
+    if (hasNotes) text = notesContainTitle(notes, title) ? notes : `${title}\n\n${notes}`;
     return { ...patch, notes: text, time: null, endTime: null };
   }
   if (wasIdea && patch.type !== undefined && patch.type !== 'idea') {
@@ -134,4 +143,26 @@ export function typeChangePatch(record, patch) {
     return { ...patch, title, notes };
   }
   return patch;
+}
+
+// nextStamp — the updatedAt (or deletedAt) for a user write that replaces a
+// record stamped `prevIso`: now, or one millisecond after the record's own
+// stamp if that is not earlier than now. Used by every user write to a synced
+// record — editItem (and so Undo), setDone, and the delete commit's tombstone.
+//
+// WHY STRICTLY LATER. unionById's ties go to remote (`>=`) and applyTombstones
+// keeps a record whose updatedAt is at or after the deletion. A record written
+// by a device whose clock runs ahead carries a future updatedAt; a write here
+// stamped with this device's plain `now` then LOSES to the very copy it
+// replaced on the next sync — the edit or delete silently undone. One write
+// can therefore no longer lose to clock skew. Two CONCURRENT writes on two
+// devices still can: this orders a write after the record it saw, nothing more.
+//
+// An unparseable prevIso (a record from before updatedAt was a full instant,
+// or a corrupt one) cannot be compared, so the write takes plain now.
+export function nextStamp(nowIso, prevIso) {
+  const now = Date.parse(nowIso);
+  const prev = typeof prevIso === 'string' ? Date.parse(prevIso) : NaN;
+  if (Number.isNaN(prev) || prev < now) return nowIso;
+  return new Date(prev + 1).toISOString();
 }
