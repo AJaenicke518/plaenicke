@@ -166,3 +166,11 @@ test('the sheet top bar is sticky, so Save stays reachable while the form scroll
   assert.match(m[2], /position:\s*sticky/);
   assert.match(m[2], /top:\s*0/);
 });
+
+// --- Task 4b (Task 2 review, O1): the toast must never cover the last row ---
+// .toast is position: fixed at the bottom. Without room under the content,
+// the final list row — often the very item whose delete it offers to undo —
+// sits under it with no way to scroll it clear.
+test('body leaves room at the bottom for the toast', () => {
+  assert.equal(declOf('body', 'padding-bottom'), 'calc(96px + env(safe-area-inset-bottom))');
+});

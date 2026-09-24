@@ -75,6 +75,9 @@ body {
   background: var(--bg);
   color: var(--ink);
   padding: env(safe-area-inset-top) 16px 40px;
+  /* Room for the fixed .toast (edit-items Task 4b): without it the last row,
+     often the very item a delete offers to undo, sits under the toast. */
+  padding-bottom: calc(96px + env(safe-area-inset-bottom));
   /* There was no line-height rule at all before this, so everything ran at
      the browser default (~1.2) — tight for a serif read at arm's length.
      This is a readability change, NOT an attempt to fill the viewport: the

@@ -1178,14 +1178,259 @@ test('open: Save says editing is not here yet, and changes nothing', async () =>
   seed([]);
 });
 
-test("open: the sheet's Delete deletes through the existing path, tombstone and all", async () => {
+// Task 4b: the sheet's Delete goes through requestDelete like every other
+// delete — hidden at once, committed (tombstone first) when the toast expires.
+test("open: the sheet's Delete deletes through the existing path, tombstone and all", async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
   seed([record({ id: 'open-del1', title: 'Open me and delete', date: '2099-02-01' })]);
-  click(openControlFor(itemList(), 'Open me and delete'));
-  click(sheetHost().querySelector('.sheet-delete'));
-  assert.deepEqual(loadItems(), [], 'the item is gone from storage');
-  assert.ok(loadTombstones().some((t) => t.id === 'open-del1'), 'and the delete is tombstoned so it syncs');
-  assert.equal(sheetHost().children.length, 0, 'the sheet closed');
-  assert.doesNotMatch(allText(itemList()), /Open me and delete/);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    click(openControlFor(itemList(), 'Open me and delete'));
+    click(sheetHost().querySelector('.sheet-delete'));
+    assert.equal(sheetHost().children.length, 0, 'the sheet closed');
+    assert.doesNotMatch(allText(itemList()), /Open me and delete/);
+    assert.equal(loadTombstones().length, 0, 'nothing is committed while Undo is offered');
+    t.mock.timers.tick(5000);
+    assert.deepEqual(loadItems(), [], 'the item is gone from storage');
+    assert.ok(loadTombstones().some((ts) => ts.id === 'open-del1'), 'and the delete is tombstoned so it syncs');
+    assert.equal(toastHost().children.length, 0, 'no toast is left showing');
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+// =========================================================================
+// Edit-items Task 4b — deleting with Undo
+// =========================================================================
+//
+// A delete hides the item at once and offers Undo for 5 seconds; only on
+// expiry (or on backgrounding, or on the next action) is it committed, with
+// the tombstone written first as before. Every id here is prefixed `del-`,
+// and every test ends with nothing pending: the module is imported once per
+// file, so a pending delete or a live toast would leak into the next test.
+
+const toastHost = () => globalThis.document.getElementById('toast-host');
+
+// The delete control (.delete, or the Day grid's .day-del) that sits beside
+// the .item-open whose text mentions `title` — found by climbing from the
+// open button to the nearest ancestor that holds one as a direct child.
+function deleteControlFor(root, title) {
+  let hit = null;
+  const walk = (el, ancestors) => {
+    for (const c of el.children) {
+      if (hit) return;
+      const chain = [...ancestors, el];
+      if (c.tagName === 'BUTTON' && c._classes.has('item-open') && (c.textContent || '').includes(title)) {
+        for (let i = chain.length - 1; i >= 0 && !hit; i--) {
+          hit = chain[i].children.find((s) => s._classes.has('delete') || s._classes.has('day-del')) || null;
+        }
+        return;
+      }
+      walk(c, chain);
+    }
+  };
+  walk(root, []);
+  return hit;
+}
+
+const tombstoned = (id) => loadTombstones().some((ts) => ts.id === id);
+const stored = (id) => loadItems().some((it) => it.id === id);
+
+// Every call site: the List's Delete, the Day grid's ×, the Day page's
+// "Other tasks" Delete, the To-do page, the Ideas page, and the sheet. A
+// site left calling handleDelete would commit at once: tombstone written, no
+// toast — which is exactly what this checks for.
+test('delete: every delete control hides the item, offers Undo, and commits only on expiry', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const today = localISO(new Date());
+  const sites = [
+    ['List', () => itemList(), record({ id: 'del-site-list', title: 'Del via list', date: '2099-03-01' })],
+    ['Day ×', () => dayBody(), record({ id: 'del-site-grid', type: 'task', title: 'Del via grid', date: today, time: '09:00' })],
+    ['Other tasks', () => dayBody(), record({ id: 'del-site-other', type: 'task', title: 'Del via other', date: today })],
+    ['To-do', () => todoList(), record({ id: 'del-site-todo', type: 'task', title: 'Del via todo', date: '2099-03-02' })],
+    ['Ideas', () => ideaList(), record({ id: 'del-site-idea', type: 'idea', title: 'Del via ideas', date: today })],
+  ];
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    for (const [name, root, rec] of sites) {
+      seed([rec]);
+      const del = deleteControlFor(root(), rec.title);
+      assert.ok(del, `fixture check: the ${name} page offers a delete control for ${rec.title}`);
+      click(del);
+      assert.ok(!tombstoned(rec.id), `${name}: the delete must not be committed while Undo is offered`);
+      assert.ok(stored(rec.id), `${name}: the item stays in storage until the delete commits`);
+      assert.doesNotMatch(allText(root()), new RegExp(rec.title), `${name}: the item is hidden at once`);
+      assert.match(allText(toastHost()), new RegExp(`Deleted "${rec.title}"`), `${name}: a toast names what was deleted`);
+      assert.ok(toastHost().querySelector('.toast-undo'), `${name}: and offers Undo`);
+      t.mock.timers.tick(5000);
+      assert.ok(tombstoned(rec.id), `${name}: on expiry the delete is committed, tombstone and all`);
+      assert.ok(!stored(rec.id), `${name}: and the item is gone from storage`);
+      assert.equal(toastHost().children.length, 0, `${name}: no toast is left showing`);
+    }
+  } finally {
+    t.mock.timers.reset();
+  }
+  seed([]);
+});
+
+test('delete: a pending delete is hidden from the List, Day, To-do and Ideas pages at once', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const today = localISO(new Date());
+  seed([
+    record({ id: 'del-hide-task', type: 'task', title: 'Del hide task', date: today, time: '10:00' }),
+    record({ id: 'del-hide-idea', type: 'idea', title: 'Del hide idea', date: today }),
+  ]);
+  for (const [root, title] of [[itemList(), 'Del hide task'], [dayBody(), 'Del hide task'], [todoList(), 'Del hide task'], [ideaList(), 'Del hide idea']]) {
+    assert.match(allText(root), new RegExp(title), `fixture check: ${title} is on screen before the delete`);
+  }
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    click(deleteControlFor(todoList(), 'Del hide task'));
+    for (const root of [itemList(), dayBody(), todoList()]) {
+      assert.doesNotMatch(allText(root), /Del hide task/, 'a pending delete is hidden on every page, not just the one tapped');
+    }
+    click(deleteControlFor(ideaList(), 'Del hide idea'));
+    assert.doesNotMatch(allText(ideaList()), /Del hide idea/);
+    assert.ok(!tombstoned('del-hide-idea'), 'the second delete is still pending');
+    t.mock.timers.tick(5000);
+    assert.equal(toastHost().children.length, 0, 'no toast is left showing');
+    assert.ok(tombstoned('del-hide-task') && tombstoned('del-hide-idea'));
+  } finally {
+    t.mock.timers.reset();
+  }
+  seed([]);
+});
+
+test('delete: Undo before expiry brings the item back and writes no tombstone', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'del-undo', title: 'Del then undo', date: '2099-03-03' })]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    click(deleteControlFor(itemList(), 'Del then undo'));
+    assert.doesNotMatch(allText(itemList()), /Del then undo/, 'fixture check: hidden while pending');
+    click(toastHost().querySelector('.toast-undo'));
+    assert.match(allText(itemList()), /Del then undo/, 'Undo shows the item again, at once');
+    assert.equal(toastHost().children.length, 0, 'the toast is gone');
+    t.mock.timers.tick(5000);
+    assert.ok(!tombstoned('del-undo'), 'an undone delete is never committed');
+    assert.ok(stored('del-undo'), 'and the item is still stored');
+    assert.match(allText(itemList()), /Del then undo/);
+  } finally {
+    t.mock.timers.reset();
+  }
+  seed([]);
+});
+
+// Critical C1. iOS can kill a backgrounded web app without warning; a delete
+// still pending then would be lost, and on return a stale Undo would sit over
+// a delete that had in fact been saved.
+test('delete: going to the background commits a pending delete and leaves no Undo on screen', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'del-hidden', title: 'Del then hide', date: '2099-03-04' })]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    click(deleteControlFor(itemList(), 'Del then hide'));
+    assert.ok(toastHost().querySelector('.toast-undo'), 'fixture check: Undo is showing');
+    globalThis.document.visibilityState = 'hidden';
+    try {
+      resume();
+    } finally {
+      globalThis.document.visibilityState = 'visible';
+    }
+    assert.ok(tombstoned('del-hidden'), 'backgrounding commits the delete, tombstone and all');
+    assert.ok(!stored('del-hidden'), 'and the item is gone from storage');
+    assert.equal(toastHost().children.length, 0, 'no stale Undo remains for a delete that is already saved');
+  } finally {
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  assert.equal(toastHost().children.length, 0);
+  seed([]);
+});
+
+test('delete: deleting a second item commits the first at once and leaves the second pending', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([
+    record({ id: 'del-a', title: 'Del first A', date: '2099-03-05' }),
+    record({ id: 'del-b', title: 'Del second B', date: '2099-03-06' }),
+  ]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    click(deleteControlFor(itemList(), 'Del first A'));
+    click(deleteControlFor(itemList(), 'Del second B'));
+    assert.ok(tombstoned('del-a'), 'only the latest delete can be undone, so A is committed');
+    assert.ok(!stored('del-a'));
+    assert.ok(!tombstoned('del-b'), 'B is still pending');
+    assert.ok(stored('del-b'));
+    assert.doesNotMatch(allText(itemList()), /Del second B/);
+    assert.match(allText(toastHost()), /Deleted "Del second B"/, 'the toast is now for B');
+    t.mock.timers.tick(5000);
+    assert.ok(tombstoned('del-b'));
+    assert.equal(toastHost().children.length, 0, 'no toast is left showing');
+  } finally {
+    t.mock.timers.reset();
+  }
+  seed([]);
+});
+
+// The test Task 4a could not write: openItem dismisses the toast, and for a
+// delete that dismissal is the commit. Without it, an Undo would sit over the
+// sheet's own buttons for a delete the user has moved on from.
+test('delete: opening another item commits a pending delete and clears its toast', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([
+    record({ id: 'del-open-a', title: 'Del before open', date: '2099-03-07' }),
+    record({ id: 'del-open-b', title: 'Del open me after', date: '2099-03-08' }),
+  ]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    click(deleteControlFor(itemList(), 'Del before open'));
+    assert.ok(toastHost().querySelector('.toast-undo'), 'fixture check: Undo is showing');
+    click(openControlFor(itemList(), 'Del open me after'));
+    assert.ok(sheetHost().querySelector('.sheet'), 'fixture check: the other sheet opened');
+    assert.equal(toastHost().children.length, 0, 'the toast is gone once another item is opened');
+    assert.ok(tombstoned('del-open-a'), 'and the delete it offered to undo is committed');
+    assert.ok(!stored('del-open-a'));
+    closeSheet();
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  assert.equal(toastHost().children.length, 0);
+  seed([]);
+});
+
+// Undo, then switch apps: the backgrounding commit must touch only what is
+// still pending. The toast it dismisses has already settled through Undo.
+test('delete: Undo, then going to the background, keeps the item', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'del-undo-hide', title: 'Del undo then hide', date: '2099-03-09' })]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    click(deleteControlFor(itemList(), 'Del undo then hide'));
+    click(toastHost().querySelector('.toast-undo'));
+    globalThis.document.visibilityState = 'hidden';
+    try {
+      resume();
+    } finally {
+      globalThis.document.visibilityState = 'visible';
+    }
+    t.mock.timers.tick(5000);
+    assert.ok(!tombstoned('del-undo-hide'), 'an undone delete stays undone across backgrounding');
+    assert.ok(stored('del-undo-hide'));
+    assert.match(allText(itemList()), /Del undo then hide/);
+    assert.equal(toastHost().children.length, 0);
+  } finally {
+    t.mock.timers.reset();
+  }
+  seed([]);
 });

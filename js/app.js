@@ -20,6 +20,7 @@ import { isVoiceSupported, dictate } from './voice.js';
 import { initSettings } from './settings.js';
 import { instancesForRange, syncStale, applyRemoteFeeds, inferName } from './feeds.js';
 import { openItemSheet } from './itemsheet.js';
+import { showToast } from './toast.js';
 import { uid } from './uid.js';
 import { syncOnce } from './sync.js';
 import { isLinked, isAdoptionPending } from './auth.js';
@@ -46,6 +47,7 @@ const els = {
   settingsBtn: document.getElementById('settings-btn'),
   settingsHost: document.getElementById('settings-host'),
   sheetHost: document.getElementById('sheet-host'),
+  toastHost: document.getElementById('toast-host'),
   showList: document.getElementById('show-list'),
   showMonth: document.getElementById('show-month'),
   showWeek: document.getElementById('show-week'),
@@ -93,6 +95,15 @@ const LIST_EXTERNAL_HORIZON_DAYS = 366;
 let feeds = loadFeeds();
 let feedCache = loadFeedCache();
 
+// Deletes offered for Undo (edit-items Task 4b). A pending id is still in
+// `items` and in storage — nothing is written until commitDelete — but it is
+// hidden from every page. liveItems() is the one place that hides it, and
+// every page reads through it, so a delete tapped on one page cannot linger
+// on another.
+const pendingDeletes = new Set();
+
+function liveItems() { return items.filter((it) => !pendingDeletes.has(it.id)); }
+
 // visibleItems: own items (unbounded) ++ every visible feed's instances for
 // [start, end]. Own items are never range-limited here — only the caller's
 // choice of [start, end] bounds how far external instances are expanded.
@@ -108,7 +119,7 @@ let feedCache = loadFeedCache();
 // — by design, not by accident: a feed event is always a scheduled thing.
 function visibleItems(start, end) {
   return [
-    ...items.filter(isScheduled),
+    ...liveItems().filter(isScheduled),
     ...instancesForRange(feeds, feedCache, start, end, DEVICE_TZ),
   ];
 }
@@ -117,9 +128,9 @@ function visibleItems(start, end) {
 // § 3.3). External feed instances carry no `type`, so they would fail both
 // predicates by ACCIDENT rather than by design — and a feed that ever grew a
 // type-shaped field would start populating the To-do page.
-function todoItems() { return sortItemsByDate(items.filter(isTodo)); }
+function todoItems() { return sortItemsByDate(liveItems().filter(isTodo)); }
 
-function ideaItems() { return sortIdeasNewestFirst(items.filter(isIdea)); }
+function ideaItems() { return sortIdeasNewestFirst(liveItems().filter(isIdea)); }
 
 // In-app dictation — only surface the mic where the browser supports it.
 // (On iPhone, the keyboard's own mic is always available regardless.)
@@ -259,10 +270,11 @@ function deleteItem(id) {
 }
 
 // handleDelete: DOM-facing wrapper around deleteItem, same catch+setMessage
-// shape as addItems' call sites below. Used both directly (list view) and as
-// the onDelete callback passed into dayview.js, which has no message
-// mechanism of its own — the wrapping belongs here, where the callback is
-// supplied from.
+// shape as addItems' call sites below. Since Task 4b its ONLY caller is
+// commitDelete: every view and the sheet call requestDelete, which offers
+// Undo first. Calling this directly from a view would commit at once with no
+// Undo. It catches so that commitDelete, run from a toast's timer or dismiss,
+// never throws.
 function handleDelete(id) {
   try {
     deleteItem(id);
@@ -300,6 +312,43 @@ function setDone(id, done) {
 // it (delete and edit both offer Undo); openItem only ever dismisses it.
 let activeToast = null;
 
+// requestDelete — every delete control in the app, and the sheet's Delete,
+// comes here (edit-items Task 4b). The item is hidden at once and nothing is
+// written: the delete is committed by commitDelete when the toast expires or
+// is dismissed (the next delete, opening an item, or going to the background).
+// Undo simply stops hiding it. Showing a new toast settles the previous one
+// first (js/toast.js), so deleting B commits A.
+function requestDelete(id) {
+  const it = items.find((x) => x.id === id);
+  pendingDeletes.add(id);
+  render();
+  activeToast = showToast(els.toastHost, it ? `Deleted "${it.title}"` : 'Deleted.', {
+    undo: () => undoDelete(id),
+    onExpire: () => commitDelete(id),
+  });
+}
+
+// toast.js runs undo and onExpire at most once between them, so a toast can
+// never undo a delete it has already committed. The message is for any path
+// that ever reaches here after a commit: say so, never silently do nothing.
+function undoDelete(id) {
+  if (pendingDeletes.has(id)) {
+    pendingDeletes.delete(id);
+    render();
+  } else {
+    setMessage('Too late to undo — that delete was already saved.');
+  }
+}
+
+// The commit is the pre-4b delete, unchanged: handleDelete writes the
+// tombstone BEFORE removing the item, and catches, so an onExpire never throws
+// out of a timer or a dismiss.
+function commitDelete(id) {
+  if (!pendingDeletes.has(id)) return;
+  pendingDeletes.delete(id);
+  handleDelete(id);
+}
+
 // openItem — tapping any item's title opens its sheet (edit-items spec § 3.2).
 //
 // The sheet gets a calendar NAME and an optional Google day link, NEVER the
@@ -329,9 +378,9 @@ function openItem(item) {
       todayISO: toISO(new Date()),
       calendarName,
       googleDayUrl,
-      // Placeholders until Tasks 4b (delete with Undo) and 4c (editing).
+      // Placeholder until Task 4c (editing).
       onSave: () => ({ ok: false, error: 'Editing arrives in the next step.' }),
-      onDelete: () => handleDelete(item.id),
+      onDelete: () => requestDelete(item.id),
       onClose: () => {},
     });
   } catch (e) {
@@ -416,7 +465,7 @@ function renderList() {
         const del = document.createElement('button');
         del.className = 'delete';
         del.textContent = 'Delete';
-        del.addEventListener('click', () => handleDelete(it.id));
+        del.addEventListener('click', () => requestDelete(it.id));
         li.appendChild(del);
       }
       els.list.appendChild(li);
@@ -498,7 +547,7 @@ function renderDay() {
   const visible = !els.dayView.hidden;
   renderDayView(els.dayBody, viewDay, byDate[viewDay] || [], {
     onOpen: openItem,
-    onDelete: handleDelete,
+    onDelete: requestDelete,
     // Auto-scroll to 07:00 only on a genuine day change while visible; otherwise
     // dayview.js restores the grid's own prior scrollTop (see its `prev` capture).
     // A hidden day-view has scrollTop 0, so lastDayRendered must not advance while hidden —
@@ -510,12 +559,12 @@ function renderDay() {
 
 function renderTodos() {
   renderTodoView(els.todoList, todoItems(), {
-    todayISO: toISO(new Date()), onOpen: openItem, onDelete: handleDelete, onToggleDone: handleToggleDone,
+    todayISO: toISO(new Date()), onOpen: openItem, onDelete: requestDelete, onToggleDone: handleToggleDone,
   });
 }
 
 function renderIdeas() {
-  renderIdeasView(els.ideaList, ideaItems(), { onOpen: openItem, onDelete: handleDelete });
+  renderIdeasView(els.ideaList, ideaItems(), { onOpen: openItem, onDelete: requestDelete });
 }
 
 // Every page is re-rendered on every change, so a to-do ticked on the To-do
@@ -736,6 +785,16 @@ function stampUpdated() {
 }
 
 document.addEventListener('visibilitychange', () => {
+  // Going to the background (Critical C1): iOS may kill the app without
+  // warning, which would lose a pending delete, and on return a stale Undo
+  // would sit over a delete that was in fact saved. Dismissing the toast runs
+  // its onExpire — commitDelete — and clears it; then anything still pending
+  // is committed as a safety net.
+  if (document.visibilityState === 'hidden') {
+    if (activeToast) activeToast.dismiss();
+    for (const id of [...pendingDeletes]) commitDelete(id);
+    return;
+  }
   if (document.visibilityState !== 'visible') return;
   refreshForToday();
   noteLaunch();
