@@ -17,7 +17,7 @@ const ASSETS = [
   'js/config.js', 'js/smartadd.js', 'js/preview.js', 'js/voice.js',
   'js/timegrid.js', 'js/theme.js', 'js/settings.js', 'js/dayview.js', 'js/weekview.js',
   'js/ics.js', 'js/tzmap.js', 'js/feeds.js', 'js/uid.js', 'js/crypto.js', 'js/merge.js', 'js/auth.js', 'js/sync.js',
-  'js/linkui.js', 'js/ideas.js', 'js/todoview.js', 'js/ideasview.js', 'js/freshness.js', 'js/edit.js',
+  'js/linkui.js', 'js/ideas.js', 'js/todoview.js', 'js/ideasview.js', 'js/freshness.js', 'js/edit.js', 'js/toast.js',
   'icons/icon-192.png', 'icons/icon-512.png',
 ];
 

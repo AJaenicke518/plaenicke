@@ -544,3 +544,22 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 /* Quiet on purpose: it answers "is this current?" at a glance and should not
    compete with the title. Sits between the title and the settings button. */
 .stamp { color: var(--muted); font-size: 0.75rem; margin-left: auto; margin-right: 10px; }
+
+/* ---------- toast (deleted / undo) ---------- */
+/* Above .settings-backdrop (z-index 10) so an Undo raised while a panel is
+   open is still reachable; bottom inset clears the iPhone home indicator. */
+.toast {
+  position: fixed;
+  left: 16px; right: 16px;
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  background: var(--card);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  z-index: 20;
+}
+/* 44px: Apple's minimum touch target; this is the one control that undoes a delete. */
+.toast-undo { min-height: 44px; }
