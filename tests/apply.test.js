@@ -1785,3 +1785,30 @@ test('edit: a sync carrying an older copy of the record keeps the edit, in stora
   }
   seed([]);
 });
+
+// Task 4b review, item 3: an Undo whose item was deleted on the other device
+// while its toast was up used to do nothing visible. The outcome is right —
+// the item really is gone — but a button that appears broken is not.
+test('review: Undo of an item the other device deleted meanwhile says so', async (t) => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  const rec = record({ id: 'rv-remote', title: 'Deleted over there', date: '2099-04-01' });
+  seed([rec]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    click(deleteControlFor(itemList(), 'Deleted over there'));
+    applySyncedState(state({
+      items: [],
+      tombstones: [{ id: 'rv-remote', kind: 'item', deletedAt: '2099-12-31T00:00:00.000Z' }],
+    }));
+    const undo = toastHost().querySelector('.toast-undo');
+    assert.ok(undo, 'fixture check: the delete toast is still showing');
+    click(undo);
+  } finally {
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  assert.match(messageText(), /deleted on your other device/i);
+  assert.equal(toastHost().children.length, 0);
+  seed([]);
+});

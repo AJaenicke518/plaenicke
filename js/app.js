@@ -169,8 +169,8 @@ initSettings({
   // onFeedsChanged fires on every colour tap too, so it is the wrong signal to
   // push on — settings.js separates the two and only this one means "the
   // account needs to know". Without it a feed change had NO push trigger at
-  // all: the three scheduleSync call sites below are addItems, deleteItem and
-  // runSync's re-arm, and closing the settings modal changes neither
+  // all: scheduleSync's other call sites are the item writers (addItems,
+  // deleteItem, setDone, editItem) and runSync's re-arm, and closing the settings modal changes neither
   // visibilityState nor connectivity.
   onSyncedDataChanged: () => scheduleSync(),
   applyState: applySyncedState,
@@ -281,9 +281,12 @@ function handleDelete(id) {
     deleteItem(id);
   } catch (e) {
     setMessage(e.message);
-    // The delete did NOT happen (tombstone-first: storage is untouched), and
-    // commitDelete has already taken the id out of pendingDeletes. Re-render so
-    // the item reappears — a failed delete must not look like a successful one.
+    // commitDelete has already taken the id out of pendingDeletes, so re-render
+    // from `items`. If the TOMBSTONE write failed, nothing was written and the
+    // item reappears — a failed delete must not look like a successful one. If
+    // the tombstone landed and saveItems then failed, `items` no longer holds
+    // the record, so it stays hidden; storage still does, and the tombstone
+    // removes it on the next sync (the pre-4b deleteItem behaved the same).
     render();
   }
 }
@@ -395,12 +398,17 @@ function requestDelete(id) {
 // toast.js runs undo and onExpire at most once between them, so a toast can
 // never undo a delete it has already committed. The message is for any path
 // that ever reaches here after a commit: say so, never silently do nothing.
+// There is no "too late" branch: toast.js runs undo and onExpire at most once
+// between them, so an Undo can never arrive after its commit (Task 4b review —
+// that branch was unreachable and untestable, and was removed rather than kept
+// as a guard that guards nothing). What CAN happen is a sync removing the item
+// while its toast is up — deleted on the other device — and then the Undo has
+// nothing to bring back. Say so, rather than leave a button that looks broken.
 function undoDelete(id) {
-  if (pendingDeletes.has(id)) {
-    pendingDeletes.delete(id);
-    render();
-  } else {
-    setMessage('Too late to undo — that delete was already saved.');
+  pendingDeletes.delete(id);
+  render();
+  if (!items.some((it) => it.id === id)) {
+    setMessage('That item was deleted on your other device, so it could not be brought back.');
   }
 }
 
@@ -852,7 +860,9 @@ document.addEventListener('visibilitychange', () => {
   // warning, which would lose a pending delete, and on return a stale Undo
   // would sit over a delete that was in fact saved. Dismissing the toast runs
   // its onExpire — commitDelete — and clears it; then anything still pending
-  // is committed as a safety net.
+  // is committed as a safety net. KEEP THIS ORDER, and keep commitDelete's
+  // pending check: with the loop first, the toast's later onExpire would
+  // commit the same id again with a later deletedAt (Task 4b review, item 5).
   if (document.visibilityState === 'hidden') {
     if (activeToast) activeToast.dismiss();
     for (const id of [...pendingDeletes]) commitDelete(id);
