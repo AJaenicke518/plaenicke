@@ -1913,3 +1913,17 @@ test('review4c: an Undo that would store an invalid record is refused, and nothi
   }
   seed([]);
 });
+
+// Sweep (dates) Critical, at the app level: an undated record — tolerated by
+// deserializeItems on purpose — must render, not crash the app.
+test('sweep: records with a null or empty date render instead of crashing the app', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  assert.doesNotThrow(() => seed([
+    record({ id: 'sw-null', title: 'Undated null', date: null, type: 'event' }),
+    record({ id: 'sw-empty', title: 'Undated empty', date: '', type: 'task' }),
+  ]));
+  assert.match(allText(itemList()), /No date — Undated null/);
+  assert.match(allText(todoList()), /Undated empty/);
+  seed([]);
+});

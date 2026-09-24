@@ -81,3 +81,16 @@ test('describeLaunches uses the singular for one open', () => {
 test('describeLaunches says so plainly when there are none', () => {
   assert.equal(describeLaunches([], NOW), 'Not opened in the last 7 days.');
 });
+
+// Sweep (dates) Critical: deserializeItems DELIBERATELY tolerates date: null
+// (CLAUDE.md), and '' is the third date state. formatDayLabel threw on both,
+// and it runs inside render() at module load — one such record synced in would
+// crash every cold start before sync could run to repair it.
+test('formatDayLabel never throws on a date it cannot read', () => {
+  for (const bad of [null, undefined, '', 'garbage', '2026-13-45x', 42]) {
+    assert.doesNotThrow(() => formatDayLabel(bad, TODAY), `threw on ${JSON.stringify(bad)}`);
+  }
+  assert.equal(formatDayLabel(null, TODAY), 'No date');
+  assert.equal(formatDayLabel('', TODAY), 'No date');
+  assert.equal(formatDayLabel('garbage', TODAY), 'Unreadable date');
+});

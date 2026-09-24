@@ -29,7 +29,16 @@ const OTHER_YEAR = new Intl.DateTimeFormat('en-US', {
   timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric', year: 'numeric',
 });
 
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+// Never throws. deserializeItems DELIBERATELY tolerates `date: null` (CLAUDE.md:
+// deliberate dead code for future undated records), '' is the third date state,
+// and this runs inside render() at module load — a throw here would crash every
+// cold start, before sync could run to repair the record. So an unreadable date
+// gets a loud, specific label instead: visible, never silent, never fatal.
 export function formatDayLabel(iso, todayISO) {
+  if (iso === null || iso === undefined || iso === '') return 'No date';
+  if (typeof iso !== 'string' || !ISO_DAY.test(iso) || Number.isNaN(utcOf(iso))) return 'Unreadable date';
   const diff = Math.round((utcOf(iso) - utcOf(todayISO)) / DAY_MS);
   if (diff === 0) return 'Today';
   if (diff === 1) return 'Tomorrow';
