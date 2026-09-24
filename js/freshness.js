@@ -6,6 +6,9 @@
 // overnight. app.js re-derives today on every resume and passes each cursor
 // through followToday.
 
+import { toISO } from './dateparse.js';
+import { addDays, formatTime } from './timegrid.js';
+
 // A cursor that was showing the old today follows the clock; one the user
 // navigated elsewhere is left exactly where they put it. Works for any key
 // that is equal-when-the-same-period: a day ISO, a week-start ISO, 'YYYY-MM'.
@@ -49,12 +52,26 @@ export function formatDayLabel(iso, todayISO) {
 
 const WINDOW_DAYS = 7;
 
+function localClock(d) {
+  return formatTime(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`);
+}
+
 // The Phase 0 baseline: is the app actually being opened? Local-only; see
-// storage.js's launch log.
+// storage.js's launch log. Pure: the caller passes the log and the clock.
+//
+// The metric is DAYS of use, not opens: a day is the device's LOCAL calendar
+// date of each timestamp, and the window is the last WINDOW_DAYS local dates
+// (today and the six before). Day arithmetic is on YYYY-MM-DD strings, so a
+// 23- or 25-hour DST day cannot move the window's edge.
 export function describeLaunches(launches, now) {
-  const cutoff = now.getTime() - WINDOW_DAYS * DAY_MS;
-  const n = launches.filter((iso) => Date.parse(iso) >= cutoff).length;
-  if (n === 0) return `Not opened in the last ${WINDOW_DAYS} days.`;
-  if (n === 1) return `Opened once in the last ${WINDOW_DAYS} days.`;
-  return `Opened ${n} times in the last ${WINDOW_DAYS} days.`;
+  const today = toISO(now);
+  const first = addDays(today, -(WINDOW_DAYS - 1));
+  const times = launches.map((iso) => Date.parse(iso)).filter(Number.isFinite);
+  const days = new Set(times.map((t) => toISO(new Date(t))).filter((d) => d >= first && d <= today));
+  const head = days.size === 0
+    ? `Not opened in the last ${WINDOW_DAYS} days.`
+    : `Opened on ${days.size} of the last ${WINDOW_DAYS} days.`;
+  if (times.length === 0) return head;
+  const last = new Date(Math.max(...times));
+  return `${head} Last opened ${formatDayLabel(toISO(last), today)}, ${localClock(last)}.`;
 }

@@ -68,13 +68,15 @@ function typeSelect(current) {
 }
 
 export function openItemSheet(host, item, {
-  todayISO, calendarName = null, googleDayUrl = null, onSave, onDelete, onClose,
+  today, calendarName = null, googleDayUrl = null, onSave, onDelete, onClose,
 } = {}) {
   const isExternal = item.external === true;
   // Every check happens BEFORE the host is touched or a listener registered:
   // the caller (app.js) catches the throw and shows a message, and whatever
   // the host was showing must still be there.
-  if (typeof todayISO !== 'string' || !todayISO) throw new Error('openItemSheet: todayISO is required');
+  // A FUNCTION, not a date string (sweep D3): a sheet can stay open across
+  // midnight, so a quick move asks for today when it is tapped.
+  if (typeof today !== 'function') throw new Error('openItemSheet: today must be a function');
   if (typeof onClose !== 'function') throw new Error('openItemSheet: onClose must be a function');
   if (!isExternal) {
     // A type the select does not list renders with NO option selected; the
@@ -124,7 +126,7 @@ export function openItemSheet(host, item, {
     bar.appendChild(closeBtn);
 
     sheet.appendChild(el('h2', 'sheet-heading', item.title));
-    let when = formatDayLabel(item.date, todayISO);
+    let when = formatDayLabel(item.date, today());
     if (item.time) when += ` · ${item.endTime ? formatTimeRange(item.time, item.endTime) : formatTime(item.time)}`;
     sheet.appendChild(el('p', 'sheet-when', when));
     if (calendarName) sheet.appendChild(el('p', 'sheet-source', `From ${calendarName}`));
@@ -217,13 +219,20 @@ export function openItemSheet(host, item, {
 
     const actions = el('div', 'sheet-actions');
     if (!isIdeaSheet) {
-      quickMoves(item, todayISO).forEach((move, i) => {
+      // Only the labels are taken here; the dates are computed at click time.
+      quickMoves(item, today()).forEach((move, i) => {
         const b = button('sheet-move', move.label);
         // Recomputed at click time from the date IN THE BOX, so "+1 week" never
-        // silently discards a date the user typed (Task 3 review O1).
+        // silently discards a date the user typed (Task 3 review O1), and from
+        // today() as of the tap, so "Tomorrow" is right after midnight (D3).
         b.addEventListener('click', () => {
+          // `|| item.date` is DELIBERATE. A cleared date box reads as '', and
+          // addDays('', 7) is not a date; a quick move is a move from the
+          // item's date, so an emptied box falls back to it. This is not the
+          // Save path: a Save with a cleared box still sends date: '' so that
+          // makeItem refuses it.
           const typed = read().date || item.date;
-          submit({ date: quickMoves({ ...item, date: typed }, todayISO)[i].date });
+          submit({ date: quickMoves({ ...item, date: typed }, today())[i].date });
         });
         actions.appendChild(b);
       });

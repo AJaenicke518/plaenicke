@@ -101,7 +101,7 @@ function open(item, { onSave = () => ({ ok: true }), ...extra } = {}) {
   const host = new FakeElement('div');
   const calls = { save: [], del: 0, close: 0 };
   openItemSheet(host, item, {
-    todayISO: TODAY,
+    today: () => TODAY,
     onSave: (p) => { calls.save.push(p); return onSave(p); },
     onDelete: () => { calls.del += 1; },
     onClose: () => { calls.close += 1; },
@@ -263,7 +263,7 @@ test('an unknown type throws before anything is mounted or registered', () => {
   const host = new FakeElement('div');
   const existing = host.appendChild(new FakeElement('p'));
   assert.throws(
-    () => openItemSheet(host, task({ type: 'bogus' }), { todayISO: TODAY, onSave() {}, onDelete() {}, onClose() {} }),
+    () => openItemSheet(host, task({ type: 'bogus' }), { today: () => TODAY, onSave() {}, onDelete() {}, onClose() {} }),
     /Unknown type: bogus/,
   );
   assert.deepEqual(host.children, [existing], 'the host must be untouched');
@@ -448,7 +448,7 @@ test('a closed sheet cannot close twice: onClose runs once', () => {
 test('mounting a second sheet into the same host leaves exactly one keydown listener', () => {
   const host = new FakeElement('div');
   const closes = [];
-  const opts = (tag) => ({ todayISO: TODAY, onSave: () => ({ ok: true }), onDelete() {}, onClose: () => closes.push(tag) });
+  const opts = (tag) => ({ today: () => TODAY, onSave: () => ({ ok: true }), onDelete() {}, onClose: () => closes.push(tag) });
   openItemSheet(host, task(), opts('first'));
   openItemSheet(host, task({ id: 'a2', title: 'Second' }), opts('second'));
   assert.equal(keydownCount(), 1, 'the replaced sheet\'s Escape handler must go with it');
@@ -508,4 +508,31 @@ test('Delete twice deletes once', () => {
 test('an external item with no calendar name does not say "From null"', () => {
   const { host } = open(external(), { calendarName: null });
   assert.doesNotMatch(allText(host), /From/);
+});
+
+// =========================================================================
+// Sweep D3: "today" is read when a quick move is tapped, not when the sheet
+// was built. A sheet left open across midnight must not move "Tomorrow" to
+// today.
+// =========================================================================
+
+test('Tomorrow is computed from today at click time, not when the sheet opened', () => {
+  let now = '2026-09-23';
+  const { host, calls } = open(task({ date: '2026-09-01' }), { today: () => now });
+  now = '2026-09-24'; // midnight passes with the sheet open
+  byClass(host, 'sheet-move')[0].fire('click');
+  assert.deepEqual(calls.save, [{ date: '2026-09-25' }]);
+});
+
+test('the sheet refuses to open without a today() function, and touches nothing', () => {
+  for (const bad of [undefined, '2026-09-23']) {
+    const host = new FakeElement('div');
+    const existing = host.appendChild(new FakeElement('p'));
+    assert.throws(
+      () => openItemSheet(host, task(), { today: bad, onSave() {}, onDelete() {}, onClose() {} }),
+      /openItemSheet: today must be a function/,
+    );
+    assert.deepEqual(host.children, [existing], 'the host must be untouched');
+  }
+  assert.equal(keydownCount(), 0);
 });

@@ -91,7 +91,10 @@ let lastToday = viewDay;
 // External calendars (Task 6/7) — feeds + cache are read once at load; the
 // only thing that changes them afterward is a background sync settling (see
 // bottom of file), which reloads the cache and re-renders once.
-const DEVICE_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+// Re-read by refreshForToday (sweep D5): a device that changes zone while
+// the app is resumed rather than reloaded must not keep placing feed events
+// in the zone it was opened in.
+let deviceTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const LIST_EXTERNAL_HORIZON_DAYS = 366;
 let feeds = loadFeeds();
 let feedCache = loadFeedCache();
@@ -121,7 +124,7 @@ function liveItems() { return items.filter((it) => !pendingDeletes.has(it.id)); 
 function visibleItems(start, end) {
   return [
     ...liveItems().filter(isScheduled),
-    ...instancesForRange(feeds, feedCache, start, end, DEVICE_TZ),
+    ...instancesForRange(feeds, feedCache, start, end, deviceTz),
   ];
 }
 
@@ -500,7 +503,9 @@ function openItem(item) {
   // message says why.
   try {
     openItemSheet(els.sheetHost, item, {
-      todayISO: toISO(new Date()),
+      // A function, read when a quick move is tapped (sweep D3): the sheet can
+      // stay open across midnight.
+      today: () => toISO(new Date()),
       calendarName,
       googleDayUrl,
       onSave: (p) => editItem(item.id, p, { openedType: item.type }),
@@ -517,6 +522,9 @@ function handleToggleDone(id, done) {
     setDone(id, done);
   } catch (e) {
     setMessage(e.message);
+    // setDone restored the record, but the checkbox the user tapped still
+    // shows the tick. Re-render from `items`, so a failed tick looks failed.
+    render();
   }
 }
 
@@ -598,7 +606,7 @@ function renderList() {
   if (feeds.some((f) => !f.hidden)) {
     const note = document.createElement('li');
     note.className = 'list-note';
-    note.textContent = `external calendars shown through ${horizonISO}`;
+    note.textContent = `external calendars shown through ${formatDayLabel(horizonISO, todayISO)}`;
     els.list.appendChild(note);
   }
 }
@@ -693,7 +701,12 @@ function renderIdeas() {
 
 // Every page is re-rendered on every change, so a to-do ticked on the To-do
 // page also leaves the calendar views correct with no second trigger.
+//
+// refreshForToday runs first (sweep D4), so ANY render — a sync landing, a
+// tap, a tab switch — catches the cursors up with the clock, not only a
+// resume. It returns at once when the day has not changed.
 function render() {
+  refreshForToday();
   renderList(); renderCalendar(); renderWeek(); renderDay(); renderTodos(); renderIdeas();
 }
 
@@ -711,7 +724,13 @@ function showView(which) {
   render();
 }
 
+// A SPECIFIC day was chosen, so catch up with the clock BEFORE setting the
+// cursors. Otherwise the render below would treat a tap on the old today's
+// cell, just after midnight, as "the view that was showing today" and carry it
+// to the new one. The relative arrows (prev/next) deliberately do not do
+// this: they act on the day the user can see.
 function openDay(dateISO) {
+  refreshForToday();
   viewDay = dateISO;
   viewWeekStart = startOfWeek(dateISO);
   showView('day');
@@ -760,15 +779,42 @@ stampUpdated();
 // this device just learned about from sync has no cache entry yet, and the
 // call below only ever runs once, at module load, over the feed list from
 // that moment.
+//
+// ONE BATCH AT A TIME (sweep D6). Two quick resumes must not fetch every
+// calendar twice. A call that arrives while a batch is in flight is dropped
+// for the feeds that batch already covers; any OTHER feed it names (one that
+// applySyncedState just pulled) is queued and fetched when the batch settles,
+// or a freshly linked calendar would sit empty until the next resume.
+//
+// When the batch settles it repaints the "Updated" stamp from the calendars
+// themselves (sweep D1); see stampFromFeeds.
+let feedBatch = null; // ids in the batch in flight, or null
+const feedQueue = new Set();
+
 function backgroundSyncFeeds(feedList) {
+  if (feedBatch) {
+    for (const f of feedList) if (!feedBatch.has(f.id)) feedQueue.add(f.id);
+    return;
+  }
   if (feedList.length === 0) return;
-  syncStale(feedList, feedCache, { fetchImpl: fetch }).then(() => {
+  feedBatch = new Set(feedList.map((f) => f.id));
+  const settle = (failedIds) => {
+    feedBatch = null;
     feedCache = loadFeedCache();
     render();
-  }).catch((err) => {
-    feedCache = loadFeedCache();
-    render();
+    stampFromFeeds(failedIds);
+    if (feedQueue.size > 0) {
+      const queued = new Set(feedQueue);
+      feedQueue.clear();
+      backgroundSyncFeeds(feeds.filter((f) => queued.has(f.id)));
+    }
+  };
+  syncStale(feedList, feedCache, { fetchImpl: fetch }).then((results) => {
+    // A per-feed failure comes back as {ok:false}, never as a rejection.
+    settle(Object.keys(results).filter((id) => !results[id].ok));
+  }, (err) => {
     console.error('plaenicke: background calendar sync failed', err && err.name);
+    settle(null); // the whole batch failed; which feeds it reached is unknown
   });
 }
 backgroundSyncFeeds(feeds);
@@ -881,6 +927,8 @@ window.addEventListener('storage', (e) => {
 // A cursor the user navigated away from is left alone (followToday); only one
 // that was showing the old today follows the clock.
 function refreshForToday() {
+  // Before the early return: a zone change need not change the date.
+  deviceTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const today = toISO(new Date());
   if (today === lastToday) return;
   viewDay = followToday(viewDay, lastToday, today);
@@ -903,9 +951,38 @@ function noteLaunch() {
   }
 }
 
+// The "Updated" stamp says how current the screen is (sweep D1).
+//
+// With no visible calendars, everything on screen is local, so a render is
+// the refresh: stampUpdated paints the render time. With visible calendars,
+// the calendars are the part that goes stale, so the stamp waits for the
+// feed batch to settle and stampFromFeeds paints it from their fetch times.
+function clockLabel(d) {
+  return formatTime(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`);
+}
+
+function visibleFeeds() { return feeds.filter((f) => !f.hidden); }
+
 function stampUpdated() {
-  const d = new Date();
-  els.updatedStamp.textContent = `Updated ${formatTime(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`)}`;
+  if (visibleFeeds().length > 0) return; // painted when the feed batch settles
+  els.updatedStamp.textContent = `Updated ${clockLabel(new Date())}`;
+}
+
+// The OLDEST fetch among the visible calendars: the stamp promises that
+// everything on screen is at least that fresh. A visible calendar whose fetch
+// failed (failedIds null means the whole batch failed), or that has no cached
+// fetch at all, has not been refreshed, and the stamp says so. Hidden
+// calendars are not on screen and do not count either way.
+function stampFromFeeds(failedIds) {
+  const visible = visibleFeeds();
+  if (visible.length === 0) return; // keep the render-time stamp
+  const failed = failedIds === null || visible.some((f) => failedIds.includes(f.id));
+  const times = visible.map((f) => Date.parse(feedCache[f.id] && feedCache[f.id].fetchedAt));
+  if (failed || times.some((t) => !Number.isFinite(t))) {
+    els.updatedStamp.textContent = "Couldn't refresh calendars";
+    return;
+  }
+  els.updatedStamp.textContent = `Updated ${clockLabel(new Date(Math.min(...times)))}`;
 }
 
 document.addEventListener('visibilitychange', () => {
@@ -922,9 +999,8 @@ document.addEventListener('visibilitychange', () => {
     return;
   }
   if (document.visibilityState !== 'visible') return;
-  refreshForToday();
   noteLaunch();
-  render();
+  render(); // refreshForToday runs first, inside render
   stampUpdated();
   // Honours syncStale's 30-minute threshold, so a quick app switch does not
   // refetch every calendar.

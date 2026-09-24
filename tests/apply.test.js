@@ -10,6 +10,8 @@ import {
 import { linkWithCode, clearAdoptionPending } from '../js/auth.js';
 import { bytesToBase64url, TOKEN_BYTES } from '../js/crypto.js';
 import { SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID } from '../js/linkui.js';
+import { addDays, startOfWeek } from '../js/timegrid.js';
+import { formatDayLabel } from '../js/freshness.js';
 
 // --- historical note: the js/linkui.js resolve hook -------------------------
 //
@@ -905,9 +907,13 @@ test('resuming leaves a Day view the user moved elsewhere where they put it', as
   } finally {
     t.mock.timers.reset();
   }
-  click(globalThis.document.getElementById('prev-day'));
-  click(globalThis.document.getElementById('prev-day'));
+  // Resume at the real time BEFORE navigating back. Every render catches up
+  // with the clock (sweep D4), and app.js still believes "today" is the mocked
+  // tomorrow: the first prev-day would land on that day and be carried along.
   resume();
+  click(globalThis.document.getElementById('prev-day'));
+  click(globalThis.document.getElementById('prev-day'));
+  assert.equal(dayLabel.textContent, labelFor(new Date()), 'restored for later tests');
 });
 
 test('resuming re-fetches calendar feeds whose cache is stale', async () => {
@@ -931,26 +937,39 @@ test('resuming re-fetches calendar feeds whose cache is stale', async () => {
   for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.feeds' });
 });
 
-test('resuming records a launch and stamps when the screen was refreshed', async () => {
+// Sweep S-12: these assert the DIFFERENCE a resume makes. Run alone (with
+// --test-name-pattern), the import below is app.js's first, so module load has
+// already logged one launch of its own; an absolute count passed only in a
+// full-file run. Sweep S-9: the stamp is pinned to an exact local time with a
+// mocked Date, not a shape.
+test('resuming records a launch and stamps when the screen was refreshed', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
   const stamp = globalThis.document.getElementById('updated-stamp');
   stamp.textContent = '';
-  resume();
-  assert.equal(loadLaunches().length, 1, 'each resume is an open, for the Phase 0 baseline');
-  assert.match(stamp.textContent, /^Updated \d{1,2}:\d{2}\s?(AM|PM)$/);
+  const before = loadLaunches().length;
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 8, 23, 9, 5).getTime() });
+  try {
+    resume();
+  } finally {
+    t.mock.timers.reset();
+  }
+  assert.equal(loadLaunches().length - before, 1, 'each resume is an open, for the Phase 0 baseline');
+  assert.equal(stamp.textContent, 'Updated 9:05 AM', 'with no calendars, the stamp is the time of the render');
+  resume(); // back to the real today, for later tests
 });
 
 test('a hidden-tab visibilitychange is not a launch and does not refresh', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
+  const before = loadLaunches().length;
   globalThis.document.visibilityState = 'hidden';
   try {
     resume();
   } finally {
     globalThis.document.visibilityState = 'visible';
   }
-  assert.equal(loadLaunches().length, 0);
+  assert.equal(loadLaunches().length - before, 0);
 });
 
 test('the List shows human dates, with today named as Today', async () => {
@@ -2254,5 +2273,412 @@ test('sweep S: backgrounding commits a pending delete\'s tombstone exactly once'
     t.mock.timers.reset();
   }
   assert.equal(toastHost().children.length, 0);
+  seed([]);
+});
+
+// =========================================================================
+// Sweep batch D — dates and staying current
+// =========================================================================
+//
+// Ids are prefixed `sD-`. The module is imported once for the file, so every
+// test here puts feeds, cursors and the clock back the way it found them.
+
+const stampEl = () => globalThis.document.getElementById('updated-stamp');
+const labelText = (id) => globalThis.document.getElementById(id).textContent;
+const settle = async () => { for (let i = 0; i < 30; i += 1) await new Promise((r) => { setImmediate(r); }); };
+const localAt = (h, m) => new Date(2026, 8, 23, h, m);
+// Puts the Day and Week cursors back on today by tapping today's month cell.
+function openDayForToday() {
+  const grid = globalThis.document.getElementById('calendar-grid');
+  click(grid.children.find((c) => c._classes.has('today')));
+  assert.equal(labelText('day-label'), labelFor(new Date()), 'fixture check: back on today');
+}
+
+// Feeds and their cache, loaded into app.js through its storage listener.
+function seedFeedsWithCache(feedList, cache) {
+  saveFeeds(feedList);
+  localStorage.setItem('plaenicke.feedCache', JSON.stringify(cache));
+  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.feeds' });
+}
+const sdFeed = (id, o = {}) => ({
+  id, url: `https://example.com/${id}.ics`, name: id, color: 'var(--feed-palette-1)', hidden: false,
+  updatedAt: '2026-08-01T00:00:00.000Z', ...o,
+});
+const cacheAt = (d) => ({ fetchedAt: d.toISOString(), events: [], skipped: [] });
+
+// --- D1: the "Updated" stamp says when the calendars were fetched ----------
+
+test('sweep D: with calendars, the stamp is the OLDEST fetch among the visible ones', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  // All three are fresh at 10:40, so nothing is fetched. The hidden one is the
+  // oldest, and must not count: its events are not on screen.
+  seedFeedsWithCache(
+    [sdFeed('sD-fa'), sdFeed('sD-fb'), sdFeed('sD-fh', { hidden: true })],
+    { 'sD-fa': cacheAt(localAt(10, 30)), 'sD-fb': cacheAt(localAt(10, 20)), 'sD-fh': cacheAt(localAt(10, 15)) },
+  );
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => { calls.push(String(url)); return { ok: true, text: async () => '' }; };
+  stampEl().textContent = 'sentinel';
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 40).getTime() });
+  let beforeSettle;
+  try {
+    resume();
+    beforeSettle = stampEl().textContent;
+    await settle();
+  } finally {
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(beforeSettle, 'sentinel', 'the render time must not be painted over calendars that have not settled');
+  assert.deepEqual(calls, [], 'fixture check: every feed was fresh');
+  assert.equal(stampEl().textContent, 'Updated 10:20 AM');
+  unseedFeeds();
+  resume();
+});
+
+test('sweep D: a calendar fetch that fails says so instead of a time', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seedFeedsWithCache([sdFeed('sD-ff')], { 'sD-ff': cacheAt(localAt(8, 40)) }); // stale at 10:40
+  const originalFetch = globalThis.fetch;
+  let fetched = 0;
+  globalThis.fetch = async () => { fetched += 1; throw new TypeError('offline'); };
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 40).getTime() });
+  try {
+    resume();
+    await settle();
+  } finally {
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(fetched, 1, 'fixture check: the stale feed was fetched');
+  assert.equal(stampEl().textContent, "Couldn't refresh calendars");
+  unseedFeeds();
+  resume();
+});
+
+// syncStale REJECTS (rather than reporting {ok:false}) on a storage error that
+// is not about quota. That is a failed refresh too.
+test('sweep D: a calendar refresh that rejects also says so', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seedFeedsWithCache([sdFeed('sD-fr')], { 'sD-fr': cacheAt(localAt(8, 40)) });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, text: async () => '' });
+  const real = localStorage.setItem.bind(localStorage);
+  const originalError = console.error;
+  const logged = [];
+  console.error = (...a) => { logged.push(a); };
+  localStorage.setItem = (k, v) => {
+    if (k === 'plaenicke.feedCache') { const e = new Error('blocked'); e.name = 'SecurityError'; throw e; }
+    return real(k, v);
+  };
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 40).getTime() });
+  try {
+    resume();
+    await settle();
+  } finally {
+    t.mock.timers.reset();
+    localStorage.setItem = real;
+    console.error = originalError;
+    globalThis.fetch = originalFetch;
+  }
+  assert.ok(logged.some((a) => String(a[0]).includes('background calendar sync failed')), 'fixture check: the batch rejected');
+  assert.equal(stampEl().textContent, "Couldn't refresh calendars");
+  unseedFeeds();
+  resume();
+});
+
+// --- D3: the sheet's quick moves read today when tapped --------------------
+
+test('sweep D: a sheet left open past midnight moves "Tomorrow" from the new today', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'sD-move', title: 'sD move me', date: '2099-01-01' })]);
+  const timers = installManualTimers();
+  try {
+    click(openControlFor(itemList(), 'sD move me'));
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 24 * 60 * 60 * 1000 });
+    const newToday = localISO(new Date());
+    click(sheetHost().querySelector('.sheet-move')); // Tomorrow
+    t.mock.timers.reset();
+    assert.equal(storedById('sD-move').date, addDays(newToday, 1));
+    timers.fire(5000);
+    assert.equal(toastHost().children.length, 0, 'no toast is left showing');
+  } finally {
+    t.mock.timers.reset();
+    forceCloseSheet();
+    timers.restore();
+  }
+  seed([]);
+  resume();
+});
+
+// --- D4: any render catches up with the clock, not only a resume -----------
+
+test('sweep D: a render after midnight moves the Day view even without a resume', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const dayLabel = globalThis.document.getElementById('day-label');
+  assert.equal(dayLabel.textContent, labelFor(new Date()), 'fixture check: the Day view starts on today');
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 24 * 60 * 60 * 1000 });
+  try {
+    seed([]); // a sync landing re-renders, with no visibilitychange at all
+    assert.equal(dayLabel.textContent, labelFor(new Date()));
+  } finally {
+    t.mock.timers.reset();
+  }
+  seed([]);
+  assert.equal(dayLabel.textContent, labelFor(new Date()));
+});
+
+// The other side of D4. Opening a SPECIFIC day is not "the view that was
+// showing today": a month cell tapped just after midnight, before anything
+// re-rendered, must open the day that was tapped, not be carried on to the new
+// today by the render that follows.
+test('sweep D: tapping yesterday\'s cell just after midnight opens that day', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const oldToday = new Date();
+  const cell = globalThis.document.getElementById('calendar-grid').children.find((c) => c._classes.has('today'));
+  assert.ok(cell, 'fixture check: the month grid marks today');
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 24 * 60 * 60 * 1000 });
+  try {
+    click(cell);
+    assert.equal(labelText('day-label'), labelFor(oldToday), 'the tapped day opens');
+  } finally {
+    t.mock.timers.reset();
+  }
+  seed([]);
+  assert.equal(labelText('day-label'), labelFor(oldToday), 'fixture check: still on the day the user chose');
+  click(globalThis.document.getElementById('show-day'));
+  openDayForToday();
+});
+
+// --- D5: the time zone is re-read, not fixed at load ------------------------
+
+// The clock is pinned to 12:00 UTC, when Tokyo (21:00) and Honolulu (02:00)
+// are on the SAME local date. So the second switch changes the zone and not
+// the day, and a re-read placed after refreshForToday's "day unchanged" early
+// return would miss it.
+test('sweep D: calendar times follow a change of the device time zone', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const prior = process.env.TZ;
+  const seen = {};
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-09-23T12:00:00.000Z') });
+  try {
+    seedFeedsWithCache([sdFeed('sD-tz')], {
+      'sD-tz': {
+        fetchedAt: new Date().toISOString(),
+        events: [{
+          uid: 'sD-tz-e', title: 'sD zoned event', form: 'UTC',
+          dtstart: { value: '20261003T120000Z', tzid: null },
+          dtend: null, duration: null, rrule: null, exdates: [], recurrenceId: null,
+        }],
+        skipped: [],
+      },
+    });
+    for (const tz of ['Asia/Tokyo', 'Pacific/Honolulu']) {
+      process.env.TZ = tz;
+      seed([]);
+      seen[tz] = allText(itemList());
+    }
+  } finally {
+    if (prior === undefined) delete process.env.TZ; else process.env.TZ = prior;
+    t.mock.timers.reset();
+  }
+  unseedFeeds();
+  seed([]);
+  assert.match(seen['Asia/Tokyo'], /sD zoned event\s+9:00 PM/, '12:00 UTC is 9 PM in Tokyo');
+  assert.match(seen['Pacific/Honolulu'], /sD zoned event\s+2:00 AM/, '12:00 UTC is 2 AM in Honolulu');
+});
+
+// --- D6: one calendar refresh at a time ------------------------------------
+
+test('sweep D: two quick resumes fetch each calendar once, and a feed pulled meanwhile is still fetched', async () => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sD-g1')], {}); // never fetched, so stale
+  const calls = [];
+  const gates = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url) => {
+    calls.push(String(url));
+    return new Promise((resolve) => { gates.push(() => resolve({ ok: true, text: async () => '' })); });
+  };
+  const releaseAll = async () => {
+    for (let i = 0; i < 5; i += 1) { while (gates.length) gates.shift()(); await settle(); }
+  };
+  const fetchesOf = (id) => calls.filter((u) => u.includes(encodeURIComponent(`https://example.com/${id}.ics`))).length;
+  try {
+    resume();
+    resume();
+    await settle();
+    assert.equal(fetchesOf('sD-g1'), 1, 'the second resume must not start a second fetch of the same calendar');
+    // A feed this device learns about from a sync while that fetch is in flight.
+    applySyncedState(state({ feeds: [sdFeed('sD-g2')] }));
+    await releaseAll();
+    assert.equal(fetchesOf('sD-g1'), 1, 'and it is not fetched again once the first fetch lands');
+    assert.equal(fetchesOf('sD-g2'), 1, 'a feed pulled during the fetch is fetched once it settles, not dropped');
+  } finally {
+    while (gates.length) gates.shift()();
+    await settle();
+    globalThis.fetch = originalFetch;
+  }
+  unseedFeeds();
+  saveTombstones([]);
+});
+
+// --- D7: the List's footer is a human date ----------------------------------
+
+test('sweep D: the List footer names its horizon as a date, not raw ISO', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seedFeedsWithCache([sdFeed('sD-foot')], { 'sD-foot': cacheAt(new Date()) });
+  const horizon = addDays(localISO(new Date()), 366);
+  const text = allText(itemList());
+  unseedFeeds();
+  assert.match(text, new RegExp(`external calendars shown through ${formatDayLabel(horizon, localISO(new Date()))}`));
+  assert.doesNotMatch(text, /\d{4}-\d{2}-\d{2}/, 'no raw ISO date on screen');
+});
+
+// --- S-1: the week and month cursors follow a resume too --------------------
+
+const weekLabelFor = (iso) => `${iso.slice(5).replace('-', '/')} – ${addDays(iso, 6).slice(5).replace('-', '/')}`;
+const monthLabelFor = (d) => d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+
+test('sweep D: the Week view follows a resume, and a navigated week stays put', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const WEEK = 7 * 24 * 60 * 60 * 1000;
+  assert.equal(labelText('week-label'), weekLabelFor(startOfWeek(localISO(new Date()))), 'fixture check');
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + WEEK });
+  try {
+    resume();
+    assert.equal(labelText('week-label'), weekLabelFor(startOfWeek(localISO(new Date()))));
+  } finally {
+    t.mock.timers.reset();
+  }
+  resume();
+  click(globalThis.document.getElementById('prev-week'));
+  const moved = labelText('week-label');
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + WEEK });
+  try {
+    resume();
+    assert.equal(labelText('week-label'), moved, 'a week the user navigated to must not jump');
+  } finally {
+    t.mock.timers.reset();
+  }
+  click(globalThis.document.getElementById('next-week'));
+  resume();
+  assert.equal(labelText('week-label'), weekLabelFor(startOfWeek(localISO(new Date()))), 'restored for later tests');
+});
+
+test('sweep D: the Month view follows a resume, and a navigated month stays put', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const real = new Date();
+  const nextMonth = new Date(real.getFullYear(), real.getMonth() + 1, 1, 12);
+  assert.equal(labelText('calendar-label'), monthLabelFor(real), 'fixture check');
+  t.mock.timers.enable({ apis: ['Date'], now: nextMonth.getTime() });
+  try {
+    resume();
+    assert.equal(labelText('calendar-label'), monthLabelFor(nextMonth));
+  } finally {
+    t.mock.timers.reset();
+  }
+  resume();
+  click(globalThis.document.getElementById('prev-month'));
+  const moved = labelText('calendar-label');
+  t.mock.timers.enable({ apis: ['Date'], now: nextMonth.getTime() });
+  try {
+    resume();
+    assert.equal(labelText('calendar-label'), moved, 'a month the user navigated to must not jump');
+  } finally {
+    t.mock.timers.reset();
+  }
+  click(globalThis.document.getElementById('next-month'));
+  resume();
+  assert.equal(labelText('calendar-label'), monthLabelFor(new Date()), 'restored for later tests');
+});
+
+// --- S-2: the Google link on a date whose month and day are one digit -------
+
+test('sweep D: the Google day link is unpadded on a single-digit month and day', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 2, 5, 12, 0).getTime() }); // Thu Mar 5 2026
+  try {
+    seedFeed({
+      id: 'sD-google', url: 'https://calendar.google.com/calendar/ical/sD/basic.ics', name: 'G',
+      color: 'var(--feed-palette-1)', hidden: false, updatedAt: '2026-08-01T00:00:00.000Z',
+    });
+    click(openControlFor(itemList(), 'Standup from the feed'));
+    assert.equal(sheetHost().querySelector('.sheet-google').href, 'https://calendar.google.com/calendar/r/day/2026/3/5');
+  } finally {
+    forceCloseSheet();
+    unseedFeeds();
+    t.mock.timers.reset();
+  }
+  seed([]);
+});
+
+// --- S-4: going to the background refreshes nothing -------------------------
+
+test('sweep D: a hidden visibilitychange changes no label and no stamp, and fetches nothing', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sD-hid')], {}); // stale: a visible resume would fetch it
+  const ids = ['day-label', 'week-label', 'calendar-label', 'updated-stamp'];
+  const before = ids.map(labelText);
+  const launches = loadLaunches().length;
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => { calls.push(String(url)); return { ok: true, text: async () => '' }; };
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 40 * 24 * 60 * 60 * 1000 });
+  globalThis.document.visibilityState = 'hidden';
+  try {
+    resume();
+    await settle();
+  } finally {
+    globalThis.document.visibilityState = 'visible';
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual(ids.map(labelText), before);
+  assert.deepEqual(calls, []);
+  assert.equal(loadLaunches().length - launches, 0);
+  unseedFeeds();
+});
+
+// --- extra: a tick that fails does not leave the box looking ticked ---------
+
+test('sweep D: a tick that fails on quota is shown unticked again, with the error', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'sD-tick', type: 'task', title: 'sD tick me', date: '2099-07-09' })]);
+  const real = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = (k, v) => {
+    if (k === 'plaenicke.items') { const e = new Error('The quota has been exceeded.'); e.name = 'QuotaExceededError'; throw e; }
+    return real(k, v);
+  };
+  try {
+    const box = checkboxFor(todoList(), 'sD tick me');
+    box.checked = true;
+    fire(box, 'change');
+  } finally {
+    localStorage.setItem = real;
+  }
+  assert.equal(storedById('sD-tick').done, false, 'fixture check: the tick was not saved');
+  assert.equal(checkboxFor(todoList(), 'sD tick me').checked, false, 'the box must not look ticked');
+  assert.match(messageText(), /quota/i);
+  assert.equal(toastHost().children.length, 0);
+  clearMessage();
   seed([]);
 });

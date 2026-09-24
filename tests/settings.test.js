@@ -431,12 +431,24 @@ test('settings: the calendar list refreshes when an adoption lands while the pan
 // --- Phase 0 baseline: the launch count is readable in Settings -------------
 import { recordLaunch } from '../js/storage.js';
 
-test('settings: shows how often the app was opened in the last 7 days', () => {
+test('settings: shows on how many of the last 7 days the app was opened, and when it was last', () => {
   const now = Date.now();
   const { host } = openPanel([], () => {
     recordLaunch(new Date(now - 60 * 60 * 1000).toISOString());
     recordLaunch(new Date(now - 2 * 24 * 60 * 60 * 1000).toISOString());
     recordLaunch(new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString()); // outside the window
   });
-  assert.match(allText(host), /Opened 2 times in the last 7 days\./);
+  // An hour ago is today or, just after midnight, yesterday; either way it is
+  // a different local day from two days ago.
+  assert.match(allText(host), /Opened on 2 of the last 7 days\. Last opened (Today|Yesterday), \d{1,2}:\d{2} (AM|PM)\./);
+});
+
+// Sweep S-8: a launch log that parses to something other than an array (here
+// an object) reads as empty, and the panel still opens rather than throwing
+// out of the Settings button.
+test('settings: a stored launch log of {} reads as no launches, and Settings opens', () => {
+  const { host } = openPanel([], () => { localStorage.setItem('plaenicke.launches', '{}'); });
+  assert.equal(host.childElementCount > 0, true, 'the panel must open');
+  assert.match(allText(host), /Not opened in the last 7 days\./);
+  assert.doesNotMatch(allText(host), /Last opened/);
 });

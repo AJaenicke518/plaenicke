@@ -297,12 +297,21 @@ export function loadLaunches() {
   return parsed.filter((t) => typeof t === 'string');
 }
 
+// On a full device the log gives up its OLDEST half and tries again, down to
+// the new entry alone; only when even that does not fit is it a QuotaError. It
+// is a convenience metric, and an open that cannot be recorded should not cost
+// the room the feed cache and items need. Any other storage error propagates
+// untouched.
 export function recordLaunch(iso) {
-  const next = [...loadLaunches(), iso].slice(-MAX_LAUNCHES);
-  try {
-    localStorage.setItem(LAUNCHES_KEY, JSON.stringify(next));
-  } catch (err) {
-    if (err && err.name === 'QuotaExceededError') throw new QuotaError('Launch log exceeded storage quota');
-    throw err;
+  let next = [...loadLaunches(), iso].slice(-MAX_LAUNCHES);
+  for (;;) {
+    try {
+      localStorage.setItem(LAUNCHES_KEY, JSON.stringify(next));
+      return;
+    } catch (err) {
+      if (!(err && err.name === 'QuotaExceededError')) throw err;
+      if (next.length <= 1) throw new QuotaError('Launch log exceeded storage quota');
+      next = next.slice(Math.floor(next.length / 2));
+    }
   }
 }
