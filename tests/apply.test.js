@@ -1163,21 +1163,6 @@ test('open: an item of an unknown type shows a message and mounts no sheet', asy
   seed([]);
 });
 
-// Tasks 4b and 4c replace both callbacks. Until then Save must say so rather
-// than silently closing over an unsaved edit, and Delete deletes as before.
-test('open: Save says editing is not here yet, and changes nothing', async () => {
-  installFakeLocalStorage();
-  await import('../js/app.js');
-  seed([record({ id: 'open-save1', title: 'Open me and save', date: '2099-02-01' })]);
-  click(openControlFor(itemList(), 'Open me and save'));
-  sheetHost().querySelector('.sheet-title').value = 'Renamed';
-  click(sheetHost().querySelector('.sheet-save'));
-  assert.equal(sheetHost().querySelector('.sheet-error').textContent, 'Editing arrives in the next step.');
-  assert.equal(loadItems()[0].title, 'Open me and save', 'nothing was written');
-  closeSheet();
-  seed([]);
-});
-
 // Task 4b: the sheet's Delete goes through requestDelete like every other
 // delete — hidden at once, committed (tombstone first) when the toast expires.
 test("open: the sheet's Delete deletes through the existing path, tombstone and all", async (t) => {
@@ -1474,5 +1459,329 @@ test('review: a delete whose commit fails is shown again, with the error', async
   assert.match(allText(itemList()), /Cannot be deleted/, 'a delete that did not happen must not look like it did');
   assert.match(messageText(), /quota/i);
   assert.equal(toastHost().children.length, 0);
+  seed([]);
+});
+
+// =========================================================================
+// Edit-items Task 4c — editing
+// =========================================================================
+//
+// editItem is the sheet's onSave. Every id here is prefixed `edit-`, and
+// every test that shows a toast resolves it (expiry or Undo) and leaves the
+// toast host empty: the module is imported once per file.
+
+const storedById = (id) => loadItems().find((it) => it.id === id);
+const rawStored = () => localStorage.getItem('plaenicke.items');
+
+// A sync that lands while the app is open: storage changes underneath app.js,
+// which reloads through its storage listener (the same path as seed()).
+function simulateSync(records) {
+  saveItems(records);
+  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.items' });
+}
+
+// A hand-rolled timer fake, used INSTEAD of t.mock.timers for the sync test.
+// app.js's module-scope `syncTimer` outlives each test, and Node 22's
+// MockTimers mis-handles clearTimeout on a handle from an EARLIER test's mock
+// session: it removes an unrelated timer from the current queue by the stale
+// handle's heap position. The delete tests leave exactly such a handle, and
+// scheduleSync's clearTimeout(syncTimer) then silently swallowed the new sync
+// timer. Reproduced standalone; not an app.js defect.
+function installManualTimers() {
+  const realSet = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  const pending = [];
+  globalThis.setTimeout = (fn, ms) => { const h = { fn, ms, cancelled: false }; pending.push(h); return h; };
+  globalThis.clearTimeout = (h) => { if (h && pending.includes(h)) h.cancelled = true; };
+  return {
+    // Runs, once, every live timer scheduled for exactly `ms`.
+    fire(ms) {
+      for (const h of pending.filter((x) => x.ms === ms && !x.cancelled)) { h.cancelled = true; h.fn(); }
+    },
+    live: (ms) => pending.filter((x) => x.ms === ms && !x.cancelled).length,
+    restore() { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; },
+  };
+}
+
+test('edit: a Save through the sheet writes storage, bumps updatedAt and schedules a sync', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  seed([record({ id: 'edit-save', title: 'Edit me', date: '2099-04-01' })]);
+
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts = {}) => {
+    requests.push({ url: String(url), method: (opts && opts.method) || 'GET' });
+    return { ok: true, status: 200, json: async () => ({ version: 0, blob: '' }), text: async () => '' };
+  };
+  const timers = installManualTimers();
+  try {
+    click(openControlFor(itemList(), 'Edit me'));
+    sheetHost().querySelector('.sheet-title').value = 'Edited title';
+    click(sheetHost().querySelector('.sheet-save'));
+    assert.equal(sheetHost().children.length, 0, 'a successful save closes the sheet');
+    const saved = storedById('edit-save');
+    assert.equal(saved.title, 'Edited title', 'the edit is in storage');
+    assert.ok(saved.updatedAt > '2026-08-19T00:00:00.000Z', 'updatedAt is bumped, or the next sync reverts the edit');
+    assert.match(allText(itemList()), /Edited title/, 'the screen shows the edit');
+    assert.match(allText(toastHost()), /Saved/, 'a toast confirms the save');
+    assert.deepEqual(requests.filter((r) => r.url.includes('/data')), [], 'the push is debounced');
+    assert.equal(timers.live(2000), 1, 'exactly one debounced sync is scheduled');
+    timers.fire(2000);
+    for (let i = 0; i < 50; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    assert.ok(requests.some((r) => r.url.includes('/data') && r.method === 'PUT'),
+      'an edit must reach the account without waiting for a reload');
+    timers.fire(5000);
+    assert.equal(toastHost().children.length, 0, 'no toast is left showing');
+  } finally {
+    forceCloseSheet();
+    timers.restore();
+    globalThis.fetch = originalFetch;
+  }
+  installFakeLocalStorage();
+  seed([]);
+});
+
+test('edit: a cleared date is refused, storage is untouched, and the sheet says why', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'edit-nodate', title: 'Keep my date', date: '2099-04-02' })]);
+  const beforeRaw = rawStored();
+  const beforeItems = loadItems();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    click(openControlFor(itemList(), 'Keep my date'));
+    sheetHost().querySelector('.sheet-date').value = '';
+    click(sheetHost().querySelector('.sheet-save'));
+    assert.ok(sheetHost().querySelector('.sheet'), 'a refused save keeps the sheet open');
+    assert.equal(sheetHost().querySelector('.sheet-error').textContent, 'Date is required', 'and shows why');
+    assert.equal(rawStored(), beforeRaw, 'storage is byte-identical');
+    assert.deepEqual(loadItems(), beforeItems);
+    assert.equal(toastHost().children.length, 0, 'a refused save offers no Undo');
+    closeSheet();
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000); // a failed assertion must not leave a live toast behind
+    t.mock.timers.reset();
+  }
+  seed([]);
+});
+
+// I1: pendingDeletes hides a record from liveItems() but it is still in
+// `items`, so an index found in liveItems() is off by one for every record
+// after it — and editItem writes into `items` by that index.
+test('edit: with an earlier item pending deletion, the edit lands on the right record and no other', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([
+    record({ id: 'edit-i1-a', title: 'I1 first', date: '2099-04-03' }),
+    record({ id: 'edit-i1-b', title: 'I1 second', date: '2099-04-04' }),
+    record({ id: 'edit-i1-c', title: 'I1 third', date: '2099-04-05' }),
+    record({ id: 'edit-i1-d', title: 'I1 fourth', date: '2099-04-06' }),
+  ]);
+  const beforeById = Object.fromEntries(loadItems().map((it) => [it.id, JSON.stringify(it)]));
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    click(openControlFor(itemList(), 'I1 third'));
+    // Delete A while C's sheet is open (opening an item would commit it).
+    click(deleteControlFor(itemList(), 'I1 first'));
+    assert.ok(!tombstoned('edit-i1-a'), 'fixture check: A is pending, not committed');
+    sheetHost().querySelector('.sheet-title').value = 'I1 third, edited';
+    click(sheetHost().querySelector('.sheet-save'));
+    assert.equal(sheetHost().children.length, 0, 'the save succeeded');
+    for (const id of ['edit-i1-b', 'edit-i1-d']) {
+      assert.equal(JSON.stringify(storedById(id)), beforeById[id], `${id} is byte-identical`);
+    }
+    const c = storedById('edit-i1-c');
+    assert.equal(c.title, 'I1 third, edited');
+    const { title: _t, updatedAt: _u, ...cRest } = c;
+    const { title: _t0, updatedAt: _u0, ...cRest0 } = JSON.parse(beforeById['edit-i1-c']);
+    assert.deepEqual(cRest, cRest0, 'only the title (and updatedAt) changed on the edited record');
+    assert.equal(loadItems().length, 3, 'A was committed by the Saved toast replacing its own; nothing else was lost');
+    assert.ok(tombstoned('edit-i1-a'));
+    t.mock.timers.tick(5000);
+    assert.equal(toastHost().children.length, 0, 'no toast is left showing');
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000); // a failed assertion must not leave a live toast behind
+    t.mock.timers.reset();
+  }
+  seed([]);
+});
+
+test('edit: saving an item that is pending deletion is refused', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'edit-pend', title: 'Pending edit', date: '2099-04-07' })]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    click(openControlFor(itemList(), 'Pending edit'));
+    click(deleteControlFor(itemList(), 'Pending edit'));
+    const beforeRaw = rawStored();
+    sheetHost().querySelector('.sheet-title').value = 'Renamed while pending';
+    click(sheetHost().querySelector('.sheet-save'));
+    assert.equal(sheetHost().querySelector('.sheet-error').textContent, 'This item is being deleted.');
+    assert.equal(rawStored(), beforeRaw, 'nothing was written');
+    assert.ok(!tombstoned('edit-pend'), 'and the delete is still pending, with its Undo');
+    closeSheet();
+    t.mock.timers.tick(5000);
+    assert.ok(tombstoned('edit-pend'), 'the delete then commits as normal');
+    assert.equal(toastHost().children.length, 0);
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000); // a failed assertion must not leave a live toast behind
+    t.mock.timers.reset();
+  }
+  seed([]);
+});
+
+test('edit: Undo restores the edited field and keeps a field a sync changed in between', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'edit-undo', title: 'Undo me', date: '2099-04-08' })]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    click(openControlFor(itemList(), 'Undo me'));
+    sheetHost().querySelector('.sheet-title').value = 'Undo me, renamed';
+    click(sheetHost().querySelector('.sheet-save'));
+    assert.equal(storedById('edit-undo').title, 'Undo me, renamed', 'fixture check: the edit landed');
+    simulateSync([{ ...storedById('edit-undo'), date: '2099-05-01' }]);
+    click(toastHost().querySelector('.toast-undo'));
+    const r = storedById('edit-undo');
+    assert.equal(r.title, 'Undo me', 'Undo restores the title');
+    assert.equal(r.date, '2099-05-01', 'and keeps the date the sync wrote');
+    assert.match(allText(itemList()), /Undo me/);
+    assert.doesNotMatch(allText(itemList()), /renamed/);
+    assert.equal(toastHost().children.length, 0, 'Undo leaves no toast');
+    t.mock.timers.tick(5000);
+    assert.equal(toastHost().children.length, 0);
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000); // a failed assertion must not leave a live toast behind
+    t.mock.timers.reset();
+  }
+  seed([]);
+});
+
+// typeChangePatch ADDS keys (notes, times, and normalizeIdea re-derives the
+// title), so an Undo built from the caller's keys alone restores only `type`.
+// And re-running typeChangePatch on the undo would split the idea's text
+// instead of restoring the task's own fields.
+test('edit: Undo of a task -> idea switch restores the original task exactly', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const original = record({
+    id: 'edit-undo-type', type: 'task', title: 'Call the plumber',
+    notes: 'About the kitchen sink', date: '2099-04-09', time: '09:00', endTime: '10:00',
+  });
+  seed([original]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    click(openControlFor(itemList(), 'Call the plumber'));
+    sheetHost().querySelector('.sheet-type').value = 'idea';
+    click(sheetHost().querySelector('.sheet-save'));
+    const idea = storedById('edit-undo-type');
+    assert.equal(idea.type, 'idea', 'fixture check: the switch landed');
+    assert.equal(idea.time, null, 'an idea is unscheduled');
+    assert.match(idea.notes, /Call the plumber/, 'the idea keeps the title');
+    assert.match(idea.notes, /About the kitchen sink/, 'and the notes');
+    click(toastHost().querySelector('.toast-undo'));
+    const back = storedById('edit-undo-type');
+    for (const k of ['type', 'title', 'notes', 'date', 'time', 'endTime']) {
+      assert.equal(back[k], original[k], `Undo restores ${k}`);
+    }
+    assert.equal(toastHost().children.length, 0);
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000); // a failed assertion must not leave a live toast behind
+    t.mock.timers.reset();
+  }
+  seed([]);
+});
+
+test('edit: a quota failure leaves the in-memory list unchanged and shows the error', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'edit-quota', title: 'Quota original', date: '2099-04-10' })]);
+  const beforeRaw = rawStored();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const real = localStorage.setItem.bind(localStorage);
+  try {
+    click(openControlFor(itemList(), 'Quota original'));
+    sheetHost().querySelector('.sheet-title').value = 'Quota renamed';
+    localStorage.setItem = (k, v) => {
+      if (k === 'plaenicke.items') { const e = new Error('The quota has been exceeded.'); e.name = 'QuotaExceededError'; throw e; }
+      return real(k, v);
+    };
+    try {
+      click(sheetHost().querySelector('.sheet-save'));
+    } finally {
+      localStorage.setItem = real;
+    }
+    assert.match(sheetHost().querySelector('.sheet-error').textContent, /quota/i, 'the sheet shows the error');
+    assert.equal(rawStored(), beforeRaw);
+    assert.equal(toastHost().children.length, 0, 'a failed save offers no Undo');
+    closeSheet();
+    resume(); // re-renders from app.js's in-memory list
+    assert.match(allText(itemList()), /Quota original/, 'the in-memory list was restored');
+    assert.doesNotMatch(allText(itemList()), /Quota renamed/);
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000); // a failed assertion must not leave a live toast behind
+    t.mock.timers.reset();
+  }
+  seed([]);
+});
+
+// Task 3 review I1: the type switch fills title/notes from the CURRENT record,
+// not the one the sheet opened with.
+test('edit: a type switch after a sync changed the notes keeps the synced notes', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'edit-stale', type: 'task', title: 'Stale check', notes: 'notes as opened', date: '2099-04-11' })]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    click(openControlFor(itemList(), 'Stale check'));
+    simulateSync([{ ...storedById('edit-stale'), notes: 'notes from the other device', updatedAt: '2026-08-20T00:00:00.000Z' }]);
+    sheetHost().querySelector('.sheet-type').value = 'idea';
+    click(sheetHost().querySelector('.sheet-save'));
+    const r = storedById('edit-stale');
+    assert.equal(r.type, 'idea');
+    assert.match(r.notes, /notes from the other device/, 'the synced notes survive');
+    assert.doesNotMatch(r.notes, /notes as opened/, 'the stale notes are not written back');
+    t.mock.timers.tick(5000);
+    assert.equal(toastHost().children.length, 0);
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000); // a failed assertion must not leave a live toast behind
+    t.mock.timers.reset();
+  }
+  seed([]);
+});
+
+// I8: the edit's fresh updatedAt is what wins the merge.
+test('edit: a sync carrying an older copy of the record keeps the edit, in storage and on screen', async (t) => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  const original = record({ id: 'edit-lww', title: 'Before the edit', date: '2099-04-12' });
+  seed([original]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    click(openControlFor(itemList(), 'Before the edit'));
+    sheetHost().querySelector('.sheet-title').value = 'After the edit';
+    click(sheetHost().querySelector('.sheet-save'));
+    t.mock.timers.tick(5000);
+    applySyncedState(state({ items: [original] }));
+    assert.equal(storedById('edit-lww').title, 'After the edit', 'storage keeps the edit');
+    assert.match(allText(itemList()), /After the edit/, 'and so does the screen');
+    assert.doesNotMatch(allText(itemList()), /Before the edit/);
+    assert.equal(toastHost().children.length, 0);
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000); // a failed assertion must not leave a live toast behind
+    t.mock.timers.reset();
+  }
   seed([]);
 });

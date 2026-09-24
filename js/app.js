@@ -21,6 +21,7 @@ import { initSettings } from './settings.js';
 import { instancesForRange, syncStale, applyRemoteFeeds, inferName } from './feeds.js';
 import { openItemSheet } from './itemsheet.js';
 import { showToast } from './toast.js';
+import { applyEdit, typeChangePatch, snapshotOf, EDITABLE_FIELDS } from './edit.js';
 import { uid } from './uid.js';
 import { syncOnce } from './sync.js';
 import { isLinked, isAdoptionPending } from './auth.js';
@@ -312,6 +313,65 @@ function setDone(id, done) {
   scheduleSync();
 }
 
+// editItem — the sheet's Save (edit-items Task 4c). Returns { ok, error }.
+//
+// Same write shape as setDone above: the record is replaced IN the module-scope
+// `items` and saved from it (the ownership invariant), with a fresh updatedAt
+// from applyEdit, because unionById's ties go to remote.
+//
+// The index comes from `items`, NOT liveItems(): a pending delete is hidden
+// from liveItems() but still in `items`, so an index found there is off by one
+// for every record after it (Task 4c review I1).
+//
+// typeChangePatch runs HERE, against the CURRENT record. The sheet sends only
+// the raw diff; filling title/notes from the record the sheet opened with
+// wrote stale text back over a sync that arrived while it was open (Task 3
+// review I1).
+//
+// `raw` skips typeChangePatch and is used ONLY by an edit's own Undo. The undo
+// snapshot already holds every field the edit changed; re-running the type
+// adjustment on it would treat undoing task -> idea as an idea -> task switch
+// and split the idea's text instead of restoring the task's own fields.
+function editItem(id, patch, { toast = true, raw = false } = {}) {
+  if (pendingDeletes.has(id)) return { ok: false, error: 'This item is being deleted.' };
+  const idx = items.findIndex((it) => it.id === id);
+  if (idx < 0) return { ok: false, error: 'This item no longer exists.' };
+  const before = items[idx];
+  let applied;
+  let next;
+  try {
+    applied = raw ? patch : typeChangePatch(before, patch);
+    next = applyEdit(before, applied, nowISO());
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+  items[idx] = next;
+  try {
+    saveItems(items);
+  } catch (e) {
+    items[idx] = before;
+    return { ok: false, error: e.message };
+  }
+  render();
+  scheduleSync();
+  if (toast) {
+    // Every key the edit could have changed: the ones applied (typeChangePatch
+    // adds notes and times to the caller's), plus any editable field that
+    // differs afterwards (normalizeIdea re-derives an idea's title). Only
+    // these are restored, so a field a sync changed in between is kept.
+    const keys = new Set(Object.keys(applied).filter((k) => EDITABLE_FIELDS.includes(k)));
+    for (const k of EDITABLE_FIELDS) if (before[k] !== next[k]) keys.add(k);
+    const undoSnap = snapshotOf(before, [...keys]);
+    activeToast = showToast(els.toastHost, 'Saved', {
+      undo: () => {
+        const r = editItem(id, undoSnap, { toast: false, raw: true });
+        if (!r.ok) setMessage(r.error);
+      },
+    });
+  }
+  return { ok: true };
+}
+
 // The handle of the toast currently on screen, or null. Tasks 4b and 4c assign
 // it (delete and edit both offer Undo); openItem only ever dismisses it.
 let activeToast = null;
@@ -382,8 +442,7 @@ function openItem(item) {
       todayISO: toISO(new Date()),
       calendarName,
       googleDayUrl,
-      // Placeholder until Task 4c (editing).
-      onSave: () => ({ ok: false, error: 'Editing arrives in the next step.' }),
+      onSave: (p) => editItem(item.id, p),
       onDelete: () => requestDelete(item.id),
       onClose: () => {},
     });
