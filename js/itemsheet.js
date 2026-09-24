@@ -3,8 +3,9 @@
 // Presentation only: no storage, no app state. It collects a patch and hands
 // it to onSave; js/app.js (the sole writer of plaenicke.items) applies it.
 //
-// What the sheet sends is `typeChangePatch(item, diffPatch(opened, current))`:
-// ONLY the fields the user changed. A field that changed through a sync while
+// What the sheet sends is `diffPatch(opened, current)`: ONLY the fields the
+// user changed, raw. The idea<->non-idea adjustment (typeChangePatch) is NOT
+// applied here — app.js's editItem applies it against the CURRENT record. A field that changed through a sync while
 // the sheet was open must not be written back with the value the sheet opened
 // with (spec § 6). `opened` is read back from the freshly built form by the
 // same function that reads `current` at Save, so an untouched sheet diffs to
@@ -17,7 +18,7 @@
 // capability token (CLAUDE.md, "Feed URLs are unrecoverable").
 
 import { TYPES } from './preview.js';
-import { diffPatch, typeChangePatch, quickMoves } from './edit.js';
+import { diffPatch, quickMoves } from './edit.js';
 import { formatDayLabel } from './freshness.js';
 import { formatTime, formatTimeRange } from './timegrid.js';
 
@@ -163,7 +164,10 @@ export function openItemSheet(host, item, {
       const time = input('time', 'sheet-time', item.time || '');
       const end = input('time', 'sheet-end', item.endTime || '');
       // An end with no start is invalid (makeItem), so it goes with the start.
-      time.addEventListener('input', () => { if (!time.value) end.value = ''; });
+      // `change` too: a time picker's Clear may fire only that (Task 3 review O2).
+      const clearEnd = () => { if (!time.value) end.value = ''; };
+      time.addEventListener('input', clearEnd);
+      time.addEventListener('change', clearEnd);
       const notes = el('textarea', 'sheet-notes');
       notes.value = item.notes || '';
       notes.setAttribute('rows', '3');
@@ -187,7 +191,20 @@ export function openItemSheet(host, item, {
       const current = { ...read(), ...override };
       const diff = diffPatch(opened, current);
       if (Object.keys(diff).length === 0) { close(); return; }
-      const res = onSave(typeChangePatch(item, diff));
+      // The RAW diff (Task 3 review I1). typeChangePatch fills title/notes from
+      // a record, and the only safe record is the CURRENT one, which app.js's
+      // editItem holds — `item` is the record as it was when this sheet opened,
+      // and filling from it wrote stale text back over a sync that arrived
+      // while the sheet was open.
+      let res;
+      try {
+        res = onSave(diff);
+      } catch (err) {
+        // Never a silent, stuck sheet (Task 3 review O3): say what happened,
+        // then let it propagate so it is not swallowed either.
+        error.textContent = `Could not save: ${err && err.message ? err.message : err}`;
+        throw err;
+      }
       // Loud on a malformed result: an ok-less result read as failure would
       // show no message, and read as success would close over an unsaved edit.
       if (!res || typeof res.ok !== 'boolean' || (!res.ok && typeof res.error !== 'string')) {
@@ -200,11 +217,16 @@ export function openItemSheet(host, item, {
 
     const actions = el('div', 'sheet-actions');
     if (!isIdeaSheet) {
-      for (const move of quickMoves(item, todayISO)) {
+      quickMoves(item, todayISO).forEach((move, i) => {
         const b = button('sheet-move', move.label);
-        b.addEventListener('click', () => submit({ date: move.date }));
+        // Recomputed at click time from the date IN THE BOX, so "+1 week" never
+        // silently discards a date the user typed (Task 3 review O1).
+        b.addEventListener('click', () => {
+          const typed = read().date || item.date;
+          submit({ date: quickMoves({ ...item, date: typed }, todayISO)[i].date });
+        });
         actions.appendChild(b);
-      }
+      });
     }
     const del = button('sheet-delete', 'Delete');
     del.addEventListener('click', () => {

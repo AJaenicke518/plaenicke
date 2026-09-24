@@ -218,11 +218,15 @@ test('a quick move sends the new date together with any typed changes', () => {
   assert.deepEqual(second.calls.save, [{ date: '2026-09-24' }], 'Tomorrow is from today');
 });
 
-test('switching a task to idea sends the typeChangePatch result, not the raw diff', () => {
+// Task 3 review I1: the sheet sends the RAW diff. typeChangePatch runs in
+// app.js's editItem against the CURRENT record — here it would fill title and
+// notes from the record as it was when the sheet opened, and a type change
+// would write stale text back over a sync that arrived meanwhile.
+test('switching a task to idea sends only the raw diff', () => {
   const { host, calls } = open(task());
   one(host, 'sheet-type').value = 'idea';
   one(host, 'sheet-save').fire('click');
-  assert.deepEqual(calls.save, [{ type: 'idea', notes: 'Dentist\n\nbring card', time: null, endTime: null }]);
+  assert.deepEqual(calls.save, [{ type: 'idea' }]);
 });
 
 test('a failed save keeps the sheet open and shows the error inside it', () => {
@@ -310,13 +314,11 @@ test('editing an idea sends the text as BOTH title and notes', () => {
   }
 });
 
-test('idea -> task sends a derived title and keeps the full text in notes', () => {
+test('idea -> task with the text untouched sends only the type', () => {
   const { host, calls } = open(idea());
   one(host, 'sheet-type').value = 'task';
   one(host, 'sheet-save').fire('click');
-  const { title, notes } = splitIdeaText(LONG);
-  assert.equal(title, 'Build a tiny garden shed.');
-  assert.deepEqual(calls.save, [{ type: 'task', title, notes }]);
+  assert.deepEqual(calls.save, [{ type: 'task' }]);
 });
 
 test('idea -> task with edited text derives from the edited text', () => {
@@ -324,7 +326,7 @@ test('idea -> task with edited text derives from the edited text', () => {
   one(host, 'sheet-text').value = 'Call the plumber';
   one(host, 'sheet-type').value = 'task';
   one(host, 'sheet-save').fire('click');
-  assert.deepEqual(calls.save, [{ type: 'task', title: 'Call the plumber', notes: null }]);
+  assert.deepEqual(calls.save, [{ type: 'task', title: 'Call the plumber', notes: 'Call the plumber' }]);
 });
 
 // =========================================================================
@@ -454,4 +456,56 @@ test('mounting a second sheet into the same host leaves exactly one keydown list
   pressKey('Escape');
   assert.deepEqual(closes, ['second'], 'Escape closes the sheet on screen, and the replaced one never fires');
   assert.equal(keydownCount(), 0);
+});
+
+// =========================================================================
+// Task 3 review
+// =========================================================================
+
+// O1: "+1 week" is relative to the date in the box, not the date the sheet
+// opened with — otherwise a typed date silently vanishes.
+test('+1 week counts from a date typed into the sheet', () => {
+  const { host, calls } = open(task());
+  one(host, 'sheet-date').value = '2026-10-10';
+  byClass(host, 'sheet-move')[1].fire('click');
+  assert.deepEqual(calls.save, [{ date: '2026-10-17' }]);
+});
+
+// O2: a time picker's Clear may fire only `change`.
+test('clearing the start via a change event also clears the end', () => {
+  const { host, calls } = open(task());
+  one(host, 'sheet-time').value = '';
+  one(host, 'sheet-time').fire('change');
+  one(host, 'sheet-save').fire('click');
+  assert.deepEqual(calls.save, [{ time: null, endTime: null }]);
+});
+
+// O3: a throwing onSave must not leave a silent, stuck sheet.
+test('an onSave that throws shows the error in the sheet', () => {
+  const { host } = open(task(), { onSave: () => { throw new Error('disk on fire'); } });
+  one(host, 'sheet-title').value = 'changed';
+  assert.throws(() => one(host, 'sheet-save').fire('click'), /disk on fire/);
+  assert.match(one(host, 'sheet-error').textContent, /disk on fire/);
+});
+
+test('a Save on an already-closed sheet does nothing, even with typed changes', () => {
+  const { host, calls } = open(task());
+  const save = one(host, 'sheet-save');
+  one(host, 'sheet-title').value = 'changed';
+  one(host, 'sheet-cancel').fire('click');
+  save.fire('click');
+  assert.deepEqual(calls.save, []);
+});
+
+test('Delete twice deletes once', () => {
+  const { host, calls } = open(task());
+  const del = one(host, 'sheet-delete');
+  del.fire('click');
+  del.fire('click');
+  assert.equal(calls.del, 1);
+});
+
+test('an external item with no calendar name does not say "From null"', () => {
+  const { host } = open(external(), { calendarName: null });
+  assert.doesNotMatch(allText(host), /From/);
 });

@@ -144,3 +144,25 @@ for (const sel of ['.day-block .item-open', '.day-pin .item-open']) {
     assert.equal(declOf(sel, 'line-height'), 'inherit');
   });
 }
+
+// --- Task 3 review: layering and the sticky Save bar ------------------------
+function zIndexOf(selector) {
+  const re = new RegExp(`(^|\\})\\s*${selector.replace(/[.]/g, '\\.')}\\s*\\{([^}]*)\\}`, 'm');
+  const m = css.match(re);
+  assert.ok(m, `expected a ${selector} rule`);
+  const z = m[2].match(/z-index:\s*(\d+)/);
+  assert.ok(z, `${selector} must set a z-index`);
+  return Number(z[1]);
+}
+
+test('the toast sits above the sheet, which sits above settings', () => {
+  assert.ok(zIndexOf('.toast') > zIndexOf('.sheet-backdrop'), 'an Undo must never be hidden under a sheet');
+  assert.ok(zIndexOf('.sheet-backdrop') > zIndexOf('.settings-backdrop'));
+});
+
+test('the sheet top bar is sticky, so Save stays reachable while the form scrolls', () => {
+  const m = css.match(/(^|\})\s*\.sheet-bar\s*\{([^}]*)\}/m);
+  assert.ok(m, 'expected a .sheet-bar rule');
+  assert.match(m[2], /position:\s*sticky/);
+  assert.match(m[2], /top:\s*0/);
+});

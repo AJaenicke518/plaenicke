@@ -240,7 +240,7 @@ export function typeChangePatch(record, patch)            // -> patch adjusted f
 1. If `pendingDeletes.has(id)`, return `{ ok: false, error: 'This item is being deleted.' }`.
 2. `const idx = items.findIndex(it => it.id === id)`. Search **`items`, not `liveItems()`**. If `idx < 0`, return `{ ok: false, error: 'This item no longer exists.' }`.
 3. `const before = items[idx]`.
-4. `let next`, then `try { next = applyEdit(before, patch, nowISO()) } catch (e) { return { ok: false, error: e.message } }`.
+4. `let next`, then `try { next = applyEdit(before, typeChangePatch(before, patch), nowISO()) } catch (e) { return { ok: false, error: e.message } }`. **`typeChangePatch` runs HERE, against the current record, not in the sheet.** *Task 3 review I1:* in the sheet it filled missing title/notes from the record as it was when the sheet OPENED, so a type change wrote stale text back over a sync that arrived while the sheet was open. The sheet now sends the raw diff only.
 5. `items[idx] = next`, then `try { saveItems(items) } catch (e) { items[idx] = before; return { ok: false, error: e.message } }`.
 6. `render()`, then `scheduleSync()`.
 7. If `toast`:
@@ -257,6 +257,7 @@ export function typeChangePatch(record, patch)            // -> patch adjusted f
 - editing a pending item is refused;
 - Undo on an edit restores only the edited field. A field changed by a sync in between is kept: simulate it by saving a changed `date` directly and reloading through the storage listener before clicking Undo;
 - a quota failure (a stubbed `setItem` that throws a `QuotaExceededError`) leaves the in-memory list unchanged, shown by re-rendering, and returns the error;
+- **Task 3 review I1:** open a task's sheet, change the record's notes via a simulated sync (save + storage listener), then switch the type to idea and Save. The resulting idea text contains the SYNCED notes, not the ones the sheet opened with;
 - **I8, the app-level sync test:** after an edit, call `applySyncedState` with a remote copy of that record carrying an older `updatedAt`. Storage and the screen keep the edit.
 
 ## Task 5 — two-device sync tests, and invariant docs
