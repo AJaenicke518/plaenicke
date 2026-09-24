@@ -888,13 +888,17 @@ stampUpdated();
 //     then awaits res.text()/res.json(). A timer cleared at the headers left a
 //     body that stalls mid-download unguarded. The same timer races the body
 //     read and is disarmed only when that read settles.
-// A timed-out download is aborted and rejects, so syncFeed reports it
-// {ok:false,'unreachable'} and the loop moves on. The race also settles a
-// fetch that ignores its signal. A caller-supplied signal is refused rather
-// than silently overwritten.
-const FEED_FETCH_TIMEOUT_MS = 20000;
+//   - 60 s, END TO END. The Worker buffers the whole upstream feed (up to 1 MB,
+//     8 s per hop, up to 3 redirects) before it replies, and the phone then
+//     downloads it, so a tighter budget could fail a large calendar on weak
+//     cellular on EVERY refresh. The timeout exists only so a hung download
+//     cannot hold the slot forever; 60 s still guarantees that.
+// A timed-out download is aborted and rejects, and syncFeed reports it
+// {ok:false} — 'unreachable' if it timed out waiting for headers, 'parse_error'
+// or 'server' if it timed out reading the body — and the loop moves on. Only
+// `ok` is read here. The race also settles a fetch that ignores its signal.
+const FEED_FETCH_TIMEOUT_MS = 60000;
 function fetchWithTimeout(url, init = {}) {
-  if (init.signal) throw new Error('fetchWithTimeout: a caller signal is not supported');
   const ac = new AbortController();
   let timer;
   const timedOut = new Promise((_, reject) => {

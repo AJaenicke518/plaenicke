@@ -3223,7 +3223,7 @@ test('sF: a slow batch that is still making progress is not declared failed', as
     for (let i = 0; i < 5; i += 1) await settle();
     assert.match(stampEl().textContent, /^Updated /, 'two 15 s fetches are 30 s of progress, not a failure');
   } finally {
-    for (let i = 0; i < 4; i += 1) { t.mock.timers.tick(20000); await settle(); }
+    for (let i = 0; i < 4; i += 1) { t.mock.timers.tick(60000); await settle(); }
     unseedFeeds();
     for (let i = 0; i < 5; i += 1) await settle();
     t.mock.timers.reset();
@@ -3255,7 +3255,7 @@ test('sF: a fetch that never answers is aborted, the batch moves on, and it is n
     assert.equal(fetchesOf('sF-hang').length, 1, 'fixture check: the hung calendar is being fetched');
     applySyncedState(state({ feeds: [sdFeed('sF-hang'), sdFeed('sF-next'), sdFeed('sF-queued')] }));
     await settle();
-    t.mock.timers.tick(20000);
+    t.mock.timers.tick(60000);
     for (let i = 0; i < 5; i += 1) await settle();
     assert.equal(fetchesOf('sF-hang')[0].signal.aborted, true, 'the hung fetch is aborted, not abandoned');
     assert.equal(fetchesOf('sF-next').length, 1, 'the batch moves on to the next calendar');
@@ -3267,7 +3267,7 @@ test('sF: a fetch that never answers is aborted, the batch moves on, and it is n
     assert.equal(hangs.length, 2, 'the next resume retries it');
     assert.ok(hangs[0].signal.aborted, 'while the first attempt is already aborted: never two at once');
   } finally {
-    for (let i = 0; i < 4; i += 1) { t.mock.timers.tick(20000); for (let j = 0; j < 3; j += 1) await settle(); }
+    for (let i = 0; i < 4; i += 1) { t.mock.timers.tick(60000); for (let j = 0; j < 3; j += 1) await settle(); }
     unseedFeeds();
     for (let i = 0; i < 5; i += 1) await settle();
     t.mock.timers.reset();
@@ -3404,14 +3404,7 @@ test('sF2: a week arrow on a stale screen steps from the week shown', async (t) 
   click(globalThis.document.getElementById('show-day'));
 });
 
-// Batch-F review, observations 4 and 5: the stamp must stay honest on a
-// Settings change (it had no memory of the last batch's failures, and showed a
-// days-old time with no date), and a calendar still being fetched for the
-// first time is not a failure.
-
-
-
-
+// A calendar whose refresh failed and then succeeds clears "Couldn't refresh".
 test('sF2: a calendar that failed and then refreshes clears "Couldn\'t refresh"', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
@@ -3468,10 +3461,13 @@ test('sF3: a download whose body never arrives is failed at the timeout, and the
     assert.equal(fetchesOf('sF3-queued'), 0, 'fixture check: queued behind the stalled download');
     t.mock.timers.tick(20000);
     for (let i = 0; i < 6; i += 1) await settle();
+    assert.equal(stampEl().textContent, 'sentinel', 'the budget is 60 s end to end: a slow download is not cut off at 20 s');
+    t.mock.timers.tick(40000);
+    for (let i = 0; i < 6; i += 1) await settle();
     assert.equal(stampEl().textContent, "Couldn't refresh calendars", 'the stalled download is failed');
     assert.equal(fetchesOf('sF3-queued'), 1, 'and the queue drains');
   } finally {
-    for (let i = 0; i < 3; i += 1) { t.mock.timers.tick(20000); for (let j = 0; j < 3; j += 1) await settle(); }
+    for (let i = 0; i < 3; i += 1) { t.mock.timers.tick(60000); for (let j = 0; j < 3; j += 1) await settle(); }
     unseedFeeds();
     for (let i = 0; i < 5; i += 1) await settle();
     t.mock.timers.reset();
@@ -3480,7 +3476,7 @@ test('sF3: a download whose body never arrives is failed at the timeout, and the
 });
 
 // Review of b8ea190, observation 6: nothing pinned that a FINISHED download
-// disarms its timer. Without it, every successful fetch would be aborted 20 s
+// disarms its timer. Without it, every successful fetch would be aborted 60 s
 // after it began.
 test('sF3: a finished download is never aborted afterwards', async (t) => {
   installFakeLocalStorage();
@@ -3533,7 +3529,7 @@ test('sF3: a fetch that throws at once fails cleanly, with no stray timeout', as
     resume();
     for (let i = 0; i < 6; i += 1) await settle();
     assert.equal(stampEl().textContent, "Couldn't refresh calendars");
-    t.mock.timers.tick(20000);
+    t.mock.timers.tick(60000);
     for (let i = 0; i < 6; i += 1) await settle();
     await new Promise((r) => setImmediate(r));
     assert.deepEqual(unhandled, [], 'no timer may be left armed to reject later');
