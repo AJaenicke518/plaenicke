@@ -212,7 +212,7 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 }
 /* A Day block is ~22px tall with overflow:hidden (js/dayview.js, HOUR_PX =
    48). The list's 44px minimum would push the title out of it. */
-.day-block .item-open, .day-pin .item-open { min-height: 0; line-height: inherit; }
+.day-block .item-open, .day-pin .item-open { min-height: 0; line-height: inherit; height: 100%; }
 .time-line { color: var(--muted); font-size: 0.8rem; font-style: italic; }
 
 /* ---------- calendar controls (shared by month/week/day) ---------- */

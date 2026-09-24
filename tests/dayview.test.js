@@ -268,3 +268,17 @@ test('no clickable element in the day view wraps another control', () => {
   assert.equal(openButtons(c).length, 2, 'fixture check: both kinds of row rendered an open control');
   assert.deepEqual(wrappedControls(c), []);
 });
+
+// Task 4a review I1: with one item, "opens THIS item" cannot fail. Two timed
+// blocks, tap the second — the edit that follows lands on whatever opened.
+test('tapping the second timed block opens the second item, not the first', () => {
+  const c = container();
+  const opened = [];
+  const a = { ...timed('a', '09:00'), endTime: '10:00' };
+  const b = { ...timed('b', '13:00'), endTime: '14:00' };
+  renderDayView(c, '2026-08-20', [a, b], { onOpen: (it) => opened.push(it), onDelete() {} });
+  const btn = openButtons(c).find((x) => /t-b/.test(x.textContent));
+  assert.ok(btn, 'fixture check: the second block has its own open button');
+  btn.click();
+  assert.deepEqual(opened, [b]);
+});

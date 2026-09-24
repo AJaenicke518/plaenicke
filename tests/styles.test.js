@@ -174,3 +174,21 @@ test('the sheet top bar is sticky, so Save stays reachable while the form scroll
 test('body leaves room at the bottom for the toast', () => {
   assert.equal(declOf('body', 'padding-bottom'), 'calc(96px + env(safe-area-inset-bottom))');
 });
+
+// --- Task 4a review O1, O2, O3 ----------------------------------------------
+test('.item-open comes before .idea-title, so font: inherit cannot cancel the bold', () => {
+  const a = css.search(/(^|\})\s*\.item-open\s*\{/m);
+  const b = css.search(/(^|\})\s*\.idea-title\s*\{/m);
+  assert.ok(a >= 0 && b >= 0, 'both rules must exist');
+  assert.ok(a < b, '.idea-title must come AFTER .item-open');
+});
+
+test('a done item keeps its strikethrough on the title button', () => {
+  assert.match(css, /li\.done \.item-open[^{]*\{[^}]*text-decoration:\s*line-through/);
+});
+
+test('in a Day block the open button fills the block, so any tap on it opens', () => {
+  const m = css.match(/\.day-block \.item-open, \.day-pin \.item-open\s*\{([^}]*)\}/);
+  assert.ok(m);
+  assert.match(m[1], /height:\s*100%/);
+});

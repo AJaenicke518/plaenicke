@@ -280,6 +280,10 @@ function handleDelete(id) {
     deleteItem(id);
   } catch (e) {
     setMessage(e.message);
+    // The delete did NOT happen (tombstone-first: storage is untouched), and
+    // commitDelete has already taken the id out of pendingDeletes. Re-render so
+    // the item reappears — a failed delete must not look like a successful one.
+    render();
   }
 }
 

@@ -1434,3 +1434,45 @@ test('delete: Undo, then going to the background, keeps the item', async (t) => 
   }
   seed([]);
 });
+
+// --- Task 4a review I1 + the 4b commit-failure finding ----------------------
+
+test('review: tapping the SECOND list item opens the second item', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([
+    record({ id: 'rv-a', title: 'First of two', date: '2099-03-01' }),
+    record({ id: 'rv-b', title: 'Second of two', date: '2099-03-02' }),
+  ]);
+  click(openControlFor(itemList(), 'Second of two'));
+  assert.equal(sheetHost().querySelector('.sheet-title').value, 'Second of two');
+  closeSheet();
+  seed([]);
+});
+
+// A delete whose commit fails (the tombstone write hits a full device) must
+// not leave the item hidden: before pending deletes, a failed delete left it
+// on screen, and it must still be on screen after one now.
+test('review: a delete whose commit fails is shown again, with the error', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'rv-fail', title: 'Cannot be deleted', date: '2099-03-03' })]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const real = localStorage.setItem.bind(localStorage);
+  try {
+    click(deleteControlFor(itemList(), 'Cannot be deleted'));
+    assert.doesNotMatch(allText(itemList()), /Cannot be deleted/, 'fixture check: hidden while pending');
+    localStorage.setItem = (k, v) => {
+      if (k === 'plaenicke.syncTombstones') { const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; }
+      return real(k, v);
+    };
+    t.mock.timers.tick(5000);
+  } finally {
+    localStorage.setItem = real;
+    t.mock.timers.reset();
+  }
+  assert.match(allText(itemList()), /Cannot be deleted/, 'a delete that did not happen must not look like it did');
+  assert.match(messageText(), /quota/i);
+  assert.equal(toastHost().children.length, 0);
+  seed([]);
+});
