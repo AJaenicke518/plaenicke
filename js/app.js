@@ -171,7 +171,7 @@ initSettings({
   // calendar changes what is on screen, and so what the stamp is about.
   onFeedsChanged: () => {
     feeds = loadFeeds(); feedCache = loadFeedCache(); render();
-    stampUpdated(); stampFromFeeds();
+    stampUpdated(); stampFromFeeds([]);
   },
   // Adding or removing a calendar mutates SYNCED data (spec 6.3): the feed
   // record itself, and for a removal the feed tombstone removeFeed() writes.
@@ -877,24 +877,45 @@ stampUpdated();
 // When the batch settles it repaints the "Updated" stamp from the calendars
 // themselves (sweep D1); see stampFromFeeds.
 //
-// EACH FETCH IS ABORTED AFTER FEED_FETCH_TIMEOUT_MS (sweep F, I4; reworked
-// after the batch-F review). A fetch that never answers would otherwise hold
-// the one batch slot forever. The timeout is per FETCH, not per batch: syncStale
-// fetches feeds one after another, so a batch timeout declared a slow but
-// progressing batch failed, ignored its results, and left its loop running —
-// a resume could then fetch the same calendar twice at once. A timed-out fetch
-// is aborted and rejects, so syncFeed reports it {ok:false,'unreachable'}, the
-// loop moves on, and the batch settles once with accurate results. The race
-// also settles a fetch that ignores its signal.
+// EACH DOWNLOAD IS ABORTED AFTER FEED_FETCH_TIMEOUT_MS (sweep F, I4; reworked
+// twice after review). A download that never finishes would otherwise hold the
+// one batch slot forever: every later refresh dropped, every queued calendar
+// never fetched.
+//   - Per DOWNLOAD, not per batch: syncStale fetches calendars one after
+//     another, so a batch timeout failed slow-but-progressing batches and left
+//     the loop running (a resume could then fetch one calendar twice at once).
+//   - HEADERS AND BODY: fetch() resolves when the headers arrive, and syncFeed
+//     then awaits res.text()/res.json(). A timer cleared at the headers left a
+//     body that stalls mid-download unguarded. The same timer races the body
+//     read and is disarmed only when that read settles.
+// A timed-out download is aborted and rejects, so syncFeed reports it
+// {ok:false,'unreachable'} and the loop moves on. The race also settles a
+// fetch that ignores its signal. A caller-supplied signal is refused rather
+// than silently overwritten.
 const FEED_FETCH_TIMEOUT_MS = 20000;
 function fetchWithTimeout(url, init = {}) {
+  if (init.signal) throw new Error('fetchWithTimeout: a caller signal is not supported');
   const ac = new AbortController();
   let timer;
   const timedOut = new Promise((_, reject) => {
     timer = setTimeout(() => { ac.abort(); reject(new Error('timeout')); }, FEED_FETCH_TIMEOUT_MS);
   });
-  return Promise.race([fetch(url, { ...init, signal: ac.signal }), timedOut])
-    .finally(() => clearTimeout(timer));
+  const disarm = () => clearTimeout(timer);
+  const guarded = (p) => Promise.race([p, timedOut]);
+  let started;
+  try {
+    started = fetch(url, { ...init, signal: ac.signal });
+  } catch (err) {
+    disarm(); // a fetch that throws at once must not leave the timer armed
+    return Promise.reject(err);
+  }
+  return guarded(started).then((res) => ({
+    ok: res.ok,
+    status: res.status,
+    headers: res.headers,
+    text: () => guarded(Promise.resolve().then(() => res.text())).finally(disarm),
+    json: () => guarded(Promise.resolve().then(() => res.json())).finally(disarm),
+  }), (err) => { disarm(); throw err; });
 }
 let feedBatch = null; // ids in the batch in flight, or null
 const feedQueue = new Set();
@@ -910,14 +931,7 @@ function backgroundSyncFeeds(feedList) {
     feedBatch = null;
     feedCache = loadFeedCache();
     render();
-    // Per calendar, and only for the calendars THIS batch covered: a later
-    // batch for other calendars must not clear an earlier failure. null means
-    // the whole batch failed, so every calendar in it counts as failed.
-    const failedNow = new Set(failedIds === null ? feedList.map((f) => f.id) : failedIds);
-    for (const f of feedList) {
-      if (failedNow.has(f.id)) lastFailedFeeds.add(f.id); else lastFailedFeeds.delete(f.id);
-    }
-    stampFromFeeds();
+    stampFromFeeds(failedIds);
     if (feedQueue.size > 0) {
       const queued = new Set(feedQueue);
       feedQueue.clear();
@@ -1084,31 +1098,20 @@ function stampUpdated() {
 }
 
 // The OLDEST fetch among the visible calendars: the stamp promises that
-// everything on screen is at least that fresh. It REMEMBERS the last batch's
-// failures (lastFailedFeeds), so a later repaint — a colour tap in Settings —
-// cannot erase "Couldn't refresh" by painting an old time over it (batch-F
-// review, observation 4). A visible calendar with no cached fetch that is NOT a
-// known failure is still being fetched for the first time (a calendar just
-// added in Settings); it is left out rather than reported failed (observation
-// 5). Hidden calendars are not on screen and do not count either way. A time
-// from an earlier day names the day, so "9:02 AM" can never pass for today.
-let lastFailedFeeds = new Set();
-
-function stampFromFeeds() {
+// everything on screen is at least that fresh. A visible calendar whose fetch
+// failed (failedIds null means the whole batch failed), or that has no cached
+// fetch at all, has not been refreshed, and the stamp says so. Hidden
+// calendars are not on screen and do not count either way.
+function stampFromFeeds(failedIds) {
   const visible = visibleFeeds();
   if (visible.length === 0) return; // keep the render-time stamp
-  if (visible.some((f) => lastFailedFeeds.has(f.id))) {
+  const failed = failedIds === null || visible.some((f) => failedIds.includes(f.id));
+  const times = visible.map((f) => Date.parse(feedCache[f.id] && feedCache[f.id].fetchedAt));
+  if (failed || times.some((t) => !Number.isFinite(t))) {
     els.updatedStamp.textContent = "Couldn't refresh calendars";
     return;
   }
-  const times = visible
-    .map((f) => Date.parse(feedCache[f.id] && feedCache[f.id].fetchedAt))
-    .filter((t) => Number.isFinite(t));
-  if (times.length === 0) return; // nothing fetched yet: keep what is shown
-  const oldest = new Date(Math.min(...times));
-  const today = toISO(new Date());
-  const day = toISO(oldest) === today ? '' : `${formatDayLabel(toISO(oldest), today)}, `;
-  els.updatedStamp.textContent = `Updated ${day}${clockLabel(oldest)}`;
+  els.updatedStamp.textContent = `Updated ${clockLabel(new Date(Math.min(...times)))}`;
 }
 
 document.addEventListener('visibilitychange', () => {

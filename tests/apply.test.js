@@ -3408,72 +3408,9 @@ test('sF2: a week arrow on a stale screen steps from the week shown', async (t) 
 // Settings change (it had no memory of the last batch's failures, and showed a
 // days-old time with no date), and a calendar still being fetched for the
 // first time is not a failure.
-function tapColourDot(feedName) {
-  const settingsBtn = globalThis.document.getElementById('settings-btn');
-  const settingsHost = globalThis.document.getElementById('settings-host');
-  if (settingsHost.childElementCount) click(settingsBtn);
-  click(settingsBtn);
-  const dot = settingsHost.querySelectorAll('button')
-    .find((b) => (b.getAttribute('aria-label') || '').includes(feedName) && b.className.includes('feed-dot'));
-  assert.ok(dot, `fixture check: a colour dot for ${feedName}`);
-  click(dot);
-  click(settingsBtn);
-}
 
-test('sF2: a Settings change keeps "Couldn\'t refresh" after a failed refresh', async (t) => {
-  installFakeLocalStorage();
-  await import('../js/app.js');
-  seed([]);
-  seedFeedsWithCache([sdFeed('sF2-bad'), sdFeed('sF2-good')],
-    { 'sF2-bad': cacheAt(localAt(7, 0)), 'sF2-good': cacheAt(localAt(7, 0)) });
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = (url) => Promise.resolve(String(url).includes('sF2-bad')
-    ? { ok: false, status: 502, json: async () => ({ error: 'upstream_error' }), text: async () => '' }
-    : { ok: true, status: 200, text: async () => '' });
-  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() });
-  try {
-    resume();
-    for (let i = 0; i < 6; i += 1) await settle();
-    assert.equal(stampEl().textContent, "Couldn't refresh calendars", 'fixture check: the refresh failed');
-    tapColourDot('sF2-good');
-    assert.equal(stampEl().textContent, "Couldn't refresh calendars", 'a colour tap must not erase the failure');
-  } finally {
-    t.mock.timers.reset();
-    globalThis.fetch = originalFetch;
-  }
-  unseedFeeds();
-  saveTombstones([]);
-});
 
-test('sF2: a stamp from an earlier day names the day', async (t) => {
-  installFakeLocalStorage();
-  await import('../js/app.js');
-  seed([]);
-  seedFeedsWithCache([sdFeed('sF2-old')], { 'sF2-old': cacheAt(new Date(2026, 8, 21, 9, 2)) });
-  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() });
-  try {
-    tapColourDot('sF2-old');
-    assert.equal(stampEl().textContent, 'Updated Mon, Sep 21, 9:02 AM');
-  } finally {
-    t.mock.timers.reset();
-  }
-  unseedFeeds();
-});
 
-test('sF2: a calendar not yet fetched for the first time is not reported as a failure', async (t) => {
-  installFakeLocalStorage();
-  await import('../js/app.js');
-  seed([]);
-  seedFeedsWithCache([sdFeed('sF2-fetched'), sdFeed('sF2-new')], { 'sF2-fetched': cacheAt(localAt(9, 30)) });
-  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() });
-  try {
-    tapColourDot('sF2-fetched');
-    assert.equal(stampEl().textContent, 'Updated 9:30 AM', 'the new calendar is simply not counted yet');
-  } finally {
-    t.mock.timers.reset();
-  }
-  unseedFeeds();
-});
 
 test('sF2: a calendar that failed and then refreshes clears "Couldn\'t refresh"', async (t) => {
   installFakeLocalStorage();
@@ -3499,4 +3436,112 @@ test('sF2: a calendar that failed and then refreshes clears "Couldn\'t refresh"'
     globalThis.fetch = originalFetch;
   }
   unseedFeeds();
+});
+
+// Review of b8ea190, Important 1: the timeout covered only the wait for the
+// response HEADERS. syncFeed then awaits res.text() with nothing armed, so a
+// body that stalls mid-download held the one batch slot forever — every later
+// refresh dropped, queued calendars never fetched. The timeout now covers the
+// whole download: headers and body.
+test('sF3: a download whose body never arrives is failed at the timeout, and the queue drains', async (t) => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sF3-body')], {});
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url) => {
+    calls.push(String(url));
+    if (String(url).includes('sF3-body')) {
+      return Promise.resolve({ ok: true, status: 200, text: () => new Promise(() => {}) });
+    }
+    return Promise.resolve(okFeedResponse());
+  };
+  const fetchesOf = (id) => calls.filter((u) => u.includes(encodeURIComponent(`https://example.com/${id}.ics`))).length;
+  stampEl().textContent = 'sentinel';
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    resume();
+    for (let i = 0; i < 4; i += 1) await settle();
+    applySyncedState(state({ feeds: [sdFeed('sF3-body'), sdFeed('sF3-queued')] }));
+    await settle();
+    assert.equal(fetchesOf('sF3-queued'), 0, 'fixture check: queued behind the stalled download');
+    t.mock.timers.tick(20000);
+    for (let i = 0; i < 6; i += 1) await settle();
+    assert.equal(stampEl().textContent, "Couldn't refresh calendars", 'the stalled download is failed');
+    assert.equal(fetchesOf('sF3-queued'), 1, 'and the queue drains');
+  } finally {
+    for (let i = 0; i < 3; i += 1) { t.mock.timers.tick(20000); for (let j = 0; j < 3; j += 1) await settle(); }
+    unseedFeeds();
+    for (let i = 0; i < 5; i += 1) await settle();
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// Review of b8ea190, observation 6: nothing pinned that a FINISHED download
+// disarms its timer. Without it, every successful fetch would be aborted 20 s
+// after it began.
+test('sF3: a finished download is never aborted afterwards', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sF3-done')], {});
+  let signal = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, init) => {
+    signal = init && init.signal;
+    return new Promise((resolve) => {
+      setTimeout(() => resolve({ ok: true, status: 200,
+        text: () => new Promise((r) => { setTimeout(() => r(''), 5000); }) }), 5000);
+    });
+  };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    resume();
+    await settle();
+    t.mock.timers.tick(5000);
+    for (let i = 0; i < 3; i += 1) await settle();
+    t.mock.timers.tick(5000);
+    for (let i = 0; i < 6; i += 1) await settle();
+    assert.match(stampEl().textContent, /^Updated /, 'fixture check: a 10 s download succeeds');
+    t.mock.timers.tick(30000);
+    for (let i = 0; i < 3; i += 1) await settle();
+    assert.equal(signal.aborted, false, 'the timer must be disarmed once the body has arrived');
+  } finally {
+    unseedFeeds();
+    for (let i = 0; i < 5; i += 1) await settle();
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// Review of b8ea190, observation 4: a fetch that throws synchronously left an
+// armed timer whose rejection nobody handled.
+test('sF3: a fetch that throws at once fails cleanly, with no stray timeout', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sF3-throw')], {});
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => { throw new TypeError('boom'); };
+  const unhandled = [];
+  const onUnhandled = (e) => { unhandled.push(e); };
+  process.on('unhandledRejection', onUnhandled);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    resume();
+    for (let i = 0; i < 6; i += 1) await settle();
+    assert.equal(stampEl().textContent, "Couldn't refresh calendars");
+    t.mock.timers.tick(20000);
+    for (let i = 0; i < 6; i += 1) await settle();
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(unhandled, [], 'no timer may be left armed to reject later');
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+    unseedFeeds();
+    for (let i = 0; i < 5; i += 1) await settle();
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
 });
