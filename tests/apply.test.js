@@ -3199,26 +3199,51 @@ test('sF: the next arrows after the clock turns move from what is on screen, wit
   }
 });
 
-// F4 (sync I4): a calendar fetch that never answers must not hold the one
-// batch slot forever. It is settled as failed after the timeout, the queue
-// drains, and its late answer, if it ever comes, does not free the slot of
-// the batch that is running by then.
-test('sF: a calendar batch that never settles is failed after the timeout, and the queue drains', async (t) => {
+// F4 (sync I4), reworked after the batch-F review: the timeout is PER FETCH,
+// not per batch. A batch timeout declared a slow-but-progressing batch failed
+// and then ignored its results, and left the timed-out batch's loop running,
+// so a resume could fetch the same calendar twice at once.
+function okFeedResponse() { return { ok: true, status: 200, text: async () => '' }; }
+
+test('sF: a slow batch that is still making progress is not declared failed', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sF-slow1'), sdFeed('sF-slow2')], {});
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => new Promise((resolve) => { setTimeout(() => resolve(okFeedResponse()), 15000); });
+  stampEl().textContent = 'sentinel';
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    resume();
+    await settle();
+    t.mock.timers.tick(15000);
+    await settle();
+    t.mock.timers.tick(15000);
+    for (let i = 0; i < 5; i += 1) await settle();
+    assert.match(stampEl().textContent, /^Updated /, 'two 15 s fetches are 30 s of progress, not a failure');
+  } finally {
+    for (let i = 0; i < 4; i += 1) { t.mock.timers.tick(20000); await settle(); }
+    unseedFeeds();
+    for (let i = 0; i < 5; i += 1) await settle();
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('sF: a fetch that never answers is aborted, the batch moves on, and it is never fetched twice at once', async (t) => {
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
   seed([]);
-  seedFeedsWithCache([sdFeed('sF-hang')], {}); // never fetched, so stale
+  seedFeedsWithCache([sdFeed('sF-hang'), sdFeed('sF-next')], {});
   const calls = [];
-  const gates = [];
-  let instant = false;
-  const failed = () => ({ ok: false, status: 502, text: async () => '' });
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = (url) => {
-    calls.push(String(url));
-    if (instant) return Promise.resolve(failed());
-    return new Promise((resolve) => { gates.push(() => resolve(failed())); });
+  globalThis.fetch = (url, init) => {
+    calls.push({ url: String(url), signal: init && init.signal });
+    if (String(url).includes('sF-hang')) return new Promise(() => {}); // ignores its signal on purpose
+    return Promise.resolve(okFeedResponse());
   };
-  const fetchesOf = (id) => calls.filter((u) => u.includes(encodeURIComponent(`https://example.com/${id}.ics`))).length;
+  const fetchesOf = (id) => calls.filter((c) => c.url.includes(encodeURIComponent(`https://example.com/${id}.ics`)));
   const originalError = console.error;
   const logged = [];
   console.error = (...a) => { logged.push(a); };
@@ -3227,38 +3252,30 @@ test('sF: a calendar batch that never settles is failed after the timeout, and t
   try {
     resume();
     await settle();
-    assert.equal(fetchesOf('sF-hang'), 1, 'fixture check: the stale calendar is being fetched');
-    applySyncedState(state({ feeds: [sdFeed('sF-hang'), sdFeed('sF-queued')] }));
+    assert.equal(fetchesOf('sF-hang').length, 1, 'fixture check: the hung calendar is being fetched');
+    applySyncedState(state({ feeds: [sdFeed('sF-hang'), sdFeed('sF-next'), sdFeed('sF-queued')] }));
     await settle();
-    assert.equal(fetchesOf('sF-queued'), 0, 'fixture check: queued behind the batch in flight');
-    t.mock.timers.tick(19999);
-    await settle();
-    assert.equal(stampEl().textContent, 'sentinel', 'not before the timeout');
-    t.mock.timers.tick(1);
-    await settle();
-    assert.equal(stampEl().textContent, "Couldn't refresh calendars", 'the hung batch is settled as failed');
-    assert.equal(fetchesOf('sF-queued'), 1, 'and the queue drains');
-    // The first fetch finally answers, while the queued batch is in flight.
-    gates.shift()();
-    await settle();
+    t.mock.timers.tick(20000);
+    for (let i = 0; i < 5; i += 1) await settle();
+    assert.equal(fetchesOf('sF-hang')[0].signal.aborted, true, 'the hung fetch is aborted, not abandoned');
+    assert.equal(fetchesOf('sF-next').length, 1, 'the batch moves on to the next calendar');
+    assert.equal(stampEl().textContent, "Couldn't refresh calendars", 'and says one calendar failed');
+    assert.equal(fetchesOf('sF-queued').length, 1, 'the queue drains');
     resume();
     await settle();
-    assert.equal(fetchesOf('sF-hang'), 1,
-      'a late answer must not free the slot of the batch in flight: that would start a second fetch');
+    const hangs = fetchesOf('sF-hang');
+    assert.equal(hangs.length, 2, 'the next resume retries it');
+    assert.ok(hangs[0].signal.aborted, 'while the first attempt is already aborted: never two at once');
   } finally {
-    instant = true;
-    while (gates.length) gates.shift()();
-    for (let i = 0; i < 5; i += 1) await settle();
+    for (let i = 0; i < 4; i += 1) { t.mock.timers.tick(20000); for (let j = 0; j < 3; j += 1) await settle(); }
     unseedFeeds();
     for (let i = 0; i < 5; i += 1) await settle();
     t.mock.timers.reset();
     console.error = originalError;
     globalThis.fetch = originalFetch;
   }
-  assert.ok(logged.some((a) => String(a[0]).includes('timed out')), 'the timeout is logged');
   assert.ok(!logged.some((a) => a.some((x) => String(x).includes('example.com'))), 'never the feed URL');
   saveTombstones([]);
-  resume();
 });
 
 // F7 (sync O5): a change of calendars in Settings changes what the stamp is
@@ -3343,4 +3360,143 @@ test('sF: the page stays locked while Settings or a sheet is open, whichever clo
     if (restore) click(restore);
   }
   seed([]);
+});
+
+// Batch-F review, Important 1: the mirror of I3. The SCREEN still shows the
+// old today (nothing re-rendered since midnight — a desktop tab left open), and
+// an arrow must step from what is on screen, not from the caught-up today.
+test('sF2: an arrow on a stale screen steps from the day shown, not from the new today', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  click(globalThis.document.getElementById('show-day'));
+  const realNow = Date.now();
+  const dayLabel = globalThis.document.getElementById('day-label');
+  assert.equal(dayLabel.textContent, labelFor(new Date(realNow)), 'fixture check: showing today');
+  t.mock.timers.enable({ apis: ['Date'], now: realNow + 24 * 60 * 60 * 1000 });
+  try {
+    click(globalThis.document.getElementById('next-day'));
+    assert.equal(dayLabel.textContent, labelFor(new Date(realNow + 24 * 60 * 60 * 1000)),
+      'next from the old today shown is the new today — not the day after it');
+    click(globalThis.document.getElementById('prev-day'));
+    assert.equal(dayLabel.textContent, labelFor(new Date(realNow)), 'and prev steps back from there');
+  } finally {
+    t.mock.timers.reset();
+  }
+  resume();
+});
+
+test('sF2: a week arrow on a stale screen steps from the week shown', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  click(globalThis.document.getElementById('show-week'));
+  const weekLabel = globalThis.document.getElementById('week-label');
+  const before = weekLabel.textContent;
+  const realNow = Date.now();
+  t.mock.timers.enable({ apis: ['Date'], now: realNow + 7 * 24 * 60 * 60 * 1000 });
+  try {
+    click(globalThis.document.getElementById('prev-week'));
+    click(globalThis.document.getElementById('next-week'));
+    assert.equal(weekLabel.textContent, before, 'prev then next returns to the week that was on screen');
+  } finally {
+    t.mock.timers.reset();
+  }
+  resume();
+  click(globalThis.document.getElementById('show-day'));
+});
+
+// Batch-F review, observations 4 and 5: the stamp must stay honest on a
+// Settings change (it had no memory of the last batch's failures, and showed a
+// days-old time with no date), and a calendar still being fetched for the
+// first time is not a failure.
+function tapColourDot(feedName) {
+  const settingsBtn = globalThis.document.getElementById('settings-btn');
+  const settingsHost = globalThis.document.getElementById('settings-host');
+  if (settingsHost.childElementCount) click(settingsBtn);
+  click(settingsBtn);
+  const dot = settingsHost.querySelectorAll('button')
+    .find((b) => (b.getAttribute('aria-label') || '').includes(feedName) && b.className.includes('feed-dot'));
+  assert.ok(dot, `fixture check: a colour dot for ${feedName}`);
+  click(dot);
+  click(settingsBtn);
+}
+
+test('sF2: a Settings change keeps "Couldn\'t refresh" after a failed refresh', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sF2-bad'), sdFeed('sF2-good')],
+    { 'sF2-bad': cacheAt(localAt(7, 0)), 'sF2-good': cacheAt(localAt(7, 0)) });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url) => Promise.resolve(String(url).includes('sF2-bad')
+    ? { ok: false, status: 502, json: async () => ({ error: 'upstream_error' }), text: async () => '' }
+    : { ok: true, status: 200, text: async () => '' });
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() });
+  try {
+    resume();
+    for (let i = 0; i < 6; i += 1) await settle();
+    assert.equal(stampEl().textContent, "Couldn't refresh calendars", 'fixture check: the refresh failed');
+    tapColourDot('sF2-good');
+    assert.equal(stampEl().textContent, "Couldn't refresh calendars", 'a colour tap must not erase the failure');
+  } finally {
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+  unseedFeeds();
+  saveTombstones([]);
+});
+
+test('sF2: a stamp from an earlier day names the day', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sF2-old')], { 'sF2-old': cacheAt(new Date(2026, 8, 21, 9, 2)) });
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() });
+  try {
+    tapColourDot('sF2-old');
+    assert.equal(stampEl().textContent, 'Updated Mon, Sep 21, 9:02 AM');
+  } finally {
+    t.mock.timers.reset();
+  }
+  unseedFeeds();
+});
+
+test('sF2: a calendar not yet fetched for the first time is not reported as a failure', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sF2-fetched'), sdFeed('sF2-new')], { 'sF2-fetched': cacheAt(localAt(9, 30)) });
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() });
+  try {
+    tapColourDot('sF2-fetched');
+    assert.equal(stampEl().textContent, 'Updated 9:30 AM', 'the new calendar is simply not counted yet');
+  } finally {
+    t.mock.timers.reset();
+  }
+  unseedFeeds();
+});
+
+test('sF2: a calendar that failed and then refreshes clears "Couldn\'t refresh"', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sF2-flaky')], { 'sF2-flaky': cacheAt(localAt(7, 0)) });
+  let up = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve(up
+    ? { ok: true, status: 200, text: async () => '' }
+    : { ok: false, status: 502, json: async () => ({ error: 'upstream_error' }), text: async () => '' });
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() });
+  try {
+    resume();
+    for (let i = 0; i < 6; i += 1) await settle();
+    assert.equal(stampEl().textContent, "Couldn't refresh calendars", 'fixture check: first refresh failed');
+    up = true;
+    resume();
+    for (let i = 0; i < 6; i += 1) await settle();
+    assert.equal(stampEl().textContent, 'Updated 10:00 AM', 'a later success must clear the failure');
+  } finally {
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+  unseedFeeds();
 });
