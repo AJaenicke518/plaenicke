@@ -36,8 +36,21 @@ export function applyEdit(record, patch, updatedAt) {
     if (Object.prototype.hasOwnProperty.call(patch, k)) picked[k] = patch[k];
   }
   const merged = { ...record, ...picked };
+  // Ideas are unscheduled (spec § 3.4): no edit — including a raw undo that
+  // restores an idea after the other device set a time — leaves one timed.
+  if (merged.type === 'idea') { merged.time = null; merged.endTime = null; }
   try {
-    return makeItem(normalizeIdea(merged), { id: record.id, createdAt: record.createdAt, updatedAt });
+    const rebuilt = makeItem(normalizeIdea(merged), { id: record.id, createdAt: record.createdAt, updatedAt });
+    // makeItem is a whitelist rebuild, which is right for VALIDATING the
+    // fields it knows and wrong for DISCARDING the ones it doesn't. CLAUDE.md:
+    // "adding a new field to items is safe on the sync path" — deserializeItems
+    // and unionById pass records through whole, and an edit must too, or this
+    // version erases a newer version's field on every device (the edit wins
+    // last-write-wins with its newer updatedAt). Unknown keys ride along; the
+    // whitelisted ones always come from makeItem and can never be overridden.
+    const extras = {};
+    for (const k of Object.keys(record)) if (!(k in rebuilt)) extras[k] = record[k];
+    return { ...extras, ...rebuilt };
   } catch (err) {
     // An idea has no separate title box on screen, so "Title is required"
     // would name a field the user cannot see. That holds when the SAME save

@@ -338,3 +338,33 @@ test('an idea emptied while switching to a task says the idea is empty', () => {
   assert.throws(() => applyEdit(record, typeChangePatch(record, { type: 'task', notes: '', title: '' }), T1),
     /The idea is empty/);
 });
+
+// --- Task 4c review ---------------------------------------------------------
+
+// I2: CLAUDE.md — "adding a new field to items is safe on the sync path".
+// deserializeItems and unionById pass records through whole; an edit must too,
+// or a device on this version erases a newer version's field on every device
+// (the edit carries a newer updatedAt and last-write-wins takes the record).
+test('applyEdit keeps fields this version does not know about', () => {
+  const record = { ...task(), color: 'red', futureField: { a: 1 } };
+  const out = applyEdit(record, { title: 'Renamed' }, T1);
+  assert.equal(out.color, 'red');
+  assert.deepEqual(out.futureField, { a: 1 });
+  assert.equal(out.title, 'Renamed');
+});
+
+test('an unknown field can never override a validated one', () => {
+  const record = { ...task(), title: 'Real' };
+  const out = applyEdit(record, { date: '2026-10-01' }, T1);
+  assert.equal(out.date, '2026-10-01');
+  assert.equal(out.updatedAt, T1);
+});
+
+// O5: ideas are unscheduled (spec § 3.4). No edit path — including a raw
+// undo — may leave an idea carrying a time.
+test('an idea never carries a time after an edit', () => {
+  const record = { ...task({ time: '07:00', endTime: '08:00' }) };
+  const out = applyEdit(record, { type: 'idea', notes: 'x', title: 'x' }, T1);
+  assert.equal(out.time, null);
+  assert.equal(out.endTime, null);
+});

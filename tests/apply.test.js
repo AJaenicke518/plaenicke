@@ -1812,3 +1812,104 @@ test('review: Undo of an item the other device deleted meanwhile says so', async
   assert.equal(toastHost().children.length, 0);
   seed([]);
 });
+
+// --- Task 4c review ---------------------------------------------------------
+
+// I1: Undo is itself an edit and must bump updatedAt, or the next sync —
+// carrying the already-pushed edit, whose updatedAt it would merely tie —
+// silently reverts the undo (unionById ties go to REMOTE).
+// Through applySyncedState (a real merge), not simulateSync, which overwrites
+// storage wholesale and so cannot exercise last-write-wins. Date is mocked so
+// the edit and the undo are a second apart: a same-millisecond pair would tie.
+test('review4c: an Undo survives a sync that returns the already-pushed edit', async (t) => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  seed([record({ id: 'rv4-bump', title: 'R orig', date: '2099-06-01' })]);
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.parse('2026-09-23T12:00:00.000Z') });
+  try {
+    click(openControlFor(itemList(), 'R orig'));
+    sheetHost().querySelector('.sheet-title').value = 'R edited';
+    click(sheetHost().querySelector('.sheet-save'));
+    const pushed = { ...storedById('rv4-bump') };
+    t.mock.timers.tick(1000);
+    click(toastHost().querySelector('.toast-undo'));
+    applySyncedState(state({ items: [pushed] }));
+    assert.equal(storedById('rv4-bump').title, 'R orig', 'the undo must win over the edit it undid');
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  seed([]);
+});
+
+// I3a: a failed Undo is not silent. The other device deleted the item between
+// the Save and the Undo.
+test('review4c: an Undo that cannot be applied says why', async (t) => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  seed([record({ id: 'rv4-gone', title: 'Gone soon', date: '2099-06-02' })]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    click(openControlFor(itemList(), 'Gone soon'));
+    sheetHost().querySelector('.sheet-title').value = 'Gone soon, renamed';
+    click(sheetHost().querySelector('.sheet-save'));
+    applySyncedState(state({ items: [], tombstones: [{ id: 'rv4-gone', kind: 'item', deletedAt: '2999-01-01T00:00:00.000Z' }] }));
+    click(toastHost().querySelector('.toast-undo'));
+    assert.match(messageText(), /no longer exists/);
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  seed([]);
+});
+
+// I3b: the Saved toast is the active toast, so opening another item dismisses
+// it — no stale Undo sits over the new sheet.
+test('review4c: opening another item dismisses the Saved toast', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([
+    record({ id: 'rv4-a', title: 'Saved one', date: '2099-06-03' }),
+    record({ id: 'rv4-b', title: 'Next one', date: '2099-06-04' }),
+  ]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    click(openControlFor(itemList(), 'Saved one'));
+    sheetHost().querySelector('.sheet-title').value = 'Saved one, renamed';
+    click(sheetHost().querySelector('.sheet-save'));
+    assert.ok(toastHost().querySelector('.toast-undo'), 'fixture check: the Saved toast is up');
+    click(openControlFor(itemList(), 'Next one'));
+    assert.equal(toastHost().children.length, 0, 'the Saved toast must be dismissed');
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  seed([]);
+});
+
+// I3c: a raw Undo still goes through applyEdit's validation. The end time was
+// edited, then the other device moved the start past the old end.
+test('review4c: an Undo that would store an invalid record is refused, and nothing is written', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'rv4-inv', title: 'Timed', date: '2099-06-05', time: '09:00', endTime: '10:00' })]);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    click(openControlFor(itemList(), 'Timed'));
+    sheetHost().querySelector('.sheet-end').value = '12:00';
+    click(sheetHost().querySelector('.sheet-save'));
+    simulateSync([{ ...storedById('rv4-inv'), time: '11:00', updatedAt: '2999-01-01T00:00:00.000Z' }]);
+    const before = JSON.stringify(storedById('rv4-inv'));
+    click(toastHost().querySelector('.toast-undo'));
+    assert.equal(JSON.stringify(storedById('rv4-inv')), before, 'an invalid undo writes nothing');
+    assert.match(messageText(), /End time must be after start time/);
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  seed([]);
+});
