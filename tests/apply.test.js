@@ -137,8 +137,12 @@ class FakeElement {
   click() { (this._listeners.click || []).forEach((fn) => fn({ target: this })); }
 
   // Harness only: records focus the way a browser reports it, so a test can
-  // ask what the app focused. Production code never reads this.
-  focus() { globalThis.document.activeElement = this; }
+  // ask what the app focused, and with which options (sweep F: preventScroll).
+  // Production code never reads this.
+  focus(options) {
+    globalThis.document.activeElement = this;
+    globalThis.document.lastFocusOptions = options;
+  }
 }
 
 function makeFakeDocument() {
@@ -1930,8 +1934,10 @@ test('review4c: opening another item dismisses the Saved toast', async (t) => {
   seed([]);
 });
 
-// I3c: a raw Undo still goes through applyEdit's validation. The end time was
-// edited, then the other device moved the start past the old end.
+// I3c: the end time was edited, then the other device moved the start past the
+// old end. Restoring the old end alone would store an invalid record. Since
+// sweep F (I2) time and endTime move together: the start changed, so neither
+// is restored, nothing is written, and the message is not the validator's.
 test('review4c: an Undo that would store an invalid record is refused, and nothing is written', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
@@ -1945,7 +1951,7 @@ test('review4c: an Undo that would store an invalid record is refused, and nothi
     const before = JSON.stringify(storedById('rv4-inv'));
     click(toastHost().querySelector('.toast-undo'));
     assert.equal(JSON.stringify(storedById('rv4-inv')), before, 'an invalid undo writes nothing');
-    assert.match(messageText(), /End time must be after start time/);
+    assert.equal(messageText(), 'Some changes from your other device were kept.');
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000);
@@ -2145,7 +2151,7 @@ test('sweep S: saving a sheet whose item changed type underneath it is refused',
     sheetHost().querySelector('.sheet-title').value = 'Type under, renamed';
     click(sheetHost().querySelector('.sheet-save'));
     assert.equal(sheetHost().querySelector('.sheet-error').textContent,
-      'This item changed on your other device — close and reopen it.');
+      'This item changed elsewhere (another device or tab) — close and reopen it.');
     assert.equal(rawStored(), before, 'nothing was written');
     assert.equal(toastHost().children.length, 0, 'a refused save offers no Undo');
     closeSheet();
@@ -2906,5 +2912,435 @@ test('sweep U: a delete announces its message in #toast-live, and it clears when
     t.mock.timers.reset();
   }
   assert.equal(toastHost().children.length, 0);
+  seed([]);
+});
+
+// =========================================================================
+// Sweep batch F — from the re-reviews of batches S, D and U
+// =========================================================================
+//
+// Ids are prefixed `sF-`. Every test that shows a toast resolves it and leaves
+// the toast host empty.
+
+const UNDO_REFUSED = "Changes from your other device were kept, so this couldn't be undone.";
+const UNDO_KEPT = 'Some changes from your other device were kept.';
+
+// F1 (sync I1): an idea switched to a task, then the other device renamed the
+// task. Restoring `type: 'idea'` without the title would let normalizeIdea
+// derive a title from the notes and write over THEIR TITLE, while the message
+// claimed their change was kept.
+test('sF: an Undo across the idea line with a field changed since is refused whole', async (t) => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  seed([record({
+    id: 'sF-boat', type: 'idea', title: 'Buy a boat', notes: 'Buy a boat. A small one, for the lake.', date: '2099-08-01',
+  })]);
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  try {
+    clearMessage();
+    click(globalThis.document.getElementById('show-ideas'));
+    click(openControlFor(ideaList(), 'Buy a boat'));
+    sheetHost().querySelector('.sheet-type').value = 'task';
+    click(sheetHost().querySelector('.sheet-save'));
+    assert.equal(storedById('sF-boat').type, 'task', 'fixture check: the switch landed');
+    applySyncedState(state({ items: [{ ...storedById('sF-boat'), title: 'THEIR TITLE', updatedAt: S_AHEAD }] }));
+    assert.equal(storedById('sF-boat').title, 'THEIR TITLE', 'fixture check: the newer sync landed');
+    const before = rawStored();
+    click(toastHost().querySelector('.toast-undo'));
+    assert.equal(storedById('sF-boat').title, 'THEIR TITLE', 'their title survives');
+    assert.equal(rawStored(), before, 'nothing is written');
+    assert.equal(messageText(), UNDO_REFUSED);
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  assert.equal(toastHost().children.length, 0);
+  clearMessage();
+  seed([]);
+});
+
+// The type check on its own: here every restored field would apply cleanly and
+// the skipped one (notes) would survive, but the result would be a task with
+// the other device's idea text in it. A partial Undo across the idea line is
+// refused before it is attempted.
+test('sF: an Undo back across the idea line is refused when the idea text changed since', async (t) => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  seed([record({
+    id: 'sF-toidea', type: 'task', title: 'sF call Bob', date: '2099-08-02', time: '09:00', endTime: '10:00',
+  })]);
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  try {
+    clearMessage();
+    click(openControlFor(itemList(), 'sF call Bob'));
+    sheetHost().querySelector('.sheet-type').value = 'idea';
+    click(sheetHost().querySelector('.sheet-save'));
+    assert.equal(storedById('sF-toidea').type, 'idea', 'fixture check: the switch landed');
+    applySyncedState(state({
+      items: [{ ...storedById('sF-toidea'), notes: 'sF call Bob on Friday instead', updatedAt: S_AHEAD }],
+    }));
+    const before = rawStored();
+    click(toastHost().querySelector('.toast-undo'));
+    assert.equal(rawStored(), before, 'nothing is written');
+    assert.equal(storedById('sF-toidea').type, 'idea');
+    assert.equal(messageText(), UNDO_REFUSED);
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  assert.equal(toastHost().children.length, 0);
+  clearMessage();
+  seed([]);
+});
+
+// The check after applyEdit, on its own: no type change, but an idea's title
+// is derived from its notes. Restoring the notes while skipping the title the
+// other device changed would re-derive the title over theirs.
+test('sF: an Undo whose rebuild would change a skipped field is refused', async (t) => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  seed([record({
+    id: 'sF-ideakeep', type: 'idea', title: 'sF idea keep is the first sentence.',
+    notes: 'sF idea keep is the first sentence. Then enough further words to make this a long idea.', date: '2099-08-07',
+  })]);
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  try {
+    clearMessage();
+    click(globalThis.document.getElementById('show-ideas'));
+    click(openControlFor(ideaList(), 'sF idea keep'));
+    const mine = 'sF idea mine is the first sentence. Then enough further words to make this a long idea.';
+    sheetHost().querySelector('.sheet-text').value = mine;
+    click(sheetHost().querySelector('.sheet-save'));
+    assert.equal(storedById('sF-ideakeep').notes, mine, 'fixture check: the edit landed');
+    assert.equal(storedById('sF-ideakeep').title, 'sF idea mine is the first sentence.', 'fixture check: title derived');
+    applySyncedState(state({ items: [{ ...storedById('sF-ideakeep'), title: 'THEIR IDEA TITLE', updatedAt: S_AHEAD }] }));
+    const before = rawStored();
+    click(toastHost().querySelector('.toast-undo'));
+    assert.equal(storedById('sF-ideakeep').title, 'THEIR IDEA TITLE', 'their title survives');
+    assert.equal(rawStored(), before, 'nothing is written');
+    assert.equal(messageText(), UNDO_REFUSED);
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  assert.equal(toastHost().children.length, 0);
+  clearMessage();
+  seed([]);
+});
+
+// F2 (sync I2): time and endTime are one value. The start was edited, then the
+// other device moved the end. Restoring the old start alone would pair it with
+// their end, a range neither device ever set.
+test('sF: an Undo keeps both times when a sync changed the end since', async (t) => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  seed([record({ id: 'sF-times', title: 'sF timed', date: '2099-08-03', time: '09:00', endTime: '10:00' })]);
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  try {
+    clearMessage();
+    click(openControlFor(itemList(), 'sF timed'));
+    sheetHost().querySelector('.sheet-time').value = '08:00';
+    click(sheetHost().querySelector('.sheet-save'));
+    applySyncedState(state({ items: [{ ...storedById('sF-times'), endTime: '11:00', updatedAt: S_AHEAD }] }));
+    const before = rawStored();
+    click(toastHost().querySelector('.toast-undo'));
+    const r = storedById('sF-times');
+    assert.equal(r.time, '08:00', 'the start is not restored on its own');
+    assert.equal(r.endTime, '11:00', 'their end is kept');
+    assert.equal(rawStored(), before, 'nothing left to restore, so nothing is written');
+    assert.equal(messageText(), UNDO_KEPT);
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  assert.equal(toastHost().children.length, 0);
+  clearMessage();
+  seed([]);
+});
+
+// F2: a filtered restore that fails validation says the Undo could not be done,
+// not the validator's text about a field the user did not touch. The other
+// device sent a record whose times are out of order (merge passes records
+// through whole); restoring the title alone rebuilds it through makeItem.
+test('sF: a filtered Undo that fails validation says it could not be undone', async (t) => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  seed([record({
+    id: 'sF-val', title: 'sF val', notes: 'n0', date: '2099-08-04', time: '09:00', endTime: '10:00',
+  })]);
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  try {
+    clearMessage();
+    click(openControlFor(itemList(), 'sF val'));
+    sheetHost().querySelector('.sheet-title').value = 'sF val mine';
+    sheetHost().querySelector('.sheet-notes').value = 'n mine';
+    click(sheetHost().querySelector('.sheet-save'));
+    applySyncedState(state({
+      items: [{ ...storedById('sF-val'), notes: 'n theirs', time: '11:00', endTime: '10:00', updatedAt: S_AHEAD }],
+    }));
+    assert.equal(storedById('sF-val').time, '11:00', 'fixture check: the out-of-order record landed');
+    const before = rawStored();
+    click(toastHost().querySelector('.toast-undo'));
+    assert.equal(rawStored(), before, 'nothing is written');
+    assert.equal(messageText(), UNDO_REFUSED);
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  assert.equal(toastHost().children.length, 0);
+  clearMessage();
+  seed([]);
+});
+
+// F3 (sync I3): an arrow tapped after midnight acts on the day the user can
+// see. Without catching up with the clock first, the render after the tap
+// read the new cursor as "showing the old today" and carried it forward: the
+// Day view bounced back to where it was.
+test('sF: the Day arrows after midnight move from the day on screen, with no bounce', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const startDay = new Date();
+  assert.equal(labelText('day-label'), labelFor(startDay), 'fixture check: the Day view is on today');
+  click(globalThis.document.getElementById('next-day'));
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 24 * 60 * 60 * 1000 });
+  try {
+    const newToday = new Date();
+    click(globalThis.document.getElementById('prev-day'));
+    const dayBeforeNewToday = new Date(newToday.getFullYear(), newToday.getMonth(), newToday.getDate() - 1);
+    assert.equal(labelText('day-label'), labelFor(dayBeforeNewToday));
+    seed([]); // a later render leaves it there
+    assert.equal(labelText('day-label'), labelFor(dayBeforeNewToday));
+  } finally {
+    t.mock.timers.reset();
+  }
+  resume();
+  assert.equal(labelText('day-label'), labelFor(new Date()), 'restored for later tests');
+});
+
+test('sF: the Week arrows after the week turns move from the week on screen, with no bounce', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const WEEK = 7 * 24 * 60 * 60 * 1000;
+  const thisWeek = startOfWeek(localISO(new Date()));
+  assert.equal(labelText('week-label'), weekLabelFor(thisWeek), 'fixture check');
+  click(globalThis.document.getElementById('next-week'));
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + WEEK });
+  try {
+    click(globalThis.document.getElementById('prev-week'));
+    assert.equal(labelText('week-label'), weekLabelFor(thisWeek), 'the week before the new today\'s week');
+    seed([]);
+    assert.equal(labelText('week-label'), weekLabelFor(thisWeek));
+  } finally {
+    t.mock.timers.reset();
+  }
+  resume();
+  assert.equal(labelText('week-label'), weekLabelFor(startOfWeek(localISO(new Date()))), 'restored for later tests');
+});
+
+test('sF: the Month arrows after the month turns move from the month on screen, with no bounce', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const real = new Date();
+  const nextMonth = new Date(real.getFullYear(), real.getMonth() + 1, 1, 12);
+  assert.equal(labelText('calendar-label'), monthLabelFor(real), 'fixture check');
+  click(globalThis.document.getElementById('next-month'));
+  t.mock.timers.enable({ apis: ['Date'], now: nextMonth.getTime() });
+  try {
+    click(globalThis.document.getElementById('prev-month'));
+    assert.equal(labelText('calendar-label'), monthLabelFor(real), 'the month before the new today\'s month');
+    seed([]); // the next render must not carry it forward
+    assert.equal(labelText('calendar-label'), monthLabelFor(real));
+  } finally {
+    t.mock.timers.reset();
+  }
+  resume();
+  assert.equal(labelText('calendar-label'), monthLabelFor(new Date()), 'restored for later tests');
+});
+
+// The "next" arrows, the same way round: back one, the clock turns, forward
+// one. Each must land on the old today, the one before the new today.
+test('sF: the next arrows after the clock turns move from what is on screen, with no bounce', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const real = new Date();
+  const DAY = 24 * 60 * 60 * 1000;
+  const cases = [
+    ['prev-day', 'next-day', 'day-label', Date.now() + DAY, labelFor(real)],
+    ['prev-week', 'next-week', 'week-label', Date.now() + 7 * DAY, weekLabelFor(startOfWeek(localISO(real)))],
+    ['prev-month', 'next-month', 'calendar-label',
+      new Date(real.getFullYear(), real.getMonth() + 1, 1, 12).getTime(), monthLabelFor(real)],
+  ];
+  for (const [back, forward, labelId, later, expected] of cases) {
+    click(globalThis.document.getElementById(back));
+    t.mock.timers.enable({ apis: ['Date'], now: later });
+    try {
+      click(globalThis.document.getElementById(forward));
+      assert.equal(labelText(labelId), expected, `${forward}: the one before the new today`);
+      seed([]);
+      assert.equal(labelText(labelId), expected, `${forward}: a later render leaves it there`);
+    } finally {
+      t.mock.timers.reset();
+    }
+    resume();
+    assert.equal(labelText(labelId), expected, `${forward}: restored for later tests`);
+  }
+});
+
+// F4 (sync I4): a calendar fetch that never answers must not hold the one
+// batch slot forever. It is settled as failed after the timeout, the queue
+// drains, and its late answer, if it ever comes, does not free the slot of
+// the batch that is running by then.
+test('sF: a calendar batch that never settles is failed after the timeout, and the queue drains', async (t) => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sF-hang')], {}); // never fetched, so stale
+  const calls = [];
+  const gates = [];
+  let instant = false;
+  const failed = () => ({ ok: false, status: 502, text: async () => '' });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url) => {
+    calls.push(String(url));
+    if (instant) return Promise.resolve(failed());
+    return new Promise((resolve) => { gates.push(() => resolve(failed())); });
+  };
+  const fetchesOf = (id) => calls.filter((u) => u.includes(encodeURIComponent(`https://example.com/${id}.ics`))).length;
+  const originalError = console.error;
+  const logged = [];
+  console.error = (...a) => { logged.push(a); };
+  stampEl().textContent = 'sentinel';
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    resume();
+    await settle();
+    assert.equal(fetchesOf('sF-hang'), 1, 'fixture check: the stale calendar is being fetched');
+    applySyncedState(state({ feeds: [sdFeed('sF-hang'), sdFeed('sF-queued')] }));
+    await settle();
+    assert.equal(fetchesOf('sF-queued'), 0, 'fixture check: queued behind the batch in flight');
+    t.mock.timers.tick(19999);
+    await settle();
+    assert.equal(stampEl().textContent, 'sentinel', 'not before the timeout');
+    t.mock.timers.tick(1);
+    await settle();
+    assert.equal(stampEl().textContent, "Couldn't refresh calendars", 'the hung batch is settled as failed');
+    assert.equal(fetchesOf('sF-queued'), 1, 'and the queue drains');
+    // The first fetch finally answers, while the queued batch is in flight.
+    gates.shift()();
+    await settle();
+    resume();
+    await settle();
+    assert.equal(fetchesOf('sF-hang'), 1,
+      'a late answer must not free the slot of the batch in flight: that would start a second fetch');
+  } finally {
+    instant = true;
+    while (gates.length) gates.shift()();
+    for (let i = 0; i < 5; i += 1) await settle();
+    unseedFeeds();
+    for (let i = 0; i < 5; i += 1) await settle();
+    t.mock.timers.reset();
+    console.error = originalError;
+    globalThis.fetch = originalFetch;
+  }
+  assert.ok(logged.some((a) => String(a[0]).includes('timed out')), 'the timeout is logged');
+  assert.ok(!logged.some((a) => a.some((x) => String(x).includes('example.com'))), 'never the feed URL');
+  saveTombstones([]);
+  resume();
+});
+
+// F7 (sync O5): a change of calendars in Settings changes what the stamp is
+// about. Removing the only visible calendar leaves only local data on screen,
+// so the stamp becomes the render time.
+test('sF: removing a calendar in Settings repaints the Updated stamp', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sF-stamp')], { 'sF-stamp': cacheAt(localAt(10, 20)) });
+  const settingsBtn = globalThis.document.getElementById('settings-btn');
+  const settingsHost = globalThis.document.getElementById('settings-host');
+  if (settingsHost.childElementCount) click(settingsBtn); // left open by an earlier test
+  stampEl().textContent = 'sentinel';
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 40).getTime() });
+  try {
+    click(settingsBtn);
+    const remove = settingsHost.querySelectorAll('button').find((b) => b.textContent === 'Remove');
+    assert.ok(remove, 'fixture check: the panel offers Remove');
+    click(remove);
+    assert.deepEqual(loadFeeds(), [], 'fixture check: removed');
+    assert.equal(stampEl().textContent, 'Updated 10:40 AM');
+  } finally {
+    t.mock.timers.reset();
+    if (settingsHost.childElementCount) click(settingsBtn);
+  }
+  saveTombstones([]);
+  unseedFeeds();
+});
+
+// F9 (UI I1): returning focus must not scroll the page to the opener.
+test('sF: focus goes back to the opener without scrolling', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'sF-focus', title: 'sF focus me', date: '2099-08-05' })]);
+  const restore = visiblePageButton();
+  try {
+    click(globalThis.document.getElementById('show-list'));
+    click(openControlFor(itemList(), 'sF focus me'));
+    globalThis.document.activeElement = null;
+    globalThis.document.lastFocusOptions = undefined;
+    closeSheet();
+    assert.equal(globalThis.document.activeElement?.getAttribute('data-item-id'), 'sF-focus', 'fixture check');
+    assert.deepEqual(globalThis.document.lastFocusOptions, { preventScroll: true });
+  } finally {
+    forceCloseSheet();
+    if (restore) click(restore);
+  }
+  seed([]);
+});
+
+// F11 (UI O2): the sheet and Settings share one page lock, so closing either
+// first leaves the page locked while the other is open, and unlocked once both
+// are closed.
+test('sF: the page stays locked while Settings or a sheet is open, whichever closes first', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'sF-lock', title: 'sF lock me', date: '2099-08-06' })]);
+  const body = globalThis.document.body;
+  const settingsBtn = globalThis.document.getElementById('settings-btn');
+  const settingsHost = globalThis.document.getElementById('settings-host');
+  if (settingsHost.childElementCount) click(settingsBtn); // left open by an earlier test
+  const restore = visiblePageButton();
+  try {
+    click(globalThis.document.getElementById('show-list'));
+    body.style.overflow = '';
+    for (const settingsFirst of [true, false]) {
+      const label = settingsFirst ? 'Settings closed first' : 'sheet closed first';
+      click(settingsBtn);
+      assert.equal(body.style.overflow, 'hidden', `${label}: Settings locks the page`);
+      click(openControlFor(itemList(), 'sF lock me'));
+      assert.equal(body.style.overflow, 'hidden', `${label}: both open`);
+      if (settingsFirst) click(settingsBtn); else closeSheet();
+      assert.equal(settingsHost.childElementCount === 0, settingsFirst, `fixture check (${label})`);
+      assert.equal(body.style.overflow, 'hidden', `${label}: the other is still open, so the page stays locked`);
+      if (settingsFirst) closeSheet(); else click(settingsBtn);
+      assert.equal(body.style.overflow, '', `${label}: both closed, so the page is unlocked`);
+    }
+  } finally {
+    forceCloseSheet();
+    if (settingsHost.childElementCount) click(settingsBtn);
+    if (restore) click(restore);
+  }
   seed([]);
 });

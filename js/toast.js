@@ -44,12 +44,14 @@ export function showToast(host, text, { live, undo = null, ms = 5000, onExpire =
 
   let settled = false;
   let timer = null;
-  // Pausing (sweep U13): the timer stops while focus is inside the toast or
-  // the pointer is over it, and resumes with the time that was left.
+  // Pausing (sweep U13): the timer stops while focus is inside the toast, and
+  // resumes with the time that was left. There is NO hover pause (sweep F,
+  // O12): a toast that appears under a mouse pointer already resting there
+  // gets a pointerenter and never a pointerleave, so it would never expire
+  // and its delete would never commit.
   let remaining = ms;
   let deadline = 0;
   let focused = false;
-  let hovered = false;
   const start = () => {
     deadline = Date.now() + remaining;
     timer = setTimeout(handle.dismiss, remaining);
@@ -61,7 +63,7 @@ export function showToast(host, text, { live, undo = null, ms = 5000, onExpire =
     remaining = Math.max(0, deadline - Date.now());
   };
   const resume = () => {
-    if (settled || timer !== null || focused || hovered) return;
+    if (settled || timer !== null || focused) return;
     start();
   };
 
@@ -90,8 +92,6 @@ export function showToast(host, text, { live, undo = null, ms = 5000, onExpire =
   // No role here, and none on the host: `live` is the live region.
   el.addEventListener('focusin', () => { focused = true; pause(); });
   el.addEventListener('focusout', () => { focused = false; resume(); });
-  el.addEventListener('pointerenter', () => { hovered = true; pause(); });
-  el.addEventListener('pointerleave', () => { hovered = false; resume(); });
   const span = document.createElement('span');
   span.textContent = text;
   el.appendChild(span);

@@ -159,10 +159,14 @@ export function typeChangePatch(record, patch) {
 // devices still can: this orders a write after the record it saw, nothing more.
 //
 // An unparseable prevIso (a record from before updatedAt was a full instant,
-// or a corrupt one) cannot be compared, so the write takes plain now.
+// or a corrupt one) cannot be compared, so the write takes plain now. So does
+// a record stamped at the last instant a Date can hold (sweep F, O1): there is
+// no millisecond after it, and toISOString would throw on every write to it.
 export function nextStamp(nowIso, prevIso) {
   const now = Date.parse(nowIso);
   const prev = typeof prevIso === 'string' ? Date.parse(prevIso) : NaN;
   if (Number.isNaN(prev) || prev < now) return nowIso;
-  return new Date(prev + 1).toISOString();
+  const next = new Date(prev + 1);
+  if (!Number.isFinite(next.getTime())) return nowIso;
+  return next.toISOString();
 }

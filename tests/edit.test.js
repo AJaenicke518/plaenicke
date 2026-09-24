@@ -430,3 +430,11 @@ test('typeChangePatch from idea: text edited in the same save wins over the reco
   assert.equal(out.title, 'Brand new thought');
   assert.doesNotMatch(JSON.stringify(out), /Old thought/);
 });
+
+// Sweep F, O1: a record stamped at the very end of the Date range has no
+// "one millisecond later". new Date(prev + 1).toISOString() throws a
+// RangeError there, which would break every write to that record.
+test('sF: nextStamp returns now when one millisecond after the record is not a date', () => {
+  const now = '2026-09-23T12:00:00.000Z';
+  assert.equal(nextStamp(now, '+275760-09-13T00:00:00.000Z'), now);
+});

@@ -321,6 +321,21 @@ test('the heading in the top bar has no margin of its own', () => {
   assert.equal(declOf('.sheet-bar .sheet-heading', 'margin'), '0');
 });
 
+// Sweep F, UI O5: the heading is centred on the SHEET. Cancel (77px) and Save
+// (61px) differ in width, so in a flex row the heading sits centred between
+// them, 8px right of the middle, and `flex: 1` on it moves nothing (measured
+// at 390px in Chrome: 203.3px either way, bar centre 195px). Equal outer
+// columns put it on the centre (195px).
+test('sF: the top bar centres the heading on the sheet, whatever the button widths', () => {
+  assert.equal(declOf('.sheet-bar', 'display'), 'grid');
+  assert.equal(declOf('.sheet-bar', 'grid-template-columns'), '1fr auto 1fr');
+  assert.equal(declOf('.sheet-bar .sheet-cancel', 'justify-self'), 'start');
+  assert.equal(declOf('.sheet-bar .sheet-save', 'justify-self'), 'end');
+  // The external sheet's bar holds Close alone. A grid cell stretches its item
+  // by default, which would make Close a full-width bar.
+  assert.equal(declOf('.sheet-bar .sheet-close', 'justify-self'), 'start');
+});
+
 // U13: #toast-live is read, not seen.
 test('.visually-hidden hides from sight only', () => {
   assert.equal(declOf('.visually-hidden', 'position'), 'absolute');

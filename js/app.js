@@ -167,7 +167,12 @@ if (els.mic && isVoiceSupported()) {
 initSettings({
   button: els.settingsBtn,
   host: els.settingsHost,
-  onFeedsChanged: () => { feeds = loadFeeds(); feedCache = loadFeedCache(); render(); },
+  // The stamp is repainted too (sweep F, O5): adding, removing or hiding a
+  // calendar changes what is on screen, and so what the stamp is about.
+  onFeedsChanged: () => {
+    feeds = loadFeeds(); feedCache = loadFeedCache(); render();
+    stampUpdated(); stampFromFeeds([]);
+  },
   // Adding or removing a calendar mutates SYNCED data (spec 6.3): the feed
   // record itself, and for a removal the feed tombstone removeFeed() writes.
   // onFeedsChanged fires on every colour tap too, so it is the wrong signal to
@@ -370,13 +375,19 @@ function setDone(id, done) {
 // The stamp is strictly later than the record's own (nextStamp), so an edit —
 // or an Undo in the same millisecond as its edit — never loses to the copy it
 // replaced because of clock skew.
-function editItem(id, patch, { toast = true, raw = false, openedType } = {}) {
+//
+// `keep` is used ONLY by an Undo that skips fields (sweep F, I1): the fields it
+// promises to leave as they are. applyEdit can still change one of them
+// (normalizeIdea re-derives an idea's title from its notes; an idea clears its
+// times), so the rebuilt record is checked, and the write refused, rather than
+// telling the user their other device's change was kept when it was not.
+function editItem(id, patch, { toast = true, raw = false, openedType, keep = [] } = {}) {
   if (pendingDeletes.has(id)) return { ok: false, error: 'This item is being deleted.' };
   const idx = items.findIndex((it) => it.id === id);
   if (idx < 0) return { ok: false, error: 'This item no longer exists.' };
   const before = items[idx];
   if (openedType !== undefined && before.type !== openedType) {
-    return { ok: false, error: 'This item changed on your other device — close and reopen it.' };
+    return { ok: false, error: 'This item changed elsewhere (another device or tab) — close and reopen it.' };
   }
   let applied;
   let next;
@@ -386,6 +397,7 @@ function editItem(id, patch, { toast = true, raw = false, openedType } = {}) {
   } catch (e) {
     return { ok: false, error: e.message };
   }
+  if (keep.some((k) => next[k] !== before[k])) return { ok: false, error: UNDO_REFUSED };
   items[idx] = next;
   try {
     saveItems(items);
@@ -410,21 +422,39 @@ function editItem(id, patch, { toast = true, raw = false, openedType } = {}) {
         // sync may have brought a newer value from the other device since;
         // Undo must not write over it. A record that is gone falls through to
         // editItem, which says so.
+        //
+        // time and endTime are ONE value, a range (sweep F, I2): both are
+        // restored only if neither changed since. Restoring one of them would
+        // pair it with the other device's, a range nobody set, or an
+        // invalid one.
         const current = items.find((it) => it.id === id);
         let restore = undoSnap;
-        let kept = false;
+        const skipped = [];
         if (current) {
           restore = {};
+          const timesUnchanged = current.time === next.time && current.endTime === next.endTime;
           for (const k of Object.keys(undoSnap)) {
-            if (current[k] === next[k]) restore[k] = undoSnap[k];
-            else kept = true;
+            const unchanged = k === 'time' || k === 'endTime' ? timesUnchanged : current[k] === next[k];
+            if (unchanged) restore[k] = undoSnap[k];
+            else skipped.push(k);
           }
+        }
+        const kept = skipped.length > 0;
+        // A partial Undo across the idea line is refused whole (sweep F, I1).
+        // The idea sheet and the others hold different fields, and the
+        // switch rewrote title, notes and times together; putting back some
+        // of them re-derives the rest from the other device's text.
+        if (kept && 'type' in restore && (restore.type === 'idea') !== (current.type === 'idea')) {
+          setMessage(UNDO_REFUSED);
+          return;
         }
         // Nothing left to restore: write nothing, since a write would only
         // bump updatedAt over the other device's version.
         if (!current || Object.keys(restore).length > 0) {
-          const r = editItem(id, restore, { toast: false, raw: true });
-          if (!r.ok) { setMessage(r.error); return; }
+          const r = editItem(id, restore, { toast: false, raw: true, keep: skipped });
+          // A filtered restore that fails says it could not be undone, never
+          // the validator's text about a field the user did not touch.
+          if (!r.ok) { setMessage(kept ? UNDO_REFUSED : r.error); return; }
         }
         if (kept) setMessage('Some changes from your other device were kept.');
       },
@@ -432,6 +462,10 @@ function editItem(id, patch, { toast = true, raw = false, openedType } = {}) {
   }
   return { ok: true };
 }
+
+// What an Undo says when it would have to write over, or re-derive, a change
+// that came from the other device (sweep F, I1 and I2). Nothing is written.
+const UNDO_REFUSED = "Changes from your other device were kept, so this couldn't be undone.";
 
 // The handle of the toast currently on screen, or null. Tasks 4b and 4c assign
 // it (delete and edit both offer Undo); openItem only ever dismisses it.
@@ -553,7 +587,10 @@ function focusOpener(id) {
   // A NodeList has no .find; spread it into an array first.
   const opener = [...shown[1].querySelectorAll('button')]
     .find((b) => b.classList.contains('item-open') && b.getAttribute('data-item-id') === id);
-  if (opener) opener.focus();
+  // preventScroll (sweep F, I1): the opener is where the user just was, and
+  // the browser's own scroll-into-view can jump the page under the closing
+  // sheet.
+  if (opener) opener.focus({ preventScroll: true });
 }
 
 function handleToggleDone(id, done) {
@@ -770,8 +807,9 @@ function showView(which) {
 // A SPECIFIC day was chosen, so catch up with the clock BEFORE setting the
 // cursors. Otherwise the render below would treat a tap on the old today's
 // cell, just after midnight, as "the view that was showing today" and carry it
-// to the new one. The relative arrows (prev/next) deliberately do not do
-// this: they act on the day the user can see.
+// to the new one. The arrows below do the same (sweep F, I3), for the same
+// reason: an arrow acts on the day the user can see, and the render after it
+// must not read the new cursor as "showing the old today".
 function openDay(dateISO) {
   refreshForToday();
   viewDay = dateISO;
@@ -789,12 +827,15 @@ els.showDay.addEventListener('click', () => showView('day'));
 els.showTodo.addEventListener('click', () => showView('todo'));
 els.showIdeas.addEventListener('click', () => showView('ideas'));
 els.ideaAdd.addEventListener('click', handleIdeaAdd);
-els.prev.addEventListener('click', () => { viewMonth = new Date(viewMonth.getFullYear(), viewMonth.getMonth() - 1, 1); renderCalendar(); });
-els.next.addEventListener('click', () => { viewMonth = new Date(viewMonth.getFullYear(), viewMonth.getMonth() + 1, 1); renderCalendar(); });
-els.prevDay.addEventListener('click', () => { viewDay = addDays(viewDay, -1); render(); });
-els.nextDay.addEventListener('click', () => { viewDay = addDays(viewDay, 1); render(); });
-els.prevWeek.addEventListener('click', () => { viewWeekStart = addDays(viewWeekStart, -7); render(); });
-els.nextWeek.addEventListener('click', () => { viewWeekStart = addDays(viewWeekStart, 7); render(); });
+// Every arrow catches up with the clock BEFORE moving its cursor (sweep F,
+// I3), as openDay does; see there. The month arrows render through the same
+// path as the others.
+els.prev.addEventListener('click', () => { refreshForToday(); viewMonth = new Date(viewMonth.getFullYear(), viewMonth.getMonth() - 1, 1); render(); });
+els.next.addEventListener('click', () => { refreshForToday(); viewMonth = new Date(viewMonth.getFullYear(), viewMonth.getMonth() + 1, 1); render(); });
+els.prevDay.addEventListener('click', () => { refreshForToday(); viewDay = addDays(viewDay, -1); render(); });
+els.nextDay.addEventListener('click', () => { refreshForToday(); viewDay = addDays(viewDay, 1); render(); });
+els.prevWeek.addEventListener('click', () => { refreshForToday(); viewWeekStart = addDays(viewWeekStart, -7); render(); });
+els.nextWeek.addEventListener('click', () => { refreshForToday(); viewWeekStart = addDays(viewWeekStart, 7); render(); });
 
 render();
 noteLaunch();
@@ -831,6 +872,15 @@ stampUpdated();
 //
 // When the batch settles it repaints the "Updated" stamp from the calendars
 // themselves (sweep D1); see stampFromFeeds.
+//
+// A BATCH THAT NEVER SETTLES IS FAILED AFTER FEED_BATCH_TIMEOUT_MS (sweep F,
+// I4). A fetch that never answers would otherwise hold the one slot forever:
+// every later resume dropped, every queued calendar never fetched. The batch
+// settles exactly once; its late answer, if it ever comes, is ignored, because
+// by then the slot may belong to another batch. The fetch itself is not
+// cancelled: a late answer can still land in the cache, where the next load
+// or batch picks it up.
+const FEED_BATCH_TIMEOUT_MS = 20000;
 let feedBatch = null; // ids in the batch in flight, or null
 const feedQueue = new Set();
 
@@ -841,7 +891,11 @@ function backgroundSyncFeeds(feedList) {
   }
   if (feedList.length === 0) return;
   feedBatch = new Set(feedList.map((f) => f.id));
+  let settled = false;
   const settle = (failedIds) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeout);
     feedBatch = null;
     feedCache = loadFeedCache();
     render();
@@ -852,6 +906,11 @@ function backgroundSyncFeeds(feedList) {
       backgroundSyncFeeds(feeds.filter((f) => queued.has(f.id)));
     }
   };
+  const timeout = setTimeout(() => {
+    if (settled) return;
+    console.error('plaenicke: background calendar sync timed out');
+    settle(null); // which feeds it reached is unknown
+  }, FEED_BATCH_TIMEOUT_MS);
   syncStale(feedList, feedCache, { fetchImpl: fetch }).then((results) => {
     // A per-feed failure comes back as {ok:false}, never as a rejection.
     settle(Object.keys(results).filter((id) => !results[id].ok));

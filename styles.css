@@ -640,9 +640,12 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
      (sweep U5; the page itself is locked by js/itemsheet.js). */
   overscroll-behavior: contain;
 }
+/* Three columns, the outer two equal (sweep F, UI O5): the heading is centred
+   on the sheet even though Cancel is wider than Save. A flex row centred it
+   between the two buttons instead, 8px off at 390px. */
 .sheet-bar {
   position: sticky; top: 0;
-  display: flex; justify-content: space-between; align-items: center;
+  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
   background: var(--card);
   padding: 8px 0;
   border-bottom: 1px solid var(--line);
@@ -654,6 +657,8 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 .sheet-cancel, .sheet-close, .sheet-move { background: var(--card); color: var(--ink); border: 1px solid var(--line); }
 /* Own items' heading, between Cancel and Save in the top bar (sweep U12). */
 .sheet-bar .sheet-heading { margin: 0; font-size: 1rem; text-align: center; }
+.sheet-bar .sheet-cancel, .sheet-bar .sheet-close { justify-self: start; }
+.sheet-bar .sheet-save { justify-self: end; }
 .sheet-form { display: flex; flex-direction: column; gap: 10px; }
 .sheet-field { display: flex; flex-direction: column; gap: 4px; }
 .sheet-label { font-size: 0.8rem; color: var(--muted); }

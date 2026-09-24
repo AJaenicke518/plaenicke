@@ -21,6 +21,7 @@ import { TYPES } from './preview.js';
 import { diffPatch, quickMoves } from './edit.js';
 import { formatDayLabel } from './freshness.js';
 import { formatTime, formatTimeRange } from './timegrid.js';
+import { lock } from './scrolllock.js';
 
 // The teardown of the sheet currently mounted in each host. Mounting empties
 // the host, so a sheet replaced by another must lose its Escape listener too;
@@ -121,17 +122,19 @@ export function openItemSheet(host, item, {
       focusables[e.shiftKey ? last : 0].focus();
     }
   };
-  // The page behind does not scroll while a sheet is open (sweep U5), the
-  // same way js/settings.js locks it. The value found is put back, not ''.
-  const prevOverflow = document.body.style.overflow;
+  // The page behind does not scroll while a sheet is open (sweep U5). The
+  // lock is the one js/settings.js holds too (js/scrolllock.js, sweep F O2),
+  // so the page stays locked while either is open, whichever closes first.
+  // Taken when the sheet mounts, below.
+  let releaseScroll = null;
   // Detach without notifying: used when another sheet replaces this one.
-  // The scroll lock is released here too, so a replaced sheet restores the
-  // page before its replacement takes the lock again.
+  // The scroll lock is released here too; a replaced sheet's release and its
+  // replacement's lock leave the page locked throughout.
   const teardown = () => {
     if (closed) return false;
     closed = true;
     document.removeEventListener('keydown', onKey);
-    document.body.style.overflow = prevOverflow;
+    releaseScroll();
     if (mounted.get(host) === teardown) mounted.delete(host);
     return true;
   };
@@ -145,15 +148,23 @@ export function openItemSheet(host, item, {
 
   const backdrop = el('div', 'sheet-backdrop');
   // Only a press that BOTH starts and ends on the backdrop itself closes
-  // (sweep U7). A drag that starts in a field and is released over the scrim
-  // reports a click targeted at the backdrop; closing on it would throw the
-  // edit away. A tap inside the sheet reports something inside as target.
+  // (sweep U7, sweep F UI O1). A drag between the scrim and the sheet, in
+  // either direction, sends its click to their nearest common ancestor: the
+  // backdrop. So the click's target cannot say where the press ended; the
+  // pointerup's can, and both ends are read from pointer events.
+  //
+  // The close itself still waits for the click. Closing on pointerup would
+  // remove the scrim before the browser sends the tap's click, and on a touch
+  // screen that click can then land on whatever was underneath it.
   let downOnBackdrop = false;
-  backdrop.addEventListener('pointerdown', (e) => { downOnBackdrop = e.target === backdrop; });
-  backdrop.addEventListener('click', (e) => {
-    const startedHere = downOnBackdrop;
+  let upOnBackdrop = false;
+  backdrop.addEventListener('pointerdown', (e) => { downOnBackdrop = e.target === backdrop; upOnBackdrop = false; });
+  backdrop.addEventListener('pointerup', (e) => { upOnBackdrop = e.target === backdrop; });
+  backdrop.addEventListener('click', () => {
+    const tapped = downOnBackdrop && upOnBackdrop;
     downOnBackdrop = false;
-    if (e.target === backdrop && startedHere) close();
+    upOnBackdrop = false;
+    if (tapped) close();
   });
   // The dialog is the SHEET, not the full-screen backdrop (sweep U12), and it
   // is named by its visible heading.
@@ -337,7 +348,7 @@ export function openItemSheet(host, item, {
 
   host.innerHTML = '';
   host.appendChild(backdrop);
-  document.body.style.overflow = 'hidden';
+  releaseScroll = lock();
   document.addEventListener('keydown', onKey);
   mounted.set(host, teardown);
   initialFocus.focus();

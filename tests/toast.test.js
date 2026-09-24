@@ -317,7 +317,6 @@ test('showToast refuses to run without a live region, and touches nothing', () =
 
 for (const [name, enter, leave] of [
   ['focus is inside it', 'focusin', 'focusout'],
-  ['the pointer is over it', 'pointerenter', 'pointerleave'],
 ]) {
   test(`the toast does not expire while ${name}, and resumes with the time it had left`, (t) => {
     t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
@@ -342,21 +341,19 @@ for (const [name, enter, leave] of [
   });
 }
 
-test('leaving with the pointer while focus is still inside keeps it paused', (t) => {
+// Sweep F, UI O12: no hover pause. A toast that appears under a mouse pointer
+// already resting there gets a pointerenter and, the pointer never moving, no
+// pointerleave: it would never expire, and its delete would never commit.
+test('sF: the pointer resting over the toast does not stop it expiring', (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
   try {
     const h = host();
     const c = counters();
     show(h, 'Deleted', { undo: c.undo, onExpire: c.onExpire, ms: 5000 });
-    const el = toastIn(h);
-    el.fire('focusin');
-    el.fire('pointerenter');
-    el.fire('pointerleave');
-    t.mock.timers.tick(60000);
-    assert.equal(c.calls.expire, 0, 'still focused, so still paused');
-    el.fire('focusout');
+    toastIn(h).fire('pointerenter');
     t.mock.timers.tick(5000);
     assert.equal(c.calls.expire, 1);
+    assert.equal(h.children.length, 0);
   } finally {
     t.mock.timers.reset();
   }

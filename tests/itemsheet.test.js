@@ -142,8 +142,11 @@ function open(item, { onSave = () => ({ ok: true }), ...extra } = {}) {
 }
 
 // Every test must leave the document clean, or the listener-count assertions
-// in later tests would be measuring an earlier test's leak.
+// in later tests would be measuring an earlier test's leak. Escape closes every
+// sheet a test left open FIRST: the page scroll lock is one shared counter
+// (js/scrolllock.js), so a sheet left open would hold it into the next test.
 test.afterEach(() => {
+  pressKey('Escape');
   docListeners.keydown = [];
   document.body.style.overflow = '';
   document.activeElement = null;
@@ -441,9 +444,11 @@ test('a backdrop click closes only when the backdrop itself is the target', () =
   const backdrop = one(host, 'sheet-backdrop');
   const sheet = one(host, 'sheet');
   backdrop.fire('pointerdown', { target: sheet });
+  backdrop.fire('pointerup', { target: sheet });
   backdrop.fire('click', { target: sheet });
   assert.equal(host.children.length, 1, 'a tap inside the sheet must not close it');
   backdrop.fire('pointerdown');
+  backdrop.fire('pointerup');
   backdrop.fire('click');
   assert.equal(host.children.length, 0);
   assert.equal(calls.close, 1);
@@ -456,22 +461,42 @@ test('a press that starts inside the sheet and ends on the backdrop does not clo
   const backdrop = one(host, 'sheet-backdrop');
   one(host, 'sheet-title').value = 'typed, then dragged out';
   backdrop.fire('pointerdown', { target: one(host, 'sheet-title') });
+  backdrop.fire('pointerup');
   backdrop.fire('click');
   assert.equal(host.children.length, 1, 'the sheet must stay open');
   assert.equal(calls.close, 0);
   assert.equal(one(host, 'sheet-title').value, 'typed, then dragged out');
   // And a fresh press that starts on the backdrop still closes it.
   backdrop.fire('pointerdown');
+  backdrop.fire('pointerup');
   backdrop.fire('click');
   assert.equal(calls.close, 1);
 });
+
+// Sweep F, UI O1: the other direction. A press that starts on the scrim and is
+// released over the sheet ENDS inside it. The browser still sends the click to
+// the nearest common ancestor, the backdrop, so a click-target check reads it
+// as a tap on the scrim. The end is read from pointerup instead.
+test('sF: a press that starts on the backdrop and ends inside the sheet does not close it', () => {
+  const { host, calls } = open(task());
+  const backdrop = one(host, 'sheet-backdrop');
+  backdrop.fire('pointerdown');
+  backdrop.fire('pointerup', { target: one(host, 'sheet-title') });
+  backdrop.fire('click'); // the common ancestor
+  assert.equal(host.children.length, 1, 'the sheet must stay open');
+  assert.equal(calls.close, 0);
+});
+
 
 // Every close path, each on a fresh sheet. One path forgetting to remove the
 // listener would leave a stale Escape handler that empties whatever the host
 // shows next and calls a stale onClose.
 const CLOSE_PATHS = {
   'Cancel': (h) => one(h, 'sheet-cancel').fire('click'),
-  'backdrop': (h) => { one(h, 'sheet-backdrop').fire('pointerdown'); one(h, 'sheet-backdrop').fire('click'); },
+  'backdrop': (h) => {
+    const b = one(h, 'sheet-backdrop');
+    b.fire('pointerdown'); b.fire('pointerup'); b.fire('click');
+  },
   'Enter (submit)': (h) => { one(h, 'sheet-title').value = 'y'; submitForm(byTag(h, 'FORM')[0]); },
   'Escape': () => pressKey('Escape'),
   'Save (changed)': (h) => { one(h, 'sheet-title').value = 'x'; one(h, 'sheet-save').fire('click'); },

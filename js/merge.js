@@ -35,10 +35,13 @@
 //      12:00 before either syncs, and it comes back on every device with the
 //      phone's fields. Annoying and re-deletable, not lost data, and it is the
 //      only horn of the two that converges at all.
-//   3. Clock skew decides ties (above). User writes (edit, Undo, tick, delete
-//      commit) are stamped strictly later than the record they replace
-//      (js/edit.js's nextStamp), so a single write cannot lose to clock skew;
-//      concurrent writes on two devices still can.
+//   3. Clock skew decides ties (above). User writes to ITEMS (edit, Undo,
+//      tick, delete commit) are stamped strictly later than the record they
+//      replace (js/edit.js's nextStamp), so a single item write cannot lose to
+//      clock skew; concurrent writes on two devices still can. Only item
+//      writes: a feed removal (js/feeds.js's removeFeed) and the tombstones
+//      dedupeState writes below still stamp plain `now`, so either can still
+//      lose to a record from a clock-ahead device (punchlist).
 //   4. Only the latest action can be undone. A second toast commits the first
 //      action at once, so its delete lands and its Undo is gone. An edit's Undo
 //      is itself a new edit with a new updatedAt; it has no merge special case.
