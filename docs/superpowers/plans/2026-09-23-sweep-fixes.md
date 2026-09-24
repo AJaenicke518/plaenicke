@@ -81,3 +81,25 @@ Each batch runs as one implementer, one after another.
 - **Rejecting a feed name that is a URL** (secrets F3). Blocker: it's settings.js code outside this diff, and only reachable if the user pastes the URL into the name box.
 - **The two-tab race on the timer-driven commit** (sync F8). Blocker: speculative. It can't be reproduced without a real browser `storage` event, and there's no multi-tab harness.
 - **Pausing the toast timer for keyboard users** is in Batch U. Full WCAG 2.2.1 compliance (an adjustable time limit) is **not** attempted.
+
+## Batch F — from the re-reviews of batches S, D and U
+
+**Sync and dates re-review:**
+
+1. **I1 — a partial Undo across the idea line.** If a restore would set `type` (across the idea line) while any field is skipped, **refuse the whole Undo** with "Changes from your other device were kept, so this couldn't be undone." Also check after `applyEdit`: if any skipped field's value differs from `current`, refuse the same way. The message must never be false.
+2. **I2 — `time` and `endTime` move together.** Restore both only if both are unchanged; otherwise keep both. When a filtered restore fails validation, show the "couldn't be undone" message, not the raw validator text.
+3. **I3 — arrows after midnight.** Every arrow handler (day, week, month) calls `refreshForToday()` BEFORE changing its cursor, the same way `openDay` does. The month arrows then render through the same path.
+4. **I4 — feed batch timeout.** A feed batch that never settles is settled as failed after a timeout (20 s is suggested), and the queue drains. Use an injectable timeout so tests don't wait.
+5. **O1 — `nextStamp`.** If `prev + 1` is not a finite date, return `nowIso`.
+6. **O2 — `merge.js` header.** Narrow the claim to item writes. Feed removal and dedupe tombstones still stamp plain now; that goes on the punchlist.
+7. **O5 — stamp on feed changes.** The "Updated" stamp is repainted when Settings changes feeds (`onFeedsChanged`).
+8. **O7 — refusal wording.** The `openedType` refusal says "changed elsewhere (another device or tab) — close and reopen it."
+
+**UI re-review:**
+
+9. **I1 — focus return.** `focusOpener` uses `focus({ preventScroll: true })`.
+10. **O1 — backdrop drag.** The backdrop closes only if the press both STARTED and ENDED on it. Check the target in a `pointerup` handler, not on `click`.
+11. **O2 — shared scroll lock.** The sheet and Settings share one lock, a counter in a tiny shared helper, so either can close in any order and the page is locked while either is open.
+12. **O3 — toast pause.** Drop hover-pause. Keep focus-pause, because a toast that appears under a resting mouse pointer never expires.
+13. **O5 — heading.** The sheet heading gets `flex: 1`, so it is truly centred.
+14. **O9 — deploy note, docs only.** `index.html` and `app.js` must deploy together (`#toast-live`). The service worker is network-first, but GitHub Pages caches HTML for 600 s. Put this in the return notes; no code change.
