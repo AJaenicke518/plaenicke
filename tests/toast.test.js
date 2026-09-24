@@ -64,7 +64,9 @@ test('renders a status toast with the text, and an Undo button only when undo is
   const t = toastIn(h);
   assert.ok(t, 'a .toast must be rendered into the host');
   assert.equal(t.tagName, 'DIV');
-  assert.equal(t.getAttribute('role'), 'status', 'role=status so a screen reader announces it');
+  // The live region is the PERSISTENT #toast-host (index.html), not this
+  // element: a live region inserted already filled is often not announced.
+  assert.equal(t.getAttribute('role'), null, 'role belongs on the host, not the inserted toast');
   assert.match(textOf(h), /Deleted "Dentist"/);
   const btn = undoIn(h);
   assert.ok(btn, 'undo given, so there must be an Undo button');
@@ -182,6 +184,91 @@ test('dismiss() on a replaced toast leaves the newer toast alone', (t) => {
     assert.equal(second.calls.expire, 0, 'a stale handle must not expire the current toast');
     assert.ok(toastIn(h), 'a stale handle must not empty the host out from under the current toast');
     assert.match(textOf(h), /second/);
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+// --- Task 2 review ----------------------------------------------------------
+
+test('ms is honoured: a 1000 ms toast expires at 1000, not 5000', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const h = host();
+    const c = counters();
+    showToast(h, 'x', { onExpire: c.onExpire, ms: 1000 });
+    t.mock.timers.tick(999);
+    assert.equal(c.calls.expire, 0);
+    t.mock.timers.tick(1);
+    assert.equal(c.calls.expire, 1);
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+// Undo of an edit re-runs the edit, whose own path may show a toast. That new
+// toast must survive the settle of the one whose Undo was tapped.
+test('a toast shown from inside undo stays visible', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const h = host();
+    showToast(h, 'Saved', { undo: () => { showToast(h, 'Restored'); } });
+    undoIn(h).fire('click');
+    assert.ok(toastIn(h), 'the toast shown by undo must be on screen');
+    assert.match(textOf(h), /Restored/);
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+test('dismiss() called from inside onExpire does not run onExpire again', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const h = host();
+    let runs = 0;
+    const handle = showToast(h, 'x', { onExpire: () => { runs += 1; handle.dismiss(); } });
+    handle.dismiss();
+    assert.equal(runs, 1);
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+// I1: a throw in the previous toast's onExpire must not stop the new toast
+// from rendering — otherwise a delete requested after it would be hidden with
+// no toast, no Undo and no timer. The throw is still surfaced to the caller.
+test('a throwing onExpire on the replaced toast still lets the new toast render and work', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const h = host();
+    showToast(h, 'A', { onExpire: () => { throw new Error('boom'); } });
+    const c = counters();
+    assert.throws(() => showToast(h, 'B', { undo: c.undo, onExpire: c.onExpire }), /boom/);
+    assert.match(textOf(h), /B/, 'the new toast must be rendered despite the throw');
+    t.mock.timers.tick(5000);
+    assert.equal(c.calls.expire, 1, 'the new toast timer must be running');
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+// I2: A is replaced by B, and A's onExpire shows C. B must end up owning the
+// host with its full lifetime, and a later toast D must settle B.
+test('a toast shown from inside a replaced toast\'s onExpire does not orphan or wipe the newer one', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const h = host();
+    const cC = counters();
+    showToast(h, 'A', { onExpire: () => { showToast(h, 'C', { ms: 1000, onExpire: cC.onExpire }); } });
+    const cB = counters();
+    showToast(h, 'B', { undo: cB.undo, onExpire: cB.onExpire });
+    assert.match(textOf(h), /B/);
+    assert.equal(cC.calls.expire, 1, 'C is settled at once rather than orphaned with a live timer');
+    t.mock.timers.tick(1000);
+    assert.ok(undoIn(h), 'B keeps its Undo for its whole lifetime');
+    assert.match(textOf(h), /B/);
+    showToast(h, 'D');
+    assert.equal(cB.calls.expire, 1, 'a later toast settles B');
   } finally {
     t.mock.timers.reset();
   }

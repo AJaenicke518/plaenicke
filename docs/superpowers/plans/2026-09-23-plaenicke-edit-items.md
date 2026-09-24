@@ -165,7 +165,7 @@ export function typeChangePatch(record, patch)            // -> patch adjusted f
 
 ## Task 4a — opening items (views, `index.html`, the sheet)
 
-**`index.html`:** add `<div id="sheet-host"></div>` and `<div id="toast-host"></div>` before the script tag.
+**`index.html`:** add `<div id="sheet-host"></div>` and `<div id="toast-host" role="status" aria-live="polite"></div>` before the script tag. The live region sits on the persistent host (Task 2 review, O2), and `toast.js` then drops `role` from the toast div.
 
 **Views:**
 - Add an `onOpen` option to `renderTodoView`, `renderIdeasView` and `renderDayView`, and use it in app.js's `renderList`.
@@ -181,6 +181,7 @@ export function typeChangePatch(record, patch)            // -> patch adjusted f
 - For an external item, look up `feeds.find(f => f.id === item.feedId)`:
   - `calendarName` is `feed ? feed.name : 'a linked calendar'`;
   - `googleDayUrl` is `https://calendar.google.com/calendar/r/day/Y/M/D` (no zero padding) when `feed && inferName(feed.url) === 'Google'`.
+- **Before opening, dismiss the active toast** (`if (activeToast) activeToast.dismiss()`), so no Undo can sit over the sheet's buttons (Task 2 review, I3). This follows the rule that only the latest action can be undone. Declare `let activeToast = null` here in 4a; 4b and 4c assign it.
 - Wrap `openItemSheet(...)` in `try`. On a throw, call `setMessage(\`This item can't be edited here (${e.message}).\`)`.
 - **No feed URL may be passed into the sheet.**
 - For now: `onSave` returns `{ ok: false, error: 'Editing arrives in the next step.' }`, and `onDelete` calls the existing `handleDelete`. Tasks 4b and 4c replace both.
@@ -220,6 +221,8 @@ export function typeChangePatch(record, patch)            // -> patch adjusted f
 - On `visibilitychange` to **hidden**: `if (activeToast) activeToast.dismiss()`. Dismissing runs `onExpire`, which is `commitDelete`, so no stale Undo remains.
 - Then commit any ids still pending, as a safety net.
 - The visible branch stays as Phase 0 made it.
+
+**CSS (Task 2 review, O1):** give `body` a bottom padding of `calc(96px + env(safe-area-inset-bottom))`, so a toast never covers the last row.
 
 **Call sites:** every existing call site of `handleDelete` in the views (the list Delete, the Day ×, "Other tasks", To-do and Ideas) and the sheet's `onDelete` now call `requestDelete`.
 

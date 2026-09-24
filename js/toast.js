@@ -15,23 +15,43 @@
 const current = new WeakMap();
 
 export function showToast(host, text, { undo = null, ms = 5000, onExpire = null } = {}) {
-  const prev = current.get(host);
-  if (prev) prev.dismiss();
+  // Settle whatever owns the host, AND anything a settling callback itself
+  // showed (a callback that calls showToast re-populates `current` mid-settle).
+  // Left alone, that toast would be orphaned with a live timer and an Undo the
+  // user can no longer see. A throw from a callback must not stop THIS toast
+  // from rendering — a caller that already hid an item is relying on it — so
+  // it is held and rethrown once the new toast is in place: loud, not lost.
+  let pendingError = null;
+  try {
+    let owner = current.get(host);
+    while (owner) {
+      owner.dismiss();
+      // A settle must leave the host unowned or owned by something NEW. If the
+      // same handle is still registered, stop rather than spin forever.
+      if (current.get(host) === owner) current.delete(host);
+      owner = current.get(host);
+    }
+  } catch (err) {
+    pendingError = err;
+    current.delete(host);
+  }
 
   let settled = false;
   let timer = null;
 
   // Every exit path funnels through here, so the at-most-once guard lives in
-  // exactly one place. That guard is also what keeps a stale handle from
-  // wiping a newer toast: a toast is always settled BEFORE it is replaced
-  // (above), so by the time another toast owns the host, this one's dismiss()
-  // returns at the guard and never reaches the innerHTML line.
+  // exactly one place. The host is cleared ONLY if this toast still owns it:
+  // a toast orphaned by a throw above, or displaced mid-settle, must never
+  // wipe the toast that replaced it. Cleanup runs BEFORE the callback so a
+  // callback may show a new toast (e.g. Undo re-running an edit).
   const settle = (fn) => {
     if (settled) return;
     settled = true;
     clearTimeout(timer);
-    current.delete(host);
-    host.innerHTML = '';
+    if (current.get(host) === handle) {
+      current.delete(host);
+      host.innerHTML = '';
+    }
     if (fn) fn();
   };
 
@@ -39,7 +59,8 @@ export function showToast(host, text, { undo = null, ms = 5000, onExpire = null 
 
   const el = document.createElement('div');
   el.className = 'toast';
-  el.setAttribute('role', 'status');
+  // No role here: #toast-host in index.html is the persistent live region.
+  // A live region inserted already filled is often not announced.
   const span = document.createElement('span');
   span.textContent = text;
   el.appendChild(span);
@@ -57,5 +78,6 @@ export function showToast(host, text, { undo = null, ms = 5000, onExpire = null 
   host.appendChild(el);
   current.set(host, handle);
   timer = setTimeout(handle.dismiss, ms);
+  if (pendingError) throw pendingError;
   return handle;
 }
