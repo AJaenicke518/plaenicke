@@ -135,6 +135,10 @@ class FakeElement {
   }
 
   click() { (this._listeners.click || []).forEach((fn) => fn({ target: this })); }
+
+  // Harness only: records focus the way a browser reports it, so a test can
+  // ask what the app focused. Production code never reads this.
+  focus() { globalThis.document.activeElement = this; }
 }
 
 function makeFakeDocument() {
@@ -145,6 +149,7 @@ function makeFakeDocument() {
   return {
     documentElement,
     body,
+    activeElement: null,
     visibilityState: 'visible',
     getElementById(id) {
       if (!byId.has(id)) byId.set(id, new FakeElement('div'));
@@ -485,7 +490,19 @@ const todoList = () => globalThis.document.getElementById('todo-list');
 const ideaList = () => globalThis.document.getElementById('idea-list');
 const itemList = () => globalThis.document.getElementById('item-list');
 
-function click(el) { (el._listeners.click || []).forEach((fn) => fn({ target: el })); }
+// As a browser does, a click on a submit button (the sheet's Save) also
+// submits its form, and a submission nothing cancelled would navigate away.
+function click(el) {
+  (el._listeners.click || []).forEach((fn) => fn({ target: el }));
+  if (el.tagName === 'BUTTON' && el.type === 'submit') {
+    let form = el.parentNode;
+    while (form && form.tagName !== 'FORM') form = form.parentNode;
+    assert.ok(form, 'a submit button outside any form submits nothing');
+    let prevented = false;
+    (form._listeners.submit || []).forEach((fn) => fn({ target: form, preventDefault() { prevented = true; } }));
+    assert.ok(prevented, 'the form submission was not cancelled; the page would navigate');
+  }
+}
 
 function fire(el, type) { (el._listeners[type] || []).forEach((fn) => fn({ target: el })); }
 
@@ -1132,6 +1149,8 @@ test("open: an external item's sheet names its calendar and never contains the f
     assert.match(allText(host), /From Work calendar/, 'the sheet says which calendar the event came from');
     const strings = stringsOf(host);
     assert.ok(strings.length > 10, 'fixture check: the walk actually collected the tree');
+    // Secrets F4: and nowhere else the app writes text on this path.
+    strings.push(...stringsOf(globalThis.document.getElementById('message')), ...stringsOf(toastHost()));
     for (const s of strings) {
       assert.ok(!s.includes(url) && !s.includes('open-SECRET-TOKEN-123'),
         `the feed URL is a capability token and must appear nowhere in the sheet; found it in ${JSON.stringify(s)}`);
@@ -1158,7 +1177,9 @@ test('open: a Google feed event links to that day in Google Calendar, unpadded',
     assert.ok(link, 'a Google feed gets the link');
     const d = new Date();
     assert.equal(link.href, `https://calendar.google.com/calendar/r/day/${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`);
-    for (const s of stringsOf(sheetHost())) {
+    for (const s of [
+      ...stringsOf(sheetHost()), ...stringsOf(globalThis.document.getElementById('message')), ...stringsOf(toastHost()),
+    ]) {
       assert.ok(!s.includes('open-SECRET-G'), `the Google feed URL must not leak either; found it in ${JSON.stringify(s)}`);
     }
   } finally {
@@ -2680,5 +2701,210 @@ test('sweep D: a tick that fails on quota is shown unticked again, with the erro
   assert.match(messageText(), /quota/i);
   assert.equal(toastHost().children.length, 0);
   clearMessage();
+  seed([]);
+});
+
+// =========================================================================
+// Sweep U — the UI batch, through the real app
+// =========================================================================
+//
+// Ids are prefixed `sU-`. Every test that shows a toast ends with it resolved
+// and #toast-host empty.
+
+const PAGES = [
+  ['List', 'show-list', 'list-view', () => itemList()],
+  ['Day', 'show-day', 'day-view', () => dayBody()],
+  ['To-do', 'show-todo', 'todo-view', () => todoList()],
+  ['Ideas', 'show-ideas', 'ideas-view', () => ideaList()],
+];
+// The nav button of whichever page is showing, to put it back afterwards.
+function visiblePageButton() {
+  for (const [buttonId, sectionId] of [
+    ['show-list', 'list-view'], ['show-month', 'calendar-view'], ['show-week', 'week-view'],
+    ['show-day', 'day-view'], ['show-todo', 'todo-view'], ['show-ideas', 'ideas-view'],
+  ]) {
+    if (!globalThis.document.getElementById(sectionId).hidden) return globalThis.document.getElementById(buttonId);
+  }
+  return null;
+}
+// Is `el` still attached somewhere under `root`?
+function isUnder(root, el) {
+  for (let n = el; n; n = n.parentNode) if (n === root) return true;
+  return false;
+}
+
+// U6: closing the sheet puts focus back on the item's opener. A Save
+// re-renders every page, so the button tapped is gone; the NEW one, found by
+// item id on the page that is showing, is the one focused.
+test('sweep U: after a Save, focus returns to the re-rendered opener on the page that is showing', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const today = localISO(new Date());
+  seed([
+    record({ id: 'sU-focus-task', type: 'task', title: 'sU focus task', date: today }),
+    record({ id: 'sU-focus-idea', type: 'idea', title: 'sU focus idea', date: today }),
+  ]);
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    for (const [name, buttonId, , root] of PAGES) {
+      click(globalThis.document.getElementById(buttonId));
+      const id = name === 'Ideas' ? 'sU-focus-idea' : 'sU-focus-task';
+      const title = name === 'Ideas' ? 'sU focus idea' : 'sU focus task';
+      const opener = openControlFor(root(), title);
+      assert.ok(opener, `fixture check: the ${name} page lists the item`);
+      assert.equal(opener.getAttribute('data-item-id'), id, `the ${name} opener carries its item id`);
+      click(opener);
+      if (name === 'Ideas') sheetHost().querySelector('.sheet-text').value = `${title} (${name})`;
+      else sheetHost().querySelector('.sheet-notes').value = `saved from ${name}`;
+      click(sheetHost().querySelector('.sheet-save'));
+      assert.equal(sheetHost().children.length, 0, 'fixture check: the save closed the sheet');
+      const focused = globalThis.document.activeElement;
+      assert.ok(focused, `${name}: something must be focused`);
+      assert.notEqual(focused, opener, `${name}: the tapped button was re-rendered away; focus the new one`);
+      assert.ok(focused._classes.has('item-open'), `${name}: the opener is focused`);
+      assert.equal(focused.getAttribute('data-item-id'), id);
+      assert.ok(isUnder(root(), focused), `${name}: on the page that is showing, not a hidden one`);
+      t.mock.timers.tick(5000); // settle the Saved toast
+    }
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  assert.equal(toastHost().children.length, 0);
+  seed([]);
+});
+
+// The Day grid's timed blocks build their opener separately from its
+// "Other tasks" list; each needs the id.
+test('sweep U: after a Save, focus returns to a timed Day block\'s opener', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'sU-timed', type: 'event', title: 'sU timed block', date: localISO(new Date()), time: '10:00', endTime: '11:00' })]);
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    click(globalThis.document.getElementById('show-day'));
+    const opener = openControlFor(dayBody(), 'sU timed block');
+    assert.ok(opener, 'fixture check: the block is on the Day grid');
+    click(opener);
+    sheetHost().querySelector('.sheet-notes').value = 'timed';
+    click(sheetHost().querySelector('.sheet-save'));
+    const focused = globalThis.document.activeElement;
+    assert.equal(focused?.getAttribute('data-item-id'), 'sU-timed');
+    assert.notEqual(focused, opener);
+    assert.ok(isUnder(dayBody(), focused));
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  assert.equal(toastHost().children.length, 0);
+  seed([]);
+});
+
+test('sweep U: Cancel returns focus to the opener too', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'sU-cancel', title: 'sU cancel me', date: '2099-02-02' })]);
+  const restore = visiblePageButton();
+  try {
+    click(globalThis.document.getElementById('show-list'));
+    click(openControlFor(itemList(), 'sU cancel me'));
+    globalThis.document.activeElement = null;
+    closeSheet();
+    assert.equal(globalThis.document.activeElement?.getAttribute('data-item-id'), 'sU-cancel');
+  } finally {
+    forceCloseSheet();
+    if (restore) click(restore);
+  }
+  seed([]);
+});
+
+// U10: the List row's text block takes the row's whole width, so a tap
+// anywhere on it (not only on the text) lands on the opener.
+test('sweep U: the List row\'s main block is the flexible one', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'sU-main', title: 'sU main block', date: '2099-02-03' })]);
+  const opener = openControlFor(itemList(), 'sU main block');
+  assert.ok(opener.parentNode._classes.has('list-main'));
+  seed([]);
+});
+
+// U14: the Google link is offered only for Google's own hosts. inferName's
+// substring test says "Google" for these look-alikes; the link must not.
+for (const [label, url, linked] of [
+  ['a look-alike domain', 'https://evilgoogle.com/sU-SECRET-1/basic.ics', false],
+  ['google.com inside another host', 'https://calendar.google.com.evil.example/sU-SECRET-2/basic.ics', false],
+  ['calendar.google.com', 'https://calendar.google.com/calendar/ical/sU-SECRET-3/basic.ics', true],
+  ['another google.com subdomain', 'https://www.google.com/calendar/ical/sU-SECRET-4/basic.ics', true],
+  ['an unparseable URL', 'not a url google.com sU-SECRET-5', false],
+]) {
+  test(`sweep U: the Google link for ${label} is ${linked ? 'offered' : 'not offered'}`, async () => {
+    installFakeLocalStorage();
+    await import('../js/app.js');
+    seed([]);
+    seedFeed({
+      id: 'sU-feed', url, name: 'Mine', color: 'var(--feed-palette-1)', hidden: false,
+      updatedAt: '2026-08-01T00:00:00.000Z',
+    });
+    try {
+      click(openControlFor(itemList(), 'Standup from the feed'));
+      assert.ok(sheetHost().querySelector('.sheet'), 'fixture check: the sheet opened');
+      const link = sheetHost().querySelector('.sheet-google');
+      assert.equal(!!link, linked);
+      if (link) assert.match(link.href, /^https:\/\/calendar\.google\.com\/calendar\/r\/day\//);
+      const secret = /sU-SECRET-\d/.exec(url)[0];
+      for (const root of [sheetHost(), globalThis.document.getElementById('message'), toastHost()]) {
+        for (const s of stringsOf(root)) {
+          assert.ok(!s.includes(secret), `the feed URL must appear nowhere; found it in ${JSON.stringify(s)}`);
+        }
+      }
+    } finally {
+      forceCloseSheet();
+      unseedFeeds();
+    }
+  });
+}
+
+// S-10 / U13: the live regions are in the page from the start (a region
+// inserted already filled is often not announced), and the toast's own
+// container is NOT one, so its Undo button is never read as part of a notice.
+test('sweep U: index.html has a persistent #toast-live status region, and #toast-host is not live', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const tag = (id) => {
+    const m = new RegExp(`<[a-z]+\\b[^>]*\\bid="${id}"[^>]*>`).exec(html);
+    assert.ok(m, `index.html has no #${id}`);
+    return m[0];
+  };
+  const live = tag('toast-live');
+  assert.match(live, /\brole="status"/);
+  assert.match(live, /\baria-live="polite"/);
+  const toastHostTag = tag('toast-host');
+  assert.doesNotMatch(toastHostTag, /\brole=/, '#toast-host holds the Undo button, so it must not be a live region');
+  assert.doesNotMatch(toastHostTag, /\baria-live=/);
+});
+
+test('sweep U: a delete announces its message in #toast-live, and it clears when resolved', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'sU-live', title: 'sU live one', date: '2099-02-04' })]);
+  const live = globalThis.document.getElementById('toast-live');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    click(deleteControlFor(itemList(), 'sU live one'));
+    assert.equal(live.textContent, 'Deleted "sU live one"');
+    assert.ok(toastHost().querySelector('.toast-undo'), 'the Undo is in the visible toast');
+    click(toastHost().querySelector('.toast-undo'));
+    assert.equal(live.textContent, '');
+  } finally {
+    t.mock.timers.tick(5000);
+    t.mock.timers.reset();
+  }
+  assert.equal(toastHost().children.length, 0);
   seed([]);
 });

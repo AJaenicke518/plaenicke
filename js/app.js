@@ -18,7 +18,7 @@ import { renderWeekView } from './weekview.js';
 import { renderPreview } from './preview.js';
 import { isVoiceSupported, dictate } from './voice.js';
 import { initSettings } from './settings.js';
-import { instancesForRange, syncStale, applyRemoteFeeds, inferName } from './feeds.js';
+import { instancesForRange, syncStale, applyRemoteFeeds } from './feeds.js';
 import { openItemSheet } from './itemsheet.js';
 import { showToast } from './toast.js';
 import { applyEdit, typeChangePatch, snapshotOf, nextStamp, EDITABLE_FIELDS } from './edit.js';
@@ -49,6 +49,7 @@ const els = {
   settingsHost: document.getElementById('settings-host'),
   sheetHost: document.getElementById('sheet-host'),
   toastHost: document.getElementById('toast-host'),
+  toastLive: document.getElementById('toast-live'),
   showList: document.getElementById('show-list'),
   showMonth: document.getElementById('show-month'),
   showWeek: document.getElementById('show-week'),
@@ -403,6 +404,7 @@ function editItem(id, patch, { toast = true, raw = false, openedType } = {}) {
     for (const k of EDITABLE_FIELDS) if (before[k] !== next[k]) keys.add(k);
     const undoSnap = snapshotOf(before, [...keys]);
     activeToast = showToast(els.toastHost, 'Saved', {
+      live: els.toastLive,
       undo: () => {
         // Restore a field only while it still holds what this edit wrote. A
         // sync may have brought a newer value from the other device since;
@@ -446,6 +448,7 @@ function requestDelete(id) {
   pendingDeletes.add(id);
   render();
   activeToast = showToast(els.toastHost, it ? `Deleted "${it.title}"` : 'Deleted.', {
+    live: els.toastLive,
     undo: () => undoDelete(id),
     onExpire: () => commitDelete(id),
   });
@@ -481,8 +484,8 @@ function commitDelete(id) {
 //
 // The sheet gets a calendar NAME and an optional Google day link, NEVER the
 // feed's URL: that URL is a capability token that is never re-displayed
-// (CLAUDE.md, "Feed URLs are unrecoverable"). inferName reads the URL here, in
-// app.js, and only its one-word verdict crosses into the sheet.
+// (CLAUDE.md, "Feed URLs are unrecoverable"). isGoogleHost reads the URL here,
+// in app.js, and only its yes/no verdict crosses into the sheet.
 function openItem(item) {
   // Only the latest action can be undone, and an Undo left sitting over the
   // sheet's own buttons is a mis-tap waiting to happen. Dismissing settles
@@ -493,7 +496,7 @@ function openItem(item) {
   if (item.external) {
     const feed = feeds.find((f) => f.id === item.feedId);
     calendarName = feed ? feed.name : 'a linked calendar';
-    if (feed && inferName(feed.url) === 'Google') {
+    if (feed && isGoogleHost(feed.url)) {
       const [y, m, d] = item.date.split('-').map(Number);
       googleDayUrl = `https://calendar.google.com/calendar/r/day/${y}/${m}/${d}`;
     }
@@ -510,11 +513,47 @@ function openItem(item) {
       googleDayUrl,
       onSave: (p) => editItem(item.id, p, { openedType: item.type }),
       onDelete: () => requestDelete(item.id),
-      onClose: () => {},
+      onClose: () => focusOpener(item.id),
     });
   } catch (e) {
     setMessage(`This item can't be edited here (${e.message}).`);
   }
+}
+
+// Is this feed Google's own? The link is offered only for a host of exactly
+// calendar.google.com or one ending in .google.com (sweep U14). inferName's
+// substring test is fine for a display name but says "Google" for
+// evilgoogle.com too. The URL is a capability token: it is parsed here and
+// never logged, rendered or put in a message — an unparseable one simply
+// gets no link.
+function isGoogleHost(url) {
+  let hostname;
+  try {
+    hostname = new URL(url).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return hostname === 'calendar.google.com' || hostname.endsWith('.google.com');
+}
+
+// When the sheet closes, focus goes back to the item's opener (sweep U6). A
+// Save or a Delete has re-rendered every page by now, so the button that was
+// tapped is gone: the NEW one is found by item id, on the page that is
+// showing (every page renders every item's opener, hidden pages included).
+// Month and Week have no openers. An item that is no longer listed — deleted,
+// or moved off the Day being shown — has none to return to, and focus is left
+// where the browser puts it.
+function focusOpener(id) {
+  const pages = [
+    [els.listView, els.list], [els.dayView, els.dayBody],
+    [els.todoView, els.todoList], [els.ideasView, els.ideaList],
+  ];
+  const shown = pages.find(([section]) => !section.hidden);
+  if (!shown) return;
+  // A NodeList has no .find; spread it into an array first.
+  const opener = [...shown[1].querySelectorAll('button')]
+    .find((b) => b.classList.contains('item-open') && b.getAttribute('data-item-id') === id);
+  if (opener) opener.focus();
 }
 
 function handleToggleDone(id, done) {
@@ -574,12 +613,16 @@ function renderList() {
       li.className = itemTypeClass(it);
       if (it.external) li.style.setProperty('--feed-color', it.feedColor);
       const main = document.createElement('div');
+      // flex: 1 (styles.css), so the whole row width is the opener's, not
+      // only its text (sweep U10).
+      main.className = 'list-main';
       // The title opens the item. Delete is appended to the <li> below, a
       // SIBLING of `main` — never inside anything with a click handler, so a
       // tap on Delete cannot also open the sheet.
       const open = document.createElement('button');
       open.type = 'button';
       open.className = 'item-open';
+      open.setAttribute('data-item-id', it.id);
       open.textContent = `${formatDayLabel(it.date, todayISO)} — ${it.title}`;
       open.addEventListener('click', () => openItem(it));
       main.appendChild(open);

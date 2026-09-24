@@ -27,19 +27,89 @@ import { readFileSync } from 'node:fs';
 const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8')
   .replace(/\/\*[\s\S]*?\*\//g, '');
 
-// Return the last line-height declared in the rule whose selector list
-// matches `selector` exactly, or null. Last wins, as in the cascade.
-function lineHeightOf(selector) {
-  const rules = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)];
-  let found = null;
-  for (const [, sel, body] of rules) {
-    const selectors = sel.split(',').map((s) => s.trim().replace(/\s+/g, ' '));
+// --- reading the WINNING declaration (sweep S-11) --------------------------
+//
+// Every declaration of every rule whose selector list contains `selector`
+// exactly, in source order. Rules with the same selector have the same
+// specificity, so the LAST declaration of a property wins, and a shorthand
+// counts: `padding: 0` after `padding-bottom: 12px` resets the bottom.
+// The first version of these helpers took the last LONGHAND only, so a later
+// shorthand that undid it read as the longhand still being in force.
+function declsOf(selector, source = css) {
+  const out = [];
+  for (const [, sel, body] of source.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+    const selectors = sel.split(',').map((x) => x.trim().replace(/\s+/g, ' '));
     if (!selectors.includes(selector)) continue;
-    const m = [...body.matchAll(/(?:^|;)\s*line-height\s*:\s*([^;]+)/g)].pop();
-    if (m) found = parseFloat(m[1]);
+    for (const decl of body.split(';')) {
+      const i = decl.indexOf(':');
+      if (i < 0) continue;
+      out.push({ prop: decl.slice(0, i).trim().toLowerCase(), value: decl.slice(i + 1).trim() });
+    }
   }
-  return found;
+  return out;
 }
+
+const SIDES = ['top', 'right', 'bottom', 'left'];
+// Each shorthand and the longhands it sets (only those this stylesheet uses).
+const LONGHANDS = {
+  padding: SIDES.map((x) => `padding-${x}`),
+  margin: SIDES.map((x) => `margin-${x}`),
+  overflow: ['overflow-x', 'overflow-y'],
+  background: ['background-color', 'background-image'],
+  font: ['font-size', 'font-family', 'font-weight', 'font-style', 'line-height'],
+  border: ['border-color', 'border-width', 'border-style',
+    ...SIDES.map((x) => `border-${x}`)],
+  flex: ['flex-grow', 'flex-shrink', 'flex-basis'],
+};
+const SHORTHAND_OF = {};
+for (const [sh, longs] of Object.entries(LONGHANDS)) for (const l of longs) SHORTHAND_OF[l] = sh;
+
+// The winning value of `prop` for `selector`, or null if nothing sets it.
+// When a shorthand wins, the longhand is read out of it where that is exact
+// (box sides, overflow); anywhere else the test THROWS rather than guess.
+function declOf(selector, prop, source = css) {
+  const sh = SHORTHAND_OF[prop];
+  const longs = LONGHANDS[prop] || [];
+  const decls = declsOf(selector, source);
+  let win = null;
+  for (const d of decls) if (d.prop === prop || d.prop === sh) win = d;
+  if (!win) return null;
+  // Asking for a shorthand that a later longhand partly overrides: there is
+  // no single value to return.
+  const later = decls.slice(decls.indexOf(win) + 1).find((d) => longs.includes(d.prop));
+  if (later) throw new Error(`${selector}: ${prop} is partly overridden by a later ${later.prop}`);
+  if (win.prop === prop) return win.value;
+  const parts = win.value.split(/\s+(?![^(]*\))/);
+  if (sh === 'padding' || sh === 'margin') {
+    const [t, r = t, b = t, l = r] = parts;
+    return { top: t, right: r, bottom: b, left: l }[prop.split('-')[1]];
+  }
+  if (sh === 'overflow') return prop === 'overflow-x' ? parts[0] : (parts[1] || parts[0]);
+  throw new Error(`${selector}: ${prop} is set by the shorthand ${win.prop}: ${win.value}; read that instead`);
+}
+
+// The winning line-height as a number, or null.
+function lineHeightOf(selector) {
+  const v = declOf(selector, 'line-height');
+  return v === null ? null : parseFloat(v);
+}
+
+test('declOf reads the winning declaration, shorthands included (S-11)', () => {
+  assert.equal(declOf('.a', 'padding-bottom', '.a { padding-bottom: 5px; padding: 1px 2px 3px; }'), '3px',
+    'a later shorthand wins over an earlier longhand');
+  assert.equal(declOf('.a', 'padding-bottom', '.a { padding: 1px; padding-bottom: 7px; }'), '7px');
+  assert.equal(declOf('.a', 'padding-left', '.a { padding: 1px 2px; }'), '2px');
+  assert.equal(declOf('.a', 'padding-bottom', '.a { padding: 0 16px; }'), '0');
+  assert.equal(declOf('.a', 'padding-bottom', '.a { padding: calc(1px + 2px) 4px; }'), 'calc(1px + 2px)');
+  assert.equal(declOf('.a', 'color', '.a { color: red; } .b { color: blue; } .a, .c { color: green; }'), 'green',
+    'the later of two rules for the same selector wins');
+  assert.equal(declOf('.a', 'color', '.a b { color: red; }'), null, 'a different selector is not this one');
+  assert.equal(declOf('.a', 'overflow-y', '.a { overflow-y: auto; overflow: hidden; }'), 'hidden');
+  assert.throws(() => declOf('.a', 'font-size', '.a { font-size: 16px; font: inherit; }'), /shorthand font/,
+    'a font shorthand after the size cannot be read as a size; the test must fail, not pass');
+  assert.throws(() => declOf('.a', 'padding', '.a { padding: 0; padding-top: 4px; }'), /partly overridden/);
+  assert.equal(lineHeightOf('.x'), null);
+});
 
 test('body sets a readable line-height', () => {
   const lh = lineHeightOf('body');
@@ -63,21 +133,6 @@ for (const sel of ['.day-block', '.day-pin', '.cal-item']) {
 // zoom the whole page on focus, and a button under 44px is a missed tap.
 // Existence is asserted FIRST, so deleting a rule fails loudly instead of
 // "no declaration found, nothing to check".
-
-// The last value of `prop` declared in any rule whose selector list contains
-// `selector` exactly, or null.
-function declOf(selector, prop) {
-  const rules = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)];
-  let found = null;
-  for (const [, sel, body] of rules) {
-    const selectors = sel.split(',').map((s) => s.trim().replace(/\s+/g, ' '));
-    if (!selectors.includes(selector)) continue;
-    const re = new RegExp(`(?:^|;)\\s*${prop}\\s*:\\s*([^;]+)`, 'g');
-    const m = [...body.matchAll(re)].pop();
-    if (m) found = m[1].trim();
-  }
-  return found;
-}
 
 function ruleExists(selector) {
   return [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)]
@@ -147,12 +202,11 @@ for (const sel of ['.day-block .item-open', '.day-pin .item-open']) {
 
 // --- Task 3 review: layering and the sticky Save bar ------------------------
 function zIndexOf(selector) {
-  const re = new RegExp(`(^|\\})\\s*${selector.replace(/[.]/g, '\\.')}\\s*\\{([^}]*)\\}`, 'm');
-  const m = css.match(re);
-  assert.ok(m, `expected a ${selector} rule`);
-  const z = m[2].match(/z-index:\s*(\d+)/);
-  assert.ok(z, `${selector} must set a z-index`);
-  return Number(z[1]);
+  assert.ok(ruleExists(selector), `expected a ${selector} rule`);
+  const z = declOf(selector, 'z-index');
+  assert.ok(z !== null, `${selector} must set a z-index`);
+  assert.match(z, /^\d+$/);
+  return Number(z);
 }
 
 test('the toast sits above the sheet, which sits above settings', () => {
@@ -161,10 +215,9 @@ test('the toast sits above the sheet, which sits above settings', () => {
 });
 
 test('the sheet top bar is sticky, so Save stays reachable while the form scrolls', () => {
-  const m = css.match(/(^|\})\s*\.sheet-bar\s*\{([^}]*)\}/m);
-  assert.ok(m, 'expected a .sheet-bar rule');
-  assert.match(m[2], /position:\s*sticky/);
-  assert.match(m[2], /top:\s*0/);
+  assert.ok(ruleExists('.sheet-bar'), 'expected a .sheet-bar rule');
+  assert.equal(declOf('.sheet-bar', 'position'), 'sticky');
+  assert.equal(declOf('.sheet-bar', 'top'), '0');
 });
 
 // --- Task 4b (Task 2 review, O1): the toast must never cover the last row ---
@@ -191,4 +244,94 @@ test('in a Day block the open button fills the block, so any tap on it opens', (
   const m = css.match(/\.day-block \.item-open, \.day-pin \.item-open\s*\{([^}]*)\}/);
   assert.ok(m);
   assert.match(m[1], /height:\s*100%/);
+});
+
+// --- Sweep S-11: pins the review found missing ------------------------------
+test('.toast-undo is at least 44px tall', () => {
+  assert.ok(ruleExists('.toast-undo'), 'no rule for .toast-undo');
+  assert.ok(px(declOf('.toast-undo', 'min-height')) >= 44);
+});
+
+test('an empty .sheet-error takes no space', () => {
+  assert.equal(declOf('.sheet-error:empty', 'display'), 'none');
+});
+
+// --- Sweep U: the real-browser review ---------------------------------------
+// U1: Delete was the global accent chip with danger text on it — unreadable.
+test('.sheet-delete is a transparent danger outline', () => {
+  assert.equal(declOf('.sheet-delete', 'background'), 'transparent');
+  assert.equal(declOf('.sheet-delete', 'border'), '1px solid var(--danger)');
+  assert.equal(declOf('.sheet-delete', 'color'), 'var(--danger)');
+});
+
+// U2: one primary action. Everything else is the secondary look that
+// .preview-actions .cancel already uses.
+test('Save is the primary button', () => {
+  assert.equal(declOf('.sheet-save', 'background'), 'var(--accent)');
+  assert.equal(declOf('.sheet-save', 'color'), 'var(--accent-ink)');
+});
+for (const sel of ['.sheet-cancel', '.sheet-close', '.sheet-move']) {
+  test(`${sel} is a secondary button, like the preview's Cancel`, () => {
+    assert.equal(declOf(sel, 'background'), declOf('.preview-actions .cancel', 'background'));
+    assert.equal(declOf(sel, 'color'), declOf('.preview-actions .cancel', 'color'));
+    assert.equal(declOf(sel, 'border'), declOf('.preview-actions .cancel', 'border'));
+    assert.equal(declOf(sel, 'background'), 'var(--card)', 'fixture check: the preview Cancel is what it was');
+  });
+}
+
+// U3
+test('the Google link is in the accent colour', () => {
+  assert.equal(declOf('.sheet-google', 'color'), 'var(--accent)');
+});
+
+// U4: native controls (date and time pickers, scrollbars) follow the theme,
+// and the scrim still dims a near-black page.
+test('dark mode sets color-scheme and a darker scrim', () => {
+  assert.equal(declOf('[data-theme="dark"]', 'color-scheme'), 'dark');
+  const alpha = (v) => {
+    const m = /^rgba\(\s*0,\s*0,\s*0,\s*([\d.]+)\s*\)$/.exec(v || '');
+    assert.ok(m, `cannot read an alpha from ${JSON.stringify(v)}`);
+    return parseFloat(m[1]);
+  };
+  assert.ok(alpha(declOf('[data-theme="dark"]', '--scrim')) > alpha(declOf(':root', '--scrim')));
+});
+
+// U5
+test('the sheet contains its own overscroll', () => {
+  assert.equal(declOf('.sheet', 'overscroll-behavior'), 'contain');
+});
+
+// U9: a Day block's title sits at the top-left, not centred in the button.
+test('in a Day block the open button\'s content is top-left', () => {
+  for (const sel of ['.day-block .item-open', '.day-pin .item-open']) {
+    assert.equal(declOf(sel, 'display'), 'flex', sel);
+    assert.equal(declOf(sel, 'align-items'), 'flex-start', sel);
+    assert.equal(declOf(sel, 'justify-content'), 'flex-start', sel);
+  }
+});
+
+// U10
+test('the List row\'s main block takes the free width', () => {
+  assert.equal(declOf('.list-main', 'flex'), '1');
+  assert.equal(declOf('.list-main', 'min-width'), '0');
+});
+
+// U12: the own-item heading sits in the top bar, between Cancel and Save.
+test('the heading in the top bar has no margin of its own', () => {
+  assert.equal(declOf('.sheet-bar .sheet-heading', 'margin'), '0');
+});
+
+// U13: #toast-live is read, not seen.
+test('.visually-hidden hides from sight only', () => {
+  assert.equal(declOf('.visually-hidden', 'position'), 'absolute');
+  assert.equal(declOf('.visually-hidden', 'width'), '1px');
+  assert.equal(declOf('.visually-hidden', 'height'), '1px');
+  assert.equal(declOf('.visually-hidden', 'overflow'), 'hidden');
+  assert.equal(declOf('.visually-hidden', 'clip-path'), 'inset(50%)');
+  assert.equal(declOf('.visually-hidden', 'display'), null, 'display: none would hide it from screen readers too');
+});
+
+// U15
+test('the external sheet has room after its last line', () => {
+  assert.equal(declOf('.sheet-external', 'padding-bottom'), 'calc(16px + env(safe-area-inset-bottom))');
 });

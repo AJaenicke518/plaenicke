@@ -42,6 +42,10 @@ class FakeElement {
 globalThis.document = { createElement: (tag) => new FakeElement(tag) };
 
 const host = () => new FakeElement('div');
+// The persistent live region (#toast-live in index.html). Every existing test
+// shares this one; the Sweep U tests below make their own.
+const LIVE = new FakeElement('p');
+const show = (h, text, opts = {}) => showToast(h, text, { live: LIVE, ...opts });
 const toastIn = (h) => h.children.find((c) => c._classes.has('toast')) || null;
 const undoIn = (h) => {
   const t = toastIn(h);
@@ -60,7 +64,7 @@ function counters() {
 
 test('renders a status toast with the text, and an Undo button only when undo is given', () => {
   const h = host();
-  showToast(h, 'Deleted "Dentist"', { undo: () => {} });
+  show(h, 'Deleted "Dentist"', { undo: () => {} });
   const t = toastIn(h);
   assert.ok(t, 'a .toast must be rendered into the host');
   assert.equal(t.tagName, 'DIV');
@@ -75,7 +79,7 @@ test('renders a status toast with the text, and an Undo button only when undo is
   assert.equal(btn.textContent, 'Undo');
 
   const h2 = host();
-  showToast(h2, 'Saved');
+  show(h2, 'Saved');
   assert.ok(toastIn(h2));
   assert.equal(undoIn(h2), null, 'no undo, so no Undo button');
 });
@@ -85,7 +89,7 @@ test('expiry after ms empties the host and calls onExpire exactly once', (t) => 
   try {
     const h = host();
     const c = counters();
-    showToast(h, 'Deleted', { undo: c.undo, onExpire: c.onExpire, ms: 5000 });
+    show(h, 'Deleted', { undo: c.undo, onExpire: c.onExpire, ms: 5000 });
     t.mock.timers.tick(4999);
     assert.equal(c.calls.expire, 0, 'must not expire early');
     assert.ok(toastIn(h), 'still showing before ms elapses');
@@ -105,7 +109,7 @@ test('Undo calls undo, empties the host, and onExpire never runs — not even wh
   try {
     const h = host();
     const c = counters();
-    showToast(h, 'Deleted', { undo: c.undo, onExpire: c.onExpire, ms: 5000 });
+    show(h, 'Deleted', { undo: c.undo, onExpire: c.onExpire, ms: 5000 });
     undoIn(h).fire('click');
     assert.equal(c.calls.undo, 1);
     assert.equal(c.calls.expire, 0, 'Undo must not also commit the deletion');
@@ -123,8 +127,8 @@ test('a second toast on the same host synchronously expires the first, then repl
     const h = host();
     const first = counters();
     const second = counters();
-    showToast(h, 'first', { undo: first.undo, onExpire: first.onExpire });
-    showToast(h, 'second', { undo: second.undo, onExpire: second.onExpire });
+    show(h, 'first', { undo: first.undo, onExpire: first.onExpire });
+    show(h, 'second', { undo: second.undo, onExpire: second.onExpire });
     assert.equal(first.calls.expire, 1, 'the first toast\'s onExpire must run before it is replaced');
     assert.equal(first.calls.undo, 0);
     assert.equal(second.calls.expire, 0, 'the second toast is still pending');
@@ -143,7 +147,7 @@ test('dismiss() expires early, so onExpire runs', (t) => {
   try {
     const h = host();
     const c = counters();
-    const handle = showToast(h, 'Deleted', { undo: c.undo, onExpire: c.onExpire });
+    const handle = show(h, 'Deleted', { undo: c.undo, onExpire: c.onExpire });
     handle.dismiss();
     assert.equal(c.calls.expire, 1);
     assert.equal(c.calls.undo, 0);
@@ -158,7 +162,7 @@ test('dismiss() twice, then the timer, then Undo: onExpire runs once and undo ne
   try {
     const h = host();
     const c = counters();
-    const handle = showToast(h, 'Deleted', { undo: c.undo, onExpire: c.onExpire });
+    const handle = show(h, 'Deleted', { undo: c.undo, onExpire: c.onExpire });
     const btn = undoIn(h);
     handle.dismiss();
     handle.dismiss();
@@ -177,8 +181,8 @@ test('dismiss() on a replaced toast leaves the newer toast alone', (t) => {
     const h = host();
     const first = counters();
     const second = counters();
-    const old = showToast(h, 'first', { onExpire: first.onExpire });
-    showToast(h, 'second', { onExpire: second.onExpire });
+    const old = show(h, 'first', { onExpire: first.onExpire });
+    show(h, 'second', { onExpire: second.onExpire });
     old.dismiss();
     assert.equal(first.calls.expire, 1);
     assert.equal(second.calls.expire, 0, 'a stale handle must not expire the current toast');
@@ -196,7 +200,7 @@ test('ms is honoured: a 1000 ms toast expires at 1000, not 5000', (t) => {
   try {
     const h = host();
     const c = counters();
-    showToast(h, 'x', { onExpire: c.onExpire, ms: 1000 });
+    show(h, 'x', { onExpire: c.onExpire, ms: 1000 });
     t.mock.timers.tick(999);
     assert.equal(c.calls.expire, 0);
     t.mock.timers.tick(1);
@@ -212,7 +216,7 @@ test('a toast shown from inside undo stays visible', (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   try {
     const h = host();
-    showToast(h, 'Saved', { undo: () => { showToast(h, 'Restored'); } });
+    show(h, 'Saved', { undo: () => { show(h, 'Restored'); } });
     undoIn(h).fire('click');
     assert.ok(toastIn(h), 'the toast shown by undo must be on screen');
     assert.match(textOf(h), /Restored/);
@@ -226,7 +230,7 @@ test('dismiss() called from inside onExpire does not run onExpire again', (t) =>
   try {
     const h = host();
     let runs = 0;
-    const handle = showToast(h, 'x', { onExpire: () => { runs += 1; handle.dismiss(); } });
+    const handle = show(h, 'x', { onExpire: () => { runs += 1; handle.dismiss(); } });
     handle.dismiss();
     assert.equal(runs, 1);
   } finally {
@@ -241,9 +245,9 @@ test('a throwing onExpire on the replaced toast still lets the new toast render 
   t.mock.timers.enable({ apis: ['setTimeout'] });
   try {
     const h = host();
-    showToast(h, 'A', { onExpire: () => { throw new Error('boom'); } });
+    show(h, 'A', { onExpire: () => { throw new Error('boom'); } });
     const c = counters();
-    assert.throws(() => showToast(h, 'B', { undo: c.undo, onExpire: c.onExpire }), /boom/);
+    assert.throws(() => show(h, 'B', { undo: c.undo, onExpire: c.onExpire }), /boom/);
     assert.match(textOf(h), /B/, 'the new toast must be rendered despite the throw');
     t.mock.timers.tick(5000);
     assert.equal(c.calls.expire, 1, 'the new toast timer must be running');
@@ -259,16 +263,121 @@ test('a toast shown from inside a replaced toast\'s onExpire does not orphan or 
   try {
     const h = host();
     const cC = counters();
-    showToast(h, 'A', { onExpire: () => { showToast(h, 'C', { ms: 1000, onExpire: cC.onExpire }); } });
+    show(h, 'A', { onExpire: () => { show(h, 'C', { ms: 1000, onExpire: cC.onExpire }); } });
     const cB = counters();
-    showToast(h, 'B', { undo: cB.undo, onExpire: cB.onExpire });
+    show(h, 'B', { undo: cB.undo, onExpire: cB.onExpire });
     assert.match(textOf(h), /B/);
     assert.equal(cC.calls.expire, 1, 'C is settled at once rather than orphaned with a live timer');
     t.mock.timers.tick(1000);
     assert.ok(undoIn(h), 'B keeps its Undo for its whole lifetime');
     assert.match(textOf(h), /B/);
-    showToast(h, 'D');
+    show(h, 'D');
     assert.equal(cB.calls.expire, 1, 'a later toast settles B');
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+// =========================================================================
+// Sweep U13 — what is announced, and pausing
+// =========================================================================
+
+// The live region is a persistent element of its own, OUTSIDE the toast, and
+// it carries only the message. With the toast's host as the live region, the
+// Undo button was inside it and was read out as part of every notice.
+test('the live region gets the message only; the Undo button stays out of it', () => {
+  const h = host();
+  const live = new FakeElement('p');
+  showToast(h, 'Deleted "Dentist"', { live, undo: () => {} });
+  assert.equal(live.textContent, 'Deleted "Dentist"');
+  assert.equal(live.children.length, 0, 'nothing but text in the live region');
+  assert.ok(undoIn(h), 'the Undo button is in the visible toast');
+  assert.equal(h.getAttribute('role'), null, 'toast.js makes no live region of the host');
+  assert.equal(h.getAttribute('aria-live'), null);
+});
+
+test('settling clears the live region; a replaced toast does not clear its successor\'s text', () => {
+  const h = host();
+  const live = new FakeElement('p');
+  const first = showToast(h, 'first', { live });
+  showToast(h, 'second', { live });
+  assert.equal(live.textContent, 'second');
+  first.dismiss(); // stale handle
+  assert.equal(live.textContent, 'second');
+  showToast(h, 'third', { live }).dismiss();
+  assert.equal(live.textContent, '', 'a settled toast leaves nothing to be found by browsing');
+});
+
+test('showToast refuses to run without a live region, and touches nothing', () => {
+  const h = host();
+  const existing = h.appendChild(new FakeElement('p'));
+  assert.throws(() => showToast(h, 'x'), /showToast: live is required/);
+  assert.deepEqual(h.children, [existing]);
+});
+
+for (const [name, enter, leave] of [
+  ['focus is inside it', 'focusin', 'focusout'],
+  ['the pointer is over it', 'pointerenter', 'pointerleave'],
+]) {
+  test(`the toast does not expire while ${name}, and resumes with the time it had left`, (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+    try {
+      const h = host();
+      const c = counters();
+      show(h, 'Deleted', { undo: c.undo, onExpire: c.onExpire, ms: 5000 });
+      t.mock.timers.tick(3000);
+      toastIn(h).fire(enter);
+      t.mock.timers.tick(60000);
+      assert.equal(c.calls.expire, 0, `must not expire while ${name}`);
+      assert.ok(toastIn(h));
+      toastIn(h).fire(leave);
+      t.mock.timers.tick(1999);
+      assert.equal(c.calls.expire, 0, 'the 2000 ms it had left, not less');
+      t.mock.timers.tick(1);
+      assert.equal(c.calls.expire, 1, 'and not more');
+      assert.equal(h.children.length, 0);
+    } finally {
+      t.mock.timers.reset();
+    }
+  });
+}
+
+test('leaving with the pointer while focus is still inside keeps it paused', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  try {
+    const h = host();
+    const c = counters();
+    show(h, 'Deleted', { undo: c.undo, onExpire: c.onExpire, ms: 5000 });
+    const el = toastIn(h);
+    el.fire('focusin');
+    el.fire('pointerenter');
+    el.fire('pointerleave');
+    t.mock.timers.tick(60000);
+    assert.equal(c.calls.expire, 0, 'still focused, so still paused');
+    el.fire('focusout');
+    t.mock.timers.tick(5000);
+    assert.equal(c.calls.expire, 1);
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+test('Undo while paused runs undo once, and no timer is left to expire it', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  try {
+    const h = host();
+    const c = counters();
+    show(h, 'Deleted', { undo: c.undo, onExpire: c.onExpire, ms: 5000 });
+    const el = toastIn(h);
+    el.fire('focusin');
+    undoIn(h).fire('click');
+    el.fire('focusout'); // focus leaves the removed button
+    t.mock.timers.tick(60000);
+    assert.equal(c.calls.undo, 1);
+    // A resume after settling is refused by resume()'s own guard; were it
+    // not, the stray timer would reach settle(), whose at-most-once guard
+    // makes it a no-op. Neither is observable, so this pins the outcome only.
+    assert.equal(c.calls.expire, 0, 'an Undo is never followed by an expiry');
   } finally {
     t.mock.timers.reset();
   }

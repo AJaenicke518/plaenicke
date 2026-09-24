@@ -36,6 +36,9 @@
 }
 
 [data-theme="dark"] {
+  /* Native controls (date/time pickers, scrollbars, form fields) follow the
+     theme instead of rendering light on a dark page (sweep U4). */
+  color-scheme: dark;
   --bg: #14161a;            /* neutral near-black */
   --card: #1e2126;
   --ink: #e2e5ea;
@@ -56,6 +59,8 @@
   --type-task: #a98fd0;
   --type-idea: #6fb3c0;
   --on-type: #14161a;
+  /* 0.35 barely dims a near-black page; a sheet must read as in front. */
+  --scrim: rgba(0, 0, 0, 0.6);
   /* linked-calendar palette (Task 8) — lighter/brighter twins of the light
      values above, same contrast strategy as the item-type palette. */
   --feed-palette-1: #9a98d4;
@@ -68,6 +73,20 @@
 
 /* ---------- base ---------- */
 * { box-sizing: border-box; }
+
+/* Read by screen readers, not shown (the toast's live region, #toast-live).
+   Never display: none — that hides it from screen readers too. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
 
 body {
   margin: 0;
@@ -212,7 +231,15 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 }
 /* A Day block is ~22px tall with overflow:hidden (js/dayview.js, HOUR_PX =
    48). The list's 44px minimum would push the title out of it. */
-.day-block .item-open, .day-pin .item-open { min-height: 0; line-height: inherit; height: 100%; }
+/* Flex, top-left (sweep U9): a button centres its content vertically, which
+   put a one-line title in the middle of a tall block. */
+.day-block .item-open, .day-pin .item-open {
+  min-height: 0; line-height: inherit; height: 100%;
+  display: flex; align-items: flex-start; justify-content: flex-start;
+}
+/* The List row's text block takes all the width Delete leaves, so a tap
+   anywhere on the row's left part lands on the opener (sweep U10). */
+.list-main { flex: 1; min-width: 0; }
 .time-line { color: var(--muted); font-size: 0.8rem; font-style: italic; }
 
 /* ---------- calendar controls (shared by month/week/day) ---------- */
@@ -609,6 +636,9 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   padding: 0 16px;
   padding-bottom: env(safe-area-inset-bottom);
   box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.2);
+  /* Scrolling past the sheet's end must not scroll the page behind it
+     (sweep U5; the page itself is locked by js/itemsheet.js). */
+  overscroll-behavior: contain;
 }
 .sheet-bar {
   position: sticky; top: 0;
@@ -618,7 +648,12 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   border-bottom: 1px solid var(--line);
   margin-bottom: 12px;
 }
+/* One primary action (sweep U2). The rest are secondary, like the preview's
+   Cancel (.preview-actions .cancel). */
 .sheet-save { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.sheet-cancel, .sheet-close, .sheet-move { background: var(--card); color: var(--ink); border: 1px solid var(--line); }
+/* Own items' heading, between Cancel and Save in the top bar (sweep U12). */
+.sheet-bar .sheet-heading { margin: 0; font-size: 1rem; text-align: center; }
 .sheet-form { display: flex; flex-direction: column; gap: 10px; }
 .sheet-field { display: flex; flex-direction: column; gap: 4px; }
 .sheet-label { font-size: 0.8rem; color: var(--muted); }
@@ -638,7 +673,18 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 .sheet-error { color: var(--danger); margin: 10px 0 0; }
 .sheet-error:empty { display: none; }
 .sheet-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 16px; }
-.sheet-delete { color: var(--danger); margin-left: auto; }
+/* Transparent with a danger outline (sweep U1): danger text on the global
+   accent chip was unreadable. */
+.sheet-delete {
+  background: transparent;
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  margin-left: auto;
+}
 .sheet-heading { font-size: 1.1rem; margin: 0 0 6px; }
 .sheet-when, .sheet-source { margin: 0 0 6px; color: var(--muted); }
-.sheet-google { display: inline-flex; align-items: center; min-height: 44px; }
+.sheet-google { display: inline-flex; align-items: center; min-height: 44px; color: var(--accent); }
+/* The external sheet ends on a line of text or the link, with nothing under
+   it; this is the room .sheet-actions' margin gives an own item (sweep U15).
+   After .sheet, which it overrides at equal specificity. */
+.sheet-external { padding-bottom: calc(16px + env(safe-area-inset-bottom)); }

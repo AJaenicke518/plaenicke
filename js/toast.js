@@ -14,7 +14,13 @@
 // takes its entry with it.
 const current = new WeakMap();
 
-export function showToast(host, text, { undo = null, ms = 5000, onExpire = null } = {}) {
+// `live` is a PERSISTENT live region (#toast-live in index.html), separate
+// from `host` (sweep U13). It gets the message text only. When the host
+// itself was the live region, the Undo button was inside it and every notice
+// was read out as "Deleted X, Undo". It must already be in the page: a live
+// region inserted already filled is often not announced.
+export function showToast(host, text, { live, undo = null, ms = 5000, onExpire = null } = {}) {
+  if (!live) throw new Error('showToast: live is required');
   // Settle whatever owns the host, AND anything a settling callback itself
   // showed (a callback that calls showToast re-populates `current` mid-settle).
   // Left alone, that toast would be orphaned with a live timer and an Undo the
@@ -38,6 +44,26 @@ export function showToast(host, text, { undo = null, ms = 5000, onExpire = null 
 
   let settled = false;
   let timer = null;
+  // Pausing (sweep U13): the timer stops while focus is inside the toast or
+  // the pointer is over it, and resumes with the time that was left.
+  let remaining = ms;
+  let deadline = 0;
+  let focused = false;
+  let hovered = false;
+  const start = () => {
+    deadline = Date.now() + remaining;
+    timer = setTimeout(handle.dismiss, remaining);
+  };
+  const pause = () => {
+    if (settled || timer === null) return;
+    clearTimeout(timer);
+    timer = null;
+    remaining = Math.max(0, deadline - Date.now());
+  };
+  const resume = () => {
+    if (settled || timer !== null || focused || hovered) return;
+    start();
+  };
 
   // Every exit path funnels through here, so the at-most-once guard lives in
   // exactly one place. The host is cleared ONLY if this toast still owns it:
@@ -51,6 +77,8 @@ export function showToast(host, text, { undo = null, ms = 5000, onExpire = null 
     if (current.get(host) === handle) {
       current.delete(host);
       host.innerHTML = '';
+      // Nothing left behind for a screen reader to find by browsing.
+      live.textContent = '';
     }
     if (fn) fn();
   };
@@ -59,8 +87,11 @@ export function showToast(host, text, { undo = null, ms = 5000, onExpire = null 
 
   const el = document.createElement('div');
   el.className = 'toast';
-  // No role here: #toast-host in index.html is the persistent live region.
-  // A live region inserted already filled is often not announced.
+  // No role here, and none on the host: `live` is the live region.
+  el.addEventListener('focusin', () => { focused = true; pause(); });
+  el.addEventListener('focusout', () => { focused = false; resume(); });
+  el.addEventListener('pointerenter', () => { hovered = true; pause(); });
+  el.addEventListener('pointerleave', () => { hovered = false; resume(); });
   const span = document.createElement('span');
   span.textContent = text;
   el.appendChild(span);
@@ -77,7 +108,8 @@ export function showToast(host, text, { undo = null, ms = 5000, onExpire = null 
   host.innerHTML = '';
   host.appendChild(el);
   current.set(host, handle);
-  timer = setTimeout(handle.dismiss, ms);
+  live.textContent = text;
+  start();
   if (pendingError) throw pendingError;
   return handle;
 }

@@ -121,9 +121,12 @@
   <div id="settings-host"></div>
   <!-- The item sheet (js/itemsheet.js) mounts here. -->
   <div id="sheet-host"></div>
-  <!-- The toast (js/toast.js). The live region is this PERSISTENT host, not
-       the toast: a live region inserted already filled is often not announced. -->
-  <div id="toast-host" role="status" aria-live="polite"></div>
+  <!-- The toast (js/toast.js). The host is NOT a live region: it holds the
+       Undo button, which would be read out as part of every notice. The
+       message is announced through #toast-live, which is PERSISTENT because a
+       live region inserted already filled is often not announced. -->
+  <div id="toast-host"></div>
+  <p id="toast-live" class="visually-hidden" role="status" aria-live="polite"></p>
 
   <script type="module" src="js/app.js"></script>
 </body>

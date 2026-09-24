@@ -54,6 +54,8 @@ export function renderTodoView(container, todos, { todayISO, onOpen, onDelete, o
     const open = document.createElement('button');
     open.type = 'button';
     open.className = 'item-open';
+    // How app.js finds this button again to return focus to it.
+    open.setAttribute('data-item-id', it.id);
     open.textContent = `${formatDayLabel(it.date, todayISO)} — ${it.title}`;
     open.addEventListener('click', () => onOpen(it));
     main.appendChild(open);

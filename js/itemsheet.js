@@ -28,6 +28,19 @@ import { formatTime, formatTimeRange } from './timegrid.js';
 // onClose. WeakMap so a host that leaves the DOM takes its entry with it.
 const mounted = new WeakMap();
 
+// Each sheet's heading gets its own id, so aria-labelledby names the dialog
+// by the text the user can see.
+let headingSeq = 0;
+
+// What the type select SHOWS for each of preview.js's TYPES (sweep U11). The
+// values stay exactly TYPES; only the text is human. A type added to TYPES
+// without a label here makes openItemSheet refuse to open (checked with the
+// other preconditions), rather than show a raw value.
+const TYPE_LABELS = {
+  due: 'Deadline', start: 'Start', milestone: 'Milestone', event: 'Event',
+  general: 'General', task: 'To-do', idea: 'Idea',
+};
+
 function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -58,7 +71,7 @@ function input(type, className, value) {
 function typeSelect(current) {
   const sel = el('select', 'sheet-type');
   for (const t of TYPES) {
-    const opt = el('option', null, t);
+    const opt = el('option', null, TYPE_LABELS[t]);
     opt.value = t;
     if (t === current) opt.selected = true;
     sel.appendChild(opt);
@@ -85,18 +98,40 @@ export function openItemSheet(host, item, {
     if (!TYPES.includes(item.type)) throw new Error(`Unknown type: ${item.type}`);
     if (typeof onSave !== 'function') throw new Error('openItemSheet: onSave must be a function');
     if (typeof onDelete !== 'function') throw new Error('openItemSheet: onDelete must be a function');
+    const unlabelled = TYPES.filter((t) => !Object.prototype.hasOwnProperty.call(TYPE_LABELS, t));
+    if (unlabelled.length) throw new Error(`openItemSheet: no label for type ${unlabelled.join(', ')}`);
   }
 
   const prev = mounted.get(host);
   if (prev) prev();
 
   let closed = false;
-  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  // The sheet's controls in DOM order, filled in as they are built. Tab is
+  // kept inside this list while the sheet is open (sweep U6).
+  const focusables = [];
+  const onKey = (e) => {
+    if (e.key === 'Escape') { close(); return; }
+    if (e.key !== 'Tab' || focusables.length === 0) return;
+    const i = focusables.indexOf(document.activeElement);
+    const last = focusables.length - 1;
+    // Only the two edges (and focus outside the list, such as the external
+    // sheet's heading) are taken over; every other Tab is the browser's own.
+    if (e.shiftKey ? i <= 0 : (i === -1 || i === last)) {
+      e.preventDefault();
+      focusables[e.shiftKey ? last : 0].focus();
+    }
+  };
+  // The page behind does not scroll while a sheet is open (sweep U5), the
+  // same way js/settings.js locks it. The value found is put back, not ''.
+  const prevOverflow = document.body.style.overflow;
   // Detach without notifying: used when another sheet replaces this one.
+  // The scroll lock is released here too, so a replaced sheet restores the
+  // page before its replacement takes the lock again.
   const teardown = () => {
     if (closed) return false;
     closed = true;
     document.removeEventListener('keydown', onKey);
+    document.body.style.overflow = prevOverflow;
     if (mounted.get(host) === teardown) mounted.delete(host);
     return true;
   };
@@ -109,23 +144,47 @@ export function openItemSheet(host, item, {
   }
 
   const backdrop = el('div', 'sheet-backdrop');
-  backdrop.setAttribute('role', 'dialog');
-  backdrop.setAttribute('aria-modal', 'true');
-  // Only a tap on the backdrop itself: a tap inside the sheet reports the
-  // backdrop as currentTarget but something inside as target.
-  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
-  const sheet = el('div', 'sheet');
+  // Only a press that BOTH starts and ends on the backdrop itself closes
+  // (sweep U7). A drag that starts in a field and is released over the scrim
+  // reports a click targeted at the backdrop; closing on it would throw the
+  // edit away. A tap inside the sheet reports something inside as target.
+  let downOnBackdrop = false;
+  backdrop.addEventListener('pointerdown', (e) => { downOnBackdrop = e.target === backdrop; });
+  backdrop.addEventListener('click', (e) => {
+    const startedHere = downOnBackdrop;
+    downOnBackdrop = false;
+    if (e.target === backdrop && startedHere) close();
+  });
+  // The dialog is the SHEET, not the full-screen backdrop (sweep U12), and it
+  // is named by its visible heading.
+  const sheet = el('div', isExternal ? 'sheet sheet-external' : 'sheet');
+  sheet.setAttribute('role', 'dialog');
+  sheet.setAttribute('aria-modal', 'true');
   backdrop.appendChild(sheet);
+  const heading = (text) => {
+    const h = el('h2', 'sheet-heading', text);
+    headingSeq += 1;
+    h.setAttribute('id', `sheet-heading-${headingSeq}`);
+    sheet.setAttribute('aria-labelledby', `sheet-heading-${headingSeq}`);
+    return h;
+  };
   const bar = el('div', 'sheet-bar');
-  sheet.appendChild(bar);
+  // What gets focus once the sheet is mounted (sweep U6).
+  let initialFocus;
 
   if (isExternal) {
-    backdrop.setAttribute('aria-label', 'Event details');
+    sheet.appendChild(bar);
     const closeBtn = button('sheet-close', 'Close');
     closeBtn.addEventListener('click', close);
     bar.appendChild(closeBtn);
+    focusables.push(closeBtn);
 
-    sheet.appendChild(el('h2', 'sheet-heading', item.title));
+    // Nothing here is editable, so focus lands on what the sheet is about:
+    // the heading, focusable by script only (tabindex -1), never by Tab.
+    const h = heading(item.title);
+    h.setAttribute('tabindex', '-1');
+    sheet.appendChild(h);
+    initialFocus = h;
     let when = formatDayLabel(item.date, today());
     if (item.time) when += ` · ${item.endTime ? formatTimeRange(item.time, item.endTime) : formatTime(item.time)}`;
     sheet.appendChild(el('p', 'sheet-when', when));
@@ -134,21 +193,36 @@ export function openItemSheet(host, item, {
       const a = el('a', 'sheet-google', 'Open in Google Calendar');
       a.href = googleDayUrl;
       a.target = '_blank';
-      a.rel = 'noopener';
+      a.rel = 'noopener noreferrer';
       sheet.appendChild(a);
+      focusables.push(a);
     }
   } else {
     const isIdeaSheet = item.type === 'idea';
-    backdrop.setAttribute('aria-label', isIdeaSheet ? 'Edit idea' : 'Edit item');
+    // A real <form> (sweep U8): Enter in a single-line field submits it, and
+    // Save is its submit button, so Enter saves. noValidate: makeItem is the
+    // validator, and its message is the one the user should see.
+    const formEl = el('form', 'sheet-body');
+    formEl.noValidate = true;
+    sheet.appendChild(formEl);
+    formEl.appendChild(bar);
     const cancel = button('sheet-cancel', 'Cancel');
     cancel.addEventListener('click', close);
     const save = button('sheet-save', 'Save');
-    bar.append(cancel, save);
+    save.type = 'submit';
+    bar.append(cancel, heading(isIdeaSheet ? 'Edit idea' : 'Edit item'), save);
+    focusables.push(cancel, save);
+    // The first control, not the first field: focusing a text field on a
+    // phone raises the keyboard over the sheet on every tap of an item.
+    initialFocus = cancel;
 
-    const form = el('div', 'sheet-form');
-    sheet.appendChild(form);
+    // Directly under the top bar (sweep U12), so a failure is next to Save
+    // and not below the fold of a long form.
     const error = el('p', 'sheet-error', '');
     error.setAttribute('role', 'alert');
+    formEl.appendChild(error);
+    const form = el('div', 'sheet-form');
+    formEl.appendChild(form);
     const type = typeSelect(item.type);
 
     let read;
@@ -157,6 +231,7 @@ export function openItemSheet(host, item, {
       text.value = item.notes ?? item.title;
       text.setAttribute('rows', '6');
       form.append(field('Idea', text), field('Type', type));
+      focusables.push(text, type);
       // title AND notes, always together: normalizeIdea prefers notes, so a
       // title-only patch would be overridden by the old notes.
       read = () => ({ title: text.value, notes: text.value, type: type.value });
@@ -177,6 +252,7 @@ export function openItemSheet(host, item, {
         field('Title', title), field('Date', date), field('Start', time), field('End', end),
         field('Type', type), field('Notes', notes),
       );
+      focusables.push(title, date, time, end, type, notes);
       read = () => ({
         title: title.value,
         date: date.value,
@@ -188,6 +264,11 @@ export function openItemSheet(host, item, {
     }
     const opened = read();
 
+    // The error is at the top; a failure scrolls the sheet back up to it.
+    const showError = (text) => {
+      error.textContent = text;
+      sheet.scrollTop = 0;
+    };
     const submit = (override) => {
       if (closed) return; // a stale reference to a control of a closed sheet
       const current = { ...read(), ...override };
@@ -204,7 +285,7 @@ export function openItemSheet(host, item, {
       } catch (err) {
         // Never a silent, stuck sheet (Task 3 review O3): say what happened,
         // then let it propagate so it is not swallowed either.
-        error.textContent = `Could not save: ${err && err.message ? err.message : err}`;
+        showError(`Could not save: ${err && err.message ? err.message : err}`);
         throw err;
       }
       // Loud on a malformed result: an ok-less result read as failure would
@@ -213,9 +294,14 @@ export function openItemSheet(host, item, {
         throw new Error('openItemSheet: onSave must return { ok: true } or { ok: false, error }');
       }
       if (res.ok) { close(); return; }
-      error.textContent = res.error;
+      showError(res.error);
     };
-    save.addEventListener('click', () => submit({}));
+    // Save's click and Enter in a field both arrive here. The browser's own
+    // submission is always cancelled: it would navigate the page away.
+    formEl.addEventListener('submit', (e) => {
+      e.preventDefault();
+      submit({});
+    });
 
     const actions = el('div', 'sheet-actions');
     if (!isIdeaSheet) {
@@ -235,6 +321,7 @@ export function openItemSheet(host, item, {
           submit({ date: quickMoves({ ...item, date: typed }, today())[i].date });
         });
         actions.appendChild(b);
+        focusables.push(b);
       });
     }
     const del = button('sheet-delete', 'Delete');
@@ -244,11 +331,14 @@ export function openItemSheet(host, item, {
       close();
     });
     actions.appendChild(del);
-    sheet.append(error, actions);
+    focusables.push(del);
+    formEl.appendChild(actions);
   }
 
   host.innerHTML = '';
   host.appendChild(backdrop);
+  document.body.style.overflow = 'hidden';
   document.addEventListener('keydown', onKey);
   mounted.set(host, teardown);
+  initialFocus.focus();
 }

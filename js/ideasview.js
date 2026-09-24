@@ -33,6 +33,8 @@ export function renderIdeasView(container, ideas, { onOpen, onDelete }) {
     const title = document.createElement('button');
     title.type = 'button';
     title.className = 'item-open idea-title';
+    // How app.js finds this button again to return focus to it.
+    title.setAttribute('data-item-id', it.id);
     title.textContent = it.title;
     title.addEventListener('click', () => onOpen(it));
     main.appendChild(title);

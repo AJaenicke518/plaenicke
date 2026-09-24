@@ -51,6 +51,8 @@ export function renderDayView(container, dateISO, dayItems, { onOpen, onDelete, 
     const open = document.createElement('button');
     open.type = 'button';
     open.className = 'item-open';
+    // How app.js finds this button again to return focus to it.
+    open.setAttribute('data-item-id', row.item.id);
     open.textContent = `${when} ${row.item.title}`;
     open.addEventListener('click', () => onOpen(row.item));
     el.appendChild(open);
@@ -86,6 +88,7 @@ export function renderDayView(container, dateISO, dayItems, { onOpen, onDelete, 
       const open = document.createElement('button');
       open.type = 'button';
       open.className = 'item-open';
+      open.setAttribute('data-item-id', it.id);
       open.textContent = it.title;
       open.addEventListener('click', () => onOpen(it));
       li.appendChild(open);

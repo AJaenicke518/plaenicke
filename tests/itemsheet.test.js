@@ -27,7 +27,12 @@ class FakeElement {
     this.href = '';
     this.target = '';
     this.rel = '';
+    this.scrollTop = 0;
   }
+
+  // Harness only: records focus the way a browser reports it, so a test can
+  // ask which element the sheet focused. Production code never reads this.
+  focus() { globalThis.document.activeElement = this; }
 
   get className() { return [...this._classes].join(' '); }
 
@@ -47,13 +52,33 @@ class FakeElement {
 
   set innerHTML(v) { if (v === '') { this.children.forEach((c) => { c.parentNode = null; }); this.children = []; } }
 
-  fire(type, ev = {}) { (this._listeners[type] || []).forEach((fn) => fn({ target: this, ...ev })); }
+  fire(type, ev = {}) {
+    (this._listeners[type] || []).forEach((fn) => fn({ target: this, ...ev }));
+    // As a browser does: a click on a submit button submits its form. The
+    // sheet must cancel that submission, or a real page would navigate away.
+    if (type === 'click' && this.tagName === 'BUTTON' && this.type === 'submit') {
+      let f = this.parentNode;
+      while (f && f.tagName !== 'FORM') f = f.parentNode;
+      assert.ok(f, 'a submit button outside any form submits nothing');
+      submitForm(f);
+    }
+  }
+}
+
+// Fires `submit` on a form, as Enter in one of its fields does, and fails the
+// test if no handler cancelled it (a real browser would navigate the page).
+function submitForm(form) {
+  let prevented = false;
+  (form._listeners.submit || []).forEach((fn) => fn({ target: form, preventDefault() { prevented = true; } }));
+  assert.ok(prevented, 'the form submission was not cancelled; the page would navigate');
 }
 
 // document-level listeners are tracked by identity, as the real
 // removeEventListener does: removing a different function removes nothing.
 const docListeners = {};
 globalThis.document = {
+  activeElement: null,
+  body: { style: { overflow: '' } },
   createElement: (tag) => new FakeElement(tag),
   addEventListener(type, fn) { (docListeners[type] ||= []).push(fn); },
   removeEventListener(type, fn) {
@@ -64,6 +89,12 @@ globalThis.document = {
 };
 const keydownCount = () => (docListeners.keydown || []).length;
 const pressKey = (key) => [...(docListeners.keydown || [])].forEach((fn) => fn({ key }));
+// A Tab press; returns whether the sheet cancelled the browser's own move.
+function pressTab(shiftKey = false) {
+  let prevented = false;
+  [...(docListeners.keydown || [])].forEach((fn) => fn({ key: 'Tab', shiftKey, preventDefault() { prevented = true; } }));
+  return prevented;
+}
 
 function walk(el, fn) { for (const c of el.children) { fn(c); walk(c, fn); } }
 function findAll(el, pred) { const out = []; walk(el, (c) => { if (pred(c)) out.push(c); }); return out; }
@@ -112,7 +143,11 @@ function open(item, { onSave = () => ({ ok: true }), ...extra } = {}) {
 
 // Every test must leave the document clean, or the listener-count assertions
 // in later tests would be measuring an earlier test's leak.
-test.afterEach(() => { docListeners.keydown = []; });
+test.afterEach(() => {
+  docListeners.keydown = [];
+  document.body.style.overflow = '';
+  document.activeElement = null;
+});
 
 // =========================================================================
 // Own item, not an idea
@@ -123,16 +158,25 @@ test('the own-item sheet is a modal dialog with Cancel and Save in a top bar, ab
   assert.equal(host.children.length, 1);
   const backdrop = host.children[0];
   assert.ok(backdrop._classes.has('sheet-backdrop'));
-  assert.equal(backdrop.getAttribute('role'), 'dialog');
-  assert.equal(backdrop.getAttribute('aria-modal'), 'true');
+  // Sweep U12: the dialog is the SHEET. On the backdrop, the dialog's box
+  // was the whole screen, scrim included.
+  assert.equal(backdrop.getAttribute('role'), null, 'the backdrop is not the dialog');
+  assert.equal(backdrop.getAttribute('aria-modal'), null);
   const sheet = backdrop.children[0];
   assert.ok(sheet._classes.has('sheet'), '.sheet must be the backdrop\'s child');
-  const bar = sheet.children[0];
-  assert.ok(bar._classes.has('sheet-bar'), 'the top bar must be the sheet\'s FIRST child, so it stays above the keyboard');
+  assert.equal(sheet.getAttribute('role'), 'dialog');
+  assert.equal(sheet.getAttribute('aria-modal'), 'true');
+  const form = sheet.children[0];
+  assert.equal(form.tagName, 'FORM', 'a real <form>, so Enter in a field saves (sweep U8)');
+  const bar = form.children[0];
+  assert.ok(bar._classes.has('sheet-bar'), 'the top bar must come FIRST, so it stays above the keyboard');
   const buttons = bar.children.filter((c) => c.tagName === 'BUTTON');
   assert.equal(buttons[0].textContent, 'Cancel', 'Cancel on the left');
   assert.equal(buttons[buttons.length - 1].textContent, 'Save', 'Save on the right');
-  for (const b of byTag(host, 'BUTTON')) assert.equal(b.type, 'button', 'no button may default to submit');
+  for (const b of byTag(host, 'BUTTON')) {
+    const want = b._classes.has('sheet-save') ? 'submit' : 'button';
+    assert.equal(b.type, want, `${b.textContent}: only Save submits the form`);
+  }
 });
 
 test('fields are prefilled from the item', () => {
@@ -367,7 +411,7 @@ test('the Google link appears only when googleDayUrl is given, and opens safely 
   assert.equal(links.length, 1);
   assert.equal(links[0].href, url);
   assert.equal(links[0].target, '_blank');
-  assert.equal(links[0].rel, 'noopener');
+  assert.equal(links[0].rel, 'noopener noreferrer');
   assert.equal(links[0].textContent, 'Open in Google Calendar');
 });
 
@@ -396,10 +440,29 @@ test('a backdrop click closes only when the backdrop itself is the target', () =
   const { host, calls } = open(task());
   const backdrop = one(host, 'sheet-backdrop');
   const sheet = one(host, 'sheet');
+  backdrop.fire('pointerdown', { target: sheet });
   backdrop.fire('click', { target: sheet });
   assert.equal(host.children.length, 1, 'a tap inside the sheet must not close it');
+  backdrop.fire('pointerdown');
   backdrop.fire('click');
   assert.equal(host.children.length, 0);
+  assert.equal(calls.close, 1);
+});
+
+// Sweep U7: a drag that starts in a field and is released over the scrim
+// reports a click whose target is the backdrop. It must not discard the edit.
+test('a press that starts inside the sheet and ends on the backdrop does not close it', () => {
+  const { host, calls } = open(task());
+  const backdrop = one(host, 'sheet-backdrop');
+  one(host, 'sheet-title').value = 'typed, then dragged out';
+  backdrop.fire('pointerdown', { target: one(host, 'sheet-title') });
+  backdrop.fire('click');
+  assert.equal(host.children.length, 1, 'the sheet must stay open');
+  assert.equal(calls.close, 0);
+  assert.equal(one(host, 'sheet-title').value, 'typed, then dragged out');
+  // And a fresh press that starts on the backdrop still closes it.
+  backdrop.fire('pointerdown');
+  backdrop.fire('click');
   assert.equal(calls.close, 1);
 });
 
@@ -408,7 +471,8 @@ test('a backdrop click closes only when the backdrop itself is the target', () =
 // shows next and calls a stale onClose.
 const CLOSE_PATHS = {
   'Cancel': (h) => one(h, 'sheet-cancel').fire('click'),
-  'backdrop': (h) => one(h, 'sheet-backdrop').fire('click'),
+  'backdrop': (h) => { one(h, 'sheet-backdrop').fire('pointerdown'); one(h, 'sheet-backdrop').fire('click'); },
+  'Enter (submit)': (h) => { one(h, 'sheet-title').value = 'y'; submitForm(byTag(h, 'FORM')[0]); },
   'Escape': () => pressKey('Escape'),
   'Save (changed)': (h) => { one(h, 'sheet-title').value = 'x'; one(h, 'sheet-save').fire('click'); },
   'Save (unchanged)': (h) => one(h, 'sheet-save').fire('click'),
@@ -423,6 +487,16 @@ for (const [name, close] of Object.entries(CLOSE_PATHS)) {
     assert.equal(host.children.length, 0);
     assert.equal(calls.close, 1);
     assert.equal(keydownCount(), 0, `${name} left the keydown listener registered`);
+  });
+
+  // Sweep U5: the page behind is locked while the sheet is open, and every
+  // close path unlocks it.
+  test(`page scroll is locked while the sheet is open and restored when it closes by ${name}`, () => {
+    document.body.style.overflow = '';
+    const { host } = open(task());
+    assert.equal(document.body.style.overflow, 'hidden');
+    close(host);
+    assert.equal(document.body.style.overflow, '', `${name} left the page unscrollable`);
   });
 }
 
@@ -535,4 +609,168 @@ test('the sheet refuses to open without a today() function, and touches nothing'
     assert.deepEqual(host.children, [existing], 'the host must be untouched');
   }
   assert.equal(keydownCount(), 0);
+});
+
+// =========================================================================
+// Sweep U — from the real-browser review
+// =========================================================================
+
+// U5: the page lock survives a sheet replaced by another, and restores what
+// the page had before (not a hard-coded '').
+test('replacing a sheet keeps the page locked, and the last close restores the prior value', () => {
+  document.body.style.overflow = 'clip';
+  const host = new FakeElement('div');
+  const opts = { today: () => TODAY, onSave: () => ({ ok: true }), onDelete() {}, onClose() {} };
+  openItemSheet(host, task(), opts);
+  openItemSheet(host, task({ id: 'a2' }), opts);
+  assert.equal(document.body.style.overflow, 'hidden');
+  one(host, 'sheet-cancel').fire('click');
+  assert.equal(document.body.style.overflow, 'clip');
+});
+
+// U6: focus moves into the sheet on open.
+test('opening an own item focuses its first control', () => {
+  const { host } = open(task());
+  assert.equal(document.activeElement, one(host, 'sheet-cancel'));
+});
+
+test('opening an external item focuses its heading, which is focusable only by script', () => {
+  const { host } = open(external(), { calendarName: 'Work' });
+  const heading = one(host, 'sheet-heading');
+  assert.equal(document.activeElement, heading);
+  assert.equal(heading.getAttribute('tabindex'), '-1');
+});
+
+test('Tab from the last control wraps to the first, and Shift+Tab from the first wraps to the last', () => {
+  const { host } = open(task());
+  const cancel = one(host, 'sheet-cancel');
+  const del = one(host, 'sheet-delete');
+  del.focus();
+  assert.equal(pressTab(), true, 'Tab on the last control must be taken over');
+  assert.equal(document.activeElement, cancel);
+  assert.equal(pressTab(true), true);
+  assert.equal(document.activeElement, del);
+  one(host, 'sheet-title').focus();
+  assert.equal(pressTab(), false, 'a Tab in the middle is left to the browser');
+  assert.equal(document.activeElement, one(host, 'sheet-title'));
+});
+
+test('Tab from outside the sheet (the external heading) goes to its first control', () => {
+  const url = 'https://calendar.google.com/calendar/r/day/2026/9/23';
+  const { host } = open(external(), { calendarName: 'Work', googleDayUrl: url });
+  assert.equal(pressTab(), true);
+  assert.equal(document.activeElement, one(host, 'sheet-close'));
+  assert.equal(pressTab(), false, 'Close -> link is the browser\'s own move');
+  one(host, 'sheet-google').focus();
+  assert.equal(pressTab(), true);
+  assert.equal(document.activeElement, one(host, 'sheet-close'));
+});
+
+// U8: Enter in a field submits the form, which saves.
+test('submitting the form (Enter in a field) saves the changes', () => {
+  const { host, calls } = open(task());
+  one(host, 'sheet-title').value = 'Entered';
+  submitForm(byTag(host, 'FORM')[0]);
+  assert.deepEqual(calls.save, [{ title: 'Entered' }]);
+  assert.equal(calls.close, 1);
+});
+
+// U11: human labels, values unchanged.
+test('the type select shows human labels over preview.js\'s values', () => {
+  const { host } = open(task());
+  const sel = one(host, 'sheet-type');
+  assert.deepEqual(sel.children.map((o) => o.value), TYPES, 'values stay exactly preview.js\'s TYPES');
+  assert.deepEqual(
+    Object.fromEntries(sel.children.map((o) => [o.value, o.textContent])),
+    {
+      due: 'Deadline', start: 'Start', milestone: 'Milestone', event: 'Event',
+      general: 'General', task: 'To-do', idea: 'Idea',
+    },
+  );
+});
+
+// U12: the dialog is the sheet, it is named by a visible heading, and the
+// error sits directly under the top bar.
+for (const [name, item, heading] of [
+  ['own item', task(), 'Edit item'],
+  ['idea', idea(), 'Edit idea'],
+  ['external item', external(), 'Board meeting'],
+]) {
+  test(`the ${name} sheet is named by its visible heading`, () => {
+    const { host } = open(item, { calendarName: 'Work' });
+    const sheet = one(host, 'sheet');
+    const h = one(host, 'sheet-heading');
+    assert.equal(h.tagName, 'H2');
+    assert.equal(h.textContent, heading);
+    assert.equal(h.hidden, false);
+    const id = h.getAttribute('id');
+    assert.ok(id, 'the heading needs an id to label the dialog');
+    assert.equal(sheet.getAttribute('aria-labelledby'), id);
+    assert.equal(sheet.getAttribute('aria-label'), null, 'one name, not two');
+  });
+}
+
+test('two sheets get different heading ids', () => {
+  const a = open(task());
+  const b = open(task({ id: 'a2' }));
+  assert.notEqual(one(a.host, 'sheet-heading').getAttribute('id'), one(b.host, 'sheet-heading').getAttribute('id'));
+});
+
+test('the error sits directly under the top bar and is an alert (S-10)', () => {
+  for (const it of [task(), idea()]) {
+    const { host } = open(it);
+    const form = byTag(host, 'FORM')[0];
+    assert.ok(form.children[0]._classes.has('sheet-bar'));
+    assert.ok(form.children[1]._classes.has('sheet-error'), 'the error is the next thing after the bar');
+    assert.equal(form.children[1].getAttribute('role'), 'alert');
+  }
+});
+
+test('a failed save scrolls the sheet back to the error', () => {
+  const { host } = open(task(), { onSave: () => ({ ok: false, error: 'nope' }) });
+  const sheet = one(host, 'sheet');
+  sheet.scrollTop = 400;
+  one(host, 'sheet-title').value = 'changed';
+  one(host, 'sheet-save').fire('click');
+  assert.equal(sheet.scrollTop, 0);
+});
+
+test('an onSave that throws also scrolls the sheet back to the error', () => {
+  const { host } = open(task(), { onSave: () => { throw new Error('boom'); } });
+  const sheet = one(host, 'sheet');
+  sheet.scrollTop = 400;
+  one(host, 'sheet-title').value = 'changed';
+  assert.throws(() => one(host, 'sheet-save').fire('click'), /boom/);
+  assert.equal(sheet.scrollTop, 0);
+});
+
+// U15: the external sheet's padding lives on a class of its own.
+test('the external sheet is marked so its bottom padding applies', () => {
+  const { host } = open(external(), { calendarName: 'Work' });
+  assert.ok(one(host, 'sheet')._classes.has('sheet-external'));
+  const own = open(task());
+  assert.equal(one(own.host, 'sheet')._classes.has('sheet-external'), false);
+});
+
+// U16: a malformed onSave result is loud, whichever way it is malformed.
+for (const [name, res] of [
+  ['undefined', undefined],
+  ['no ok', {}],
+  ['ok not a boolean', { ok: 'yes' }],
+  ['failure without an error string', { ok: false }],
+]) {
+  test(`an onSave result that is ${name} throws, and the sheet stays open`, () => {
+    const { host, calls } = open(task(), { onSave: () => res });
+    one(host, 'sheet-title').value = 'changed';
+    assert.throws(() => one(host, 'sheet-save').fire('click'), /onSave must return/);
+    assert.equal(calls.close, 0);
+    assert.equal(host.children.length, 1);
+  });
+}
+
+test('a quick move is inside the Tab order, so Tab from it is the browser\'s own move', () => {
+  const { host } = open(task());
+  byClass(host, 'sheet-move')[1].focus();
+  assert.equal(pressTab(), false, 'not treated as focus outside the sheet');
+  assert.equal(pressTab(true), false);
 });
