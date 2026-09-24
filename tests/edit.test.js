@@ -187,19 +187,38 @@ test('snapshotOf returns a new object; changing it does not touch the record', (
 
 // --- typeChangePatch -------------------------------------------------------
 
-test('typeChangePatch to idea: the typed title becomes the text, stale notes are dropped, times cleared', () => {
-  const record = task({ notes: 'old hidden notes' });
-  const patch = typeChangePatch(record, { type: 'idea', title: 'Build a boat' });
-  assert.deepEqual(patch, { type: 'idea', title: 'Build a boat', notes: 'Build a boat', time: null, endTime: null });
+// Notes are a VISIBLE field on every item's sheet (plan rev 2 amendment), so
+// switching to idea must never discard them: they ARE the idea's text. Only
+// an item with no notes takes its text from the title.
+test('typeChangePatch to idea keeps existing notes as the idea text and clears times', () => {
+  const full = 'Full text of an earlier idea that must survive the switch back';
+  const record = task({ title: 'Full text of an earlier', notes: full });
+  const patch = typeChangePatch(record, { type: 'idea', title: 'Renamed label' });
+  assert.equal(patch.notes, full, 'existing notes are the idea text, never replaced by the title');
+  assert.equal(patch.time, null);
+  assert.equal(patch.endTime, null);
   const out = applyEdit(record, patch, T1);
-  assert.equal(out.title, 'Build a boat', 'normalizeIdea must derive from what the user sees, not the hidden notes');
+  // A thought of 15 words or fewer is stored whole as the title with notes
+  // null (js/ideas.js) — either way the complete text must survive.
+  assert.equal(out.notes ?? out.title, full, 'nothing the user wrote is lost');
+});
+
+test('typeChangePatch to idea uses notes edited in the same save', () => {
+  const record = task({ notes: 'old' });
+  const patch = typeChangePatch(record, { type: 'idea', notes: 'new words' });
+  assert.equal(patch.notes, 'new words');
+});
+
+test('typeChangePatch to idea with no notes takes the typed title as the text', () => {
+  const patch = typeChangePatch(task({ notes: null }), { type: 'idea', title: 'Build a boat' });
+  assert.equal(patch.notes, 'Build a boat');
+  const out = applyEdit(task({ notes: null }), patch, T1);
+  assert.equal(out.title, 'Build a boat');
   assert.equal(out.notes, null);
-  assert.equal(out.time, null);
-  assert.equal(out.endTime, null);
 });
 
 test('typeChangePatch to idea with no title in the patch uses the record\'s title', () => {
-  const patch = typeChangePatch(task(), { type: 'idea' });
+  const patch = typeChangePatch(task({ notes: null }), { type: 'idea' });
   assert.equal(patch.notes, 'Hand in essay');
   assert.equal(patch.time, null);
   assert.equal(patch.endTime, null);

@@ -91,9 +91,10 @@ export function quickMoves(record, todayISO) {
 // Applied by the caller BEFORE applyEdit. Returns a new object when it
 // changes anything and never mutates its inputs.
 //
-// To idea: the text becomes what the user sees as the title. Without this,
-// normalizeIdea would prefer the record's old (possibly hidden) notes and the
-// new idea would be titled from text the user never saw. Ideas are unscheduled
+// To idea: the idea's text is the item's notes when it has any — notes are a
+// VISIBLE field on every item's sheet, so they are text the user has seen and
+// must never be discarded — else the title as typed. Setting notes explicitly
+// means normalizeIdea derives from exactly that text. Ideas are unscheduled
 // (type is the only discriminator, spec § 3.4), so times are cleared.
 //
 // From idea: the idea's full text is split with the same splitIdeaText the
@@ -102,8 +103,9 @@ export function quickMoves(record, todayISO) {
 export function typeChangePatch(record, patch) {
   const wasIdea = record.type === 'idea';
   if (!wasIdea && patch.type === 'idea') {
-    const title = patch.title ?? record.title;
-    return { ...patch, notes: title, time: null, endTime: null };
+    const notes = patch.notes !== undefined ? patch.notes : record.notes;
+    const text = typeof notes === 'string' && notes.trim() ? notes : (patch.title ?? record.title);
+    return { ...patch, notes: text, time: null, endTime: null };
   }
   if (wasIdea && patch.type !== undefined && patch.type !== 'idea') {
     const text = patch.notes ?? patch.title ?? (record.notes ?? record.title);

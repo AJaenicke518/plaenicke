@@ -49,8 +49,8 @@ export function typeChangePatch(record, patch)            // -> patch adjusted f
 **`diffPatch`:** compares each editable key with `===`, treating `null`, `undefined` and `''` as equal to each other **except for `date`**. A date of `''` is a real value that must reach `makeItem` so it can be rejected.
 
 **`typeChangePatch`**, applied by the caller **before** `applyEdit`:
-- **Switching to idea** (the record is not an idea, and `patch.type === 'idea'`): set `notes` to the effective title, which is `patch.title ?? record.title`. Also set `time: null` and `endTime: null`.
-  - This makes `normalizeIdea` derive from what the user sees, never from old hidden notes.
+- **Switching to idea** (the record is not an idea, and `patch.type === 'idea'`): the idea text is the effective notes (`patch.notes`, else `record.notes`) when they are non-empty, otherwise the effective title. Set `notes` to that text, plus `time: null` and `endTime: null`.
+  - *Amended after Task 1.* The first version threw existing notes away. Notes are now a visible field on every sheet (Task 3), so they are never hidden text.
 - **Switching from idea** (the record is an idea, and `patch.type` is set and isn't `'idea'`): the text is `patch.notes ?? patch.title ?? (record.notes ?? record.title)`.
   - Set `title` to `splitIdeaText(text).title`, taken from `js/ideas.js`.
   - Set `notes` to `splitIdeaText(text).notes`.
@@ -111,7 +111,7 @@ export function typeChangePatch(record, patch)            // -> patch adjusted f
 - The sheet is sized so it scrolls internally (CSS below).
 
 **Own item, non-idea:**
-- Inputs: title (text), date (date), time (time), end (time).
+- Inputs: title (text), date (date), time (time), end (time), and a **Notes** textarea (`notes`, empty when null). *Amended after Task 1: notes are visible on every sheet, so no edit is ever driven by hidden text.*
 - A type `<select>` built from `js/preview.js`'s `TYPES`.
 - If `item.type` isn't in `TYPES`, **throw `Error('Unknown type: …')`**. The caller catches it (Task 4a).
 - Clearing the start time also clears the end time.
@@ -124,7 +124,7 @@ export function typeChangePatch(record, patch)            // -> patch adjusted f
 **Save and quick moves:**
 - The sheet remembers the values it opened with.
 - **Save** builds `current` from the inputs:
-  - non-idea: `{ title, date, time: time||null, endTime: end||null, type }`;
+  - non-idea: `{ title, date, time: time||null, endTime: end||null, type, notes: notesText||null }`;
   - idea: `{ title: text, notes: text, type }`.
 - It then sends `onSave(typeChangePatch(item, diffPatch(opened, current)))`.
 - **If the diff is empty**, close without calling `onSave`.
