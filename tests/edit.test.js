@@ -194,19 +194,20 @@ test('typeChangePatch to idea keeps existing notes as the idea text and clears t
   const full = 'Full text of an earlier idea that must survive the switch back';
   const record = task({ title: 'Full text of an earlier', notes: full });
   const patch = typeChangePatch(record, { type: 'idea', title: 'Renamed label' });
-  assert.equal(patch.notes, full, 'existing notes are the idea text, never replaced by the title');
+  assert.match(patch.notes, /Full text of an earlier idea that must survive/, 'existing notes are never replaced by the title');
   assert.equal(patch.time, null);
   assert.equal(patch.endTime, null);
   const out = applyEdit(record, patch, T1);
   // A thought of 15 words or fewer is stored whole as the title with notes
   // null (js/ideas.js) — either way the complete text must survive.
-  assert.equal(out.notes ?? out.title, full, 'nothing the user wrote is lost');
+  assert.match(out.notes ?? out.title, new RegExp(full), 'nothing the user wrote is lost');
 });
 
 test('typeChangePatch to idea uses notes edited in the same save', () => {
   const record = task({ notes: 'old' });
   const patch = typeChangePatch(record, { type: 'idea', notes: 'new words' });
-  assert.equal(patch.notes, 'new words');
+  assert.match(patch.notes, /new words/);
+  assert.doesNotMatch(patch.notes, /old/, 'notes replaced in the same save must not come back');
 });
 
 test('typeChangePatch to idea with no notes takes the typed title as the text', () => {
@@ -281,4 +282,59 @@ test('quickMoves crosses month and year boundaries', () => {
     { label: 'Tomorrow', date: '2026-03-01' },
     { label: '+1 week', date: '2026-03-04' },
   ]);
+});
+
+// --- review of Task 1 (C1, I1, O1, O4) --------------------------------------
+//
+// C1: switching an item with notes to an idea used the notes as the whole text
+// and dropped the title — including a title typed in the same save. Both must
+// survive: the title leads, the notes follow.
+
+test('typeChangePatch to idea keeps BOTH the title and the notes', () => {
+  const record = task({ title: 'Call mom about Thanksgiving', notes: 'after 6pm her time' });
+  const out = applyEdit(record, typeChangePatch(record, { type: 'idea' }), T1);
+  const text = out.notes ?? out.title;
+  assert.match(text, /Call mom about Thanksgiving/, 'the title must survive the switch');
+  assert.match(text, /after 6pm her time/, 'the notes must survive the switch');
+});
+
+test('typeChangePatch to idea keeps a title typed in the same save', () => {
+  const record = task({ title: 'Old', notes: 'details' });
+  const out = applyEdit(record, typeChangePatch(record, { type: 'idea', title: 'New title' }), T1);
+  const text = out.notes ?? out.title;
+  assert.match(text, /New title/);
+  assert.match(text, /details/);
+  assert.doesNotMatch(text, /Old/);
+});
+
+// The idea -> task -> idea round trip must not duplicate the label: a task
+// derived from an idea has a title that is a prefix of its notes.
+test('typeChangePatch idea -> task -> idea does not duplicate the title', () => {
+  const text = long(20);
+  const asIdea = idea({ title: long(15), notes: text });
+  const asTask = applyEdit(asIdea, typeChangePatch(asIdea, { type: 'task' }), T1);
+  const back = applyEdit(asTask, typeChangePatch(asTask, { type: 'idea' }), '2026-09-24T12:00:00.000Z');
+  assert.equal(back.notes, text, 'the round trip returns exactly the original text');
+});
+
+// I1: notes cleared in the same save must not resurrect the old notes.
+test('typeChangePatch to idea honours notes cleared in the same save', () => {
+  const record = task({ notes: 'old' });
+  const out = applyEdit(record, typeChangePatch(record, { type: 'idea', notes: null, title: 'T' }), T1);
+  assert.equal(out.notes ?? out.title, 'T');
+});
+
+// O4: whitespace-only notes are no notes.
+test('typeChangePatch to idea treats whitespace-only notes as empty', () => {
+  const record = task({ title: 'Real title', notes: '   ' });
+  const out = applyEdit(record, typeChangePatch(record, { type: 'idea' }), T1);
+  assert.equal(out.notes ?? out.title, 'Real title');
+});
+
+// O1: the user is on the idea sheet, so an emptied idea says so even when the
+// same save switches it to a task.
+test('an idea emptied while switching to a task says the idea is empty', () => {
+  const record = idea({ title: 'x', notes: null });
+  assert.throws(() => applyEdit(record, typeChangePatch(record, { type: 'task', notes: '', title: '' }), T1),
+    /The idea is empty/);
 });

@@ -40,8 +40,9 @@ export function applyEdit(record, patch, updatedAt) {
     return makeItem(normalizeIdea(merged), { id: record.id, createdAt: record.createdAt, updatedAt });
   } catch (err) {
     // An idea has no separate title box on screen, so "Title is required"
-    // would name a field the user cannot see.
-    if (merged.type === 'idea' && err instanceof Error && err.message === 'Title is required') {
+    // would name a field the user cannot see. That holds when the SAME save
+    // switches an idea to another type: the user is still on the idea sheet.
+    if ((merged.type === 'idea' || record.type === 'idea') && err instanceof Error && err.message === 'Title is required') {
       throw new Error('The idea is empty.');
     }
     throw err;
@@ -91,11 +92,15 @@ export function quickMoves(record, todayISO) {
 // Applied by the caller BEFORE applyEdit. Returns a new object when it
 // changes anything and never mutates its inputs.
 //
-// To idea: the idea's text is the item's notes when it has any — notes are a
-// VISIBLE field on every item's sheet, so they are text the user has seen and
-// must never be discarded — else the title as typed. Setting notes explicitly
-// means normalizeIdea derives from exactly that text. Ideas are unscheduled
-// (type is the only discriminator, spec § 3.4), so times are cleared.
+// To idea: an idea is ONE piece of text, and nothing the user wrote may be
+// dropped on the way into it. The title leads and the notes (a visible field on
+// every sheet) follow, separated by a blank line. When the notes already begin
+// with the title — a task that was itself derived from an idea, whose title is
+// the first sentence of its notes — the notes ARE the full text, so the round
+// trip idea -> task -> idea returns exactly what it started with. Notes cleared
+// in the same save (patch.notes === null or '') count as cleared: `??` would
+// resurrect the old ones. Setting notes explicitly means normalizeIdea derives
+// from exactly this text. Ideas are unscheduled (spec § 3.4): times cleared.
 //
 // From idea: the idea's full text is split with the same splitIdeaText the
 // capture path uses, so a long idea becomes a short title with the complete
@@ -104,7 +109,10 @@ export function typeChangePatch(record, patch) {
   const wasIdea = record.type === 'idea';
   if (!wasIdea && patch.type === 'idea') {
     const notes = patch.notes !== undefined ? patch.notes : record.notes;
-    const text = typeof notes === 'string' && notes.trim() ? notes : (patch.title ?? record.title);
+    const title = patch.title ?? record.title;
+    const hasNotes = typeof notes === 'string' && notes.trim() !== '';
+    let text = title;
+    if (hasNotes) text = notes.startsWith(title) ? notes : `${title}\n\n${notes}`;
     return { ...patch, notes: text, time: null, endTime: null };
   }
   if (wasIdea && patch.type !== undefined && patch.type !== 'idea') {
