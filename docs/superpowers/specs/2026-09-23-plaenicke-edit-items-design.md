@@ -5,6 +5,7 @@
 **Brief:** `docs/superpowers/briefs/2026-09-23-autonomous-editing-brief.md`
 **Research:** `docs/superpowers/research/2026-09-23-plaenicke-ui-research.md` (Phase 2)
 **Baseline:** branch `feature/phase0-today-fresh` at 036b82b.
+**Superseded in detail by the plan (revision 2)**, which folds in the devil's-advocate review. Where they disagree, the plan wins.
 
 ## 1. Goal
 
@@ -31,14 +32,14 @@ Alex's words: "I also want to be able to edit stuff that is already on my calend
 ### 3.1 `js/edit.js` (new, pure)
 - `EDITABLE_FIELDS = ['title', 'date', 'time', 'endTime', 'type', 'notes']`
 - `applyEdit(record, patch, updatedAt)`: keeps only editable keys from `patch`, runs `normalizeIdea` on the merged fields, and rebuilds through `makeItem(merged, { id: record.id, createdAt: record.createdAt, updatedAt })`. It throws exactly what `makeItem` throws. It preserves `done`, `project`, `subject` and `category` from the record. It never mutates `record`.
-- `shiftDate(iso, days)` is a local-calendar day shift (reuses `timegrid.addDays`). `quickMoves(todayISO)` returns `[{label:'Tomorrow', date}, {label:'+1 week', date}]`. "+1 week" is relative to the **item's** date; "Tomorrow" is relative to **today**.
+- `quickMoves(record, todayISO)` returns `[{label:'Tomorrow', date}, {label:'+1 week', date}]`. "+1 week" is relative to the **item's** date; "Tomorrow" is relative to **today**.
 - `editableSnapshot(record)` returns the record's editable fields, and is what an edit's undo re-applies.
 
 ### 3.2 `js/itemsheet.js` (new, DOM, presentation only)
 `openItemSheet(host, item, opts)` mounts a bottom sheet into `host`. It never writes storage.
 - **Own item** (`!item.external`): a form with title (text), date, start, end, a type `<select>` (from `preview.js`'s `TYPES`, so the list isn't copied a fifth time), and Save / Cancel / Delete. Also Tomorrow and +1 week buttons, which save immediately.
   - **An idea** shows a single textarea holding the full text (`notes ?? title`) in place of title/time/type. Saving sends `{ title: text, notes: text }` and `normalizeIdea` derives the label.
-- **External item:** read-only. Shows title, date, time range, and "From <calendar name>". If `opts.googleDayUrl` is given, it adds an `<a target="_blank" rel="noopener">` "Open in Google Calendar".
+- **External item:** read-only. Shows title, date, time range, and "From <calendar name>". If `opts.googleDayUrl` is given (it opens the browser's *default* Google account, which may not be the account behind the feed), it adds an `<a target="_blank" rel="noopener">` "Open in Google Calendar".
 - **Callbacks:**
   - `opts.onSave(patch)` returns `{ ok: true }` or `{ ok: false, error }`. On failure the sheet stays open and shows the error inline, in the sheet, not in the top `#message`.
   - `opts.onDelete()` and `opts.onClose()`.
@@ -81,6 +82,9 @@ Traced against `merge.js`. Edits on the **same** item on two devices before eith
 1. **Edit on A, tick (or edit) on B.** Last-write-wins on `updatedAt`, so the later one wins whole and the other change is lost. *Accepted.* It needs the same item on both devices inside one sync window.
 2. **Delete on A, edit on B after the delete but before syncing.** `applyTombstones` keeps records whose `updatedAt ≥ deletedAt`, so the item comes back, with B's edits, on every device. *Accepted*, the same class as the V6 checkbox. The item is re-deletable, and no data is lost.
 3. **Clock skew** decides ties (already documented).
+4. **Only the latest action can be undone.** A second toast commits the first action at once, so its delete lands and its Undo is gone.
+5. **`deletedAt` is when the delete commits, not when you tapped.** If a sync brings another device's edit to an item during its 5 s window, the commit still deletes it, because the commit is later than the edit.
+6. **Edits send only changed fields.** A field that changed through a sync while the sheet was open is not written back.
 
 No new tombstone kinds, no new arrays, no `schemaVersion` change. A device running pre-edit code receives edited records as ordinary newer records. `deserializeItems` and `unionById` pass them through whole.
 
