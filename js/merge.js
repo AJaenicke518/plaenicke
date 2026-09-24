@@ -11,33 +11,58 @@
 // whose clocks are never compared. A phone 90 seconds ahead of a laptop wins
 // every tie for 90 seconds, silently.
 //
-// AN EDIT PATH NOW EXISTS, AND IT IS EXACTLY ONE BOOLEAN (V6 § 5.1). The To-do
-// page's checkbox rewrites `done` on a record that already exists. It is
-// confined to that one field on purpose. Two consequences, both examined
-// rather than assumed, and both accepted:
+// AN EDIT PATH NOW EXISTS, AND IT IS SIX FIELDS PLUS ONE BOOLEAN. The To-do
+// checkbox (V6 § 5.1) rewrites `done`; the item sheet (edit-items spec) rewrites
+// title, date, time, endTime, type and notes through app.js's editItem, which
+// rebuilds the record with js/edit.js's applyEdit (makeItem underneath). NOTHING
+// CHANGED HERE for either: not merge(), not the tombstone kinds, not
+// schemaVersion. An edited record is an ordinary record with a newer
+// updatedAt, so a device on pre-edit code receives it as one and deserializeItems
+// and unionById pass it through whole. The consequences (edit-items spec § 5),
+// each examined rather than assumed, and each accepted:
 //
-//   - The toggle DOES bump updatedAt. It has to: unionById's ties go to remote
-//     (`>=`, below), so a toggle that left updatedAt alone would be silently
-//     REVERTED on the next sync. Self-reverting, not self-correcting.
-//   - Because it bumps updatedAt, applyTombstones can resurrect a deleted
-//     record. That function keeps anything whose updatedAt is at or after the
-//     deletion, on the documented assumption that a later updatedAt means
-//     "re-created after the deletion" — and with an edit path that assumption
-//     is false. Delete an item on the laptop at 09:00, tick it on the phone at
-//     12:00 before either syncs, and the item comes back on every device with
-//     done: true (so it is off the To-do page and reappears only on the
-//     calendar). Annoying and re-deletable, not lost data, and it is the only
-//     horn of the two that converges at all.
+//   1. Every edit and every tick DOES bump updatedAt. It has to: unionById's
+//      ties go to remote (`>=`, below), so a write that left updatedAt alone
+//      would be silently REVERTED on the next sync. Self-reverting, not
+//      self-correcting. The price is whole-record last-write-wins: edit an item
+//      on A, tick or edit the same item on B before either syncs, and the later
+//      write wins whole — A's change is lost, including fields B never touched.
+//   2. Because writes bump updatedAt, applyTombstones can resurrect a deleted
+//      record. It keeps anything whose updatedAt is at or after the deletion,
+//      on the documented assumption that a later updatedAt means "re-created
+//      after the deletion" — and with an edit path that assumption is false.
+//      Delete an item on the laptop at 09:00, edit or tick it on the phone at
+//      12:00 before either syncs, and it comes back on every device with the
+//      phone's fields. Annoying and re-deletable, not lost data, and it is the
+//      only horn of the two that converges at all.
+//   3. Clock skew decides ties (above).
+//   4. Only the latest action can be undone. A second toast commits the first
+//      action at once, so its delete lands and its Undo is gone. An edit's Undo
+//      is itself a new edit with a new updatedAt; it has no merge special case.
+//   5. `deletedAt` IS WHEN THE DELETE COMMITS, not when the user tapped: the
+//      tombstone is written when the 5 s Undo toast expires or the app is
+//      backgrounded. If a sync brings another device's edit to the item inside
+//      that window, the commit still deletes it, because the commit is later.
+//   6. EDITS SEND ONLY THE CHANGED FIELDS. The sheet hands editItem the raw
+//      diff, applied to the CURRENT record, so a field a sync changed while the
+//      sheet was open is not written back over. This narrows (1) on the SAME
+//      device only; across devices the whole record still travels and wins.
+//
+// tests/editsync.test.js pins 1, 2 (and its same-instant boundary), 5 and the
+// undo case against merge()/toWire(), comparing field values, not id sets.
 //
 // Teaching applyTombstones to tell an edit from a re-creation was considered
 // and rejected: it is a change to the most defect-prone function here, and the
 // ledger records four occasions on this codebase where exactly that kind of
 // fix introduced a worse defect than the one it cured.
 //
-// THE NEXT EDITABLE FIELD RE-OPENS ALL OF THIS. Per-record last-write-wins is
-// tolerable while the same id is almost never rewritten on both devices; a
-// second, less trivial editable field changes that, and the resurrection above
-// stops being merely annoying the moment the field carries content.
+// WHAT RE-OPENS ALL OF THIS. Per-record last-write-wins is tolerable while the
+// same id is almost never rewritten on both devices inside one sync window.
+// It stops being tolerable for a field edited concurrently OFTEN, or for
+// content where last-write-wins throws away meaningful text (long notes edited
+// on both devices, say). Either argues for per-field timestamps, which change
+// what merge() means for a device on old code and so need a coordinated
+// schemaVersion bump and new convergence coverage — not a patch to unionById.
 
 export const SCHEMA_VERSION = 1;
 
