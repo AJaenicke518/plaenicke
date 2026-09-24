@@ -563,3 +563,59 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 }
 /* 44px: Apple's minimum touch target; this is the one control that undoes a delete. */
 .toast-undo { min-height: 44px; }
+
+/* ---------- item sheet (open / edit one item) ---------- */
+/* Above .settings-backdrop (10), below .toast (20): a Deleted/Saved toast
+   raised as the sheet closes must never sit under a sheet. */
+.sheet-backdrop {
+  position: fixed; inset: 0;
+  background: var(--scrim);
+  z-index: 15;
+}
+/* Pinned to the bottom and scrolling INSIDE itself, so a tall form (or the
+   iOS keyboard) never pushes the top bar's Save/Cancel off screen. */
+.sheet {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  max-height: 85dvh;
+  overflow-y: auto;
+  background: var(--card);
+  color: var(--ink);
+  border-top: 1px solid var(--line);
+  border-radius: 12px 12px 0 0;
+  padding: 0 16px;
+  padding-bottom: env(safe-area-inset-bottom);
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.2);
+}
+.sheet-bar {
+  position: sticky; top: 0;
+  display: flex; justify-content: space-between; align-items: center;
+  background: var(--card);
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 12px;
+}
+.sheet-save { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.sheet-form { display: flex; flex-direction: column; gap: 10px; }
+.sheet-field { display: flex; flex-direction: column; gap: 4px; }
+.sheet-label { font-size: 0.8rem; color: var(--muted); }
+/* Under 16px iOS zooms the page on focus. */
+.sheet input, .sheet select, .sheet textarea {
+  font: inherit;
+  font-size: 1rem;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--ink);
+}
+.sheet textarea { resize: vertical; }
+/* 44px: Apple's minimum touch target. */
+.sheet button { min-height: 44px; padding: 0 14px; }
+.sheet-error { color: var(--danger); margin: 10px 0 0; }
+.sheet-error:empty { display: none; }
+.sheet-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 16px; }
+.sheet-delete { color: var(--danger); margin-left: auto; }
+.sheet-heading { font-size: 1.1rem; margin: 0 0 6px; }
+.sheet-when, .sheet-source { margin: 0 0 6px; color: var(--muted); }
+.sheet-google { display: inline-flex; align-items: center; min-height: 44px; }
