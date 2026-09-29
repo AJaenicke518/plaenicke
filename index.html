@@ -24,6 +24,10 @@
 <body>
   <header>
     <h1>plaenicke</h1>
+    <!-- When the screen was last brought up to date (Phase 0). iOS resumes
+         this app rather than reloading it, so "is this current?" is a real
+         question; js/app.js repaints this on load and on every resume. -->
+    <span id="updated-stamp" class="stamp"></span>
     <button id="settings-btn" class="icon-btn" type="button" aria-label="Settings">&#9881;</button>
   </header>
 
@@ -59,15 +63,15 @@
   <section id="preview" hidden></section>
 
   <nav class="view-toggle">
-    <button id="show-list" type="button" class="active">List</button>
+    <button id="show-list" type="button">List</button>
     <button id="show-month" type="button">Month</button>
     <button id="show-week" type="button">Week</button>
-    <button id="show-day" type="button">Day</button>
+    <button id="show-day" type="button" class="active">Day</button>
     <button id="show-todo" type="button">To-do</button>
     <button id="show-ideas" type="button">Ideas</button>
   </nav>
 
-  <section id="list-view">
+  <section id="list-view" hidden>
     <ul id="item-list"></ul>
   </section>
 
@@ -89,7 +93,7 @@
     <div id="week-grid" class="week-grid"></div>
   </section>
 
-  <section id="day-view" hidden>
+  <section id="day-view">
     <div class="cal-controls">
       <button id="prev-day" type="button">&larr;</button>
       <span id="day-label"></span>
@@ -115,6 +119,14 @@
   </section>
 
   <div id="settings-host"></div>
+  <!-- The item sheet (js/itemsheet.js) mounts here. -->
+  <div id="sheet-host"></div>
+  <!-- The toast (js/toast.js). The host is NOT a live region: it holds the
+       Undo button, which would be read out as part of every notice. The
+       message is announced through #toast-live, which is PERSISTENT because a
+       live region inserted already filled is often not announced. -->
+  <div id="toast-host"></div>
+  <p id="toast-live" class="visually-hidden" role="status" aria-live="polite"></p>
 
   <script type="module" src="js/app.js"></script>
 </body>

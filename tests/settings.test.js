@@ -131,11 +131,12 @@ function findButtonByText(el, text) {
   return null;
 }
 
-function openPanel(feeds) {
+function openPanel(feeds, seed = () => {}) {
   globalThis.window = makeFakeWindow();
   globalThis.document = makeFakeDocument();
   installFakeLocalStorage();
   saveFeeds(feeds);
+  seed(); // extra storage the panel should see when it opens
 
   const button = document.createElement('button');
   const host = document.createElement('div');
@@ -426,3 +427,28 @@ test('settings: the calendar list refreshes when an adoption lands while the pan
 // network calls. The :330-337 write site gets the identical
 // re-read-before-write fix as the two sites above; app.js/Task 7's
 // integration tests are where an Add flow with a real fetchImpl belongs.
+
+// --- Phase 0 baseline: the launch count is readable in Settings -------------
+import { recordLaunch } from '../js/storage.js';
+
+test('settings: shows on how many of the last 7 days the app was opened, and when it was last', () => {
+  const now = Date.now();
+  const { host } = openPanel([], () => {
+    recordLaunch(new Date(now - 60 * 60 * 1000).toISOString());
+    recordLaunch(new Date(now - 2 * 24 * 60 * 60 * 1000).toISOString());
+    recordLaunch(new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString()); // outside the window
+  });
+  // An hour ago is today or, just after midnight, yesterday; either way it is
+  // a different local day from two days ago.
+  assert.match(allText(host), /Opened on 2 of the last 7 days\. Last opened (Today|Yesterday), \d{1,2}:\d{2} (AM|PM)\./);
+});
+
+// Sweep S-8: a launch log that parses to something other than an array (here
+// an object) reads as empty, and the panel still opens rather than throwing
+// out of the Settings button.
+test('settings: a stored launch log of {} reads as no launches, and Settings opens', () => {
+  const { host } = openPanel([], () => { localStorage.setItem('plaenicke.launches', '{}'); });
+  assert.equal(host.childElementCount > 0, true, 'the panel must open');
+  assert.match(allText(host), /Not opened in the last 7 days\./);
+  assert.doesNotMatch(allText(host), /Last opened/);
+});

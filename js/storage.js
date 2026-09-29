@@ -274,3 +274,44 @@ export function saveSyncState(s) {
     throw err;
   }
 }
+
+// --- launch log ---
+// Timestamps of each time the app was opened or resumed on THIS device. Local
+// only, never synced: it is the Phase 0 baseline for "is plaenicke actually
+// being used?" (docs/superpowers/research/2026-09-23-plaenicke-ui-research.md).
+// Capped so it can never grow into the quota the feed cache depends on.
+
+const LAUNCHES_KEY = 'plaenicke.launches';
+export const MAX_LAUNCHES = 500;
+
+export function loadLaunches() {
+  const json = localStorage.getItem(LAUNCHES_KEY);
+  if (!json) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.filter((t) => typeof t === 'string');
+}
+
+// On a full device the log gives up its OLDEST half and tries again, down to
+// the new entry alone; only when even that does not fit is it a QuotaError. It
+// is a convenience metric, and an open that cannot be recorded should not cost
+// the room the feed cache and items need. Any other storage error propagates
+// untouched.
+export function recordLaunch(iso) {
+  let next = [...loadLaunches(), iso].slice(-MAX_LAUNCHES);
+  for (;;) {
+    try {
+      localStorage.setItem(LAUNCHES_KEY, JSON.stringify(next));
+      return;
+    } catch (err) {
+      if (!(err && err.name === 'QuotaExceededError')) throw err;
+      if (next.length <= 1) throw new QuotaError('Launch log exceeded storage quota');
+      next = next.slice(Math.floor(next.length / 2));
+    }
+  }
+}

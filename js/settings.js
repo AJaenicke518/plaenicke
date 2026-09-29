@@ -13,10 +13,12 @@ import { resolveTheme, THEME_KEY } from './theme.js';
 import {
   syncFeed, feedStatus, removeFeed, webcalToHttps, inferName,
 } from './feeds.js';
-import { loadFeeds, saveFeeds, loadFeedCache } from './storage.js';
+import { loadFeeds, saveFeeds, loadFeedCache, loadLaunches } from './storage.js';
+import { describeLaunches } from './freshness.js';
 import { initLinkUI } from './linkui.js';
 import { uid } from './uid.js';
 import { nowISO } from './dateparse.js';
+import { lock } from './scrolllock.js';
 
 const CHOICES = ['light', 'dark', 'auto'];
 
@@ -99,9 +101,13 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
 
   function onKey(e) { if (e.key === 'Escape') close(); }
 
+  // The page scroll lock is shared with the item sheet (js/scrolllock.js,
+  // sweep F O2); this panel's own hold, or null while it is closed.
+  let releaseScroll = null;
+
   function close() {
     host.innerHTML = '';
-    document.body.style.overflow = '';
+    if (releaseScroll) { releaseScroll(); releaseScroll = null; }
     document.removeEventListener('keydown', onKey);
   }
 
@@ -140,7 +146,12 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
       });
       seg.appendChild(b);
     }
-    appearance.append(ah, seg);
+    // Phase 0 baseline: how often this device actually opens the app.
+    // Local-only (storage.js's launch log), never synced.
+    const usage = document.createElement('p');
+    usage.className = 'note usage-note';
+    usage.textContent = describeLaunches(loadLaunches(), new Date());
+    appearance.append(ah, seg, usage);
 
     // --- Linked calendars ---------------------------------------------
     //
@@ -486,7 +497,7 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
       onLinked: refreshCalendars,
       onUnlinked: refreshCalendars,
     });
-    document.body.style.overflow = 'hidden'; // no scrolling behind the modal (iOS)
+    if (!releaseScroll) releaseScroll = lock(); // no scrolling behind the modal (iOS)
     document.addEventListener('keydown', onKey);
   }
 

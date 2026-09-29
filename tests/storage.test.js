@@ -410,3 +410,91 @@ test('saveSyncState with a complete object overwrites every field, including lif
   assert.deepEqual(loadSyncState(),
     { version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false });
 });
+
+// --- launch log (Phase 0 baseline) ------------------------------------------
+//
+// Local-only and never synced: it answers "is this device's app actually being
+// opened?", which is a per-device question.
+import { recordLaunch, loadLaunches, MAX_LAUNCHES } from '../js/storage.js';
+
+test('recordLaunch appends to the launch log, oldest first', () => {
+  installFakeLocalStorage();
+  recordLaunch('2026-09-22T08:00:00.000Z');
+  recordLaunch('2026-09-23T08:00:00.000Z');
+  assert.deepEqual(loadLaunches(), ['2026-09-22T08:00:00.000Z', '2026-09-23T08:00:00.000Z']);
+});
+
+test('the launch log keeps only the most recent MAX_LAUNCHES entries', () => {
+  installFakeLocalStorage();
+  for (let i = 0; i < MAX_LAUNCHES + 3; i += 1) recordLaunch(new Date(Date.UTC(2026, 0, 1) + i * 60000).toISOString());
+  const log = loadLaunches();
+  assert.equal(log.length, MAX_LAUNCHES);
+  assert.equal(log[log.length - 1], new Date(Date.UTC(2026, 0, 1) + (MAX_LAUNCHES + 2) * 60000).toISOString());
+});
+
+test('a corrupt launch log reads as empty and non-string entries are dropped', () => {
+  installFakeLocalStorage();
+  localStorage.setItem('plaenicke.launches', '{not json');
+  assert.deepEqual(loadLaunches(), []);
+  localStorage.setItem('plaenicke.launches', JSON.stringify(['2026-09-23T08:00:00.000Z', 7, null]));
+  assert.deepEqual(loadLaunches(), ['2026-09-23T08:00:00.000Z']);
+});
+
+test('recordLaunch raises QuotaError on a full device, like every other writer', () => {
+  installFakeLocalStorage();
+  const real = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = () => { const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; };
+  try {
+    assert.throws(() => recordLaunch('2026-09-23T08:00:00.000Z'), QuotaError);
+  } finally {
+    localStorage.setItem = real;
+  }
+});
+
+// Sweep S-8: JSON that parses to a non-array (an object here) is not a log.
+test('a stored launch log of {} reads as []', () => {
+  installFakeLocalStorage();
+  localStorage.setItem('plaenicke.launches', '{}');
+  assert.deepEqual(loadLaunches(), []);
+});
+
+// Sweep D10: the launch log is a convenience metric. On a full device it gives
+// up its OLDEST entries to make room, rather than failing to record the open.
+// The fake quota here rejects any launch log longer than 40 entries.
+test('recordLaunch on a full device trims the oldest entries and records the new one', () => {
+  installFakeLocalStorage();
+  const seeded = Array.from({ length: 100 }, (_, i) => new Date(Date.UTC(2026, 0, 1) + i * 60000).toISOString());
+  localStorage.setItem('plaenicke.launches', JSON.stringify(seeded));
+  const real = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = (k, v) => {
+    if (k === 'plaenicke.launches' && JSON.parse(v).length > 40) {
+      const e = new Error('full'); e.name = 'QuotaExceededError'; throw e;
+    }
+    return real(k, v);
+  };
+  try {
+    recordLaunch('2026-09-23T08:00:00.000Z');
+  } finally {
+    localStorage.setItem = real;
+  }
+  const log = loadLaunches();
+  assert.equal(log[log.length - 1], '2026-09-23T08:00:00.000Z', 'the new open is recorded');
+  assert.ok(log.length > 0 && log.length <= 40, `trimmed to fit; got ${log.length}`);
+  assert.deepEqual(log.slice(0, -1), seeded.slice(-(log.length - 1)), 'what is kept is the newest, in order');
+});
+
+// A failure that is not about space is not "fixed" by throwing entries away.
+test('recordLaunch passes a non-quota storage error through without trimming', () => {
+  installFakeLocalStorage();
+  localStorage.setItem('plaenicke.launches', JSON.stringify(['2026-09-22T08:00:00.000Z']));
+  const real = localStorage.setItem.bind(localStorage);
+  let calls = 0;
+  localStorage.setItem = () => { calls += 1; const e = new Error('blocked'); e.name = 'SecurityError'; throw e; };
+  try {
+    assert.throws(() => recordLaunch('2026-09-23T08:00:00.000Z'), { name: 'SecurityError' });
+  } finally {
+    localStorage.setItem = real;
+  }
+  assert.equal(calls, 1);
+  assert.deepEqual(loadLaunches(), ['2026-09-22T08:00:00.000Z']);
+});
