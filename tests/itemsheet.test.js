@@ -799,3 +799,28 @@ test('a quick move is inside the Tab order, so Tab from it is the browser\'s own
   assert.equal(pressTab(), false, 'not treated as focus outside the sheet');
   assert.equal(pressTab(true), false);
 });
+
+// Speculative-review note (batch F): the previous sheet was torn down BEFORE
+// the new one was built. A build that threw then left the old sheet on screen
+// with its Escape handler and its close already spent: un-closable, with the
+// page lock released under it. The new sheet is now built first.
+test('a replacement sheet whose build throws leaves the old sheet open and closable', () => {
+  document.body.style.overflow = '';
+  const host = new FakeElement('div');
+  const closes = [];
+  openItemSheet(host, task(), {
+    today: () => TODAY, onSave: () => ({ ok: true }), onDelete() {}, onClose: () => closes.push('first'),
+  });
+  const oldCancel = one(host, 'sheet-cancel');
+  assert.throws(() => openItemSheet(host, task({ id: 'a2' }), {
+    today: () => { throw new Error('build failed'); },
+    onSave: () => ({ ok: true }), onDelete() {}, onClose: () => closes.push('second'),
+  }), /build failed/);
+  assert.equal(one(host, 'sheet-cancel'), oldCancel, 'the old sheet is still the one on screen');
+  assert.equal(keydownCount(), 1, 'with its Escape handler, and no other');
+  assert.equal(document.body.style.overflow, 'hidden', 'and the page still locked under it');
+  pressKey('Escape');
+  assert.deepEqual(closes, ['first'], 'Escape closes it');
+  assert.equal(host.children.length, 0);
+  assert.equal(document.body.style.overflow, '', 'and releases the page');
+});

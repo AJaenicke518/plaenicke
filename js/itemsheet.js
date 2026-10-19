@@ -103,9 +103,6 @@ export function openItemSheet(host, item, {
     if (unlabelled.length) throw new Error(`openItemSheet: no label for type ${unlabelled.join(', ')}`);
   }
 
-  const prev = mounted.get(host);
-  if (prev) prev();
-
   let closed = false;
   // The sheet's controls in DOM order, filled in as they are built. Tab is
   // kept inside this list while the sheet is open (sweep U6).
@@ -346,6 +343,11 @@ export function openItemSheet(host, item, {
     formEl.appendChild(actions);
   }
 
+  // The sheet this one replaces is torn down only now, once the new one is
+  // fully built: a build that throws above leaves the old sheet on screen
+  // with its Escape handler, its close and the page lock all still live.
+  const prev = mounted.get(host);
+  if (prev) prev();
   host.innerHTML = '';
   host.appendChild(backdrop);
   releaseScroll = lock();
