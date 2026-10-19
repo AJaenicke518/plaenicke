@@ -559,6 +559,27 @@ test('instancesForRange: an expansion throw is logged by error name only, never 
   assert.ok(!logged[0].includes('example.com'), 'log leaked the feed host');
 });
 
+// instancesForRange runs on EVERY render (four views each), so an entry that
+// fails expansion used to log on every tap and every sync. Once per feed per
+// session says the same thing.
+test('instancesForRange: a feed that fails expansion is logged once per session, not once per render', () => {
+  const broken = { fetchedAt: '2026-07-28T12:00:00.000Z', events: [{ uid: 'broken', title: 'Broken' }], skipped: [] };
+  const feedX = { ...FEED_A, id: 'feedOnceX' };
+  const feedY = { ...FEED_A, id: 'feedOnceY' };
+  const cache = { feedOnceX: broken, feedOnceY: broken };
+  const logged = [];
+  const realError = console.error;
+  console.error = (...args) => { logged.push(args.map(String).join(' ')); };
+  try {
+    for (let i = 0; i < 3; i += 1) instancesForRange([feedX], cache, '2026-08-01', '2026-08-01', 'UTC');
+    assert.equal(logged.length, 1, 'three renders, one log');
+    instancesForRange([feedX, feedY], cache, '2026-08-01', '2026-08-01', 'UTC');
+    assert.equal(logged.length, 2, 'a second broken feed is still reported, once');
+  } finally {
+    console.error = realError;
+  }
+});
+
 // --- removeFeed --------------------------------------------------------------
 
 test('removeFeed: removes both the feed and its cache entry, leaves others intact', () => {

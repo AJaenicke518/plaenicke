@@ -445,6 +445,11 @@ function compareInstances(a, b) {
 // A feed with no cache entry yet (never synced) or an entry a malformed
 // expansion throws on is skipped rather than breaking the whole merge; one
 // bad feed must not blank every other calendar.
+// Feed ids whose expansion failure has already been logged this session.
+// instancesForRange runs on every render, so without this one broken entry
+// logged on every tap and every sync.
+const reportedExpansionFailures = new Set();
+
 export function instancesForRange(feeds, cache, start, end, targetTz) {
   const out = [];
   for (const feed of feeds) {
@@ -459,8 +464,11 @@ export function instancesForRange(feeds, cache, start, end, targetTz) {
       // Skipping keeps one bad feed from blanking every other calendar, but a
       // silent skip is indistinguishable from an empty calendar. Log the error
       // NAME only: a feed URL is a capability token and the feed object carries
-      // it, so neither may ever reach the console.
-      console.error(`instancesForRange: expansion failed (${err && err.name ? err.name : 'unknown'}) — feed skipped`);
+      // it, so neither may ever reach the console. Once per feed per session.
+      if (!reportedExpansionFailures.has(feed.id)) {
+        reportedExpansionFailures.add(feed.id);
+        console.error(`instancesForRange: expansion failed (${err && err.name ? err.name : 'unknown'}) — feed skipped`);
+      }
       continue;
     }
 
