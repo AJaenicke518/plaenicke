@@ -100,16 +100,28 @@ test('an empty server accepts the local state as the first push', async () => {
 });
 
 // DA-M4: the fake records the body, so this assertion can actually fail.
+//
+// The plaintext marker must be a string the wire cannot contain BY CHANCE.
+// It used to be the title 't-a', and every character of that is in the
+// base64url alphabet the random 43-character authToken is drawn from — so
+// the Bearer header carried 't-a' in about 1 run in 6000 and the test failed
+// on correct code. A space is in neither base64url nor standard base64, so no
+// token or ciphertext can produce this; and it has no quote or backslash, so
+// it would survive JSON escaping intact if the title ever did go out in clear.
+const PLAINTEXT_MARKER = 'plaintext title marker';
 test('the Bearer token is sent and the encryption key is NEVER on the wire', async () => {
   const link = await linked();
-  saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
+  saveItems([{ ...item('a', '2026-08-01T00:00:00.000Z'), title: PLAINTEXT_MARKER }]);
   const server = fakeServer();
   await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo });
   assert.ok(server.calls.some(c => c.method === 'PUT'), 'the test must actually exercise a push');
   assert.ok(server.calls.every(c => c.headers.authorization === `Bearer ${link.authToken}`));
+  const pushed = await decryptBlob(link.encKey, server.row.blob);
+  assert.deepEqual(pushed.items.map(i => i.title), [PLAINTEXT_MARKER],
+    'fixture check: the marker is the content that was pushed, encrypted');
   const wire = JSON.stringify(server.calls);
   assert.ok(!wire.includes(bytesToBase64url(link.encKey)), 'encKey must never be transmitted');
-  assert.ok(!wire.includes('t-a'), 'plaintext must never be transmitted');
+  assert.ok(!wire.includes(PLAINTEXT_MARKER), 'plaintext must never be transmitted');
 });
 
 test('remote records are merged and handed to applyState, not written directly', async () => {
