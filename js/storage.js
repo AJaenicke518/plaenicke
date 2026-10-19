@@ -1,7 +1,7 @@
 // storage.js — the ONLY file that touches localStorage.
 
-const STORAGE_KEY = 'plaenicke.items';
-const FEEDS_KEY = 'plaenicke.feeds';
+export const STORAGE_KEY = 'plaenicke.items';
+export const FEEDS_KEY = 'plaenicke.feeds';
 const FEED_CACHE_KEY = 'plaenicke.feedCache';
 
 export class QuotaError extends Error {
@@ -106,7 +106,7 @@ export function saveFeeds(feeds) {
 // so deserializeItems would discard it on the next load and the deletion would
 // be lost. Cleared only once a sync has acknowledged them. See spec 5.6.
 
-const TOMBSTONES_KEY = 'plaenicke.syncTombstones';
+export const TOMBSTONES_KEY = 'plaenicke.syncTombstones';
 const TOMBSTONE_MAX_AGE_DAYS = 90;
 const DAY_MS = 24 * 60 * 60 * 1000;
 

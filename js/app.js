@@ -1,6 +1,6 @@
 import {
   loadItems, saveItems, loadFeeds, loadFeedCache, addTombstone,
-  loadTombstones, saveTombstones, recordLaunch,
+  loadTombstones, saveTombstones, recordLaunch, STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY,
 } from './storage.js';
 import { followToday, formatDayLabel } from './freshness.js';
 import {
@@ -1027,8 +1027,9 @@ function scheduleSync() {
 // does not fire in the tab that performed the write, so no echo guard is
 // needed. Narrowed to the three data keys — plaenicke.syncState is written on
 // every sync tick and would otherwise force a full re-render in every other
-// tab on every tick.
-const CROSS_TAB_KEYS = ['plaenicke.items', 'plaenicke.feeds', 'plaenicke.syncTombstones'];
+// tab on every tick. storage.js's own constants, never literals: a renamed
+// key would otherwise leave this listener silently dead.
+const CROSS_TAB_KEYS = [STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY];
 window.addEventListener('storage', (e) => {
   if (!CROSS_TAB_KEYS.includes(e.key)) return;
   items = loadItems();

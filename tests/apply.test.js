@@ -3672,3 +3672,12 @@ test('the Week header names both years for a week across New Year\'s', async (t)
   resume();
   assert.equal(labelText('week-label'), weekLabelFor(startOfWeek(localISO(new Date()))), 'restored for later tests');
 });
+
+// app.js's cross-tab listener named the three data keys as string literals,
+// so renaming one in storage.js left the listener silently dead with the
+// suite green. It reads storage.js's exported constants now; the literal
+// values are pinned once, in tests/storage.test.js.
+test('app.js names no storage key by a string literal', () => {
+  const appSrc = readFileSync(new URL('../js/app.js', import.meta.url), 'utf8');
+  assert.deepEqual(appSrc.match(/['"`]plaenicke\.[A-Za-z]+['"`]/g), null);
+});
