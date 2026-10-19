@@ -440,6 +440,13 @@ const SLOW_WRITE_TEXT = "This is taking longer than usual — it's safe to reloa
 // joining mount can tell how long the live write has been running).
 let writeStartedAt = 0;
 
+// Rendered beside every Unlink button (linked, failed, stalled preview). The
+// link code is the account's only decryption credential and a device never
+// re-displays its own (CLAUDE.md, Device linking), so the note says it goes
+// rather than implying nothing is lost. One constant so the views cannot drift.
+const UNLINK_NOTE = "Unlinking stops syncing and deletes this device's link code, which cannot be shown again. "
+  + 'Your items and calendars stay on this device.';
+
 function el(tag, props = {}) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(props)) {
@@ -943,7 +950,7 @@ export function initLinkUI(options = {}) {
     wrap.append(takeOver, unlinkButton('Unlink this device'));
     wrap.appendChild(el('p', {
       className: 'note',
-      text: 'Unlinking stops syncing. Nothing on this device is deleted.',
+      text: UNLINK_NOTE,
     }));
   }
 
@@ -1041,7 +1048,7 @@ export function initLinkUI(options = {}) {
       wrap.appendChild(unlinkButton('Unlink this device'));
       wrap.appendChild(el('p', {
         className: 'note',
-        text: 'Unlinking stops syncing. Nothing on this device is deleted.',
+        text: UNLINK_NOTE,
       }));
     }
   }
@@ -1092,11 +1099,7 @@ export function initLinkUI(options = {}) {
     wrap.appendChild(unlinkButton('Unlink this device'));
     wrap.appendChild(el('p', {
       className: 'note',
-      // The link code is the account's only decryption credential and a
-      // device never re-displays its own (CLAUDE.md, Device linking), so the
-      // note says it goes rather than implying nothing is lost.
-      text: "Unlinking stops syncing and deletes this device's link code, which cannot be shown again. "
-        + 'Your items and calendars stay on this device.',
+      text: UNLINK_NOTE,
     }));
     renderNewDevice(wrap);
   }

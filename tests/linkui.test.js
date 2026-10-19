@@ -1887,6 +1887,43 @@ test("the linked view's Unlink note says the link code goes, and cannot be shown
   assert.match(text, /items and calendars stay on this device/i, 'it still says local data is kept');
 });
 
+// The same facts on EVERY view that offers Unlink. The failed view and the
+// stalled-preview view still said "Nothing on this device is deleted" after
+// the linked view's note was corrected — false of the link code, which Unlink
+// erases and a device never re-displays. All three are checked here, each
+// reached the way a user reaches it.
+function assertUnlinkNoteFacts(text, label) {
+  assert.match(text, /deletes this device's link code/i, `${label}: the note must say the code is erased`);
+  assert.match(text, /cannot be shown again/i, `${label}: and that it cannot be recovered from this device`);
+  assert.match(text, /items and calendars stay on this device/i, `${label}: and that local data is kept`);
+  assert.doesNotMatch(text, /Nothing on this device is deleted/i, `${label}: the old wording denies the code is lost`);
+}
+
+test('every view that offers Unlink states the same facts about the link code', async (t) => {
+  const linked = await setup({ clearGate: true });
+  assert.ok(findButton(linked.host, 'Unlink'), 'fixture check: the linked view offers Unlink');
+  assertUnlinkNoteFacts(allText(linked.host), 'linked');
+
+  const failed = await setup({ fetchImpl: async () => { throw new TypeError('Failed to fetch'); } });
+  assert.ok(findButton(failed.host, 'Try again'), 'fixture check: the failed view');
+  assert.ok(findButton(failed.host, 'Unlink'), 'fixture check: the failed view offers Unlink');
+  assertUnlinkNoteFacts(allText(failed.host), 'failed');
+
+  const clock = makeClock(Date.parse('2026-08-05T12:00:00.000Z'));
+  const f = await concurrencyFixture({ staleAfterMs: 50, clock });
+  t.after(() => f.releaseAll());
+  const a = f.mount();
+  a.host.innerHTML = '';
+  clock.advance(60);
+  const b = f.mount();
+  assert.match(allText(b.host), /Still checking the account/, 'fixture check: the stalled-preview view');
+  assert.ok(findButton(b.host, 'Unlink'), 'fixture check: the stalled-preview view offers Unlink');
+  assertUnlinkNoteFacts(allText(b.host), 'joining-stale');
+  f.releaseGet(0);
+  await a.ui.settled();
+  await b.ui.settled();
+});
+
 test('Unlink keeps local data and says so', async () => {
   const unlinkedCalls = [];
   const { host, ui } = await setup({
