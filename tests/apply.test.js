@@ -438,6 +438,7 @@ test('removing a calendar in Settings pushes it, without waiting for a reload', 
     assert.ok(remove, 'fixture check: the open panel must offer a Remove button for the seeded calendar');
 
     remove.click();
+    host.querySelectorAll('button').find((b) => b.textContent === 'Remove from every device').click();
     assert.deepEqual(loadFeeds(), [], 'fixture check: the calendar really was removed');
     assert.deepEqual(requests.filter((r) => r.url.includes('/data')), [],
       'the push is debounced, so nothing may go out before the timer fires');
@@ -3298,6 +3299,7 @@ test('sF: removing a calendar in Settings repaints the Updated stamp', async (t)
     const remove = settingsHost.querySelectorAll('button').find((b) => b.textContent === 'Remove');
     assert.ok(remove, 'fixture check: the panel offers Remove');
     click(remove);
+    click(settingsHost.querySelectorAll('button').find((b) => b.textContent === 'Remove from every device'));
     assert.deepEqual(loadFeeds(), [], 'fixture check: removed');
     assert.equal(stampEl().textContent, 'Updated 10:40 AM');
   } finally {

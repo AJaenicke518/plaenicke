@@ -196,6 +196,13 @@ export function initSettings({
     // draft text must survive that rebuild rather than being wiped.
     let urlDraft = '';
     let nameDraft = '';
+    // The row whose Remove is waiting for its confirmation, or null. Remove is
+    // TWO taps (punchlist, decided 2026-10-19): since sweep fix 1 a removal is
+    // pushed to the account within 2 s, so one mis-tap deleted the calendar
+    // from every device, and its link — a capability token this panel never
+    // shows again — could not be typed back in. The first tap only asks; Cancel
+    // leaves storage, tombstones and the sync schedule exactly as they were.
+    let confirmingRemoveId = null;
     function isBusy() { return syncingFeedId !== null || addBusy; }
 
     // reapplyFeedField: closes the "two writers on plaenicke.feeds" gap —
@@ -321,7 +328,34 @@ export function initSettings({
           removeBtn.className = 'remove';
           removeBtn.textContent = 'Remove';
           removeBtn.disabled = syncingFeedId === feed.id;
+          // First tap: ask, and touch nothing else.
           removeBtn.addEventListener('click', () => {
+            confirmingRemoveId = feed.id;
+            renderCalendars();
+          });
+
+          // The question names the calendar (feed.name — never its URL) and
+          // says what the second tap does.
+          const confirmNote = document.createElement('p');
+          confirmNote.className = 'note feed-remove-confirm';
+          confirmNote.textContent = `Remove "${feed.name}" from every device? `
+            + 'Its calendar link is never shown again and cannot be typed back in.';
+
+          const cancelRemoveBtn = document.createElement('button');
+          cancelRemoveBtn.type = 'button';
+          cancelRemoveBtn.textContent = 'Cancel';
+          cancelRemoveBtn.addEventListener('click', () => {
+            confirmingRemoveId = null;
+            renderCalendars();
+          });
+
+          const confirmRemoveBtn = document.createElement('button');
+          confirmRemoveBtn.type = 'button';
+          confirmRemoveBtn.className = 'remove';
+          confirmRemoveBtn.textContent = 'Remove from every device';
+          confirmRemoveBtn.disabled = syncingFeedId === feed.id;
+          confirmRemoveBtn.addEventListener('click', () => {
+            confirmingRemoveId = null;
             // Same catch+surface shape as runSync/handleAdd above: removeFeed
             // only throws on a genuine storage failure (see feeds.js), never
             // include the feed object/URL in the log. On failure, leave
@@ -352,8 +386,13 @@ export function initSettings({
             notifySyncedChanged();
           });
 
-          actions.append(toggle, syncBtn, removeBtn);
-          row.append(main, status, actions);
+          if (confirmingRemoveId === feed.id) {
+            actions.append(confirmRemoveBtn, cancelRemoveBtn);
+            row.append(main, status, confirmNote, actions);
+          } else {
+            actions.append(toggle, syncBtn, removeBtn);
+            row.append(main, status, actions);
+          }
           list.appendChild(row);
         }
         body.appendChild(list);

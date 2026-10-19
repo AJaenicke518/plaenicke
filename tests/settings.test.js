@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { installFakeLocalStorage } from './fake-localstorage.js';
-import { loadFeeds, saveFeeds, saveItems, loadSyncState } from '../js/storage.js';
+import {
+  loadFeeds, saveFeeds, saveItems, loadItems, loadSyncState, loadTombstones, loadFeedCache, saveFeedCache,
+} from '../js/storage.js';
 import { initSettings } from '../js/settings.js';
 import { linkWithCode } from '../js/auth.js';
 import { bytesToBase64url, generateEncKey, encryptBlob } from '../js/crypto.js';
@@ -243,6 +245,7 @@ test('settings: removing a calendar is a SYNCED change, not just a re-render', (
   notified.length = 0;
 
   findButtonByText(host, 'Remove').click();
+  findButtonByText(host, 'Remove from every device').click();
 
   assert.deepEqual(loadFeeds(), [], 'fixture check: the feed really was removed');
   assert.ok(notified.includes('synced'),
@@ -299,12 +302,88 @@ test('settings: removing a calendar keeps one that arrived in storage after the 
   saveFeeds([feedA, feedC]);
 
   findButtonByText(host, 'Remove').click(); // feedA's row is first
+  findButtonByText(host, 'Remove from every device').click();
 
   assert.deepEqual(loadFeeds().map((f) => f.id), ['feedC'], 'fixture check: storage is right either way');
   assert.ok(allText(host).includes('C'),
     'the panel must show the calendar sync pulled in, not the snapshot it opened with');
   assert.ok(!allText(host).includes('No calendars linked yet'),
     'a subscription that exists must never be rendered as if the device had none');
+});
+
+// --- Remove asks first (punchlist L88 fix (1), decided 2026-10-19) ----------
+//
+// A feed URL is a capability token this panel never shows again, and since
+// sweep fix 1 a Remove is pushed to the account within 2 s — so one mis-tap
+// used to delete the subscription from EVERY device, with nothing on screen
+// that could restore it. Remove now asks, inline, naming the calendar.
+function twoFeeds() {
+  return [
+    {
+      id: 'feedA', url: 'https://example.com/a.ics', name: 'Classes', color: 'var(--feed-palette-1)', hidden: false,
+      updatedAt: '2026-07-01T00:00:00.000Z',
+    },
+    {
+      id: 'feedB', url: 'https://example.com/b.ics', name: 'Work', color: 'var(--feed-palette-2)', hidden: true,
+      updatedAt: '2026-07-02T00:00:00.000Z',
+    },
+  ];
+}
+
+test('settings: the first Remove tap removes nothing and asks, naming the calendar', () => {
+  const { host, notified } = openPanel(twoFeeds());
+  notified.length = 0;
+
+  findButtonByText(host, 'Remove').click(); // Classes' row is first
+
+  assert.deepEqual(loadFeeds().map((f) => f.id), ['feedA', 'feedB'], 'nothing may be removed on the first tap');
+  assert.deepEqual(loadTombstones(), [], 'no tombstone may be written on the first tap');
+  assert.deepEqual(notified, [], 'nothing may be scheduled or re-rendered app-wide on the first tap');
+  const text = allText(host);
+  assert.ok(text.includes('Classes'), 'the question names the calendar');
+  assert.match(text, /every device/, 'the question says it is removed from every device');
+  assert.match(text, /cannot be typed back in/, 'the question says the link cannot be re-entered');
+  assert.ok(!text.includes('https://example.com/a.ics'), 'the feed URL is never rendered, even here');
+  assert.ok(findButtonByText(host, 'Remove from every device'), 'a confirm control is offered');
+  assert.ok(findButtonByText(host, 'Cancel'), 'a Cancel control is offered');
+});
+
+test('settings: Cancel on the Remove question leaves everything untouched', () => {
+  const { host, notified } = openPanel(twoFeeds());
+  const before = JSON.stringify(loadFeeds());
+  notified.length = 0;
+
+  findButtonByText(host, 'Remove').click();
+  findButtonByText(host, 'Cancel').click();
+
+  assert.equal(JSON.stringify(loadFeeds()), before, 'Cancel must not touch plaenicke.feeds');
+  assert.deepEqual(loadTombstones(), [], 'Cancel must not write a tombstone');
+  assert.deepEqual(notified, [], 'Cancel must not schedule a sync');
+  assert.equal(findButtonByText(host, 'Remove from every device'), null, 'the question goes away');
+  assert.equal(host.querySelectorAll('button').filter((b) => b.textContent === 'Remove').length, 2,
+    'both rows offer Remove again');
+});
+
+test('settings: a confirmed Remove removes exactly one calendar and nothing else', () => {
+  const { host, notified } = openPanel(twoFeeds(), () => {
+    saveItems([{ id: 'i1', title: 'Keep me', date: '2026-08-01', type: 'event', updatedAt: '2026-08-01T00:00:00.000Z' }]);
+    const entry = { fetchedAt: '2026-08-01T00:00:00.000Z', events: [], skipped: [] };
+    saveFeedCache({ feedA: entry, feedB: entry });
+  });
+  assert.deepEqual(Object.keys(loadFeedCache()), ['feedA', 'feedB'], 'fixture check: both calendars are cached');
+  const feedBBefore = JSON.stringify(loadFeeds()[1]);
+  const itemsBefore = JSON.stringify(loadItems());
+  notified.length = 0;
+
+  findButtonByText(host, 'Remove').click(); // Classes
+  findButtonByText(host, 'Remove from every device').click();
+
+  assert.deepEqual(loadFeeds().map((f) => f.id), ['feedB'], 'only the confirmed calendar is removed');
+  assert.equal(JSON.stringify(loadFeeds()[0]), feedBBefore, 'the other calendar is untouched, field for field');
+  assert.deepEqual(loadTombstones().map((t) => [t.id, t.kind]), [['feedA', 'feed']], 'exactly one feed tombstone');
+  assert.equal(JSON.stringify(loadItems()), itemsBefore, 'items are untouched');
+  assert.deepEqual(Object.keys(loadFeedCache()), ['feedB'], "only the removed calendar's cache goes");
+  assert.deepEqual(notified, ['view', 'synced'], 'a confirmed Remove is still a synced change');
 });
 
 test('settings: colour and hidden are per-device preferences and never schedule a sync', () => {
