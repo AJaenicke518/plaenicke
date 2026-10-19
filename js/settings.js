@@ -407,6 +407,15 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
           renderCalendars();
           return;
         }
+        // A name is shown on every row and synced; the link is a capability
+        // token that is never shown again. A link pasted into the Name box
+        // would put it on screen and on the wire, so it is refused, and the
+        // message never repeats it.
+        if (/^(https?|webcal):/i.test(nameInput.value.trim())) {
+          urlErrorMsg = 'That name is a link. Put the link in the first box, and a name (or nothing) in the second.';
+          renderCalendars();
+          return;
+        }
         urlErrorMsg = '';
         const url = webcalToHttps(raw);
         const name = nameInput.value.trim() || inferName(url);

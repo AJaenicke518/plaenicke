@@ -502,3 +502,33 @@ test('settings: every close path returns focus to the Settings button, without s
     assert.deepEqual(document.lastFocusOptions, { preventScroll: true }, label);
   }
 });
+
+// --- a Name that is itself a link (punchlist: secrets F3) -------------------
+//
+// A feed's name is displayed on every row and synced to the account; its URL
+// is a capability token that is never displayed again. A link pasted into the
+// Name box would put that token on screen and on the wire, so the add is
+// refused with an inline message, like an empty link is.
+test('settings: a calendar Name that is itself a link is refused, with a message, and nothing is added', () => {
+  for (const badName of ['https://calendar.google.com/secret.ics', '  WEBCAL://p01.icloud.com/secret', 'http:x']) {
+    const { host, notified } = openPanel([]);
+    notified.length = 0;
+    const originalFetch = globalThis.fetch;
+    let fetched = 0;
+    globalThis.fetch = async () => { fetched += 1; return { ok: false, status: 500, json: async () => ({}) }; };
+    try {
+      const inputs = host.querySelectorAll('input');
+      inputs.find((i) => i.getAttribute('aria-label') === 'Calendar link').value = 'https://example.com/new.ics';
+      inputs.find((i) => i.getAttribute('aria-label') === 'Calendar name (optional)').value = badName;
+      findButtonByText(host, 'Add calendar').click();
+      assert.deepEqual(loadFeeds(), [], `${badName}: nothing is saved`);
+      assert.equal(fetched, 0, `${badName}: nothing is fetched`);
+      assert.deepEqual(notified, [], `${badName}: nothing is pushed`);
+      const msg = host.querySelectorAll('p').find((p) => p._classes.has('feed-add-msg'));
+      assert.match(msg.textContent, /\S/, `${badName}: the panel says why`);
+      assert.ok(!msg.textContent.includes('secret'), 'the message never repeats the link');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+});
