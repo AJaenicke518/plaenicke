@@ -400,6 +400,15 @@ export function feedStatus(feed, cacheEntry, now = new Date()) {
 
   const parts = [`fetched ${humanizeAgo(cacheEntry.fetchedAt, nowDate)}`];
 
+  // How many events the feed holds (as cached: a recurring series is one). A
+  // feed that returns none otherwise looks exactly like a broken one. Not
+  // after a quota drop: those events were emptied to free storage, and "0
+  // events" would say the calendar has none.
+  if (!cacheEntry.quotaDropped && Array.isArray(cacheEntry.events)) {
+    const n = cacheEntry.events.length;
+    parts.push(`${n} event${n === 1 ? '' : 's'}`);
+  }
+
   if (cacheEntry.quotaDropped) {
     parts.push('storage limit reached — events not cached, sync again to retry');
   } else if (cacheEntry.quotaPruned) {
