@@ -386,6 +386,49 @@ test('settings: a confirmed Remove removes exactly one calendar and nothing else
   assert.deepEqual(notified, ['view', 'synced'], 'a confirmed Remove is still a synced change');
 });
 
+// The confirm must follow the CALENDAR, not the row position. A sync can land
+// while the question sits open and re-order the list or insert a calendar
+// ahead of the one being asked about; the next re-render (any row action
+// re-reads storage) must keep asking about the same calendar, and the confirm
+// must remove that one. The test above confirms on the FIRST row, where
+// "the row at this index" and "feeds[0]" both happen to be right.
+test('settings: a Remove question stays on its calendar when a re-render moves it to another row', () => {
+  const F = (id, name, i) => ({
+    id, url: `https://example.com/${id}.ics`, name, color: `var(--feed-palette-${i})`, hidden: false,
+    updatedAt: '2026-07-01T00:00:00.000Z',
+  });
+  const { host, notified } = openPanel([F('A', 'Alpha', 1), F('B', 'Bravo', 2), F('C', 'Charlie', 3)]);
+  const removes = host.querySelectorAll('button').filter((b) => b.textContent === 'Remove');
+  assert.equal(removes.length, 3, 'fixture check: three rows offer Remove');
+  removes[1].click(); // Bravo, the second row
+  assert.match(allText(host), /Remove "Bravo"/, 'fixture check: the question names Bravo');
+
+  // A sync lands while the question is open: a new calendar ahead of Bravo,
+  // and the rest re-ordered, so Bravo is now the third row, not the second.
+  saveFeeds([F('Z', 'Zulu', 4), F('C', 'Charlie', 3), F('B', 'Bravo', 2), F('A', 'Alpha', 1)]);
+  const othersBefore = Object.fromEntries(loadFeeds().filter((f) => f.id !== 'B').map((f) => [f.id, JSON.stringify(f)]));
+  // Re-render through a row action that re-reads storage: Hide then Show on
+  // Zulu (the first row) leaves Zulu field-identical.
+  findButtonByText(host, 'Hide').click();
+  findButtonByText(host, 'Show').click();
+  assert.equal(JSON.stringify(loadFeeds()[0]), othersBefore.Z, 'fixture check: Hide then Show restores Zulu');
+
+  const confirms = host.querySelectorAll('button').filter((b) => b.textContent === 'Remove from every device');
+  assert.equal(confirms.length, 1, 'exactly one question is open');
+  assert.match(allText(host), /Remove "Bravo"/, 'the question still names Bravo after the re-render');
+  assert.doesNotMatch(allText(host), /Remove "(Zulu|Charlie|Alpha)"/, 'and no other calendar');
+  notified.length = 0;
+
+  confirms[0].click();
+
+  assert.deepEqual(loadFeeds().map((f) => f.id), ['Z', 'C', 'A'], 'exactly Bravo is removed');
+  for (const f of loadFeeds()) {
+    assert.equal(JSON.stringify(f), othersBefore[f.id], `${f.name} is untouched, field for field`);
+  }
+  assert.deepEqual(loadTombstones().map((t) => [t.id, t.kind]), [['B', 'feed']], 'exactly one feed tombstone, for Bravo');
+  assert.deepEqual(notified, ['view', 'synced'], 'a confirmed Remove is still a synced change');
+});
+
 // Punchlist L130 (decided 2026-10-19): Google serves its calendar feeds with
 // a lag of hours, so a just-made change can be missing after a manual Sync
 // and look like a broken app. One line, beside the calendars' Sync buttons.
