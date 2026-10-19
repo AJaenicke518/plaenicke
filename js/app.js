@@ -1011,6 +1011,9 @@ async function runSync() {
   syncInFlight = true;
   try {
     await syncOnce({
+      // The read gives up at the shared download deadline and reports as
+      // offline; the write never does (js/sync.js, punchlist L63).
+      readFetchImpl: fetchWithTimeout,
       fetchImpl: (u, o) => fetch(u, o),
       now: () => new Date(),
       apiBase: WORKER_URL,

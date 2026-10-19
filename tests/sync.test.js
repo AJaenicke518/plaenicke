@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
-import { syncOnce, previewRemote, MAX_ATTEMPTS } from '../js/sync.js';
+import { syncOnce as realSyncOnce, previewRemote as realPreviewRemote, MAX_ATTEMPTS } from '../js/sync.js';
+import { fetchWithTimeout, FETCH_TIMEOUT_MS } from '../js/fetchtimeout.js';
 import { linkWithCode, clearAdoptionPending, tokenHash } from '../js/auth.js';
 import { encryptBlob, decryptBlob, generateEncKey, bytesToBase64url, composeLinkCode } from '../js/crypto.js';
 import { SCHEMA_VERSION, toWire } from '../js/merge.js';
@@ -12,6 +13,15 @@ const NOW = () => new Date('2026-08-02T12:00:00.000Z');
 const item = (id, updatedAt) => ({ id, title: `t-${id}`, date: '2026-08-02', time: null, updatedAt });
 const state = (o = {}) => ({ schemaVersion: SCHEMA_VERSION, items: [], feeds: [], tombstones: [], ...o });
 const echo = (s) => s;   // simplest applyState: writes nothing, returns what it got
+
+// READS AND WRITES ARE SEPARATE INJECTIONS: syncOnce/previewRemote take a
+// readFetchImpl for GET /data (production passes fetchWithTimeout) and a
+// fetchImpl for the PUT (never timed out). Almost every test here drives both
+// through ONE fake server, so these two adapters hand the test's fetchImpl in
+// as the read fetch too, unless the test passes its own. The tests that are
+// ABOUT the split call realSyncOnce / realPreviewRemote directly.
+const syncOnce = (deps) => realSyncOnce({ readFetchImpl: deps.fetchImpl, ...deps });
+const previewRemote = (deps) => realPreviewRemote({ readFetchImpl: deps.fetchImpl, ...deps });
 
 // A fake Worker holding one row, enforcing the real compare-and-swap rule.
 // It records the FULL request, body included — a fake that drops the body
@@ -553,6 +563,121 @@ test('a calendar save that runs out of storage during apply is recorded as Quota
   assert.equal(res.status, 'error');
   assert.equal(loadSyncState().lastError, 'QuotaError');
   assert.equal(server.row.version, 1, 'nothing is pushed after a failed apply');
+});
+
+// --- timeouts: the read gives up, the write does not (punchlist L63) -------
+//
+// A read is side-effect free, so abandoning it is always safe and it is
+// reported exactly like being offline. A PUT is never abandoned: a client-side
+// timeout does not stop the server's write, so timing one out would report
+// 'offline' about a write that may have landed.
+
+test('syncOnce and previewRemote refuse to run without a readFetchImpl', async () => {
+  await linked();
+  let called = false;
+  const fetchImpl = async () => { called = true; };
+  await assert.rejects(realSyncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo }), /readFetchImpl/);
+  await assert.rejects(realPreviewRemote({ apiBase: 'https://w.example' }), /readFetchImpl/);
+  assert.equal(called, false, 'nothing may be fetched through the write fetch instead');
+});
+
+test('the read goes through readFetchImpl and only the PUT goes through fetchImpl', async () => {
+  const link = await linked();
+  saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer({ version: 1, blob: await encryptBlob(link.encKey, state()) });
+  const reads = [];
+  const writes = [];
+  const res = await realSyncOnce({
+    readFetchImpl: (u, o) => { reads.push((o && o.method) || 'GET'); return server.fetchImpl(u, o); },
+    fetchImpl: (u, o) => { writes.push((o && o.method) || 'GET'); return server.fetchImpl(u, o); },
+    now: NOW, apiBase: 'https://w.example', applyState: echo,
+  });
+  assert.equal(res.status, 'ok');
+  assert.deepEqual(reads, ['GET']);
+  assert.deepEqual(writes, ['PUT']);
+});
+
+test('a read that times out is reported as offline: nothing applied, nothing pushed', async (t) => {
+  await linked();
+  saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
+  const originalFetch = globalThis.fetch;
+  let reads = 0;
+  globalThis.fetch = () => { reads += 1; return new Promise(() => {}); }; // a GET that never answers
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let applied = false;
+  let wrote = false;
+  try {
+    let settled = false;
+    const pending = realSyncOnce({
+      readFetchImpl: fetchWithTimeout,
+      fetchImpl: async () => { wrote = true; },
+      now: NOW, apiBase: 'https://w.example', applyState: () => { applied = true; },
+    });
+    pending.then(() => { settled = true; }, () => { settled = true; });
+    for (let i = 0; i < 20; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    assert.equal(reads, 1, 'fixture check: the read really went out');
+    assert.equal(settled, false, 'fixture check: and is still waiting before the deadline');
+    t.mock.timers.tick(FETCH_TIMEOUT_MS);
+    const res = await pending;
+    assert.deepEqual([res.status, res.applied], ['offline', false]);
+  } finally {
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(loadSyncState().lastError, 'offline', 'reported exactly like being offline');
+  assert.equal(applied, false);
+  assert.equal(wrote, false);
+});
+
+test('previewRemote reports a timed-out read as offline', async (t) => {
+  await linked();
+  const originalFetch = globalThis.fetch;
+  let reads = 0;
+  globalThis.fetch = () => { reads += 1; return new Promise(() => {}); };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let settled = false;
+    const pending = realPreviewRemote({ readFetchImpl: fetchWithTimeout, apiBase: 'https://w.example' });
+    pending.then(() => { settled = true; });
+    for (let i = 0; i < 20; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    assert.equal(reads, 1, 'fixture check: the read really went out');
+    assert.equal(settled, false, 'fixture check: and is still waiting before the deadline');
+    t.mock.timers.tick(FETCH_TIMEOUT_MS);
+    assert.equal((await pending).status, 'offline');
+  } finally {
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// Must not change: the PUT has no deadline. One that takes twice the read's
+// budget still lands and is reported as the success it is.
+test('a PUT slower than the read deadline is still waited for, and lands', async (t) => {
+  const link = await linked();
+  saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer({ version: 1, blob: await encryptBlob(link.encKey, state()) });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let putStarted = false;
+    const pending = realSyncOnce({
+      readFetchImpl: server.fetchImpl,
+      fetchImpl: (u, o) => {
+        putStarted = true;
+        return new Promise((resolve) => { setTimeout(() => resolve(server.fetchImpl(u, o)), 2 * FETCH_TIMEOUT_MS); });
+      },
+      now: NOW, apiBase: 'https://w.example', applyState: echo,
+    });
+    for (let i = 0; i < 50 && !putStarted; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    assert.ok(putStarted, 'fixture check: the PUT is in flight');
+    t.mock.timers.tick(2 * FETCH_TIMEOUT_MS);
+    const res = await pending;
+    assert.equal(res.status, 'ok');
+    assert.equal(res.pushed, true);
+  } finally {
+    t.mock.timers.reset();
+  }
+  assert.equal(server.row.version, 2, 'the write landed');
+  assert.equal(loadSyncState().lastError, null);
 });
 
 // --- Second-pass review findings ---

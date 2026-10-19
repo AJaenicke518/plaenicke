@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
 import {
-  describeSyncStatus, classifyPastedCode, chooseAdoption, renderSyncStatus,
+  describeSyncStatus, classifyPastedCode, chooseAdoption, renderSyncStatus, SLOW_WRITE_MS,
   initLinkUI, failureText, SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID,
   classifySyncState, shellNeedsAttention, panelShowsProblem,
   SYNC_OK, SYNC_NOT_LINKED, SYNC_CORRUPT, SYNC_ADOPTION_PENDING, SYNC_ERROR,
@@ -17,6 +17,7 @@ import {
 } from '../js/storage.js';
 import { SCHEMA_VERSION, toWire } from '../js/merge.js';
 import { WORKER_URL } from '../js/config.js';
+import { fetchWithTimeout, FETCH_TIMEOUT_MS } from '../js/fetchtimeout.js';
 
 // --- minimal fake DOM ------------------------------------------------------
 //
@@ -438,6 +439,7 @@ test('initLinkUI mounts with an applyState and makes no network call doing it', 
     host: doc.createElement('div'),
     applyState: (s) => s,
     fetchImpl: async (url) => { calls.push(String(url)); throw new Error('no network call was expected here'); },
+    readFetchImpl: async (url) => { calls.push(String(url)); throw new Error('no network call was expected here'); },
   }));
   assert.deepEqual(calls, []);
 });
@@ -456,16 +458,20 @@ async function setup(o = {}) {
   const fetchCalls = [];
   const linkedCalls = o.linkedCalls || [];
   const unlinkedCalls = o.unlinkedCalls || [];
+  // One fake behind both the read and the write fetch: these tests are about
+  // what the panel decides, not about which fetch carries which request.
+  const fakeFetch = async (url, opts) => {
+    fetchCalls.push({ url: String(url), method: (opts && opts.method) || 'GET' });
+    if (!o.fetchImpl) throw new Error('no network call was expected here');
+    return o.fetchImpl(url, opts);
+  };
   const ui = initLinkUI({
     host,
     applyState: o.applyState || ((s) => s),
     onLinked: () => linkedCalls.push(true),
     onUnlinked: () => unlinkedCalls.push(true),
-    fetchImpl: async (url, opts) => {
-      fetchCalls.push({ url: String(url), method: (opts && opts.method) || 'GET' });
-      if (!o.fetchImpl) throw new Error('no network call was expected here');
-      return o.fetchImpl(url, opts);
-    },
+    fetchImpl: fakeFetch,
+    readFetchImpl: fakeFetch,
     apiBase: 'https://w.example',
     now: () => NOW,
     syncOnceImpl: async (deps) => {
@@ -779,7 +785,7 @@ test('re-opening the panel mid-adoption does not start a second, concurrent adop
     return { ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) };
   };
   const syncOnceImpl = async (deps) => { log.push(`SYNC:${deps.adoptChoice}`); return { status: 'ok', pushed: true }; };
-  const deps = { applyState: (s) => s, fetchImpl, apiBase: 'https://w.example', now: () => NOW, syncOnceImpl };
+  const deps = { applyState: (s) => s, fetchImpl, readFetchImpl: fetchImpl, apiBase: 'https://w.example', now: () => NOW, syncOnceImpl };
 
   const hostA = doc.createElement('div');
   doc.body.appendChild(hostA);
@@ -843,7 +849,7 @@ async function settleUntil(pred) {
 
 // Mounts a linked, adoption-pending device with a preview that can be held
 // open, and a syncOnceImpl that can be held open independently.
-async function concurrencyFixture({ staleAfterMs, clock, localEmpty = false } = {}) {
+async function concurrencyFixture({ staleAfterMs, slowWriteAfterMs, clock, localEmpty = false } = {}) {
   installFakeLocalStorage();
   const doc = installDom();
   const link = await linkWithCode(bytesToBase64url(generateEncKey()));
@@ -877,10 +883,12 @@ async function concurrencyFixture({ staleAfterMs, clock, localEmpty = false } = 
   const deps = {
     applyState: (s) => s,
     fetchImpl,
+    readFetchImpl: fetchImpl,
     apiBase: 'https://w.example',
     now: (clock || { now: () => NOW }).now,
     syncOnceImpl,
     ...(staleAfterMs === undefined ? {} : { staleAfterMs }),
+    ...(slowWriteAfterMs === undefined ? {} : { slowWriteAfterMs }),
   };
   const mount = () => {
     const host = doc.createElement('div');
@@ -934,7 +942,7 @@ test('a mount arriving while a write is in flight cannot take over from it', asy
     'nothing may take over from an unabandonable write');
   assert.equal(findButton(b.host, 'Unlink'), null,
     'and unlinking here would leave that write pushing with a token the user just revoked');
-  // Nothing under syncOnce has a timeout, so a write that never answers would
+  // The write has no deadline (by design: L63), so a write that never answers would
   // leave this on a bare spinner. With no control to offer, the text has to
   // carry the whole state: what is happening, that it cannot be interrupted,
   // and that reloading is SAFE — the gate is still raised and the
@@ -1307,6 +1315,93 @@ test('a superseded episode settling does not wipe the taking-over mount mid-deci
   assert.ok(findButton(b.host, 'Cancel'));
 });
 
+// --- timeouts (punchlist L63, decided 2026-10-19) ---------------------------
+//
+// The PREVIEW is a read: with the production default it gives up at the
+// shared download deadline and is reported exactly like being offline.
+test('a preview whose read never answers gives up at the deadline and reads as offline', async (t) => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  await linkWithCode(bytesToBase64url(generateEncKey()));
+  const host = doc.createElement('div');
+  doc.body.appendChild(host);
+  const originalFetch = globalThis.fetch;
+  let reads = 0;
+  globalThis.fetch = () => { reads += 1; return new Promise(() => {}); };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const ui = initLinkUI({
+      host, applyState: (s) => s, apiBase: 'https://w.example', now: () => NOW,
+      fetchImpl: async () => { throw new Error('the preview must not use the write fetch'); },
+      syncOnceImpl: async () => { throw new Error('nothing may be adopted'); },
+    });
+    for (let i = 0; i < 20; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    assert.equal(reads, 1, 'fixture check: the preview read went out through the default');
+    assert.match(allText(host), /Checking the account/, 'fixture check: still waiting before the deadline');
+    t.mock.timers.tick(FETCH_TIMEOUT_MS);
+    await ui.settled();
+  } finally {
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+  assert.match(allText(host), /could not reach the account/);
+});
+
+// The WRITE is never abandoned (a client-side timeout does not stop the
+// server's write). Past SLOW_WRITE_MS the panel says so, and that reloading is
+// safe — and still offers no control, because nothing may interfere with it.
+test('the slow-write threshold is twenty seconds', () => {
+  assert.equal(SLOW_WRITE_MS, 20000);
+});
+
+const SLOW_TEXT = "This is taking longer than usual — it's safe to reload.";
+
+test('a write in flight past the threshold says it is taking longer than usual, on the mount writing it', async (t) => {
+  const clock = makeClock(Date.parse('2026-08-05T12:00:00.000Z'));
+  const f = await concurrencyFixture({ clock, slowWriteAfterMs: 30 });
+  t.after(() => f.releaseAll());
+  const a = f.mount();
+  f.releaseGet(0);
+  await a.ui.settled();
+  f.holdNextWrite();
+  findButton(a.host, 'Merge').click();
+  await settleUntil(() => f.syncCalls.length > 0);
+  assert.ok(!allText(a.host).includes(SLOW_TEXT), 'not before the threshold');
+  clock.advance(40);
+  await new Promise((resolve) => { setTimeout(resolve, 60); });
+  assert.ok(allText(a.host).includes(SLOW_TEXT), 'past the threshold the panel says so');
+  assert.equal(findAll(a.host, 'BUTTON').length, 0, 'and still offers no control: the write cannot be abandoned');
+  f.letWriteFinish();
+  await a.ui.settled();
+  assert.ok(!allText(a.host).includes(SLOW_TEXT), 'gone once the write settles');
+  assert.deepEqual(f.syncCalls, ['adopt-merge'], 'exactly one write ran');
+});
+
+test('a mount joining a slow write shows the same line, with no takeover and no unlink', async (t) => {
+  const clock = makeClock(Date.parse('2026-08-05T12:00:00.000Z'));
+  const f = await concurrencyFixture({ clock, slowWriteAfterMs: 30 });
+  t.after(() => f.releaseAll());
+  const a = f.mount();
+  f.releaseGet(0);
+  await a.ui.settled();
+  f.holdNextWrite();
+  findButton(a.host, 'Merge').click();
+  await settleUntil(() => f.syncCalls.length > 0);
+  a.host.innerHTML = '';
+  const b = f.mount();
+  assert.match(allText(b.host), /Saving your choice/, 'fixture check: b joined the write');
+  assert.ok(!allText(b.host).includes(SLOW_TEXT), 'not before the threshold');
+  clock.advance(40);
+  await new Promise((resolve) => { setTimeout(resolve, 60); });
+  assert.ok(allText(b.host).includes(SLOW_TEXT), 'the joining view says so too');
+  assert.equal(findButton(b.host, 'Try again'), null);
+  assert.equal(findButton(b.host, 'Unlink'), null);
+  f.letWriteFinish();
+  await a.ui.settled();
+  await b.ui.settled();
+  assert.deepEqual(f.syncCalls, ['adopt-merge']);
+});
+
 // R4-4. Every other concurrency test injects staleAfterMs or runs on a frozen
 // clock where elapsed === 0, so ANY default >= 1 behaves identically and
 // STALE_ADOPTION_MS was pinned by nothing. Setting it to 1 restores exactly
@@ -1336,6 +1431,38 @@ test('the production staleness threshold is ten seconds — not instant, and not
   await a.ui.settled();
   await b.ui.settled();
   await c.ui.settled();
+});
+
+// Same shape for the slow-write timers: one armed by the writing mount in
+// adopt(), one by a joining mount's saving view. Neither may outlive the write.
+test('a settled write leaves no slow-write timer behind, on the writing or the joining mount', async (t) => {
+  const realSet = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  const live = new Set();
+  globalThis.setTimeout = (fn, ms) => {
+    const h = realSet(fn, ms);
+    if (ms >= 1000) live.add(h);
+    return h;
+  };
+  globalThis.clearTimeout = (h) => { live.delete(h); return realClear(h); };
+  t.after(() => { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; });
+
+  const f = await concurrencyFixture();            // production SLOW_WRITE_MS
+  t.after(() => f.releaseAll());
+  const a = f.mount();
+  f.releaseGet(0);
+  await a.ui.settled();
+  f.holdNextWrite();
+  findButton(a.host, 'Merge').click();
+  await settleUntil(() => f.syncCalls.length > 0);
+  a.host.innerHTML = '';
+  const b = f.mount();
+  assert.match(allText(b.host), /Saving your choice/, 'fixture check: b joined the write');
+  assert.equal(live.size, 2, 'fixture check: both mounts armed a slow-write timer');
+  f.letWriteFinish();
+  await a.ui.settled();
+  await b.ui.settled();
+  assert.equal(live.size, 0, 'a settled write must not leave a twenty-second timer holding the event loop open');
 });
 
 // R4-5. Deleting the clearTimeout in joinActive's settle handler took
@@ -1603,6 +1730,9 @@ test('the injected effects default to the production wiring', async () => {
   assert.ok(seen[0].opts && seen[0].opts.headers && /^Bearer /.test(seen[0].opts.headers.authorization),
     'the default fetchImpl must forward (url, opts) in that order — swapping them drops the Authorization header');
   assert.equal(syncCalls.length, 1);
+  assert.equal(syncCalls[0].readFetchImpl, fetchWithTimeout,
+    'the account read must default to the shared download deadline (js/fetchtimeout.js)');
+  assert.notEqual(syncCalls[0].fetchImpl, fetchWithTimeout, 'and the write must not carry it');
   const stamped = syncCalls[0].now();
   assert.ok(stamped instanceof Date);
   assert.ok(Math.abs(stamped.getTime() - Date.now()) < 60_000,
@@ -1664,6 +1794,7 @@ test('an unlinked device warns that a bare device token creates a NEW account', 
     host,
     applyState: (s) => s,
     fetchImpl: async () => { throw new Error('no network call was expected here'); },
+    readFetchImpl: async () => { throw new Error('no network call was expected here'); },
     apiBase: 'https://w.example',
     now: () => NOW,
     syncOnceImpl: async () => ({ status: 'ok' }),
@@ -1812,6 +1943,7 @@ test('a link attempt that throws renders the error and never echoes the pasted c
     host,
     applyState: (s) => s,
     fetchImpl: async () => { throw new Error('no network call was expected here'); },
+    readFetchImpl: async () => { throw new Error('no network call was expected here'); },
     apiBase: 'https://w.example',
     now: () => NOW,
     syncOnceImpl: async () => ({ status: 'ok' }),
@@ -1851,18 +1983,20 @@ test('pasting a valid link code links the device AND goes straight on to the cho
   const fetchCalls = [];
   const syncCalls = [];
   const linkedCalls = [];
+  const fakeFetch = async (url, opts) => {
+    fetchCalls.push({ url: String(url), method: (opts && opts.method) || 'GET' });
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ version: 6, blob: await encryptBlob(encKey, st({ items: [it('r')] })) }),
+    };
+  };
   const ui = initLinkUI({
     host,
     applyState: (s) => s,
     onLinked: () => linkedCalls.push(true),
-    fetchImpl: async (url, opts) => {
-      fetchCalls.push({ url: String(url), method: (opts && opts.method) || 'GET' });
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ version: 6, blob: await encryptBlob(encKey, st({ items: [it('r')] })) }),
-      };
-    },
+    fetchImpl: fakeFetch,
+    readFetchImpl: fakeFetch,
     apiBase: 'https://w.example',
     now: () => NOW,
     syncOnceImpl: async (d) => { syncCalls.push(d); return { status: 'ok', pushed: true, applied: true }; },
@@ -1916,6 +2050,7 @@ test('a bootstrap adoption drives the real syncOnce, pushes local state and lift
     host,
     applyState: (s) => s,
     fetchImpl,
+    readFetchImpl: fetchImpl,
     apiBase: 'https://w.example',
     now: () => NOW,
   });
@@ -2108,6 +2243,7 @@ test('opening the settings panel refreshes the shell indicator', async () => {
     host,
     applyState: (s) => s,
     fetchImpl: async () => { throw new Error('offline'); },
+    readFetchImpl: async () => { throw new Error('offline'); },
     apiBase: 'https://w.example',
     now: () => NOW,
   });

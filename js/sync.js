@@ -21,17 +21,36 @@ function localState() {
 
 function record(patch) { saveSyncState({ ...loadSyncState(), ...patch }); }
 
-async function fetchRemote({ fetchImpl, apiBase, link }) {
+// TWO FETCHES, INJECTED SEPARATELY (punchlist L63, decided 2026-10-19).
+//   readFetchImpl — GET /data. Production passes js/fetchtimeout.js's
+//     fetchWithTimeout, so a read that never answers gives up and is reported
+//     exactly like being offline. A read has no side effects, so abandoning
+//     one is always safe.
+//   fetchImpl — the PUT. Production passes a plain fetch with NO deadline: a
+//     client-side timeout does not stop the server's write, so timing one out
+//     would report 'offline' about a write that may have landed. The linking
+//     UI says "taking longer than usual — safe to reload" instead.
+// They are separate parameters because both used to travel through the one
+// fetchImpl, and a timeout on that would have reached the PUT too. There is no
+// default: a caller that forgets readFetchImpl would silently lose the
+// deadline, so it is refused.
+function requireReadFetch(readFetchImpl, fn) {
+  if (typeof readFetchImpl !== 'function') throw new Error(`${fn} requires readFetchImpl`);
+}
+
+async function fetchRemote({ readFetchImpl, apiBase, link }) {
   // The network call, the body read, and the decrypt/schema check below must
   // all fail distinguishably: a dropped connection (offline) is not the same
   // failure as a decrypt that throws (undecryptable), and the caller reports
   // each differently. fetch() resolves as soon as headers arrive, so a
   // connection dropped mid-body — or a captive portal returning a 200 HTML
-  // page — throws out of res.json(), not out of the fetchImpl call; that read
+  // page — throws out of res.json(), not out of the fetch call; that read
   // gets its own networkError tag for the same reason the call above does.
+  // A read that hits its deadline rejects from one of those same two places,
+  // which is what makes a timeout report as 'offline'.
   let res;
   try {
-    res = await fetchImpl(`${apiBase}/data`, { headers: { authorization: `Bearer ${link.authToken}` } });
+    res = await readFetchImpl(`${apiBase}/data`, { headers: { authorization: `Bearer ${link.authToken}` } });
   } catch (err) {
     return { networkError: err };
   }
@@ -52,11 +71,12 @@ async function fetchRemote({ fetchImpl, apiBase, link }) {
 
 // Pull only. Applies nothing and pushes nothing — the linking UI uses this to
 // decide whether to offer Merge / Cancel before any write happens.
-export async function previewRemote({ fetchImpl, apiBase }) {
+export async function previewRemote({ readFetchImpl, apiBase }) {
+  requireReadFetch(readFetchImpl, 'previewRemote');
   const link = getLink();
   if (!link) return { status: 'skipped' };
   try {
-    const pulled = await fetchRemote({ fetchImpl, apiBase, link });
+    const pulled = await fetchRemote({ readFetchImpl, apiBase, link });
     if (pulled.networkError) return { status: 'offline' };
     if (pulled.unauthorized) return { status: 'unauthorized' };
     if (pulled.failed) return { status: 'error' };
@@ -82,7 +102,10 @@ export async function syncOnce(deps) {
   // bootstrap path — collapsing two legitimately distinct same-title/date/
   // time records and pushing a tombstone for the loser to every device
   // (DA-C1). tests/sync.test.js pins that.
-  const { fetchImpl, now, apiBase, applyState, adoptChoice = null, expectVersion = null } = deps;
+  const {
+    fetchImpl, readFetchImpl, now, apiBase, applyState, adoptChoice = null, expectVersion = null,
+  } = deps;
+  requireReadFetch(readFetchImpl, 'syncOnce');
   // Any other value is a wiring bug. Refused before the network, rather than
   // read as one of the legal values: a caller that asked for something this
   // function no longer does must not silently get a merge instead.
@@ -117,7 +140,7 @@ export async function syncOnce(deps) {
 
   let pulled;
   try {
-    pulled = await fetchRemote({ fetchImpl, apiBase, link });
+    pulled = await fetchRemote({ readFetchImpl, apiBase, link });
   } catch (err) {
     // Undecryptable or unparseable. Apply NOTHING: a record silently dropped
     // by a deserializer looks like a local deletion and would propagate a

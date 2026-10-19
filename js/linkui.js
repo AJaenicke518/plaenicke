@@ -25,6 +25,7 @@ import { previewRemote, syncOnce } from './sync.js';
 import { applyTombstones } from './merge.js';
 import { loadAuth, loadSyncState, loadItems, loadFeeds, loadTombstones } from './storage.js';
 import { WORKER_URL } from './config.js';
+import { fetchWithTimeout } from './fetchtimeout.js';
 
 const LINK_CODE_BYTES = TOKEN_BYTES + KEY_BYTES;
 
@@ -389,11 +390,12 @@ const MAX_ADOPT_ATTEMPTS = 3;
 // not cover linkui's syncOnce calls.
 //
 // IT MUST NOT BE ABLE TO OUTLIVE ITS PURPOSE either. It is cleared in the
-// episode's `finally`, and nothing in previewRemote/fetchRemote carries an
-// AbortController or a timeout — so an episode whose request never settles
-// would hold it for the page's lifetime, and every later panel open would
-// render a busy view with no controls at all, on a fully healthy network.
-// A joining mount can therefore TAKE OVER — but ONLY during the preview.
+// episode's `finally`. The preview's read now gives up at the shared download
+// deadline (js/fetchtimeout.js, 60 s), but that is long, and the WRITE has no
+// deadline at all — so without an escape an episode whose request is slow to
+// settle would hold it, and every later panel open would render a busy view
+// with no controls, on a fully healthy network. A joining mount can therefore
+// TAKE OVER — but ONLY during the preview.
 //
 // THE PHASE DISTINCTION IS THE WHOLE DESIGN, and getting it wrong is how the
 // first attempt at this destroyed the exclusion it was written to preserve:
@@ -424,6 +426,19 @@ let activeStartedAt = 0;
 // under text that invites the click, turns every ordinary two-second wait
 // into an invitation to start a second episode.
 const STALE_ADOPTION_MS = 10000;
+
+// THE WRITE IS NEVER TIMED OUT (punchlist L63, decided 2026-10-19): a
+// client-side timeout does not stop the server's write, so giving up on one
+// would report 'offline' about a write that may have landed. Past this long in
+// flight the panel says so, and that reloading is safe — it still offers no
+// control, because nothing may interfere with an unabandonable write.
+// Reloading is safe because the adoption gate stays raised until the PUT is
+// confirmed, and the compare-and-swap makes a re-run idempotent.
+export const SLOW_WRITE_MS = 20000;
+const SLOW_WRITE_TEXT = "This is taking longer than usual — it's safe to reload.";
+// When the write now in flight began (module scope, like writeInFlight, so a
+// joining mount can tell how long the live write has been running).
+let writeStartedAt = 0;
 
 function el(tag, props = {}) {
   const node = document.createElement(tag);
@@ -460,11 +475,16 @@ export function initLinkUI(options = {}) {
     host, onLinked, onUnlinked, applyState,
     // Effects, injected the way js/feeds.js and js/sync.js already do it. The
     // defaults are the production wiring; tests supply their own.
+    // The WRITE (the PUT inside syncOnce): no deadline, ever.
     fetchImpl = (url, opts) => fetch(url, opts),
+    // The READ (GET /data, for the preview and inside syncOnce): gives up at
+    // the shared download deadline and is reported like being offline.
+    readFetchImpl = fetchWithTimeout,
     apiBase = WORKER_URL,
     now = () => new Date(),
     syncOnceImpl = syncOnce,
     staleAfterMs = STALE_ADOPTION_MS,
+    slowWriteAfterMs = SLOW_WRITE_MS,
   } = options;
 
   // A STATIC WIRING FACT, checked where it becomes known. Everything this
@@ -532,6 +552,12 @@ export function initLinkUI(options = {}) {
       joinTimer = setTimeout(() => {
         if (stage === 'joining' && activeAdoption) joinActive();
       }, Math.max(0, staleAfterMs - elapsed));
+    } else if (stage === 'saving' && !writeIsSlow()) {
+      // Re-render once the live write crosses the slow threshold, so the
+      // "taking longer than usual" line appears without another panel open.
+      joinTimer = setTimeout(() => {
+        if (stage === 'saving') render();
+      }, Math.max(0, slowWriteAfterMs - (now().getTime() - writeStartedAt)));
     }
     // A JOINED EPISODE'S SETTLE HANDLER MUST NOT REPAINT A VIEW THIS MOUNT HAS
     // SINCE TAKEN OWNERSHIP OF. If this mount goes on to take over, its own
@@ -623,7 +649,12 @@ export function initLinkUI(options = {}) {
     stage = 'busy';
     stageData = { text: 'Checking the account…' };
     render();
-    await handlePreview(await previewRemote({ fetchImpl, apiBase }), attempt, generation);
+    await handlePreview(await previewRemote({ readFetchImpl, apiBase }), attempt, generation);
+  }
+
+  // True while a write is in flight and has been for at least the threshold.
+  function writeIsSlow() {
+    return writeInFlight && now().getTime() - writeStartedAt >= slowWriteAfterMs;
   }
 
   // BRANCH ON preview.status BEFORE CONSULTING chooseAdoption (DA-C3).
@@ -729,12 +760,19 @@ export function initLinkUI(options = {}) {
     // flight. No mount may take over from it — see `writeInFlight`.
     let res;
     writeInFlight = true;
+    writeStartedAt = now().getTime();
+    // Repaint this mount's "Combining…" view once the write crosses the slow
+    // threshold. Cleared when the write settles, whichever comes first.
+    const slowTimer = setTimeout(() => {
+      if (writeInFlight && stage === 'busy') render();
+    }, slowWriteAfterMs);
     try {
       res = await syncOnceImpl({
-        fetchImpl, now, apiBase, applyState, adoptChoice, expectVersion,
+        fetchImpl, readFetchImpl, now, apiBase, applyState, adoptChoice, expectVersion,
       });
     } finally {
       writeInFlight = false;
+      clearTimeout(slowTimer);
     }
     if (res.status === 'changed') {
       // The account moved between the preview and the write, so the choice
@@ -873,6 +911,9 @@ export function initLinkUI(options = {}) {
 
   function renderBusy(wrap) {
     wrap.appendChild(el('p', { className: 'note', text: stageData.text || 'Working…' }));
+    // Only ever true on the mount doing the write ('Combining…'): a preview
+    // cannot run while a write is in flight.
+    if (writeIsSlow()) wrap.appendChild(el('p', { className: 'note link-slow', text: SLOW_WRITE_TEXT }));
   }
 
   // Shown to a mount that found another episode already PREVIEWING, and not
@@ -881,7 +922,8 @@ export function initLinkUI(options = {}) {
   // click turns every ordinary wait into a second episode. joinActive()
   // re-renders this into renderJoiningStale once the threshold passes, and
   // out of it entirely once the live episode settles, so it is never a dead
-  // end even though nothing below this has a timeout.
+  // end — the preview's read does give up at the shared download deadline,
+  // but that is 60 s, far past this threshold.
   function renderJoining(wrap) {
     wrap.appendChild(el('p', {
       className: 'note',
@@ -912,14 +954,16 @@ export function initLinkUI(options = {}) {
   function renderSaving(wrap) {
     // No controls, deliberately — see renderSaving's caller. But a write that
     // never answers would otherwise leave this panel on a bare spinner for
-    // ever (nothing under syncOnce has a timeout), so say what is happening
-    // and that waiting is not the only option. Reloading IS safe: the gate is
-    // still raised, and the compare-and-swap makes a re-run idempotent.
+    // ever (the write has no deadline, by design — see SLOW_WRITE_MS), so say
+    // what is happening and that waiting is not the only option. Reloading IS
+    // safe: the gate is still raised, and the compare-and-swap makes a re-run
+    // idempotent.
     wrap.appendChild(el('p', {
       className: 'note',
       text: 'Saving your choice… This step cannot be interrupted. '
         + 'If it does not finish, it is safe to reload the page and try again — nothing is lost either way.',
     }));
+    if (writeIsSlow()) wrap.appendChild(el('p', { className: 'note link-slow', text: SLOW_WRITE_TEXT }));
   }
 
   function renderAdoptionEntry(wrap) {

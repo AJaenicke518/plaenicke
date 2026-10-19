@@ -8,6 +8,7 @@ import {
   loadLaunches,
 } from '../js/storage.js';
 import { linkWithCode, clearAdoptionPending } from '../js/auth.js';
+import { FETCH_TIMEOUT_MS } from '../js/fetchtimeout.js';
 import { bytesToBase64url, TOKEN_BYTES } from '../js/crypto.js';
 import { SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID } from '../js/linkui.js';
 import { addDays, startOfWeek, weekLabel } from '../js/timegrid.js';
@@ -820,6 +821,75 @@ test('an idea returned by the model is normalised through the same split', async
 // still no write. They are kept only to prove no real network call escapes,
 // in case that reasoning about sync.js is ever wrong.
 const SENTINEL = 'sentinel: renderSyncStatus has not run';
+
+// Punchlist L63, decided 2026-10-19: the account READ carries the shared
+// download deadline (js/fetchtimeout.js) and a timed-out read is reported
+// exactly like being offline; the WRITE has none. Manual timers, not
+// t.mock.timers: see installManualTimers below for why app.js's module-scope
+// syncTimer makes MockTimers unsafe here.
+async function drain() {
+  for (let i = 0; i < 50; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+}
+
+test('runSync gives up on an account read that never answers, and reports it as offline', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    requests.push((opts && opts.method) || 'GET');
+    return new Promise(() => {});
+  };
+  const timers = installManualTimers();
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    await drain();
+    assert.deepEqual(requests, ['GET'], 'fixture check: the read went out');
+    assert.equal(timers.live(FETCH_TIMEOUT_MS), 1, 'the read carries the shared download deadline');
+    timers.fire(FETCH_TIMEOUT_MS);
+    await drain();
+  } finally {
+    timers.restore();
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(loadSyncState().lastError, 'offline', 'a timed-out read is reported like being offline');
+  assert.deepEqual(requests, ['GET'], 'nothing is pushed after a read that gave up');
+});
+
+test('runSync never puts a deadline on the write: a slow PUT is waited for and lands', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  saveItems([record({ id: 'slow-put', title: 'Slow put' })]);
+  const requests = [];
+  let releasePut = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    requests.push(method);
+    if (method === 'GET') return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) });
+    return new Promise((resolve) => {
+      releasePut = () => resolve({ ok: true, status: 200, json: async () => ({ version: 1 }) });
+    });
+  };
+  const timers = installManualTimers();
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    for (let i = 0; i < 200 && !releasePut; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    assert.deepEqual(requests, ['GET', 'PUT'], 'fixture check: the write is in flight');
+    assert.equal(timers.live(FETCH_TIMEOUT_MS), 0, 'no deadline is armed while the write is in flight');
+    releasePut();
+    await drain();
+  } finally {
+    timers.restore();
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(loadSyncState().lastError, null);
+  assert.equal(loadSyncState().version, 1, 'the slow write landed and was recorded');
+});
 
 test('runSync does not proceed into its try/finally while adoption is pending', async () => {
   installFakeLocalStorage();
