@@ -1092,7 +1092,11 @@ export function initLinkUI(options = {}) {
     wrap.appendChild(unlinkButton('Unlink this device'));
     wrap.appendChild(el('p', {
       className: 'note',
-      text: 'Unlinking stops syncing. Nothing on this device is deleted, and the other devices keep their copies.',
+      // The link code is the account's only decryption credential and a
+      // device never re-displays its own (CLAUDE.md, Device linking), so the
+      // note says it goes rather than implying nothing is lost.
+      text: "Unlinking stops syncing and deletes this device's link code, which cannot be shown again. "
+        + 'Your items and calendars stay on this device.',
     }));
     renderNewDevice(wrap);
   }

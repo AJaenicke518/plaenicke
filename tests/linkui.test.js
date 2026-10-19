@@ -1872,6 +1872,21 @@ test('mounting a linked, settled device makes no network call', async () => {
   assert.ok(findButton(host, 'Unlink'), 'a linked device must offer Unlink');
 });
 
+// Punchlist (decided 2026-10-19): the note said "...and the other devices keep
+// their copies" — true of the DATA, not of the KEY. Unlink erases this
+// device's link code, a device never re-displays its own, and the code is the
+// account's only decryption credential. The note must not suggest the account
+// stays readable from here or that the code can be got back from this device.
+test("the linked view's Unlink note says the link code goes, and cannot be shown again", async () => {
+  const { host } = await setup({ clearGate: true });
+  assert.ok(findButton(host, 'Unlink'), 'fixture check: the linked view');
+  const text = allText(host);
+  assert.match(text, /deletes this device's link code/i, 'the note must say the code is erased');
+  assert.match(text, /cannot be shown again/i, 'and that it cannot be recovered from this device');
+  assert.doesNotMatch(text, /keep their copies/i, 'the old wording implied nothing is lost');
+  assert.match(text, /items and calendars stay on this device/i, 'it still says local data is kept');
+});
+
 test('Unlink keeps local data and says so', async () => {
   const unlinkedCalls = [];
   const { host, ui } = await setup({
