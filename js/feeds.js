@@ -15,6 +15,7 @@
 import { WORKER_URL } from './config.js';
 import { parseICS, expandEvents, parseDuration } from './ics.js';
 import { nowISO } from './dateparse.js';
+import { FEED_PALETTE } from './palette.js';
 import {
   loadFeeds, saveFeeds, loadFeedCache, saveFeedCache, QuotaError, addTombstone,
 } from './storage.js';
@@ -528,15 +529,8 @@ export function removeFeed(id) {
 // applyRemoteFeeds
 // ---------------------------------------------------------------------------
 
-// This device's colour cycle for a feed with no local record of its own —
-// the same 6-slot palette settings.js (Task 7) offers on Add. Duplicated
-// rather than imported: settings.js already imports FROM feeds.js (syncFeed,
-// feedStatus, removeFeed, ...), so importing the other way would be a cycle.
-// Both lists must stay in lockstep with styles.css's --feed-palette-1..6.
-const FEED_PALETTE = [
-  'var(--feed-palette-1)', 'var(--feed-palette-2)', 'var(--feed-palette-3)',
-  'var(--feed-palette-4)', 'var(--feed-palette-5)', 'var(--feed-palette-6)',
-];
+// A feed with no local record of its own takes this device's next colour from
+// FEED_PALETTE (js/palette.js), the same cycle settings.js offers on Add.
 
 // applyRemoteFeeds: the feeds half of the "single writer" fix — js/sync.js
 // hands merged state to applyState(state, opts) and never writes storage

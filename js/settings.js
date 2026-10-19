@@ -20,24 +20,15 @@ import { uid } from './uid.js';
 import { nowISO } from './dateparse.js';
 import { lock } from './scrolllock.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
+import { FEED_PALETTE } from './palette.js';
 
 const CHOICES = ['light', 'dark', 'auto'];
 
-// The fixed 6-color palette calendars are auto-assigned from, tap-to-cycle.
-// Each entry is a CSS custom-property *reference* (not a raw hex) — stored
-// verbatim in feed.color and set as the inline `--feed-color` custom
-// property at every render site (app.js, Task 7), so the actual displayed
-// color resolves through the token cascade and stays theme-correct without
-// this module (or app.js) ever special-casing light/dark. Swatch values
-// themselves live in styles.css as --feed-palette-1..6.
-const PALETTE = [
-  'var(--feed-palette-1)', 'var(--feed-palette-2)', 'var(--feed-palette-3)',
-  'var(--feed-palette-4)', 'var(--feed-palette-5)', 'var(--feed-palette-6)',
-];
-
+// Calendars are auto-assigned from FEED_PALETTE (js/palette.js) and cycle
+// through it on a tap of the colour dot.
 function nextColor(color) {
-  const idx = PALETTE.indexOf(color);
-  return PALETTE[(idx + 1) % PALETTE.length];
+  const idx = FEED_PALETTE.indexOf(color);
+  return FEED_PALETTE[(idx + 1) % FEED_PALETTE.length];
 }
 
 function systemPrefersDark() {
@@ -424,7 +415,7 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
         // reapplyFeedField above): appending onto the stale `feeds` closure
         // would silently drop anything sync wrote while this panel sat open.
         const fresh = loadFeeds();
-        const color = PALETTE[fresh.length % PALETTE.length];
+        const color = FEED_PALETTE[fresh.length % FEED_PALETTE.length];
         const feed = {
           id: uid('feed'), url, name, color, hidden: false,
           updatedAt: nowISO(),
