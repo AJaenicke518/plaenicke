@@ -6,7 +6,7 @@
 //
 // Linking sets adoptionPending. sync.js refuses to run an ordinary sync while
 // it is set, so the union is never applied or pushed before the user has been
-// offered Merge / Replace / Cancel (spec 5.7).
+// offered Merge / Cancel (spec 5.7).
 //
 // Unlinking never deletes local data. Signed-out plaenicke is a complete,
 // working, offline app (spec 4.4).

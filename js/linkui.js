@@ -122,8 +122,9 @@ export function classifyPastedCode(input) {
 // previewRemote returns `state: null` ONLY when the response carries no blob
 // at all; an account whose records were all deleted returns a non-null
 // {schemaVersion, items: [], feeds: [], tombstones: [...]}. Reading emptiness
-// as `state === null` classifies that account as "has data", offers Replace
-// this device, and wipes every local item and every feed URL — unrecoverably,
+// as `state === null` classifies that account as "has data", and (while the
+// dialog still offered "Replace this device", removed 2026-10-19) offered a
+// Replace that wiped every local item and every feed URL — unrecoverably,
 // since js/settings.js never re-displays a feed URL.
 //
 // BUT A SIDE'S TOMBSTONES ARE PART OF WHAT IT WOULD DO TO THE OTHER SIDE.
@@ -140,7 +141,7 @@ export function classifyPastedCode(input) {
 //     them to every other device.
 //
 // Counting tombstones outright is the wrong fix too: it sends a tombstone-only
-// account back to 'ask', re-creating the original defect — a Replace button
+// account back to 'ask', re-creating the original defect — a choice offered
 // beside a dialog reading "0 items, 0 calendars". What matters is how many
 // records a side's tombstones would ACTUALLY suppress on the other side, and
 // that rule is merge.js's applyTombstones (`deletedAt > updatedAt`, so a
@@ -222,7 +223,7 @@ export function classifySyncState({ hasCredential, codeReadable, syncState }) {
 }
 
 // The panel's own red styling. It EXCLUDES a pending adoption deliberately:
-// the panel renders the Merge / Replace / Cancel dialog for that state, so
+// the panel renders the Merge / Cancel dialog for that state, so
 // colouring the line red on top of it would be noise.
 export function panelShowsProblem(kind) {
   return kind === SYNC_CORRUPT || kind === SYNC_ERROR;
@@ -330,12 +331,12 @@ const FAILURE_TEXT = {
 // advance the cursor second), so 'offline', 'error' and 'conflict' are all
 // reachable with the local write already landed — a Wi-Fi drop between the GET
 // and the PUT reaches every one of them. The messages above say "Nothing has
-// been combined yet", and on adopt-replace that is not merely imprecise: the
-// local wipe is complete and irreversible (applySyncedState has already run
-// saveItems, applyRemoteFeeds — which calls removeFeed for every local feed —
-// and saveTombstones), and the panel offers Unlink right beside the false
-// report. Round 3's Critical on this branch was the same divergence class: a
-// user's Cancel reversed while the panel said it was not.
+// been combined yet", which is false once applySyncedState has run saveItems,
+// applyRemoteFeeds and saveTombstones (and, when the dialog still offered
+// "Replace this device", described a local wipe that was already complete and
+// irreversible), and the panel offers Unlink right beside the false report.
+// Round 3's Critical on this branch was the same divergence class: a user's
+// Cancel reversed while the panel said it was not.
 //
 // syncOnce answers the question directly (`applied`), so these are keyed on it
 // rather than guessed at. Only the three statuses whose ORIGINAL text makes
@@ -377,10 +378,11 @@ const MAX_ADOPT_ATTEMPTS = 3;
 // work. Each mount owns its own `inflight` and neither sees the other, so
 // with the gate still raised a user who opens Settings, closes it
 // mid-adoption and re-opens starts a SECOND concurrent adoption — measured
-// ['GET','GET','SYNC','SYNC']. The realistic worst case is clicking "Replace
-// this device", closing, re-opening on a slow connection, getting the dialog
-// again and clicking "Merge": two applyState writes with conflicting
-// semantics, resolved by arrival order. app.js's own syncInFlight guard does
+// ['GET','GET','SYNC','SYNC']. The realistic worst case (measured while the
+// dialog still offered "Replace this device") was clicking Replace, closing,
+// re-opening on a slow connection, getting the dialog again and clicking
+// "Merge": two applyState writes with conflicting semantics, resolved by
+// arrival order. app.js's own syncInFlight guard does
 // not cover linkui's syncOnce calls.
 //
 // IT MUST NOT BE ABLE TO OUTLIVE ITS PURPOSE either. It is cleared in the
@@ -399,11 +401,12 @@ const MAX_ADOPT_ATTEMPTS = 3;
 //   - A WRITE (syncOnceImpl) is NOT abandonable, and a generation check in
 //     front of it answers the wrong question. It gates whether an episode may
 //     BEGIN a write; it says nothing once an episode is already inside one.
-//     Measured, with the generation counter working exactly as designed:
-//     Merge held inside syncOnce -> close/reopen -> take over -> Replace, and
-//     both writes ran concurrently. The superseded PUT then landed AFTER the
-//     replace, putting the record the user explicitly discarded back into the
-//     account, at a higher version, with no error and no status anywhere.
+//     Measured (while Replace still existed), with the generation counter
+//     working exactly as designed: Merge held inside syncOnce -> close/reopen
+//     -> take over -> Replace, and both writes ran concurrently. The
+//     superseded PUT then landed AFTER the replace, putting the record the
+//     user explicitly discarded back into the account, at a higher version,
+//     with no error and no status anywhere.
 //     A Cancel in the same window reported "nothing was combined" while the
 //     superseded episode's syncOnce went on to call clearAdoptionPending().
 //
@@ -469,7 +472,7 @@ export function initLinkUI(options = {}) {
   // It used to be checked inside adopt() instead, at the far end of a network
   // round trip: initSettings({button, host, onFeedsChanged}) mounted the whole
   // panel, painted the status line, fired the mount-time GET against the
-  // account and walked the user through Merge / Replace before answering "the
+  // account and walked the user through the Merge dialog before answering "the
   // app is wired up wrong. Reload the page and try again" — advice that cannot
   // possibly help, delivered after the user had already made a decision.
   // Zero fallback: escalate at mount, where it is a one-line fix at the call
@@ -533,7 +536,7 @@ export function initLinkUI(options = {}) {
     // settles, and an unconditional `stage = null; render()` there throws away
     // a dialog the user is in the middle of. Reproduced: b joins a stalled
     // preview, clicks Try again, b's own preview returns and renders Merge /
-    // Replace / Cancel, then the first preview finally answers and replaces
+    // Cancel, then the first preview finally answers and replaces
     // the dialog with the Continue screen. No wrong write is possible — the
     // superseded episode is generation-gated out of adopt() — but a decision
     // in progress is discarded.
@@ -656,8 +659,8 @@ export function initLinkUI(options = {}) {
   // The single place the decision is made and acted on. The re-ask path goes
   // through here too: if local emptied while the dialog sat open, the honest
   // answer is no longer "choose" but 'auto', and re-rendering the old dialog
-  // would put "This device holds 0 items and 0 calendars" beside a Replace
-  // button — the exact shape DA-C2 named as not an informed choice.
+  // would put "This device holds 0 items and 0 calendars" beside a choice —
+  // the exact shape DA-C2 named as not an informed choice.
   async function decideAndAct(remote, version, attempt, generation) {
     // tombstones are load-bearing on BOTH sides — see adoptionCounts.
     const local = readLocal();
@@ -687,9 +690,11 @@ export function initLinkUI(options = {}) {
   // calendar section directly above it stays live while the dialog is open
   // (its controls are disabled only by isBusy(), which covers feed syncing
   // alone), with no focus trap keeping app.js's own add path out either.
-  // Measured: dialog read "1 item and 1 calendar", a second calendar was
-  // added, Replace was clicked, and BOTH were destroyed — the user consented
-  // to discarding one. So re-read at CLICK time and re-ask if it moved.
+  // Measured while the dialog still offered Replace: it read "1 item and 1
+  // calendar", a second calendar was added, Replace was clicked, and BOTH were
+  // destroyed — the user consented to discarding one. Merge discards nothing,
+  // but its dedupe and the deletions it pushes are still a function of what
+  // the dialog described. So re-read at CLICK time and re-ask if it moved.
   async function adoptAgainstFreshCounts(adoptChoice, generation) {
     const shown = stageData;
     const fresh = adoptionCounts(readLocal(), shown.remote);
@@ -730,10 +735,8 @@ export function initLinkUI(options = {}) {
     }
     if (res.status === 'changed') {
       // The account moved between the preview and the write, so the choice
-      // the user made was against data that is no longer there — a Replace
-      // against an account that emptied in between would be a silent full
-      // local wipe with no re-confirmation (DA-I5). Re-preview and re-ask
-      // rather than acting on a stale choice.
+      // the user made was against data that is no longer there (DA-I5).
+      // Re-preview and re-ask rather than acting on a stale choice.
       //
       // BOUNDED. On a 'none'/'auto' decision the re-preview adopts again with
       // no human in the loop, so an account whose version keeps advancing
@@ -846,7 +849,7 @@ export function initLinkUI(options = {}) {
   // enters its write, and both controls are still clickable.
   //
   // Routing that click to doUnlink is worse than the takeover it sits beside.
-  // syncOnce captured `link = getLink()` at entry (js/sync.js:83), so the
+  // syncOnce captured `link = getLink()` at entry, so the
   // in-flight write goes on pushing with a credential the user just revoked,
   // and its applyState has already landed the account's records locally.
   // Reproduced: isLinked() false, local items replaced by the account's, and
@@ -931,8 +934,8 @@ export function initLinkUI(options = {}) {
     // A side can show 0 items and 0 calendars and still carry pending
     // DELETIONS that would remove records from the other side — that is
     // exactly how this dialog gets reached against a tombstone-only account.
-    // A bare "0 items, 0 calendars" beside a Replace button is not an
-    // informed choice, so the deletions are named.
+    // A bare "0 items, 0 calendars" beside a Merge button is not an informed
+    // choice, so the deletions are named.
     let text = `This device holds ${plural(d.localItems, 'item', 'items')} and ${plural(d.localFeeds, 'calendar', 'calendars')}. `
       + `The account holds ${plural(d.remoteItems, 'item', 'items')} and ${plural(d.remoteFeeds, 'calendar', 'calendars')}.`;
     if (d.remoteDeletesLocal > 0) {
@@ -943,10 +946,12 @@ export function initLinkUI(options = {}) {
     }
     text += ' Choose how to combine them.';
     wrap.appendChild(el('p', { className: 'note', text }));
+    // TWO choices. "Replace this device" (discard local, take the account) was
+    // removed on 2026-10-19: it added no capability Merge lacks — unlinking,
+    // clearing this device and re-linking reaches the same place — and every
+    // data-destroying defect found on V5 lived on its path.
     const mergeBtn = el('button', { type: 'button', className: 'primary', text: 'Merge (recommended)' });
     mergeBtn.addEventListener('click', () => runAdoption((g) => adoptAgainstFreshCounts('adopt-merge', g)));
-    const replaceBtn = el('button', { type: 'button', text: 'Replace this device' });
-    replaceBtn.addEventListener('click', () => runAdoption((g) => adoptAgainstFreshCounts('adopt-replace', g)));
     const cancelBtn = el('button', { type: 'button', text: 'Cancel' });
     cancelBtn.addEventListener('click', () => {
       notice = 'Nothing was combined. This device will not sync until you choose.';
@@ -954,12 +959,10 @@ export function initLinkUI(options = {}) {
       stageData = {};
       render();
     });
-    wrap.append(mergeBtn, replaceBtn, cancelBtn);
+    wrap.append(mergeBtn, cancelBtn);
     wrap.appendChild(el('p', {
       className: 'note',
-      text: 'Merge keeps everything from both sides and folds together anything that is obviously the same. '
-        + 'Replace this device throws away what is on this device — including its calendar links, whose addresses '
-        + 'are never shown again and cannot be typed back in.',
+      text: 'Merge keeps everything from both sides and folds together anything that is obviously the same.',
     }));
   }
 

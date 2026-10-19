@@ -284,10 +284,10 @@ test('chooseAdoption resolves both-empty to none, not auto', () => {
 //
 // The plan said "tombstones are never counted on either side". That was
 // adjudicated to stop a tombstone-only account being classified 'ask' and
-// offered "Replace this device" — a one-click unrecoverable wipe. But 'none'
-// and 'auto' both route to adopt-bootstrap, which runs AUTOMATICALLY on panel
-// mount with no user interaction: it traded a one-click wipe for a ZERO-click
-// one, in both directions. Reproduced.
+// offered "Replace this device" (since removed) — a one-click unrecoverable
+// wipe. But 'none' and 'auto' both route to adopt-bootstrap, which runs
+// AUTOMATICALLY on panel mount with no user interaction: it traded a one-click
+// wipe for a ZERO-click one, in both directions. Reproduced.
 //
 // A pure count of tombstones is the wrong fix too — it sends a tombstone-only
 // account back to 'ask', re-creating the original defect. What counts is
@@ -384,7 +384,7 @@ test('renderSyncStatus renders a corrupt stored code as its own state, not a fro
 // constructed. Before this guard the only check was inside adopt(), so
 // initSettings({button, host, onFeedsChanged}) — one missing key — mounted the
 // whole panel, rendered the status line, fired the mount-time GET against the
-// account and walked the user through Merge/Replace before reporting "the app
+// account and walked the user through the Merge dialog before reporting "the app
 // is wired up wrong. Reload the page and try again" — advice that cannot
 // possibly help, at the end of a network round trip, with a decision already
 // taken. Zero fallback: escalate at mount, where it is a one-line fix.
@@ -534,7 +534,7 @@ test("an account with data and an empty device adopts with 'adopt-bootstrap', ne
   assert.equal(syncCalls[0].expectVersion, 7, 'the version previewed must be pinned against the write');
 });
 
-test('a device and an account that both hold data present Merge, Replace and Cancel and adopt nothing yet', async () => {
+test('a device and an account that both hold data present Merge and Cancel, never Replace, and adopt nothing yet', async () => {
   const { host, syncCalls } = await setup({
     seed: () => { saveItems([it('local')]); },
     fetchImpl: async () => ({
@@ -543,12 +543,16 @@ test('a device and an account that both hold data present Merge, Replace and Can
   });
   assert.equal(syncCalls.length, 0, 'nothing may be applied or pushed before the user chooses');
   assert.ok(findButton(host, 'Merge'), 'Merge must be offered');
-  assert.ok(findButton(host, 'Replace this device'), 'Replace this device must be offered');
   assert.ok(findButton(host, 'Cancel'), 'Cancel must be offered');
+  // Removed 2026-10-19 (punchlist design debt (i)): Replace added no capability
+  // Merge lacks and every data-destroying defect on V5 lived on its path.
+  assert.equal(findButton(host, 'Replace'), null, 'Replace this device is no longer offered');
+  assert.doesNotMatch(allText(host), /replace/i, 'and nothing in the dialog describes it');
+  assert.equal(findAll(host, 'BUTTON').length, 2, 'exactly two choices: Merge and Cancel');
 });
 
-test('Merge and Replace pass their own adoptChoice, pinned to the previewed version', async () => {
-  for (const [label, expected] of [['Merge', 'adopt-merge'], ['Replace this device', 'adopt-replace']]) {
+test('Merge passes adopt-merge, pinned to the previewed version', async () => {
+  for (const [label, expected] of [['Merge', 'adopt-merge']]) {
     const { host, ui, syncCalls } = await setup({
       seed: () => { saveItems([it('local')]); },
       fetchImpl: async () => ({
@@ -577,10 +581,10 @@ test('Cancel adopts nothing and leaves the adoption gate raised', async () => {
   assert.deepEqual(loadItems().map((i) => i.id), ['local'], 'Cancel must not touch local data');
 });
 
-// DA-I5. The account can empty between previewRemote and syncOnce, and a user
-// who clicked Replace against data they SAW would get a silent full local
-// wipe with no re-confirmation. syncOnce hands the decision back rather than
-// acting on a stale choice.
+// DA-I5. The account can change between previewRemote and syncOnce, and a
+// user's choice made against data they SAW would be acted on against data
+// they never saw. syncOnce hands the decision back rather than acting on a
+// stale choice.
 test('a version that moved between the preview and the write re-asks instead of acting on a stale choice', async () => {
   let pull = 0;
   const { host, ui, syncCalls } = await setup({
@@ -592,12 +596,12 @@ test('a version that moved between the preview and the write re-asks instead of 
       return { ok: true, status: 200, json: async () => ({ version, blob: await encryptBlob(currentKey, st({ items: [it('r')] })) }) };
     },
   });
-  findButton(host, 'Replace this device').click();
+  findButton(host, 'Merge').click();
   await ui.settled();
   assert.equal(syncCalls.length, 1, 'a stale choice must not be retried automatically against the new state');
   assert.equal(syncCalls[0].expectVersion, 4);
   assert.match(allText(host), /changed/i, 'the user must be told the account moved');
-  assert.ok(findButton(host, 'Replace this device'), 'the choice must be presented again, against the new state');
+  assert.ok(findButton(host, 'Merge'), 'the choice must be presented again, against the new state');
   const again = findButton(host, 'Merge');
   again.click();
   await ui.settled();
@@ -607,8 +611,8 @@ test('a version that moved between the preview and the write re-asks instead of 
 
 // The dialog can now be reached against a side showing 0 items and 0
 // calendars but carrying pending deletions. It must say so — a bare
-// "0 items, 0 calendars" next to a Replace button is not an informed choice.
-test('the dialog names pending deletions instead of showing a bare "0 items" next to Replace', async () => {
+// "0 items, 0 calendars" next to a choice is not an informed choice.
+test('the dialog names pending deletions instead of showing a bare "0 items" next to the choice', async () => {
   const { host, syncCalls } = await setup({
     seed: () => { saveItems([it('a'), it('b')]); },
     fetchImpl: async () => ({
@@ -626,7 +630,7 @@ test('the dialog names pending deletions instead of showing a bare "0 items" nex
     }),
   });
   assert.equal(syncCalls.length, 0, 'a tombstone-only account must not be adopted with no dialog');
-  assert.ok(findButton(host, 'Replace this device'), 'the choice must be presented');
+  assert.ok(findButton(host, 'Merge'), 'the choice must be presented');
   const text = allText(host);
   assert.match(text, /deletion/i, 'the pending deletions must be named, not hidden behind a bare "0 items"');
   assert.match(text, /2 of the items/i);
@@ -666,7 +670,7 @@ test('a device whose only local data is a calendar subscription still gets the d
     }),
   });
   assert.equal(syncCalls.length, 0, 'a local calendar subscription is data — it must not be adopted over silently');
-  assert.ok(findButton(host, 'Replace this device'));
+  assert.ok(findButton(host, 'Merge'));
 });
 
 // IR1. The sibling read (local FEEDS) is pinned by the test above; the local
@@ -698,7 +702,7 @@ test('a device that cleared its list while unlinked still gets the dialog, not a
   });
   assert.equal(syncCalls.length, 0,
     "adopting here deletes the account's item AND calendar and tombstones both to every other device, with no dialog");
-  assert.ok(findButton(host, 'Replace this device'), 'the choice must be presented');
+  assert.ok(findButton(host, 'Merge'), 'the choice must be presented');
   assert.match(allText(host), /2 of the records in the account/i,
     'the deletions this device would push must be named');
 });
@@ -727,9 +731,9 @@ test('an account that keeps changing gives up instead of looping forever', async
 // I2. settings.js calls initLinkUI per open(), and close() cannot cancel the
 // previous closure's in-flight work: each mount owns its own `inflight` and
 // the gate is still raised, so a second mount fires its own adoption.
-// Reproduced: ['GET','GET','SYNC','SYNC']. Worst realistic case is Replace
-// then Merge — two applyState writes with conflicting semantics, resolved by
-// arrival order.
+// Reproduced: ['GET','GET','SYNC','SYNC']. Worst realistic case (while
+// Replace existed) was Replace then Merge — two applyState writes with
+// conflicting semantics, resolved by arrival order.
 test('re-opening the panel mid-adoption does not start a second, concurrent adoption', async () => {
   installFakeLocalStorage();
   const doc = installDom();
@@ -874,7 +878,8 @@ async function concurrencyFixture({ staleAfterMs, clock, localEmpty = false } = 
   };
 }
 
-// THE CRITICAL. Reproduced verbatim before the fix: Merge held inside
+// THE CRITICAL. Reproduced verbatim before the fix (while the dialog still
+// offered Replace): Merge held inside
 // syncOnce -> close/reopen -> Try again -> Replace gave
 // ['adopt-merge','adopt-replace'] with both writes in flight at once. The
 // superseded PUT then landed after the replace, putting the record the user
@@ -1211,7 +1216,7 @@ test('a joining mount that never clicks leaves the joining view once the live ep
 // renderJoiningStale's `wrap.append(takeOver, unlinkButton(...))`, so the
 // interleaving is identical — a control rendered before the write began, still
 // on screen after it started — but unlinkButton wired straight to doUnlink()
-// with no gate. syncOnce captured `link = getLink()` at entry (js/sync.js:83),
+// with no gate. syncOnce captured `link = getLink()` at entry,
 // so the in-flight write goes on pushing with a credential the user just
 // revoked, and its applyState has already replaced this device's items with
 // the account's. Reproduced: isLinked() false, local items ['remoteA',
@@ -1270,7 +1275,7 @@ test('a superseded episode settling does not wipe the taking-over mount mid-deci
   await settle();
   assert.ok(findButton(b.host, 'Merge'),
     'a superseded episode settling must not discard a dialog the user is deciding in');
-  assert.ok(findButton(b.host, 'Replace'), 'all three choices, not a half-rendered view');
+  assert.equal(findButton(b.host, 'Replace'), null, 'Replace this device is no longer offered');
   assert.ok(findButton(b.host, 'Cancel'));
 });
 
@@ -1371,10 +1376,11 @@ test('a mount joining an already-stale-ish episode waits the remaining time, not
 // covers only feed syncing), and open() installs no focus trap, so app.js's
 // own add path is reachable too. Reproduced against the real syncOnce: the
 // dialog said "1 item and 1 calendar", a second calendar was added, Replace
-// was clicked, and BOTH calendars were destroyed.
+// (since removed) was clicked, and BOTH calendars were destroyed.
 //
-// EVERY limb of the check and BOTH buttons are covered: the Merge button
-// bypassing the check entirely survived when only Replace was exercised.
+// EVERY limb of the check is covered, on Merge — the only adopting button
+// left. A Merge bypassing the check entirely once survived when only Replace
+// was exercised.
 async function dialogFixture(seed) {
   return setup({
     seed,
@@ -1392,7 +1398,7 @@ async function dialogFixture(seed) {
   });
 }
 
-for (const button of ['Merge', 'Replace this device']) {
+for (const button of ['Merge']) {
   test(`${button}: a count that moved while the dialog was open re-asks instead of acting`, async () => {
     const { host, ui, syncCalls } = await dialogFixture(() => {
       saveItems([it('local')]);
@@ -1446,7 +1452,7 @@ test('a swap that changes only remoteDeletesLocal still re-asks', async () => {
   // Same count, different records: 'doomed' (which the account deletes) is
   // replaced by one it does not.
   saveItems([it('local'), it('safe')]);
-  findButton(host, 'Replace this device').click();
+  findButton(host, 'Merge').click();
   await ui.settled();
   assert.equal(syncCalls.length, 0, 'the description changed, so the choice must be re-confirmed');
   assert.doesNotMatch(allText(host), /1 of the items and calendars on this device/i);
@@ -1454,7 +1460,7 @@ test('a swap that changes only remoteDeletesLocal still re-asks', async () => {
 
 // Minor 4: the re-ask must go back through chooseAdoption. If local emptied
 // while the dialog sat open, re-rendering the old dialog reads "This device
-// holds 0 items and 0 calendars" beside a Replace button — the exact shape
+// holds 0 items and 0 calendars" beside a choice — the exact shape
 // DA-C2 named as not an informed choice. chooseAdoption says 'auto'.
 test('a device that emptied while the dialog was open is no longer asked to choose', async () => {
   const { host, ui, syncCalls } = await dialogFixture(() => {
@@ -1465,8 +1471,8 @@ test('a device that emptied while the dialog was open is no longer asked to choo
   saveFeeds([]);
   findButton(host, 'Merge').click();
   await ui.settled();
-  assert.equal(findButton(host, 'Replace this device'), null,
-    'there is nothing left on this device to replace — offering it is not an informed choice');
+  assert.equal(findButton(host, 'Merge'), null,
+    'there is nothing left on this device to merge — offering the choice is not an informed one');
   assert.doesNotMatch(allText(host), /holds 0 items/);
   assert.deepEqual(syncCalls.map((c) => c.adoptChoice), ['adopt-bootstrap'],
     "an empty device adopts; it does not 'merge' with nothing");
@@ -1651,8 +1657,8 @@ test('an unlinked device warns that a bare device token creates a NEW account', 
 //
 // syncOnce applies BEFORE the push loop, so 'offline', 'error' and 'conflict'
 // are all reachable with the local write already landed. The panel said
-// "Nothing has been combined yet" on every one of them, and on adopt-replace
-// the local wipe is complete and irreversible by then — with Unlink offered
+// "Nothing has been combined yet" on every one of them, though the local
+// write had already landed — with Unlink offered
 // right beside the false report, so the user can act on it. Same divergence
 // class as round 3's Critical (a Cancel reversed while the panel said it was
 // not), which this branch treated as blocking.
@@ -1682,7 +1688,7 @@ test('a failure AFTER the write says the device was combined; the same failure b
     await after.ui.settled();
     const text = allText(after.host);
     assert.doesNotMatch(text, /nothing has been combined/i,
-      `${status} after applyState wrote must not report that nothing happened — on Replace the local wipe is already irreversible`);
+      `${status} after applyState wrote must not report that nothing happened — the local write has already landed`);
     assert.match(text, /already been combined/i, `${status} must say what actually happened`);
     assert.match(text, /nothing is lost|next sync/i, 'and what happens next');
   }
@@ -1847,7 +1853,7 @@ test('pasting a valid link code links the device AND goes straight on to the cho
   assert.deepEqual(fetchCalls, [{ url: 'https://w.example/data', method: 'GET' }],
     'linking must check the account in the SAME click — nothing else in the app will start that');
   assert.ok(findButton(host, 'Merge'), 'and must lead to the choice, not to a raised gate with no way forward');
-  assert.ok(findButton(host, 'Replace this device'));
+  assert.equal(findButton(host, 'Replace'), null);
   assert.ok(findButton(host, 'Cancel'));
   assert.equal(syncCalls.length, 0, 'nothing may be adopted before the user chooses');
 

@@ -270,40 +270,26 @@ test('applySyncedState returns what it wrote', async () => {
   assert.deepEqual(written.items.map((i) => i.id), loadItems().map((i) => i.id));
 });
 
-// --- opts.replace: a local discard, never a re-merge (mutation M2) ---------
+// --- no discard path (Replace this device removed, 2026-10-19) -------------
 //
-// "Replace this device" means the user explicitly chose to drop local data.
-// Re-merging here would union it straight back in, and sync.js would then
-// push the resurrected data to the account being joined.
-test('applySyncedState with opts.replace discards live storage instead of re-merging it back in', async () => {
-  installFakeLocalStorage();
-  const { applySyncedState } = await import('../js/app.js');
-  saveItems([item('live-only', '2026-08-01T00:00:00.000Z')]);
-  const incoming = state({ items: [item('remote-only', '2026-08-01T00:00:00.000Z')] });
-  const written = applySyncedState(incoming, { replace: true });
-  assert.deepEqual(written.items.map((i) => i.id), ['remote-only']);
-  assert.deepEqual(loadItems().map((i) => i.id), ['remote-only']);
-});
-
-// Replace's "nothing is tombstoned" guarantee depends on the ORDER of the
-// applyRemoteFeeds()/saveTombstones() calls inside applySyncedState:
-// applyRemoteFeeds's own removeFeed() writes a real tombstone for every local
-// feed the replace discards, and the full-overwrite saveTombstones() that
-// runs immediately after is what erases it (see the comment at the two call
-// sites in js/app.js). Swapping those two lines would leave the tombstone in
-// place and push that deletion to the account being joined on the next sync.
-test('applySyncedState with opts.replace leaves no tombstone for a feed the replace discarded', async () => {
+// "Replace this device" was the only caller of a discard: applySyncedState
+// wrote the incoming state wholesale instead of re-merging live storage. The
+// button is gone, so the path is gone. Whatever a caller passes, what is on
+// this device is merged in, never thrown away.
+test('applySyncedState always re-merges live storage, whatever options it is passed', async () => {
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
   const feedX = {
     id: 'feedX', url: 'https://example.com/x.ics', name: 'X', color: 'var(--feed-palette-1)', hidden: false,
     updatedAt: '2026-07-01T00:00:00.000Z',
   };
+  saveItems([item('live-only', '2026-08-01T00:00:00.000Z')]);
   saveFeeds([feedX]);
-  applySyncedState(state({ feeds: [] }), { replace: true });
-  assert.deepEqual(loadFeeds(), [], 'the local-only feed must be gone after replace');
-  assert.deepEqual(loadTombstones(), [],
-    'replace must not leave a tombstone for data it discarded locally — that would push the deletion to the account being joined');
+  const written = applySyncedState(state({ items: [item('remote-only', '2026-08-01T00:00:00.000Z')] }), { replace: true });
+  assert.deepEqual(written.items.map((i) => i.id).sort(), ['live-only', 'remote-only']);
+  assert.deepEqual(loadItems().map((i) => i.id).sort(), ['live-only', 'remote-only']);
+  assert.deepEqual(loadFeeds().map((f) => f.id), ['feedX'], 'a local calendar is never discarded');
+  assert.deepEqual(loadTombstones(), [], 'and nothing is tombstoned');
 });
 
 // --- applyRemoteFeeds must get the COMPLETE merged list (mutation M5) ------
@@ -841,7 +827,7 @@ test('runSync does not proceed into its try/finally while adoption is pending', 
 
   // linkWithCode's bootstrap path accepts any base64url string of exactly
   // TOKEN_BYTES bytes and always sets adoptionPending: true (spec 5.7) — this
-  // device has not yet been offered Merge / Replace / Cancel.
+  // device has not yet been offered Merge / Cancel.
   const token = bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES)));
   await linkWithCode(token);
 
@@ -867,7 +853,7 @@ test('runSync does not proceed into its try/finally while adoption is pending', 
   assert.equal(statusEl.textContent, SENTINEL,
     'runSync must return before its try/finally while adoption is pending, so renderSyncStatus must never repaint the status line');
   assert.deepEqual(requests.filter((u) => u.includes('/data')), [],
-    'nothing may be pulled or pushed before the user has chosen Merge / Replace / Cancel');
+    'nothing may be pulled or pushed before the user has chosen Merge / Cancel');
   assert.equal(JSON.stringify(loadSyncState()), syncStateBefore,
     'a sync that must not run must not move the cursor either');
 });

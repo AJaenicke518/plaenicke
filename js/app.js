@@ -963,17 +963,15 @@ backgroundSyncFeeds(feeds);
 // for a feed, destroy a URL that is never rendered anywhere and so cannot be
 // re-entered. Returns what it actually wrote; sync.js pushes THAT, not the
 // state it was handed.
-export function applySyncedState(state, opts = {}) {
-  // opts.replace is set only by the linking flow's "Replace this device".
-  // The user explicitly chose to discard local data, so re-merging would
-  // union it straight back in — and sync would then push it to the account
-  // being joined. Replace is a LOCAL discard: nothing is tombstoned, so the
-  // other devices keep their own copies.
+//
+// There is no discard path. It existed only for the linking flow's "Replace
+// this device", which was removed on 2026-10-19: every caller is re-merged.
+export function applySyncedState(state) {
   const live = {
     schemaVersion: SCHEMA_VERSION,
     items: loadItems(), feeds: loadFeeds(), tombstones: loadTombstones(),
   };
-  const written = opts.replace ? state : merge(live, state, new Date());
+  const written = merge(live, state, new Date());
   items = written.items;
   saveItems(items);
   // applyRemoteFeeds requires the COMPLETE merged feed list (written.feeds,
@@ -981,16 +979,13 @@ export function applySyncedState(state, opts = {}) {
   // argument, and a partial list would propagate a deletion of every other
   // feed to every device.
   //
-  // ORDER MATTERS here. On replace, applyRemoteFeeds's own removeFeed() call
-  // (for every local feed absent from written.feeds) writes a real feed
-  // tombstone via addTombstone() as it runs. The saveTombstones() line below
-  // is what erases that: on replace, written IS state — the caller's raw
-  // incoming state, not a merge — so written.tombstones carries none of
-  // those just-written tombstones, and this full-overwrite save discards
-  // them, keeping the "Replace is a LOCAL discard, nothing is tombstoned"
-  // guarantee above true. Swap these two lines and a replace would tombstone
-  // every feed it discarded locally and push those deletions to the account
-  // being joined on the very next sync.
+  // ORDER MATTERS here. applyRemoteFeeds's own removeFeed() call (for every
+  // local feed absent from written.feeds — i.e. one a merged tombstone
+  // suppresses) writes a feed tombstone via addTombstone() stamped with THIS
+  // device's clock. The full-overwrite saveTombstones() below then leaves the
+  // stored tombstones exactly equal to written.tombstones, so a deletion
+  // pulled from another device keeps its original deletedAt. Swap these two
+  // lines and every such deletion is re-stamped with this device's clock.
   const { added } = applyRemoteFeeds(written.feeds);
   saveTombstones(written.tombstones);
   feeds = loadFeeds();
@@ -1009,8 +1004,8 @@ let syncPending = false;
 let syncTimer = null;
 
 async function runSync() {
-  // Never run while the user hasn't chosen Merge / Replace / Cancel yet
-  // (spec 5.7) — that choice is what supplies opts.replace above.
+  // Never run while the user hasn't chosen Merge / Cancel yet (spec 5.7) —
+  // only the linking flow's adoption may lift the gate.
   if (!isLinked() || isAdoptionPending()) return;
   if (syncInFlight) { syncPending = true; return; }
   syncInFlight = true;
