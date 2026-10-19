@@ -52,13 +52,21 @@ function getSetting() {
 // already supplies app.js with renderSyncStatus; importing applySyncedState
 // back would close a cycle that drags the whole DOM-bound app.js into
 // linkui.js's unit tests (DA-C6).
-export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged, applyState }) {
+export function initSettings({
+  button, host, onFeedsChanged, onSyncedDataChanged, onFeedFetched, applyState,
+}) {
   // A missing wire here is silent data loss, not a degraded feature: without
   // it a calendar added or removed in this panel never reaches the account
   // until something unrelated happens to trigger a sync. Fail at mount, where
   // it is a one-line fix, rather than at the moment a subscription is lost.
   if (typeof onSyncedDataChanged !== 'function') {
     throw new Error('initSettings requires an onSyncedDataChanged callback');
+  }
+  // Every fetch this panel makes reports its result (feed id, ok) here, before
+  // the view notification: app.js's "Updated" stamp remembers which calendars
+  // failed, and a fetch it never heard about leaves that memory wrong.
+  if (typeof onFeedFetched !== 'function') {
+    throw new Error('initSettings requires an onFeedFetched callback');
   }
 
   // Follow the phone while in auto.
@@ -245,6 +253,7 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
       feedCache = loadFeedCache();
       syncingFeedId = null;
       renderCalendars();
+      onFeedFetched(feed.id, result.ok);
       notifyViewChanged();
     }
 
@@ -446,6 +455,7 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
         addBusy = false;
         syncingFeedId = null;
         renderCalendars();
+        onFeedFetched(feed.id, result.ok);
         notifyViewChanged();
       }
 

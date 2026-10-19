@@ -153,18 +153,21 @@ function openPanel(feeds, seed = () => {}) {
   // onFeedsChanged (this device's own re-render) and 'synced' for
   // onSyncedDataChanged (something the account must be told about).
   const notified = [];
+  const fetched = [];
   initSettings({
     button,
     host,
     onFeedsChanged: () => notified.push('view'),
     onSyncedDataChanged: () => notified.push('synced'),
+    // Every fetch's result, in order: [feedId, ok].
+    onFeedFetched: (id, ok) => fetched.push([id, ok]),
     // Not exercised by any test that uses this helper — they drive the theme
     // and calendar controls — but open() mounts initLinkUI, which refuses to
     // mount without one. app.js always passes applySyncedState here.
     applyState: (s) => s,
   });
   button.click(); // host.childElementCount === 0 -> open()
-  return { host, notified, button };
+  return { host, notified, button, fetched };
 }
 
 // --- the second-writer fix --------------------------------------------------
@@ -352,6 +355,7 @@ test('settings: the panel refuses to open its sync section without an applyState
     host: document.createElement('div'),
     onFeedsChanged: () => {},
     onSyncedDataChanged: () => {},
+    onFeedFetched: () => {},
   });
   assert.throws(() => button.click(), /applyState/,
     'a settings panel that cannot save synced data must say so at mount, not after a round trip to the account');
@@ -408,6 +412,7 @@ test('settings: the calendar list refreshes when an adoption lands while the pan
       host,
       onFeedsChanged: () => {},
       onSyncedDataChanged: () => {},
+      onFeedFetched: () => {},
       // Stands in for app.js's applySyncedState: the feed owner assigns a
       // real colour before saving (merge.js hands a first-seen feed
       // color: null, and deserializeFeeds drops any feed whose color is not
@@ -579,3 +584,49 @@ for (const [label, start] of [
     }
   });
 }
+
+// The wire app.js's "Updated" stamp depends on (punchlist L211): c6cfbf5
+// reverted a stamp memory because these results never reached it.
+test('settings: initSettings refuses to mount without an onFeedFetched callback', () => {
+  globalThis.window = makeFakeWindow();
+  globalThis.document = makeFakeDocument();
+  installFakeLocalStorage();
+  assert.throws(
+    () => initSettings({
+      button: document.createElement('button'),
+      host: document.createElement('div'),
+      onFeedsChanged: () => {},
+      onSyncedDataChanged: () => {},
+      applyState: (x) => x,
+    }),
+    /onFeedFetched/,
+  );
+});
+
+test('settings: a manual Sync and an Add each report their fetch result, before the view notification', async () => {
+  const feedA = {
+    id: 'feedR', url: 'https://example.com/r.ics', name: 'R', color: 'var(--feed-palette-1)', hidden: false,
+    updatedAt: '2026-07-01T00:00:00.000Z',
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => (String(url).includes(encodeURIComponent('r.ics'))
+    ? { ok: true, status: 200, text: async () => '' }
+    : { ok: false, status: 502, json: async () => ({ error: 'upstream_error' }) });
+  try {
+    const { host, fetched, notified } = openPanel([feedA]);
+    const order = [];
+    notified.push = (x) => { order.push(`view:${x}`); return Array.prototype.push.call(notified, x); };
+    fetched.push = (x) => { order.push(`fetched:${x[1]}`); return Array.prototype.push.call(fetched, x); };
+    findButtonByText(host, 'Sync').click();
+    await waitFor(() => fetched.length === 1, 'the manual Sync to settle');
+    assert.deepEqual(fetched[0], ['feedR', true]);
+    assert.deepEqual(order, ['fetched:true', 'view:view'], 'reported before the repaint it feeds');
+    host.querySelectorAll('input').find((i) => i.getAttribute('aria-label') === 'Calendar link').value = 'https://example.com/bad.ics';
+    findButtonByText(host, 'Add calendar').click();
+    await waitFor(() => fetched.length === 2, 'the Add\'s first fetch to settle');
+    const added = loadFeeds().find((f) => f.url === 'https://example.com/bad.ics');
+    assert.deepEqual(fetched[1], [added.id, false]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

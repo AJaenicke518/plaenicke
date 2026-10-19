@@ -3681,3 +3681,182 @@ test('app.js names no storage key by a string literal', () => {
   const appSrc = readFileSync(new URL('../js/app.js', import.meta.url), 'utf8');
   assert.deepEqual(appSrc.match(/['"`]plaenicke\.[A-Za-z]+['"`]/g), null);
 });
+
+// --- the "Updated" stamp's three accepted behaviours (punchlist L211) -------
+//
+// c6cfbf5 reverted b8ea190's per-calendar failure memory because it brought
+// two worse regressions: a successful manual Sync in Settings did not clear
+// "Couldn't refresh", and a calendar added in Settings whose first fetch
+// failed showed a clean time. Both came from one gap: Settings' own fetches
+// never reached the memory. They do now, and the last three tests below pin
+// both regressions so they cannot come back with it.
+function settingsPanel() {
+  const settingsBtn = globalThis.document.getElementById('settings-btn');
+  const settingsHost = globalThis.document.getElementById('settings-host');
+  if (settingsHost.childElementCount) click(settingsBtn); // left open by an earlier test
+  click(settingsBtn);
+  return { host: settingsHost, close: () => { if (settingsHost.childElementCount) click(settingsBtn); } };
+}
+function tapColourDot(feedName) {
+  const panel = settingsPanel();
+  const dot = panel.host.querySelectorAll('button')
+    .find((b) => (b.getAttribute('aria-label') || '').includes(feedName) && b.className.includes('feed-dot'));
+  assert.ok(dot, `fixture check: a colour dot for ${feedName}`);
+  click(dot);
+  panel.close();
+}
+// The Sync button on the Settings row whose colour dot names this calendar.
+function rowSyncButton(host, feedName) {
+  const row = host.querySelectorAll('li').find((li) => allText(li).includes(` ${feedName}`));
+  assert.ok(row, `fixture check: a Settings row for ${feedName}`);
+  return row.querySelectorAll('button').find((b) => b.textContent === 'Sync');
+}
+const failingFeed = () => ({ ok: false, status: 502, json: async () => ({ error: 'upstream_error' }), text: async () => '' });
+
+test('stamp: a colour tap in Settings after a failed refresh keeps "Couldn\'t refresh"', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sP-bad'), sdFeed('sP-good')],
+    { 'sP-bad': cacheAt(localAt(7, 0)), 'sP-good': cacheAt(localAt(7, 0)) });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url) => Promise.resolve(String(url).includes('sP-bad') ? failingFeed() : okFeedResponse());
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() });
+  try {
+    resume();
+    for (let i = 0; i < 6; i += 1) await settle();
+    assert.equal(stampEl().textContent, "Couldn't refresh calendars", 'fixture check: the refresh failed');
+    tapColourDot('sP-good');
+    assert.equal(stampEl().textContent, "Couldn't refresh calendars", 'a colour tap must not erase the failure');
+  } finally {
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+  unseedFeeds();
+});
+
+test('stamp: a fetch time from an earlier day names the day', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sP-old')], { 'sP-old': cacheAt(new Date(2026, 8, 21, 9, 2)) });
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() }); // Wed Sep 23
+  try {
+    tapColourDot('sP-old');
+    assert.equal(stampEl().textContent, 'Updated Mon, Sep 21, 9:02 AM');
+    seedFeedsWithCache([sdFeed('sP-old')], { 'sP-old': cacheAt(new Date(2026, 8, 22, 9, 2)) });
+    tapColourDot('sP-old');
+    assert.equal(stampEl().textContent, 'Updated Yesterday, 9:02 AM');
+    seedFeedsWithCache([sdFeed('sP-old')], { 'sP-old': cacheAt(localAt(9, 2)) });
+    tapColourDot('sP-old');
+    assert.equal(stampEl().textContent, 'Updated 9:02 AM', 'today needs no day');
+  } finally {
+    t.mock.timers.reset();
+  }
+  unseedFeeds();
+});
+
+test('stamp: a visible calendar not yet fetched for the first time is not a failure', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sP-fetched'), sdFeed('sP-new')], { 'sP-fetched': cacheAt(localAt(9, 30)) });
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() });
+  try {
+    tapColourDot('sP-fetched');
+    assert.equal(stampEl().textContent, 'Updated 9:30 AM', 'the new calendar is simply not counted yet');
+  } finally {
+    t.mock.timers.reset();
+  }
+  unseedFeeds();
+});
+
+// c6cfbf5's regression 1: Settings' manual Sync never reached the memory.
+test('stamp: a successful manual Sync in Settings clears "Couldn\'t refresh"', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sP-flaky')], { 'sP-flaky': cacheAt(localAt(7, 0)) });
+  let up = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve(up ? okFeedResponse() : failingFeed());
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() });
+  const panel = { close() {} };
+  try {
+    resume();
+    for (let i = 0; i < 6; i += 1) await settle();
+    assert.equal(stampEl().textContent, "Couldn't refresh calendars", 'fixture check: the refresh failed');
+    up = true;
+    Object.assign(panel, settingsPanel());
+    click(rowSyncButton(panel.host, 'sP-flaky'));
+    for (let i = 0; i < 6; i += 1) await settle();
+    assert.equal(stampEl().textContent, 'Updated 10:00 AM', 'the manual Sync succeeded, so the stamp says so');
+  } finally {
+    panel.close();
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+  unseedFeeds();
+});
+
+// And the other direction: a manual Sync that fails is a failed refresh too.
+test('stamp: a failed manual Sync in Settings says "Couldn\'t refresh", and a later batch that skips it keeps that', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  // Fresh at 10:00 (fetched 9:45), so the background batch will NOT refetch it.
+  seedFeedsWithCache([sdFeed('sP-manual')], { 'sP-manual': cacheAt(localAt(9, 45)) });
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url) => { calls.push(String(url)); return Promise.resolve(failingFeed()); };
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() });
+  const panel = { close() {} };
+  try {
+    Object.assign(panel, settingsPanel());
+    click(rowSyncButton(panel.host, 'sP-manual'));
+    for (let i = 0; i < 6; i += 1) await settle();
+    assert.equal(calls.length, 1, 'fixture check: one manual fetch');
+    assert.equal(stampEl().textContent, "Couldn't refresh calendars");
+    panel.close();
+    resume();
+    for (let i = 0; i < 6; i += 1) await settle();
+    assert.equal(calls.length, 1, 'fixture check: the batch skipped the fresh calendar');
+    assert.equal(stampEl().textContent, "Couldn't refresh calendars", 'a calendar the batch never fetched keeps its failure');
+  } finally {
+    panel.close();
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+  unseedFeeds();
+});
+
+// c6cfbf5's regression 2: a calendar added in Settings whose first fetch
+// failed was "not yet fetched", so the stamp showed the other calendar's time.
+test('stamp: a calendar added in Settings whose first fetch fails says "Couldn\'t refresh"', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sP-have')], { 'sP-have': cacheAt(localAt(9, 50)) });
+  let answer;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => new Promise((resolve) => { answer = resolve; });
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() });
+  const panel = { close() {} };
+  try {
+    Object.assign(panel, settingsPanel());
+    const inputs = panel.host.querySelectorAll('input');
+    inputs.find((i) => i.getAttribute('aria-label') === 'Calendar link').value = 'https://example.com/sP-added.ics';
+    click(panel.host.querySelectorAll('button').find((b) => b.textContent === 'Add calendar'));
+    await settle();
+    assert.equal(stampEl().textContent, 'Updated 9:50 AM', 'while its first fetch runs, the new calendar is not a failure');
+    answer(failingFeed());
+    for (let i = 0; i < 6; i += 1) await settle();
+    assert.equal(stampEl().textContent, "Couldn't refresh calendars", 'its first fetch failed, and the stamp says so');
+  } finally {
+    panel.close();
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+  saveTombstones([]);
+  unseedFeeds();
+});

@@ -100,6 +100,10 @@ let deviceTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const LIST_EXTERNAL_HORIZON_DAYS = 366;
 let feeds = loadFeeds();
 let feedCache = loadFeedCache();
+// Calendars whose latest fetch failed, by id, for the "Updated" stamp (see
+// stampFromFeeds). Fed by every fetch this page makes: each background batch
+// and Settings' own Sync and Add calendar (onFeedFetched below).
+const failedFeedIds = new Set();
 
 // Deletes offered for Undo (edit-items Task 4b). A pending id is still in
 // `items` and in storage — nothing is written until commitDelete — but it is
@@ -172,8 +176,15 @@ initSettings({
   // calendar changes what is on screen, and so what the stamp is about.
   onFeedsChanged: () => {
     feeds = loadFeeds(); feedCache = loadFeedCache(); render();
-    stampUpdated(); stampFromFeeds([]);
+    stampUpdated(); stampFromFeeds();
   },
+  // Settings' manual Sync and Add calendar fetch outside the background batch.
+  // Their results must reach the stamp's failure memory, or a successful
+  // manual Sync leaves "Couldn't refresh" up, and a calendar added there whose
+  // first fetch failed is counted as not yet fetched (both regressions of
+  // b8ea190's memory, reverted in c6cfbf5). Settings calls this before
+  // onFeedsChanged, which repaints.
+  onFeedFetched: (id, ok) => { if (ok) failedFeedIds.delete(id); else failedFeedIds.add(id); },
   // Adding or removing a calendar mutates SYNCED data (spec 6.3): the feed
   // record itself, and for a removal the feed tombstone removeFeed() writes.
   // onFeedsChanged fires on every colour tap too, so it is the wrong signal to
@@ -913,11 +924,17 @@ function backgroundSyncFeeds(feedList) {
   }
   if (feedList.length === 0) return;
   feedBatch = new Set(feedList.map((f) => f.id));
-  const settle = (failedIds) => {
+  // results is syncStale's per-feed map (only the calendars it fetched), or
+  // null when the whole batch failed and which calendars it reached is
+  // unknown: then every one in it counts as failed. A calendar this batch did
+  // not fetch (still fresh) keeps whatever its last fetch said.
+  const settle = (results) => {
     feedBatch = null;
     feedCache = loadFeedCache();
     render();
-    stampFromFeeds(failedIds);
+    if (results === null) for (const f of feedList) failedFeedIds.add(f.id);
+    else for (const [id, r] of Object.entries(results)) { if (r.ok) failedFeedIds.delete(id); else failedFeedIds.add(id); }
+    stampFromFeeds();
     if (feedQueue.size > 0) {
       const queued = new Set(feedQueue);
       feedQueue.clear();
@@ -926,7 +943,7 @@ function backgroundSyncFeeds(feedList) {
   };
   syncStale(feedList, feedCache, { fetchImpl: fetchWithTimeout }).then((results) => {
     // A per-feed failure comes back as {ok:false}, never as a rejection.
-    settle(Object.keys(results).filter((id) => !results[id].ok));
+    settle(results);
   }, (err) => {
     console.error('plaenicke: background calendar sync failed', err && err.name);
     settle(null); // the whole batch failed; which feeds it reached is unknown
@@ -1073,8 +1090,13 @@ function noteLaunch() {
 // the refresh: stampUpdated paints the render time. With visible calendars,
 // the calendars are the part that goes stale, so the stamp waits for the
 // feed batch to settle and stampFromFeeds paints it from their fetch times.
+//
+// A time from an earlier day names the day ("Yesterday, 9:02 AM"), so a
+// days-old fetch can never pass for this morning's.
 function clockLabel(d) {
-  return formatTime(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`);
+  const clock = formatTime(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`);
+  const today = toISO(new Date());
+  return toISO(d) === today ? clock : `${formatDayLabel(toISO(d), today)}, ${clock}`;
 }
 
 function visibleFeeds() { return feeds.filter((f) => !f.hidden); }
@@ -1085,19 +1107,28 @@ function stampUpdated() {
 }
 
 // The OLDEST fetch among the visible calendars: the stamp promises that
-// everything on screen is at least that fresh. A visible calendar whose fetch
-// failed (failedIds null means the whole batch failed), or that has no cached
-// fetch at all, has not been refreshed, and the stamp says so. Hidden
-// calendars are not on screen and do not count either way.
-function stampFromFeeds(failedIds) {
+// everything on screen is at least that fresh.
+//
+// A visible calendar whose latest fetch failed (failedFeedIds) has not been
+// refreshed, and the stamp says so until a fetch of THAT calendar succeeds. The
+// memory is what keeps a later repaint — a colour tap in Settings — from
+// painting an old time over "Couldn't refresh". A visible calendar with no
+// cached fetch and no failure is still being fetched for the first time (one
+// just added in Settings, or queued behind a running batch); it is left out
+// rather than reported failed, and if nothing visible has been fetched yet the
+// stamp is left as it is. Hidden calendars are not on screen and do not count
+// either way.
+function stampFromFeeds() {
   const visible = visibleFeeds();
   if (visible.length === 0) return; // keep the render-time stamp
-  const failed = failedIds === null || visible.some((f) => failedIds.includes(f.id));
-  const times = visible.map((f) => Date.parse(feedCache[f.id] && feedCache[f.id].fetchedAt));
-  if (failed || times.some((t) => !Number.isFinite(t))) {
+  if (visible.some((f) => failedFeedIds.has(f.id))) {
     els.updatedStamp.textContent = "Couldn't refresh calendars";
     return;
   }
+  const times = visible
+    .map((f) => Date.parse(feedCache[f.id] && feedCache[f.id].fetchedAt))
+    .filter((t) => Number.isFinite(t));
+  if (times.length === 0) return; // nothing fetched yet: keep what is shown
   els.updatedStamp.textContent = `Updated ${clockLabel(new Date(Math.min(...times)))}`;
 }
 
