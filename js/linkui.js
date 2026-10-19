@@ -562,9 +562,8 @@ export function initLinkUI(options = {}) {
     } else if (stage === 'saving' && !writeIsSlow()) {
       // Re-render once the live write crosses the slow threshold, so the
       // "taking longer than usual" line appears without another panel open.
-      joinTimer = setTimeout(() => {
-        if (stage === 'saving') render();
-      }, Math.max(0, slowWriteAfterMs - (now().getTime() - writeStartedAt)));
+      // Kept in joinTimer, which the settle handler below clears.
+      armSlowWriteRepaint(() => stage === 'saving', (h) => { joinTimer = h; });
     }
     // A JOINED EPISODE'S SETTLE HANDLER MUST NOT REPAINT A VIEW THIS MOUNT HAS
     // SINCE TAKEN OWNERSHIP OF. If this mount goes on to take over, its own
@@ -662,6 +661,26 @@ export function initLinkUI(options = {}) {
   // True while a write is in flight and has been for at least the threshold.
   function writeIsSlow() {
     return writeInFlight && now().getTime() - writeStartedAt >= slowWriteAfterMs;
+  }
+
+  // Repaints once writeIsSlow() turns true. The timer is REAL but writeIsSlow()
+  // reads the INJECTED clock, and the two can disagree (a test clock; a timer
+  // that fires a millisecond before Date.now() agrees). A one-shot timer that
+  // fired first found writeIsSlow() false, repainted nothing new and was never
+  // armed again, so the line was missed for good. So a timer that fires early
+  // re-arms for the time still remaining by the same clock writeIsSlow() reads.
+  // The delay is always > 0 there (writeIsSlow() false means time remains), so
+  // this cannot spin. It stops when the line is shown, when the write settles
+  // (writeInFlight false; the caller also clears the handle), or when this
+  // mount's view has moved on (`stillShowing`). Every re-arm passes its handle
+  // to `keep`, so the caller's clearTimeout always reaches the live one.
+  function armSlowWriteRepaint(stillShowing, keep) {
+    const remaining = slowWriteAfterMs - (now().getTime() - writeStartedAt);
+    keep(setTimeout(() => {
+      if (!writeInFlight || !stillShowing()) return;
+      if (writeIsSlow()) render();
+      else armSlowWriteRepaint(stillShowing, keep);
+    }, Math.max(0, remaining)));
   }
 
   // BRANCH ON preview.status BEFORE CONSULTING chooseAdoption (DA-C3).
@@ -770,9 +789,8 @@ export function initLinkUI(options = {}) {
     writeStartedAt = now().getTime();
     // Repaint this mount's "Combining…" view once the write crosses the slow
     // threshold. Cleared when the write settles, whichever comes first.
-    const slowTimer = setTimeout(() => {
-      if (writeInFlight && stage === 'busy') render();
-    }, slowWriteAfterMs);
+    let slowTimer = null;
+    armSlowWriteRepaint(() => stage === 'busy', (h) => { slowTimer = h; });
     try {
       res = await syncOnceImpl({
         fetchImpl, readFetchImpl, now, apiBase, applyState, adoptChoice, expectVersion,

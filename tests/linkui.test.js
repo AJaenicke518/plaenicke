@@ -1356,21 +1356,73 @@ test('the slow-write threshold is twenty seconds', () => {
 
 const SLOW_TEXT = "This is taking longer than usual — it's safe to reload.";
 
+// The slow-write repaint is a REAL timer, but writeIsSlow() reads the INJECTED
+// clock. The two can disagree — a test clock, or a browser timer that fires a
+// millisecond before Date.now() agrees — and when the timer fired first the
+// repaint found writeIsSlow() false, rendered nothing new and never re-armed,
+// so the line was missed for good. Measured: inserting a 40 ms real delay
+// before clock.advance(40) failed both tests below every run.
+//
+// So these tests own the timers instead of sleeping. Every timer with a
+// non-zero delay is captured rather than scheduled (settle()'s 0 ms timers
+// pass through), and the test fires them itself: once BEFORE the injected
+// clock reaches the threshold — exactly the losing order — and once after.
+function captureTimers(t) {
+  const realSet = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  const pending = new Map();
+  let nextId = 0;
+  globalThis.setTimeout = (fn, ms) => {
+    if (!ms) return realSet(fn, ms);
+    nextId += 1;
+    const handle = { capturedTimer: nextId };
+    pending.set(handle, { fn, ms });
+    return handle;
+  };
+  globalThis.clearTimeout = (h) => {
+    if (pending.has(h)) { pending.delete(h); return undefined; }
+    return realClear(h);
+  };
+  t.after(() => { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; });
+  return {
+    delays: () => [...pending.values()].map((p) => p.ms),
+    // Fires every timer pending right now, as a real timer would: once each,
+    // and removed before it runs. Timers armed by these callbacks stay pending.
+    fireAll: () => {
+      const due = [...pending.entries()];
+      due.forEach(([h]) => pending.delete(h));
+      due.forEach(([, p]) => p.fn());
+    },
+  };
+}
+
 test('a write in flight past the threshold says it is taking longer than usual, on the mount writing it', async (t) => {
   const clock = makeClock(Date.parse('2026-08-05T12:00:00.000Z'));
   const f = await concurrencyFixture({ clock, slowWriteAfterMs: 30 });
   t.after(() => f.releaseAll());
+  const timers = captureTimers(t);
   const a = f.mount();
   f.releaseGet(0);
   await a.ui.settled();
   f.holdNextWrite();
   findButton(a.host, 'Merge').click();
   await settleUntil(() => f.syncCalls.length > 0);
+  assert.deepEqual(timers.delays(), [30], 'fixture check: the writing mount armed its slow-write timer');
   assert.ok(!allText(a.host).includes(SLOW_TEXT), 'not before the threshold');
-  clock.advance(40);
-  await new Promise((resolve) => { setTimeout(resolve, 60); });
+
+  // The timer fires while the injected clock is still 10 ms short.
+  clock.advance(20);
+  timers.fireAll();
+  assert.ok(!allText(a.host).includes(SLOW_TEXT), 'still not before the threshold');
+  assert.deepEqual(timers.delays(), [10],
+    'a timer that fired before the clock passed the threshold must re-arm for the time remaining');
+
+  clock.advance(10);
+  timers.fireAll();
   assert.ok(allText(a.host).includes(SLOW_TEXT), 'past the threshold the panel says so');
   assert.equal(findAll(a.host, 'BUTTON').length, 0, 'and still offers no control: the write cannot be abandoned');
+  assert.deepEqual(timers.delays(), [], 'and stops re-arming once it has');
+
   f.letWriteFinish();
   await a.ui.settled();
   assert.ok(!allText(a.host).includes(SLOW_TEXT), 'gone once the write settles');
@@ -1381,6 +1433,47 @@ test('a mount joining a slow write shows the same line, with no takeover and no 
   const clock = makeClock(Date.parse('2026-08-05T12:00:00.000Z'));
   const f = await concurrencyFixture({ clock, slowWriteAfterMs: 30 });
   t.after(() => f.releaseAll());
+  const timers = captureTimers(t);
+  const a = f.mount();
+  f.releaseGet(0);
+  await a.ui.settled();
+  f.holdNextWrite();
+  findButton(a.host, 'Merge').click();
+  await settleUntil(() => f.syncCalls.length > 0);
+  a.host.innerHTML = '';
+  clock.advance(5);
+  const b = f.mount();
+  assert.match(allText(b.host), /Saving your choice/, 'fixture check: b joined the write');
+  assert.deepEqual(timers.delays(), [30, 25], 'fixture check: a armed for 30 ms, b for the 25 ms remaining');
+  assert.ok(!allText(b.host).includes(SLOW_TEXT), 'not before the threshold');
+
+  // Both timers fire while the injected clock is still 10 ms short.
+  clock.advance(15);
+  timers.fireAll();
+  assert.ok(!allText(b.host).includes(SLOW_TEXT), 'still not before the threshold');
+  assert.deepEqual(timers.delays(), [10, 10],
+    'each mount must re-arm for the time remaining, not give up');
+
+  clock.advance(10);
+  timers.fireAll();
+  assert.ok(allText(b.host).includes(SLOW_TEXT), 'the joining view says so too');
+  assert.equal(findButton(b.host, 'Try again'), null);
+  assert.equal(findButton(b.host, 'Unlink'), null);
+  assert.deepEqual(timers.delays(), [], 'and neither mount re-arms once it has');
+
+  f.letWriteFinish();
+  await a.ui.settled();
+  await b.ui.settled();
+  assert.deepEqual(f.syncCalls, ['adopt-merge']);
+});
+
+// The re-arm must not outlive the write: one re-armed timer left pending when
+// the write settles, on either mount, is cleared rather than left to fire.
+test('a re-armed slow-write timer is cleared when the write settles, on the writing and the joining mount', async (t) => {
+  const clock = makeClock(Date.parse('2026-08-05T12:00:00.000Z'));
+  const f = await concurrencyFixture({ clock, slowWriteAfterMs: 30 });
+  t.after(() => f.releaseAll());
+  const timers = captureTimers(t);
   const a = f.mount();
   f.releaseGet(0);
   await a.ui.settled();
@@ -1389,17 +1482,12 @@ test('a mount joining a slow write shows the same line, with no takeover and no 
   await settleUntil(() => f.syncCalls.length > 0);
   a.host.innerHTML = '';
   const b = f.mount();
-  assert.match(allText(b.host), /Saving your choice/, 'fixture check: b joined the write');
-  assert.ok(!allText(b.host).includes(SLOW_TEXT), 'not before the threshold');
-  clock.advance(40);
-  await new Promise((resolve) => { setTimeout(resolve, 60); });
-  assert.ok(allText(b.host).includes(SLOW_TEXT), 'the joining view says so too');
-  assert.equal(findButton(b.host, 'Try again'), null);
-  assert.equal(findButton(b.host, 'Unlink'), null);
+  timers.fireAll(); // early: the clock has not moved
+  assert.deepEqual(timers.delays(), [30, 30], 'fixture check: both mounts re-armed');
   f.letWriteFinish();
   await a.ui.settled();
   await b.ui.settled();
-  assert.deepEqual(f.syncCalls, ['adopt-merge']);
+  assert.deepEqual(timers.delays(), [], 'a settled write must leave no re-armed timer behind');
 });
 
 // R4-4. Every other concurrency test injects staleAfterMs or runs on a frozen
