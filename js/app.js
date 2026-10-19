@@ -11,7 +11,7 @@ import { renderTodoView } from './todoview.js';
 import { renderIdeasView } from './ideasview.js';
 import { toISO, nowISO } from './dateparse.js';
 import { buildMonthGrid, groupItemsByDate, monthCellSummary, chronoFirst, itemTypeClass } from './calendar.js';
-import { startOfWeek, addDays, formatTime, formatTimeRange } from './timegrid.js';
+import { startOfWeek, addDays, formatTime, formatTimeRange, weekLabel } from './timegrid.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
 import { renderDayView } from './dayview.js';
 import { renderWeekView } from './weekview.js';
@@ -751,7 +751,7 @@ function renderCalendar() {
 
 function renderWeek() {
   const end = addDays(viewWeekStart, 6);
-  els.weekLabel.textContent = `${viewWeekStart.slice(5).replace('-', '/')} – ${end.slice(5).replace('-', '/')}`;
+  els.weekLabel.textContent = weekLabel(viewWeekStart, end);
   renderWeekView(els.weekGrid, viewWeekStart,
     groupItemsByDate(sortItemsByDate(visibleItems(viewWeekStart, end))), toISO(new Date()),
     { onSelectDay: openDay });

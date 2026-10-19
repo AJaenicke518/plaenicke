@@ -10,7 +10,7 @@ import {
 import { linkWithCode, clearAdoptionPending } from '../js/auth.js';
 import { bytesToBase64url, TOKEN_BYTES } from '../js/crypto.js';
 import { SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID } from '../js/linkui.js';
-import { addDays, startOfWeek } from '../js/timegrid.js';
+import { addDays, startOfWeek, weekLabel } from '../js/timegrid.js';
 import { formatDayLabel } from '../js/freshness.js';
 
 // --- historical note: the js/linkui.js resolve hook -------------------------
@@ -2575,7 +2575,9 @@ test('sweep D: the List footer names its horizon as a date, not raw ISO', async 
 
 // --- S-1: the week and month cursors follow a resume too --------------------
 
-const weekLabelFor = (iso) => `${iso.slice(5).replace('-', '/')} – ${addDays(iso, 6).slice(5).replace('-', '/')}`;
+// Through weekLabel itself (pinned in tests/timegrid.test.js), so these
+// navigation tests do not fail in the week across New Year's.
+const weekLabelFor = (iso) => weekLabel(iso, addDays(iso, 6));
 const monthLabelFor = (d) => d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 
 test('sweep D: the Week view follows a resume, and a navigated week stays put', async (t) => {
@@ -3653,4 +3655,20 @@ test('a11y: each nav button reports itself pressed, and only itself', async () =
   } finally {
     if (restore) click(restore);
   }
+});
+
+// The Week header across New Year's: "12/27 – 01/02" named no year at all.
+test('the Week header names both years for a week across New Year\'s', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  assert.equal(labelText('week-label'), weekLabelFor(startOfWeek(localISO(new Date()))), 'fixture check: this week');
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 11, 30, 12).getTime() });
+  try {
+    resume();
+    assert.equal(labelText('week-label'), '12/27/2026 – 01/02/2027');
+  } finally {
+    t.mock.timers.reset();
+  }
+  resume();
+  assert.equal(labelText('week-label'), weekLabelFor(startOfWeek(localISO(new Date()))), 'restored for later tests');
 });

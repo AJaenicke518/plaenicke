@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { minutesOf, formatTime, formatTimeRange, addDays, startOfWeek,
-  bucketDayItems, layoutDayBlocks } from '../js/timegrid.js';
+  bucketDayItems, layoutDayBlocks, weekLabel } from '../js/timegrid.js';
 
 test('minutesOf converts HH:MM to minutes since midnight', () => {
   assert.equal(minutesOf('00:00'), 0);
@@ -68,4 +68,12 @@ test('layoutDayBlocks: no endTime pins a default-duration chip', () => {
 test('layoutDayBlocks clamps a late pin to midnight', () => {
   const rows = layoutDayBlocks([{ id: 'a', time: '23:59' }]); // "due at midnight" case
   assert.equal(rows[0].endMin, 1440);
+});
+
+// The Week header. A week inside one year needs no year; a week across New
+// Year's names both, or "12/27 – 01/02" reads as running backwards.
+test('weekLabel omits the year inside one year and names both across a year boundary', () => {
+  assert.equal(weekLabel('2026-10-18', '2026-10-24'), '10/18 – 10/24');
+  assert.equal(weekLabel('2026-11-29', '2026-12-05'), '11/29 – 12/05', 'a month boundary is not a year boundary');
+  assert.equal(weekLabel('2026-12-27', '2027-01-02'), '12/27/2026 – 01/02/2027');
 });
