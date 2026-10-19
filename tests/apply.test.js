@@ -3541,3 +3541,86 @@ test('sF3: a fetch that throws at once fails cleanly, with no stray timeout', as
     globalThis.fetch = originalFetch;
   }
 });
+
+// =========================================================================
+// Punchlist batch — accessibility and small fixes
+// =========================================================================
+
+// A keydown as a browser delivers it, recording whether it was cancelled (a
+// Space that is not cancelled scrolls the page).
+function keydown(el, key) {
+  let prevented = false;
+  (el._listeners.keydown || []).forEach((fn) => fn({ target: el, key, preventDefault() { prevented = true; } }));
+  return prevented;
+}
+
+// Month cells and Week columns open a day on click. A bare <div> with a click
+// handler is unreachable from a keyboard, so each one is a button to assistive
+// tech and to Tab, and Enter or Space opens the same day a click does.
+test('a11y: Month cells open their day from the keyboard, and blanks are not focusable', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  try {
+    click(globalThis.document.getElementById('show-month'));
+    const grid = globalThis.document.getElementById('calendar-grid');
+    const cells = grid.children.filter((c) => c._classes.has('cal-cell') && !c._classes.has('blank'));
+    const blanks = grid.children.filter((c) => c._classes.has('blank'));
+    assert.ok(cells.length >= 28, 'fixture check: a month of day cells');
+    for (const c of cells) {
+      assert.equal(c.getAttribute('role'), 'button');
+      assert.equal(c.getAttribute('tabindex'), '0');
+    }
+    for (const b of blanks) {
+      assert.equal(b.getAttribute('tabindex'), null, 'a blank cell opens nothing, so it is not a tab stop');
+      assert.equal((b._listeners.keydown || []).length, 0);
+    }
+    const now = new Date();
+    const firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    assert.equal(keydown(cells[0], 'a'), false, 'another key is left alone');
+    assert.equal(globalThis.document.getElementById('day-view').hidden, true, 'and opens nothing');
+    assert.equal(keydown(cells[0], 'Enter'), true);
+    assert.equal(globalThis.document.getElementById('day-view').hidden, false, 'Enter opens the Day view');
+    assert.equal(labelText('day-label'), labelFor(firstOfMonth), 'on the cell\'s own day');
+    click(globalThis.document.getElementById('show-month'));
+    const second = globalThis.document.getElementById('calendar-grid').children
+      .filter((c) => c._classes.has('cal-cell') && !c._classes.has('blank'))[1];
+    assert.equal(keydown(second, ' '), true, 'Space is cancelled, or it would also scroll the page');
+    assert.equal(labelText('day-label'), labelFor(new Date(now.getFullYear(), now.getMonth(), 2)));
+  } finally {
+    click(globalThis.document.getElementById('show-month'));
+    openDayForToday();
+    if (restore) click(restore);
+  }
+});
+
+test('a11y: Week columns open their day from the keyboard', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  try {
+    click(globalThis.document.getElementById('show-week'));
+    const cols = globalThis.document.getElementById('week-grid').children;
+    assert.equal(cols.length, 7, 'fixture check: seven columns');
+    for (const c of cols) {
+      assert.equal(c.getAttribute('role'), 'button');
+      assert.equal(c.getAttribute('tabindex'), '0');
+    }
+    const weekStart = startOfWeek(localISO(new Date()));
+    const [y, m, d] = addDays(weekStart, 2).split('-').map(Number);
+    assert.equal(keydown(cols[2], 'Escape'), false);
+    assert.equal(globalThis.document.getElementById('day-view').hidden, true, 'another key opens nothing');
+    assert.equal(keydown(cols[2], 'Enter'), true);
+    assert.equal(globalThis.document.getElementById('day-view').hidden, false, 'Enter opens the Day view');
+    assert.equal(labelText('day-label'), labelFor(new Date(y, m - 1, d)));
+    click(globalThis.document.getElementById('show-week'));
+    const cols2 = globalThis.document.getElementById('week-grid').children;
+    const [y4, m4, d4] = addDays(weekStart, 4).split('-').map(Number);
+    assert.equal(keydown(cols2[4], ' '), true);
+    assert.equal(labelText('day-label'), labelFor(new Date(y4, m4 - 1, d4)), 'and so does Space');
+  } finally {
+    click(globalThis.document.getElementById('show-month'));
+    openDayForToday();
+    if (restore) click(restore);
+  }
+});

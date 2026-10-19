@@ -734,7 +734,16 @@ function renderCalendar() {
         m.textContent = `+${more} more`;
         div.appendChild(m);
       }
+      // A button to Tab and to assistive tech, not a bare clickable <div>:
+      // Enter or Space opens the same day a click does (Space is cancelled, or
+      // it would also scroll the page). Blank cells above open nothing and
+      // stay out of the tab order.
+      div.setAttribute('role', 'button');
+      div.setAttribute('tabindex', '0');
       div.addEventListener('click', () => openDay(cell.date));
+      div.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDay(cell.date); }
+      });
       els.calGrid.appendChild(div);
     }
   }
