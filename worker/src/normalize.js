@@ -37,6 +37,9 @@ export function normalizeClaudeJson(raw) {
       project: cleanStrOrNull(it.project),
       subject: cleanStrOrNull(it.subject),
       category: CATEGORIES.includes(it.category) ? it.category : null,
+      // An idea's complete original wording (prompt.js). Leaving it out of
+      // this rebuild silently cut every smart-added idea down to its label.
+      notes: cleanStrOrNull(it.notes),
     });
   }
   const needsReview = raw.needsReview === true || dropped;

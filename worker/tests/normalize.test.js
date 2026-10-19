@@ -138,3 +138,25 @@ test('normalize accepts precisely the categories the schema can return', async (
       `the schema lets the model return '${c}' but normalize nulls it`);
   }
 });
+
+// The schema REQUIRES notes (prompt.js) and the prompt asks for an idea's
+// complete original wording there. Rebuilding items from a fixed key list
+// silently dropped it, so every smart-added idea lost its full text and kept
+// only the model's short label.
+test('keeps an idea\'s verbatim notes', () => {
+  const text = 'idea for the app: let the week view collapse empty days, maybe with a swipe';
+  const r = normalizeClaudeJson({ needsReview: false, items: [
+    { title: 'Collapse empty days', date: '2026-05-15', time: null, endTime: null, type: 'idea',
+      project: null, subject: null, category: null, notes: text },
+  ]});
+  assert.equal(r.items[0].notes, text);
+});
+
+test('notes is null when absent, blank, or not a string', () => {
+  for (const notes of [undefined, null, '', '   ', 42]) {
+    const r = normalizeClaudeJson({ needsReview: false, items: [
+      { title: 'x', date: '2026-05-15', type: 'task', project: null, subject: null, category: null, notes },
+    ]});
+    assert.equal(r.items[0].notes, null);
+  }
+});
