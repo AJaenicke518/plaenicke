@@ -536,6 +536,25 @@ test('a successful sync also reports applied, and a version mismatch does not', 
   assert.ok(link.encKey.length === 32); // fixture sanity
 });
 
+// The whole wire for a device that fills up while applying calendars:
+// saveFeeds -> QuotaError -> syncOnce's apply catch records err.name, which
+// linkui.js labels "this device has run out of storage".
+test('a calendar save that runs out of storage during apply is recorded as QuotaError', async () => {
+  const link = await linked();
+  saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer({ version: 1, blob: await encryptBlob(link.encKey, state({ items: [item('r', '2026-08-01T00:00:00.000Z')] })) });
+  const real = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = (k, v) => {
+    if (k === 'plaenicke.feeds') { const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; }
+    return real(k, v);
+  };
+  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: (s) => { saveFeeds(s.feeds); return s; } });
+  assert.equal(res.status, 'error');
+  assert.equal(loadSyncState().lastError, 'QuotaError');
+  assert.equal(server.row.version, 1, 'nothing is pushed after a failed apply');
+});
+
 // --- Second-pass review findings ---
 
 // Finding 1: fetch() resolves as soon as headers arrive. A connection dropped

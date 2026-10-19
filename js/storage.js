@@ -97,8 +97,18 @@ export function loadFeeds() {
   return deserializeFeeds(localStorage.getItem(FEEDS_KEY));
 }
 
+// Same quota translation as every other saver here: a raw QuotaExceededError
+// reaches syncOnce's lastError under its DOMException name, which linkui.js
+// has no label for, so a full device read "something went wrong".
 export function saveFeeds(feeds) {
-  localStorage.setItem(FEEDS_KEY, serializeFeeds(feeds));
+  try {
+    localStorage.setItem(FEEDS_KEY, serializeFeeds(feeds));
+  } catch (err) {
+    if (err && err.name === 'QuotaExceededError') {
+      throw new QuotaError('Feeds exceeded storage quota');
+    }
+    throw err;
+  }
 }
 
 // --- tombstones ---

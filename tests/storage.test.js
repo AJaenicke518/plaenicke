@@ -146,7 +146,8 @@ test('feeds: loadFeeds returns [] when nothing stored', () => {
 
 test('feeds: saveFeeds propagates errors instead of swallowing them', () => {
   globalThis.localStorage = new QuotaExceedingLocalStorage();
-  assert.throws(() => saveFeeds([FEED]), /quota exceeded/);
+  // Propagated, translated to QuotaError like every other saver (L103).
+  assert.throws(() => saveFeeds([FEED]), QuotaError);
 });
 
 // --- feed cache ---
@@ -194,6 +195,22 @@ test('feed cache: loadFeedCache returns {} when nothing stored', () => {
 test('feed cache: saveFeedCache throws QuotaError on QuotaExceededError', () => {
   globalThis.localStorage = new QuotaExceedingLocalStorage();
   assert.throws(() => saveFeedCache({ f1: CACHE_ENTRY }), QuotaError);
+});
+
+// Punchlist L103: saveFeeds was the only saver with no quota translation.
+test('saveFeeds throws QuotaError on QuotaExceededError', () => {
+  globalThis.localStorage = new QuotaExceedingLocalStorage();
+  assert.throws(() => saveFeeds([FEED]), QuotaError);
+});
+
+test('saveFeeds rethrows any other storage error unchanged, and still writes when there is room', () => {
+  const blocked = new Error('denied');
+  blocked.name = 'SecurityError';
+  globalThis.localStorage = { getItem() { return null; }, setItem() { throw blocked; } };
+  assert.throws(() => saveFeeds([FEED]), (err) => err === blocked);
+  installFakeLocalStorage();
+  saveFeeds([FEED]);
+  assert.deepEqual(loadFeeds(), [FEED]);
 });
 
 test('deserializeItems backfills updatedAt from createdAt', () => {

@@ -58,6 +58,9 @@ const ERROR_LABELS = {
   EncryptError: 'this device could not encrypt its data',
   ApplyError: 'this device could not save what it pulled',
   QuotaError: 'this device has run out of storage',
+  // The Worker refuses a blob over 1,000,000 bytes (worker/src/data.js).
+  // Retrying cannot help, so it is named rather than left as a server error.
+  http_413: "the synced data has reached the account's size limit",
 };
 
 function errorLabel(code) {

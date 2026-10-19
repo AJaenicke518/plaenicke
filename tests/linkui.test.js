@@ -199,6 +199,34 @@ test('describeSyncStatus surfaces lastError alongside the last successful sync',
   assert.doesNotMatch(noPrior, /ago/);
 });
 
+// The Worker caps the blob at 1,000,000 bytes and answers 413 (worker/src/
+// data.js); syncOnce records it as http_413. A generic "the server returned an
+// error" gives the user nothing to act on, and retrying never helps.
+test('a 413 is named as the account size limit, not as a generic server error', () => {
+  const s = describeSyncStatus(syncState({ lastError: 'http_413', lastSyncedAt: '2026-08-05T11:00:00.000Z' }), NOW);
+  assert.match(s, /size limit/i);
+  assert.doesNotMatch(s, /server returned an error/i);
+  // Must not change: every other HTTP status keeps the generic label.
+  assert.match(describeSyncStatus(syncState({ lastError: 'http_500' }), NOW), /the server returned an error/);
+  assert.match(describeSyncStatus(syncState({ lastError: 'http_429' }), NOW), /the server returned an error/);
+});
+
+// saveFeeds used to be the one saver with no quota translation, so a device
+// out of storage while saving calendars recorded the raw DOMException name
+// and read "something went wrong" (punchlist L103).
+test('a device that runs out of storage while saving calendars reads as out of storage', () => {
+  installFakeLocalStorage();
+  const real = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = (k, v) => {
+    if (k === 'plaenicke.feeds') { const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; }
+    return real(k, v);
+  };
+  let caught = null;
+  try { saveFeeds([fd('f')]); } catch (err) { caught = err; }
+  assert.ok(caught, 'fixture check: the save must fail');
+  assert.match(describeSyncStatus(syncState({ lastError: caught.name }), NOW), /run out of storage/);
+});
+
 // The adoption gate means a device that links while offline sits at
 // adoptionPending: true and syncs NOTHING until the user completes the
 // dialog. The failure mode is "silently does nothing", and this string is the
