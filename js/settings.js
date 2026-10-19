@@ -105,10 +105,15 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
   // sweep F O2); this panel's own hold, or null while it is closed.
   let releaseScroll = null;
 
+  // Focus goes back to the Settings button on every close path (the button,
+  // Escape, a backdrop tap), as the item sheet returns it to its opener (app.js's
+  // focusOpener): otherwise it falls back to the top of the document. Without
+  // scrolling, for the same reason.
   function close() {
     host.innerHTML = '';
     if (releaseScroll) { releaseScroll(); releaseScroll = null; }
     document.removeEventListener('keydown', onKey);
+    button.focus({ preventScroll: true });
   }
 
   function open() {
@@ -124,6 +129,9 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
 
     const h = document.createElement('h2');
     h.textContent = 'Settings';
+    // Focus moves here once the panel is mounted (below), as the item sheet's
+    // does to its heading: focusable by script only (tabindex -1), never by Tab.
+    h.setAttribute('tabindex', '-1');
     panel.appendChild(h);
 
     const appearance = document.createElement('div');
@@ -499,6 +507,7 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
     });
     if (!releaseScroll) releaseScroll = lock(); // no scrolling behind the modal (iOS)
     document.addEventListener('keydown', onKey);
+    h.focus();
   }
 
   button.addEventListener('click', () => { host.childElementCount ? close() : open(); });

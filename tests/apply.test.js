@@ -3624,3 +3624,33 @@ test('a11y: Week columns open their day from the keyboard', async () => {
     if (restore) click(restore);
   }
 });
+
+// The nav's selected page was shown only by a CSS class, which assistive tech
+// does not read. aria-pressed says it, in the markup at load (showView is not
+// run until a button is tapped) and after every tap.
+test('a11y: index.html marks the Day button pressed and every other nav button not', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  for (const id of ['show-list', 'show-month', 'show-week', 'show-day', 'show-todo', 'show-ideas']) {
+    const tag = html.match(new RegExp(`<button id="${id}"[^>]*>`));
+    assert.ok(tag, `fixture check: #${id}`);
+    assert.match(tag[0], new RegExp(`aria-pressed="${id === 'show-day'}"`), `#${id}`);
+  }
+});
+
+test('a11y: each nav button reports itself pressed, and only itself', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const ids = ['show-list', 'show-month', 'show-week', 'show-day', 'show-todo', 'show-ideas'];
+  try {
+    for (const id of ids) {
+      click(globalThis.document.getElementById(id));
+      for (const other of ids) {
+        assert.equal(globalThis.document.getElementById(other).getAttribute('aria-pressed'), String(other === id),
+          `after #${id}, #${other}`);
+      }
+    }
+  } finally {
+    if (restore) click(restore);
+  }
+});

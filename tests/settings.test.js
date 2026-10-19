@@ -85,6 +85,13 @@ class FakeElement {
   click() {
     (this._listeners.click || []).forEach((fn) => fn({ target: this }));
   }
+
+  // Harness only: records focus the way a browser reports it, as
+  // tests/apply.test.js's harness does. Production code never reads this.
+  focus(options) {
+    globalThis.document.activeElement = this;
+    globalThis.document.lastFocusOptions = options;
+  }
 }
 
 function makeFakeDocument() {
@@ -109,11 +116,13 @@ function makeFakeDocument() {
     // that turns every "safe when unmounted" assertion into a vacuous one.
     getElementById(id) { return walk(body, (el) => el.id === id); },
     createElement: (tag) => new FakeElement(tag),
+    activeElement: null,
     addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
     removeEventListener(type, fn) {
       if (!listeners[type]) return;
       listeners[type] = listeners[type].filter((f) => f !== fn);
     },
+    _listeners: listeners,
   };
 }
 
@@ -155,7 +164,7 @@ function openPanel(feeds, seed = () => {}) {
     applyState: (s) => s,
   });
   button.click(); // host.childElementCount === 0 -> open()
-  return { host, notified };
+  return { host, notified, button };
 }
 
 // --- the second-writer fix --------------------------------------------------
@@ -451,4 +460,45 @@ test('settings: a stored launch log of {} reads as no launches, and Settings ope
   assert.equal(host.childElementCount > 0, true, 'the panel must open');
   assert.match(allText(host), /Not opened in the last 7 days\./);
   assert.doesNotMatch(allText(host), /Last opened/);
+});
+
+// --- focus management (punchlist: a11y) ------------------------------------
+//
+// The panel is a modal dialog: focus moves into it on open and goes back to
+// the Settings button on close, by every close path. Without this a keyboard
+// or screen-reader user is left on the page BEHIND the modal, and after a
+// close focus falls back to the top of the document.
+
+function findByTag(el, tag) {
+  for (const c of el.children) {
+    if (c.tagName === tag) return c;
+    const found = findByTag(c, tag);
+    if (found) return found;
+  }
+  return null;
+}
+
+test('settings: opening moves focus to the panel heading, focusable by script only', () => {
+  const { host } = openPanel([]);
+  const heading = findByTag(host, 'H2');
+  assert.equal(heading.textContent, 'Settings', 'fixture check');
+  assert.equal(document.activeElement, heading);
+  assert.equal(heading.getAttribute('tabindex'), '-1', 'a target for focus, never a Tab stop');
+});
+
+test('settings: every close path returns focus to the Settings button, without scrolling', () => {
+  const closers = {
+    'the Settings button': ({ button }) => button.click(),
+    Escape: () => document._listeners.keydown.slice().forEach((fn) => fn({ key: 'Escape' })),
+    'a backdrop tap': ({ host }) => host.children[0].click(),
+  };
+  for (const [label, closeIt] of Object.entries(closers)) {
+    const opened = openPanel([]);
+    assert.notEqual(document.activeElement, opened.button, `fixture check (${label}): focus moved in`);
+    document.lastFocusOptions = undefined;
+    closeIt(opened);
+    assert.equal(opened.host.childElementCount, 0, `fixture check (${label}): closed`);
+    assert.equal(document.activeElement, opened.button, `${label}: focus back on the opener`);
+    assert.deepEqual(document.lastFocusOptions, { preventScroll: true }, label);
+  }
 });

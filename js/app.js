@@ -809,7 +809,12 @@ function showView(which) {
     todo: els.showTodo, ideas: els.showIdeas,
   };
   for (const [name, el] of Object.entries(views)) el.hidden = name !== which;
-  for (const [name, b] of Object.entries(buttons)) b.classList.toggle('active', name === which);
+  // aria-pressed says which page is showing to assistive tech, which does not
+  // read the class. index.html carries the load-time values.
+  for (const [name, b] of Object.entries(buttons)) {
+    b.classList.toggle('active', name === which);
+    b.setAttribute('aria-pressed', String(name === which));
+  }
   render();
 }
 
