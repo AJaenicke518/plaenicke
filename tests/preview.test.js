@@ -140,3 +140,37 @@ test('changing the type control rewrites the draft', () => {
   findButton(container, 'Add all').click();
   assert.equal(confirmed[0].type, 'task');
 });
+
+// Manual add reveals its end-time box only once a start time is set (app.js,
+// #entry-end), and the preview does the same: an end with no start is not a
+// range the record can hold, so it is not offered.
+const timeInputs = (container) => findAll(container, 'INPUT').filter((i) => i.type === 'time');
+
+test('the end-time box is hidden until the row has a start time', () => {
+  const container = new FakeElement('section');
+  renderPreview(container, [modelItem(), modelItem({ time: '09:00', endTime: '10:00' })], {
+    onConfirm: () => true, onCancel() {},
+  });
+  const [start1, end1, , end2] = timeInputs(container);
+  assert.equal(end1.hidden, true, 'no start time, no end box');
+  assert.equal(end2.hidden, false, 'a row that arrives with a start time shows its end box');
+  start1.value = '14:00';
+  start1.fire('input');
+  assert.equal(end1.hidden, false, 'setting a start reveals the end box');
+});
+
+test('clearing the start time hides the end box again and clears the end', () => {
+  const container = new FakeElement('section');
+  let confirmed = null;
+  renderPreview(container, [modelItem({ time: '09:00', endTime: '10:00' })], {
+    onConfirm: (d) => { confirmed = d; return true; }, onCancel() {},
+  });
+  const [start, end] = timeInputs(container);
+  start.value = '';
+  start.fire('input');
+  assert.equal(end.hidden, true);
+  assert.equal(end.value, '');
+  findButton(container, 'Add all').click();
+  assert.equal(confirmed[0].time, null);
+  assert.equal(confirmed[0].endTime, null);
+});
