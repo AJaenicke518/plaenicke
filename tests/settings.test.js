@@ -532,3 +532,50 @@ test('settings: a calendar Name that is itself a link is refused, with a message
     }
   }
 });
+
+// --- manual fetches have a deadline (punchlist: sF review) ------------------
+//
+// The background refresh aborts a download after 60 s (js/fetchtimeout.js).
+// The panel's own Sync and Add calendar fetched with bare fetch, so a server
+// that never answered left the row on "Syncing…" with every button disabled
+// until a reload. They go through the same fetchWithTimeout now.
+const settleMicro = async () => { for (let i = 0; i < 30; i += 1) await new Promise((r) => { setImmediate(r); }); };
+
+for (const [label, start] of [
+  ['Sync', (host) => findButtonByText(host, 'Sync').click()],
+  ['Add calendar', (host) => {
+    host.querySelectorAll('input').find((i) => i.getAttribute('aria-label') === 'Calendar link').value = 'https://example.com/new.ics';
+    findButtonByText(host, 'Add calendar').click();
+  }],
+]) {
+  test(`settings: a manual ${label} that never answers is aborted at 60 s and the panel recovers`, async (t) => {
+    const feedA = {
+      id: 'feedT', url: 'https://example.com/t.ics', name: 'T', color: 'var(--feed-palette-1)', hidden: false,
+      updatedAt: '2026-07-01T00:00:00.000Z',
+    };
+    const signals = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (url, init) => { signals.push(init && init.signal); return new Promise(() => {}); };
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      const { host } = openPanel(label === 'Sync' ? [feedA] : []);
+      start(host);
+      await settleMicro();
+      assert.equal(signals.length, 1, 'fixture check: one fetch in flight');
+      assert.ok(signals[0], 'the fetch is given an abort signal');
+      const addReady = () => { const b = findButtonByText(host, 'Add calendar'); return Boolean(b) && !b.disabled; };
+      assert.equal(addReady(), false, 'fixture check: busy while it runs');
+      t.mock.timers.tick(59999);
+      await settleMicro();
+      assert.equal(signals[0].aborted, false, 'not before the 60 s budget');
+      t.mock.timers.tick(1);
+      await settleMicro();
+      assert.equal(signals[0].aborted, true, 'aborted at 60 s');
+      assert.equal(addReady(), true, 'the panel is usable again');
+      assert.ok(findButtonByText(host, 'Sync'), 'and the row is no longer "Syncing…"');
+    } finally {
+      t.mock.timers.reset();
+      globalThis.fetch = originalFetch;
+    }
+  });
+}

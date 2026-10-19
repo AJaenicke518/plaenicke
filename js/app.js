@@ -28,6 +28,7 @@ import { isLinked, isAdoptionPending } from './auth.js';
 import { merge, SCHEMA_VERSION } from './merge.js';
 import { renderSyncStatus } from './linkui.js';
 import { WORKER_URL } from './config.js';
+import { fetchWithTimeout } from './fetchtimeout.js';
 
 const els = {
   text: document.getElementById('entry-text'),
@@ -891,50 +892,17 @@ stampUpdated();
 // When the batch settles it repaints the "Updated" stamp from the calendars
 // themselves (sweep D1); see stampFromFeeds.
 //
-// EACH DOWNLOAD IS ABORTED AFTER FEED_FETCH_TIMEOUT_MS (sweep F, I4; reworked
-// twice after review). A download that never finishes would otherwise hold the
-// one batch slot forever: every later refresh dropped, every queued calendar
-// never fetched.
-//   - Per DOWNLOAD, not per batch: syncStale fetches calendars one after
-//     another, so a batch timeout failed slow-but-progressing batches and left
-//     the loop running (a resume could then fetch one calendar twice at once).
-//   - HEADERS AND BODY: fetch() resolves when the headers arrive, and syncFeed
-//     then awaits res.text()/res.json(). A timer cleared at the headers left a
-//     body that stalls mid-download unguarded. The same timer races the body
-//     read and is disarmed only when that read settles.
-//   - 60 s, END TO END. The Worker buffers the whole upstream feed (up to 1 MB,
-//     8 s per hop, up to 3 redirects) before it replies, and the phone then
-//     downloads it, so a tighter budget could fail a large calendar on weak
-//     cellular on EVERY refresh. The timeout exists only so a hung download
-//     cannot hold the slot forever; 60 s still guarantees that.
-// A timed-out download is aborted and rejects, and syncFeed reports it
+// EACH DOWNLOAD IS ABORTED AFTER 60 s (sweep F, I4): fetchWithTimeout, in
+// js/fetchtimeout.js, which Settings' manual Sync and Add calendar share. A
+// download that never finishes would otherwise hold the one batch slot
+// forever: every later refresh dropped, every queued calendar never fetched.
+// The timeout is per DOWNLOAD, not per batch: syncStale fetches calendars one
+// after another, so a batch timeout failed slow-but-progressing batches and
+// left the loop running (a resume could then fetch one calendar twice at
+// once). A timed-out download is aborted and rejects, and syncFeed reports it
 // {ok:false} — 'unreachable' if it timed out waiting for headers, 'parse_error'
 // or 'server' if it timed out reading the body — and the loop moves on. Only
-// `ok` is read here. The race also settles a fetch that ignores its signal.
-const FEED_FETCH_TIMEOUT_MS = 60000;
-function fetchWithTimeout(url, init = {}) {
-  const ac = new AbortController();
-  let timer;
-  const timedOut = new Promise((_, reject) => {
-    timer = setTimeout(() => { ac.abort(); reject(new Error('timeout')); }, FEED_FETCH_TIMEOUT_MS);
-  });
-  const disarm = () => clearTimeout(timer);
-  const guarded = (p) => Promise.race([p, timedOut]);
-  let started;
-  try {
-    started = fetch(url, { ...init, signal: ac.signal });
-  } catch (err) {
-    disarm(); // a fetch that throws at once must not leave the timer armed
-    return Promise.reject(err);
-  }
-  return guarded(started).then((res) => ({
-    ok: res.ok,
-    status: res.status,
-    headers: res.headers,
-    text: () => guarded(Promise.resolve().then(() => res.text())).finally(disarm),
-    json: () => guarded(Promise.resolve().then(() => res.json())).finally(disarm),
-  }), (err) => { disarm(); throw err; });
-}
+// `ok` is read here.
 let feedBatch = null; // ids in the batch in flight, or null
 const feedQueue = new Set();
 

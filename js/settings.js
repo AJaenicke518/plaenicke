@@ -19,6 +19,7 @@ import { initLinkUI } from './linkui.js';
 import { uid } from './uid.js';
 import { nowISO } from './dateparse.js';
 import { lock } from './scrolllock.js';
+import { fetchWithTimeout } from './fetchtimeout.js';
 
 const CHOICES = ['light', 'dark', 'auto'];
 
@@ -240,7 +241,7 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
       renderCalendars();
       let result;
       try {
-        result = await syncFeed(feed, { fetchImpl: fetch, manual: true });
+        result = await syncFeed(feed, { fetchImpl: fetchWithTimeout, manual: true });
       } catch (err) {
         // syncFeed only throws on a genuine non-quota storage bug (see
         // feeds.js); never include the feed object/URL in the log, same
@@ -443,7 +444,7 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
 
         let result;
         try {
-          result = await syncFeed(feed, { fetchImpl: fetch, manual: true });
+          result = await syncFeed(feed, { fetchImpl: fetchWithTimeout, manual: true });
         } catch (err) {
           result = { ok: false, error: 'server' };
           console.error('plaenicke: initial calendar sync failed', err && err.name);
