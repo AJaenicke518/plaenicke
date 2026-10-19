@@ -396,6 +396,12 @@ export function initSettings({
           list.appendChild(row);
         }
         body.appendChild(list);
+        // Google serves calendar feeds with a lag of hours, so a change made a
+        // minute ago can still be missing after a manual Sync (punchlist L130).
+        const lag = document.createElement('p');
+        lag.className = 'note feed-lag-note';
+        lag.textContent = 'Google calendars can take a few hours to show recent changes.';
+        body.appendChild(lag);
       }
 
       // --- Add calendar ---

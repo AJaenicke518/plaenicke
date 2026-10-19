@@ -386,6 +386,27 @@ test('settings: a confirmed Remove removes exactly one calendar and nothing else
   assert.deepEqual(notified, ['view', 'synced'], 'a confirmed Remove is still a synced change');
 });
 
+// Punchlist L130 (decided 2026-10-19): Google serves its calendar feeds with
+// a lag of hours, so a just-made change can be missing after a manual Sync
+// and look like a broken app. One line, beside the calendars' Sync buttons.
+test('settings: the calendar list carries one line about Google lag, beside the Sync buttons', () => {
+  const { host } = openPanel(twoFeeds());
+  const notes = host.querySelectorAll('p').filter((p) => /Google calendars can take a few hours to show recent changes/.test(p.textContent));
+  assert.equal(notes.length, 1, 'exactly one note, not one per calendar');
+  assert.equal(host.querySelectorAll('button').filter((b) => b.textContent === 'Sync').length, 2,
+    'every calendar still offers its own Sync button');
+  const list = host.querySelectorAll('ul').find((u) => u.className === 'feed-list');
+  const section = list.parentNode;
+  assert.equal(section.children.indexOf(notes[0]), section.children.indexOf(list) + 1,
+    'the note sits directly under the list of calendars and their Sync buttons');
+});
+
+test('settings: with no calendars there is no Sync button, and no Google note', () => {
+  const { host } = openPanel([]);
+  assert.ok(allText(host).includes('No calendars linked yet'), 'fixture check');
+  assert.doesNotMatch(allText(host), /Google calendars/);
+});
+
 test('settings: colour and hidden are per-device preferences and never schedule a sync', () => {
   const feedA = {
     id: 'feedA', url: 'https://example.com/a.ics', name: 'A', color: 'var(--feed-palette-1)', hidden: false,
