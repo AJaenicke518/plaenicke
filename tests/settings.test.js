@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { installFakeLocalStorage } from './fake-localstorage.js';
+import { makeFakeDocument, makeFakeWindow } from './fake-dom.js';
 import {
   loadFeeds, saveFeeds, saveItems, loadItems, loadSyncState, loadTombstones, loadFeedCache, saveFeedCache,
 } from '../js/storage.js';
@@ -9,128 +10,11 @@ import { linkWithCode } from '../js/auth.js';
 import { bytesToBase64url, generateEncKey, encryptBlob } from '../js/crypto.js';
 import { SCHEMA_VERSION } from '../js/merge.js';
 
-// --- minimal fake DOM ------------------------------------------------------
+// --- fake DOM: tests/fake-dom.js ---------------------------------------------
 //
-// settings.js has no prior test coverage: it's DOM glue, Node 22 has no DOM,
-// and this repo has no jsdom dependency (no new dependencies, per this
-// task's constraints). This fakes only the slice of Element/Document/Window
-// settings.js actually touches — createElement, classList, style.setProperty,
-// dataset, addEventListener/removeEventListener, append/appendChild,
-// `innerHTML = ''` (clear), querySelectorAll('button'), and
-// window.matchMedia — enough to open the panel and drive its real click
-// handlers, not to render pixels.
-
-class FakeElement {
-  constructor(tag) {
-    this.tagName = tag.toUpperCase();
-    this.children = [];
-    this.parentNode = null;
-    this._classes = new Set();
-    this._listeners = {};
-    this._attrs = {};
-    this.style = { setProperty(name, val) { this[name] = val; } };
-    this.dataset = {};
-    this.disabled = false;
-    this.hidden = false;
-    this.id = '';
-    this.value = '';
-    this.textContent = '';
-  }
-
-  get className() { return [...this._classes].join(' '); }
-
-  set className(v) { this._classes = new Set(String(v).split(' ').filter(Boolean)); }
-
-  get classList() {
-    const self = this;
-    return {
-      add(c) { self._classes.add(c); },
-      remove(c) { self._classes.delete(c); },
-      contains(c) { return self._classes.has(c); },
-    };
-  }
-
-  setAttribute(name, val) { this._attrs[name] = val; }
-
-  getAttribute(name) { return Object.prototype.hasOwnProperty.call(this._attrs, name) ? this._attrs[name] : null; }
-
-  addEventListener(type, fn) { (this._listeners[type] ||= []).push(fn); }
-
-  removeEventListener(type, fn) {
-    if (!this._listeners[type]) return;
-    this._listeners[type] = this._listeners[type].filter((f) => f !== fn);
-  }
-
-  appendChild(child) { this.children.push(child); child.parentNode = this; return child; }
-
-  append(...nodes) { nodes.forEach((n) => this.appendChild(n)); }
-
-  get innerHTML() { return ''; }
-
-  set innerHTML(v) { if (v === '') this.children = []; }
-
-  get childElementCount() { return this.children.length; }
-
-  querySelectorAll(selector) {
-    const tag = selector.toUpperCase();
-    const out = [];
-    const walk = (el) => {
-      for (const c of el.children) {
-        if (c.tagName === tag) out.push(c);
-        walk(c);
-      }
-    };
-    walk(this);
-    return out;
-  }
-
-  click() {
-    (this._listeners.click || []).forEach((fn) => fn({ target: this }));
-  }
-
-  // Harness only: records focus the way a browser reports it, as
-  // tests/apply.test.js's harness does. Production code never reads this.
-  focus(options) {
-    globalThis.document.activeElement = this;
-    globalThis.document.lastFocusOptions = options;
-  }
-}
-
-function makeFakeDocument() {
-  const documentElement = new FakeElement('html');
-  const body = new FakeElement('body');
-  const listeners = {};
-  const walk = (el, pred) => {
-    for (const c of el.children) {
-      if (pred(c)) return c;
-      const found = walk(c, pred);
-      if (found) return found;
-    }
-    return null;
-  };
-  return {
-    documentElement,
-    body,
-    // Real semantics, copied from tests/linkui.test.js: an element that is not
-    // in the document is NOT found. (js/linkui.js's render() looks up the app
-    // shell's sync indicator here; these tests never mount one.) Do NOT make
-    // this lazily create an element per id the way tests/apply.test.js does —
-    // that turns every "safe when unmounted" assertion into a vacuous one.
-    getElementById(id) { return walk(body, (el) => el.id === id); },
-    createElement: (tag) => new FakeElement(tag),
-    activeElement: null,
-    addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
-    removeEventListener(type, fn) {
-      if (!listeners[type]) return;
-      listeners[type] = listeners[type].filter((f) => f !== fn);
-    },
-    _listeners: listeners,
-  };
-}
-
-function makeFakeWindow() {
-  return { matchMedia: () => ({ matches: false, addEventListener() {} }) };
-}
+// The shared harness. Its getElementById returns null for an id that is not
+// mounted (js/linkui.js's render() looks up the app shell's sync indicator;
+// these tests never mount one), so "safe when unmounted" stays non-vacuous.
 
 // Recursively finds the first BUTTON descendant whose textContent matches.
 function findButtonByText(el, text) {

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
+import { makeFakeDocument } from './fake-dom.js';
 import {
   describeSyncStatus, classifyPastedCode, chooseAdoption, renderSyncStatus, SLOW_WRITE_MS,
   initLinkUI, failureText, SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID,
@@ -19,91 +20,11 @@ import { SCHEMA_VERSION, toWire } from '../js/merge.js';
 import { WORKER_URL } from '../js/config.js';
 import { fetchWithTimeout, FETCH_TIMEOUT_MS } from '../js/fetchtimeout.js';
 
-// --- minimal fake DOM ------------------------------------------------------
+// --- fake DOM: tests/fake-dom.js ---------------------------------------------
 //
-// Modeled on tests/settings.test.js's fake (Task 6) with ONE deliberate
-// difference: getElementById WALKS THE TREE and returns null for an id that
-// is not mounted. The repo's existing fakes (tests/apply.test.js:170,
-// tests/settings.test.js) lazily create an element for any id and never
-// return null, which makes "renderSyncStatus is safe when the host is
-// absent" a vacuous assertion — an implementation doing
-// `document.getElementById('sync-status').textContent = …` passes under
-// those fakes and throws in a real browser.
-
-class FakeElement {
-  constructor(tag) {
-    this.tagName = tag.toUpperCase();
-    this.children = [];
-    this.parentNode = null;
-    this.id = '';
-    this._classes = new Set();
-    this._listeners = {};
-    this._attrs = {};
-    this.style = { setProperty(name, val) { this[name] = val; } };
-    this.dataset = {};
-    this.disabled = false;
-    this.hidden = false;
-    this.value = '';
-    this.textContent = '';
-  }
-
-  get className() { return [...this._classes].join(' '); }
-
-  set className(v) { this._classes = new Set(String(v).split(' ').filter(Boolean)); }
-
-  get classList() {
-    const self = this;
-    return {
-      add(c) { self._classes.add(c); },
-      remove(c) { self._classes.delete(c); },
-      contains(c) { return self._classes.has(c); },
-    };
-  }
-
-  setAttribute(name, val) { this._attrs[name] = val; }
-
-  getAttribute(name) { return Object.prototype.hasOwnProperty.call(this._attrs, name) ? this._attrs[name] : null; }
-
-  addEventListener(type, fn) { (this._listeners[type] ||= []).push(fn); }
-
-  removeEventListener(type, fn) {
-    if (!this._listeners[type]) return;
-    this._listeners[type] = this._listeners[type].filter((f) => f !== fn);
-  }
-
-  appendChild(child) { this.children.push(child); child.parentNode = this; return child; }
-
-  append(...nodes) { nodes.forEach((n) => this.appendChild(n)); }
-
-  get innerHTML() { return ''; }
-
-  set innerHTML(v) { if (v === '') { this.children.forEach((c) => { c.parentNode = null; }); this.children = []; } }
-
-  get childElementCount() { return this.children.length; }
-
-  click() { (this._listeners.click || []).forEach((fn) => fn({ target: this })); }
-}
-
-function makeFakeDocument() {
-  const body = new FakeElement('body');
-  const walk = (el, pred) => {
-    for (const c of el.children) {
-      if (pred(c)) return c;
-      const found = walk(c, pred);
-      if (found) return found;
-    }
-    return null;
-  };
-  return {
-    body,
-    documentElement: new FakeElement('html'),
-    createElement: (tag) => new FakeElement(tag),
-    // Real semantics: an element that is not in the document is not found.
-    getElementById(id) { return walk(body, (el) => el.id === id); },
-    addEventListener() {},
-    removeEventListener() {},
-  };
-}
+// This file's harness is where tests/fake-dom.js came from: getElementById
+// WALKS THE TREE and returns null for an id that is not mounted, so "safe when
+// the host is absent" assertions here are not vacuous.
 
 function installDom() {
   globalThis.document = makeFakeDocument();

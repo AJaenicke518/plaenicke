@@ -2,6 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
+import {
+  makeFakeDocument, makeFakeWindow, mountIds, indexHtmlIds,
+} from './fake-dom.js';
 import { SCHEMA_VERSION } from '../js/merge.js';
 import {
   saveItems, loadItems, saveTombstones, saveFeeds, loadFeeds, loadTombstones, loadSyncState, saveSyncState,
@@ -142,167 +145,18 @@ test('resetMockTimers throws rather than reset over a timer that never settles',
   await assert.rejects(resetMockTimers(t, 5), /did not settle after 5 rounds/);
 });
 
-// --- minimal fake DOM --------------------------------------------------
+// --- fake DOM (tests/fake-dom.js) ------------------------------------------
 //
-// app.js reaches for `document`/`window` at module scope (building its
-// `els` cache, wiring initSettings, registering the storage/visibilitychange/
-// online listeners, and calling render() once). Node has no DOM and this
-// repo has no jsdom dependency (no new dependencies, per this task's
-// constraints), so this fakes only the slice app.js's import graph actually
-// touches. Modeled directly on tests/settings.test.js's fake DOM (Task 6),
-// extended with:
-//   - getElementById: app.js looks up ~30 ids by id, lazily creating one
-//     FakeElement per id (settings.test.js only ever needed two, passed in
-//     directly).
-//   - querySelector: dayview.js reads back its own prior scroll position via
-//     `container.querySelector('.day-grid')`.
-//   - a `_listeners` escape hatch on document/window so this file can invoke
-//     app.js's own registered storage-event listener directly (there is no
-//     other way to dispatch a synthetic 'storage' event from Node).
-
-class FakeElement {
-  constructor(tag) {
-    this.tagName = tag.toUpperCase();
-    this.children = [];
-    this.parentNode = null;
-    this._classes = new Set();
-    this._listeners = {};
-    this._attrs = {};
-    this.style = { setProperty(name, val) { this[name] = val; } };
-    this.dataset = {};
-    this.disabled = false;
-    this.hidden = false;
-    this.value = '';
-    this.textContent = '';
-  }
-
-  get className() { return [...this._classes].join(' '); }
-
-  set className(v) { this._classes = new Set(String(v).split(' ').filter(Boolean)); }
-
-  get classList() {
-    const self = this;
-    return {
-      // The real classList.add THROWS InvalidCharacterError on a token
-      // containing whitespace. itemTypeClass can now return two tokens
-      // ('type-task done'), so a fake that silently accepted one would let a
-      // call site pass in a browser-fatal string and stay green here.
-      add(...cs) {
-        for (const c of cs) {
-          assert.doesNotMatch(String(c), /\s/, `classList.add token must not contain whitespace: "${c}"`);
-          self._classes.add(c);
-        }
-      },
-      remove(c) { self._classes.delete(c); },
-      contains(c) { return self._classes.has(c); },
-      toggle(c, force) {
-        const on = force === undefined ? !self._classes.has(c) : force;
-        if (on) self._classes.add(c); else self._classes.delete(c);
-      },
-    };
-  }
-
-  setAttribute(name, val) { this._attrs[name] = val; }
-
-  getAttribute(name) { return Object.prototype.hasOwnProperty.call(this._attrs, name) ? this._attrs[name] : null; }
-
-  addEventListener(type, fn) { (this._listeners[type] ||= []).push(fn); }
-
-  removeEventListener(type, fn) {
-    if (!this._listeners[type]) return;
-    this._listeners[type] = this._listeners[type].filter((f) => f !== fn);
-  }
-
-  appendChild(child) { this.children.push(child); child.parentNode = this; return child; }
-
-  append(...nodes) { nodes.forEach((n) => this.appendChild(n)); }
-
-  get innerHTML() { return ''; }
-
-  set innerHTML(v) { if (v === '') this.children = []; }
-
-  get childElementCount() { return this.children.length; }
-
-  querySelectorAll(selector) {
-    const tag = selector.toUpperCase();
-    const out = [];
-    const walk = (el) => {
-      for (const c of el.children) {
-        if (c.tagName === tag) out.push(c);
-        walk(c);
-      }
-    };
-    walk(this);
-    return out;
-  }
-
-  querySelector(selector) {
-    const isClass = selector.startsWith('.');
-    const key = isClass ? selector.slice(1) : selector.toUpperCase();
-    const matches = (el) => (isClass ? el._classes.has(key) : el.tagName === key);
-    const walk = (el) => {
-      for (const c of el.children) {
-        if (matches(c)) return c;
-        const found = walk(c);
-        if (found) return found;
-      }
-      return null;
-    };
-    return walk(this);
-  }
-
-  click() { (this._listeners.click || []).forEach((fn) => fn({ target: this })); }
-
-  // Harness only: records focus the way a browser reports it, so a test can
-  // ask what the app focused, and with which options (sweep F: preventScroll).
-  // Production code never reads this.
-  focus(options) {
-    globalThis.document.activeElement = this;
-    globalThis.document.lastFocusOptions = options;
-  }
-}
-
-function makeFakeDocument() {
-  const documentElement = new FakeElement('html');
-  const body = new FakeElement('body');
-  const byId = new Map();
-  const listeners = {};
-  return {
-    documentElement,
-    body,
-    activeElement: null,
-    visibilityState: 'visible',
-    getElementById(id) {
-      if (!byId.has(id)) byId.set(id, new FakeElement('div'));
-      return byId.get(id);
-    },
-    createElement: (tag) => new FakeElement(tag),
-    addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
-    removeEventListener(type, fn) {
-      if (!listeners[type]) return;
-      listeners[type] = listeners[type].filter((f) => f !== fn);
-    },
-    _listeners: listeners,
-  };
-}
-
-function makeFakeWindow() {
-  const listeners = {};
-  return {
-    matchMedia: () => ({ matches: false, addEventListener() {} }),
-    addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
-    removeEventListener(type, fn) {
-      if (!listeners[type]) return;
-      listeners[type] = listeners[type].filter((f) => f !== fn);
-    },
-    _listeners: listeners,
-  };
-}
-
-// Installed before the dynamic import below, per the brief: app.js reaches
-// for `document`/`window` at module scope.
+// app.js reaches for `document`/`window` at module scope (building its `els`
+// cache, wiring initSettings, registering the storage/visibilitychange/online
+// listeners, and calling render() once), so these are installed before the
+// dynamic import below. The shared fake returns null for an unmounted id, as
+// a browser does, so every id index.html declares is mounted first: app.js
+// runs against the page it ships with, and an id it looks up that index.html
+// lacks is null here exactly as it would be in a browser.
 globalThis.window = makeFakeWindow();
 globalThis.document = makeFakeDocument();
+mountIds(globalThis.document, indexHtmlIds(readFileSync(new URL('../index.html', import.meta.url), 'utf8')));
 
 const item = (id, updatedAt) => ({ id, title: `t-${id}`, date: '2026-08-02', time: null, updatedAt });
 const state = (o = {}) => ({ schemaVersion: SCHEMA_VERSION, items: [], feeds: [], tombstones: [], ...o });
@@ -938,6 +792,20 @@ test('an idea returned by the model is normalised through the same split', async
 // in case that reasoning about sync.js is ever wrong.
 const SENTINEL = 'sentinel: renderSyncStatus has not run';
 
+// The settings panel's status line (#sync-status) exists only while Settings
+// is open; index.html does not declare it. A test that reads it mounts it,
+// standing in for an open panel, instead of relying on an earlier test having
+// left Settings open.
+function panelStatusLine() {
+  const doc = globalThis.document;
+  const existing = doc.getElementById(SYNC_STATUS_ID);
+  if (existing) return existing;
+  const el = doc.createElement('p');
+  el.id = SYNC_STATUS_ID;
+  doc.body.appendChild(el);
+  return el;
+}
+
 // Punchlist L63, decided 2026-10-19: the account READ carries the shared
 // download deadline (js/fetchtimeout.js) and a timed-out read is reported
 // exactly like being offline; the WRITE has none. Manual timers, not
@@ -1022,6 +890,7 @@ test('a sync whose apply runs out of storage on plaenicke.items reads as out of 
   const { encKey } = await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
   clearAdoptionPending();
   const blob = await encryptBlob(encKey, state({ items: [record({ id: 'pulled-big', title: 'Pulled' })] }));
+  const statusLine = panelStatusLine();
   const shell = globalThis.document.getElementById(SHELL_SYNC_STATUS_ID);
   shell.hidden = true;
   shell.textContent = '';
@@ -1057,7 +926,7 @@ test('a sync whose apply runs out of storage on plaenicke.items reads as out of 
   assert.deepEqual(requests, ['GET'], 'nothing is pushed after a failed apply');
   assert.equal(loadSyncState().lastError, 'QuotaError');
   assert.equal(shell.hidden, false, 'the app shell lights');
-  assert.match(globalThis.document.getElementById(SYNC_STATUS_ID).textContent, /run out of storage/);
+  assert.match(statusLine.textContent, /run out of storage/);
 });
 
 test('runSync records a lastError and lights the indicator when syncOnce itself rejects', async () => {
@@ -1067,6 +936,7 @@ test('runSync records a lastError and lights the indicator when syncOnce itself 
   clearAdoptionPending();
   saveItems([record({ id: 'crash-put', title: 'Crash put' })]);
   saveSyncState({ ...loadSyncState(), lastSyncedAt: '2026-08-01T00:00:00.000Z', lastError: null });
+  const statusLine = panelStatusLine();
   const shell = globalThis.document.getElementById(SHELL_SYNC_STATUS_ID);
   shell.hidden = true;
   shell.textContent = '';
@@ -1096,7 +966,7 @@ test('runSync records a lastError and lights the indicator when syncOnce itself 
   assert.equal(typeof lastError, 'string', 'a sync that crashed must be recorded as a failure');
   assert.equal(shell.hidden, false, 'and the app shell must say so without opening Settings');
   assert.match(shell.textContent, /\S/);
-  assert.match(globalThis.document.getElementById(SYNC_STATUS_ID).textContent, /^Sync problem: something went wrong\./,
+  assert.match(statusLine.textContent, /^Sync problem: something went wrong\./,
     'the recorded value must read as a sync problem in plain words');
 });
 
@@ -1154,7 +1024,7 @@ test('runSync does not proceed into its try/finally while adoption is pending', 
   const token = bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES)));
   await linkWithCode(token);
 
-  const statusEl = globalThis.document.getElementById(SYNC_STATUS_ID);
+  const statusEl = panelStatusLine();
   statusEl.textContent = SENTINEL;
   const syncStateBefore = JSON.stringify(loadSyncState());
 
