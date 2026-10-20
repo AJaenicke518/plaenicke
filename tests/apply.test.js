@@ -555,6 +555,35 @@ test('the To-do page lists open to-dos, and nothing else', async () => {
   assert.doesNotMatch(text, /Rework the shelves/, 'an idea is not a to-do');
 });
 
+// Owner decision: a manual add (title + date box) is an EVENT. It shows on the
+// calendar in event colours and is not a to-do. 'general' stays only as the
+// type of old records and makeItem's default.
+test('manual add creates an event: on the calendar, not on the To-do page', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const timers = installManualTimers(); // the add arms a 2 s sync timer; never fired here
+  try {
+    doc.getElementById('entry-text').value = 'Manual dinner';
+    doc.getElementById('entry-date').value = '2099-03-04';
+    doc.getElementById('entry-time').value = '';
+    doc.getElementById('entry-end').value = '';
+    click(doc.getElementById('add-btn'));
+  } finally {
+    timers.restore();
+  }
+  const stored = loadItems();
+  assert.equal(stored.length, 1, 'fixture check: the manual add stored one record');
+  assert.equal(stored[0].type, 'event');
+  assert.equal(stored[0].title, 'Manual dinner');
+  const row = itemList().children.find((li) => allText(li).includes('Manual dinner'));
+  assert.ok(row, 'a manual add shows on the calendar list');
+  assert.ok(row._classes.has('type-event'), 'in event colours');
+  assert.doesNotMatch(allText(todoList()), /Manual dinner/, 'an event is not a to-do');
+  seed([]);
+});
+
 // § 5: soonest first. The comparator is items.js's sortItemsByDate — the
 // repo's SINGLE ordering rule, reused rather than restated, because § 7.6
 // already flags one drifting second copy of it in feeds.js and a third would

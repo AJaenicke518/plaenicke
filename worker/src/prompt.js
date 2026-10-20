@@ -11,7 +11,7 @@
 // is not rejected loudly, it is silently replaced.
 //
 // js/preview.js keeps a separate list ON PURPOSE — different deploy unit, and
-// it must additionally carry 'general' for manual adds. tests/preview.test.js
+// it must additionally carry 'general' for old records (the edit sheet's menu). tests/preview.test.js
 // pins the two together as subset-plus-stated-difference.
 export const ITEM_TYPES = ['due', 'start', 'milestone', 'event', 'task', 'idea'];
 

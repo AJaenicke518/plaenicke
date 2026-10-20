@@ -80,8 +80,8 @@ test('the preview offers every type the Worker can return', () => {
 });
 
 // The other direction is NOT set equality, and this states why so the next
-// person does not "fix" it into one. 'general' is client-only: manual add
-// hard-codes it (js/app.js) and it is every pre-V6 record's type, but the
+// person does not "fix" it into one. 'general' is client-only: it is every
+// pre-V6 record's type (and older manual adds'), but the
 // model is never asked to produce it. Pinning the difference exactly means a
 // THIRD divergence still fails this test.
 test('the only type the preview offers that the Worker cannot return is general', () => {

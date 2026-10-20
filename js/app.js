@@ -234,13 +234,13 @@ export function addItems(list) {
   scheduleSync();
 }
 
-// Manual add: title box + date box, type defaults to general. Works with no network.
+// Manual add: title box + date box, type is always event. Works with no network.
 function handleManualAdd() {
   const title = els.text.value.trim();
   const date = els.date.value;
   if (!title || !date) { setMessage('For manual add, type a title and pick a date.'); return; }
   try {
-    addItems([{ title, date, type: 'general', time: els.time.value || null, endTime: els.end.value || null }]);
+    addItems([{ title, date, type: 'event', time: els.time.value || null, endTime: els.end.value || null }]);
   } catch (e) { setMessage(e.message); return; }
   els.text.value = ''; els.date.value = ''; els.time.value = ''; els.end.value = ''; els.end.hidden = true;
   setMessage('Added.');

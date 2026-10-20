@@ -12,8 +12,8 @@
 // directly (npm test recurses into worker/, so importing both is airtight
 // without coupling the two deploy units through a shared import).
 //
-// 'general' is deliberately client-only: manual add hard-codes it and it is
-// every pre-V6 record's type, but the model is never asked to produce it.
+// 'general' is deliberately client-only: it is every pre-V6 record's type
+// (and older manual adds'), but the model is never asked to produce it.
 export const TYPES = ['due', 'start', 'milestone', 'event', 'general', 'task', 'idea'];
 
 export function renderPreview(container, items, { onConfirm, onCancel }) {
