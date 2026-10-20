@@ -1733,6 +1733,109 @@ function installManualTimers() {
   };
 }
 
+// --- scheduleSync / syncInFlight / syncPending wiring (punchlist) ---------
+//
+// Before these, removing scheduleSync() from addItems or from deleteItem,
+// removing runSync's syncPending re-arm, and removing its syncInFlight guard
+// each passed the whole suite. Manual timers, for the reason given above.
+function linkedWithFetch(handler) {
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    if (String(url).includes('/data')) requests.push(method);
+    return handler(method);
+  };
+  return { requests, restore: () => { globalThis.fetch = originalFetch; } };
+}
+const emptyAccount = () => Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) });
+const putAccepted = () => Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 1 }) });
+
+test('wiring: addItems schedules a debounced sync that pushes the capture', async () => {
+  installFakeLocalStorage();
+  const { addItems } = await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  seed([]);
+  const net = linkedWithFetch((m) => (m === 'GET' ? emptyAccount() : putAccepted()));
+  const timers = installManualTimers();
+  try {
+    addItems([{ title: 'Pushed capture', date: '2099-05-01', type: 'general' }]);
+    assert.deepEqual(net.requests, [], 'the push is debounced');
+    assert.equal(timers.live(2000), 1, 'adding an item arms the 2 s sync timer');
+    timers.fire(2000);
+    await drain();
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  assert.deepEqual(net.requests, ['GET', 'PUT'], 'the capture reaches the account without waiting for a reload');
+  seed([]);
+});
+
+test('wiring: a committed delete schedules a debounced sync that pushes the tombstone', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  seed([record({ id: 'wire-del', title: 'Wire delete', date: '2099-05-02' })]);
+  const net = linkedWithFetch((m) => (m === 'GET' ? emptyAccount() : putAccepted()));
+  const timers = installManualTimers();
+  try {
+    click(deleteControlFor(itemList(), 'Wire delete'));
+    assert.equal(timers.live(2000), 0, 'fixture check: nothing is scheduled while Undo is offered');
+    timers.fire(5000);
+    assert.ok(tombstoned('wire-del'), 'fixture check: the toast expiry committed the delete');
+    assert.deepEqual(net.requests, [], 'the push is debounced');
+    assert.equal(timers.live(2000), 1, 'committing a delete arms the 2 s sync timer');
+    timers.fire(2000);
+    await drain();
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  assert.deepEqual(net.requests, ['GET', 'PUT'], 'the deletion reaches the account without waiting for a reload');
+  seed([]);
+});
+
+// One sync is held open on its GET. A second trigger arriving meanwhile must
+// neither start a concurrent sync (syncInFlight) nor be dropped (syncPending:
+// runSync's finally re-arms the debounce once the first one settles).
+test('wiring: a trigger during a sync waits for it, then runs once it settles', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  let releaseGet = null;
+  const net = linkedWithFetch((m) => {
+    if (m === 'GET' && !releaseGet) return new Promise((resolve) => { releaseGet = () => resolve({ ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) }); });
+    return m === 'GET' ? emptyAccount() : putAccepted();
+  });
+  const timers = installManualTimers();
+  let afterFirst;
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    await drain();
+    assert.deepEqual(net.requests, ['GET'], 'fixture check: the first sync is in flight');
+    for (const fn of globalThis.window._listeners.online) fn();
+    await drain();
+    assert.deepEqual(net.requests, ['GET'], 'a trigger during a sync must not start a second, concurrent one');
+    assert.equal(timers.live(2000), 0, 'and nothing is re-armed while the first is still running');
+    releaseGet();
+    await drain();
+    afterFirst = [...net.requests];
+    assert.equal(timers.live(2000), 1, 'the trigger that arrived mid-sync is re-armed once the first settles');
+    timers.fire(2000);
+    await drain();
+  } finally {
+    if (releaseGet) releaseGet();
+    timers.restore();
+    net.restore();
+  }
+  assert.equal(net.requests.length - afterFirst.length >= 1, true, 'the re-armed sync actually ran');
+  assert.equal(net.requests[afterFirst.length], 'GET', 'and it started with a fresh read');
+});
+
 test('edit: a Save through the sheet writes storage, bumps updatedAt and schedules a sync', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
