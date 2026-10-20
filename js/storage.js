@@ -1,6 +1,20 @@
 // storage.js — the ONLY file that touches localStorage.
 
+// WHO MAY WRITE EACH SYNCED KEY. The three synced keys are protected by
+// different invariants, and a writer added under the wrong one fails
+// silently. sync.js and linkui.js write none of them: merged state reaches
+// storage only through the injected applyState (app.js's applySyncedState).
+// tests/sync.test.js enforces that half for both files.
+
+// plaenicke.items — SOLE OWNERSHIP. Only app.js calls saveItems, and it saves
+// from its module-scope `items` snapshot rather than re-reading storage, so
+// any other writer in this tab is overwritten by app.js's next save. Another
+// tab's write reaches the snapshot through app.js's storage listener.
 export const STORAGE_KEY = 'plaenicke.items';
+// plaenicke.feeds — READ IMMEDIATELY BEFORE WRITE. Several writers (feeds.js's
+// removeFeed and applyRemoteFeeds, settings.js twice), each loading the list
+// and saving it in one synchronous step. A writer that holds a list across
+// an await, or keeps a snapshot and saves from it later, breaks this.
 export const FEEDS_KEY = 'plaenicke.feeds';
 const FEED_CACHE_KEY = 'plaenicke.feedCache';
 
@@ -69,6 +83,24 @@ export function serializeFeeds(feeds) {
   return JSON.stringify(feeds);
 }
 
+// THIS FILTER CAN DESTROY EVERY CALENDAR SUBSCRIPTION, silently and for good.
+// A feed it rejects is gone from loadFeeds(), and the next saveFeeds (any
+// colour tap, any sync apply) writes the list back without it. A feed URL is
+// a capability token nothing on screen can restore (CLAUDE.md, "Feed URLs are
+// unrecoverable").
+//
+// `color` and `hidden` are PER-DEVICE fields that never travel over the wire
+// (spec 6.3: toWire strips them, merge.js's pickFeed hands a first-seen feed
+// over with color: null, feeds.js's applyRemoteFeeds assigns one). So a feed
+// reaching this filter from a sync is exactly the shape it rejects unless
+// applyRemoteFeeds did its job. The three call-site warnings live at pickFeed
+// (js/merge.js), applyRemoteFeeds (js/feeds.js) and syncOnce (js/sync.js).
+//
+// Before you change it: adding a required field drops every stored feed that
+// predates it (backfill it in the .map below instead, as updatedAt is);
+// adding a per-device field means applyRemoteFeeds must assign it, or every
+// feed pulled from another device is dropped here; relaxing a check lets junk
+// reach every render site.
 export function deserializeFeeds(json) {
   if (!json) return [];
   let parsed;
@@ -114,11 +146,22 @@ export function saveFeeds(feeds) {
 // --- tombstones ---
 // Deletions live here, NOT in plaenicke.items: a tombstone has no title/date,
 // so deserializeItems would discard it on the next load and the deletion would
-// be lost. Cleared only once a sync has acknowledged them. See spec 5.6.
+// be lost. See spec 5.6.
 
+// plaenicke.syncTombstones — TWO KINDS OF WRITE, both synchronous.
+// addTombstone (app.js's deleteItem, feeds.js's removeFeed) is a
+// read-modify-write of one entry. app.js's applySyncedState is a FULL
+// OVERWRITE, saveTombstones(written.tombstones), from a list it loaded at its
+// own start; that is correct only because nothing between that load and the
+// save awaits, and the one tombstone written in between (applyRemoteFeeds's
+// removeFeed) is for a feed that written.tombstones already covers. Any
+// asynchronous tombstone writer breaks the overwrite.
+// Tombstones are NOT kept until every device has seen them: merge() drops any
+// that suppresses nothing and is more than 90 days older than the earlier of
+// the device clock and the newest data (js/merge.js's prune), so a device
+// offline for longer can bring a deleted record back (spec § 12). That prune
+// is the only one; nothing in this file ages tombstones out.
 export const TOMBSTONES_KEY = 'plaenicke.syncTombstones';
-const TOMBSTONE_MAX_AGE_DAYS = 90;
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 export function loadTombstones() {
   const json = localStorage.getItem(TOMBSTONES_KEY);
@@ -158,17 +201,6 @@ export function addTombstone(id, kind, deletedAt) {
   const kept = existing.filter(t => !(t.id === id && t.kind === kind));
   kept.push({ id, kind, deletedAt });
   saveTombstones(kept);
-}
-
-export function pruneTombstones(list, now, maxAgeDays = TOMBSTONE_MAX_AGE_DAYS) {
-  const cutoff = now.getTime() - maxAgeDays * DAY_MS;
-  return list.filter(t => {
-    const parsed = Date.parse(t.deletedAt);
-    // An unparseable deletedAt must not cause a tombstone to be dropped:
-    // losing it would let the deleted item resurrect on the next sync.
-    if (Number.isNaN(parsed)) return true;
-    return parsed >= cutoff;
-  });
 }
 
 // --- feed cache ---
@@ -217,9 +249,13 @@ export function saveFeedCache(cache) {
   }
 }
 
-// --- sync credentials and cursor ---
+// --- sync credentials and sync state ---
 // The link code contains the encryption key, so it is a secret: never log it
 // and never render it outside the linking UI.
+//
+// syncState.version is recorded after each sync but read by nothing in the
+// sync protocol: syncOnce PUTs against the version its own GET returned. Its
+// projection in loadSyncState is hygiene, not a guard.
 
 export const AUTH_KEY = 'plaenicke.auth';
 export const SYNC_STATE_KEY = 'plaenicke.syncState';

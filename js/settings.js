@@ -529,7 +529,7 @@ export function initSettings({
     //
     // MOUNTED HERE, not from initSettings, and against its own sub-element.
     // open() rebuilds the whole panel on every click and close() does
-    // `host.innerHTML = ''` (:65, :78), so a single initLinkUI call from
+    // `host.innerHTML = ''` (both in initSettings, above), so a single initLinkUI call from
     // initSettings against the panel host would be wiped on the first open.
     // Mounting per open against a fresh `linkHost` is what keeps it
     // idempotent: no listener ever accumulates, because the element every

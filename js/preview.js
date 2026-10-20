@@ -12,8 +12,8 @@
 // directly (npm test recurses into worker/, so importing both is airtight
 // without coupling the two deploy units through a shared import).
 //
-// 'general' is deliberately client-only: manual add hard-codes it and it is
-// every pre-V6 record's type, but the model is never asked to produce it.
+// 'general' is deliberately client-only: it is every pre-V6 record's type
+// (and older manual adds'), but the model is never asked to produce it.
 export const TYPES = ['due', 'start', 'milestone', 'event', 'general', 'task', 'idea'];
 
 export function renderPreview(container, items, { onConfirm, onCancel }) {
@@ -39,8 +39,12 @@ export function renderPreview(container, items, { onConfirm, onCancel }) {
     date.value = it.date;
     date.addEventListener('input', () => { draft[i].date = date.value; });
 
+    // 'general' is offered only on a row that already holds it — the same
+    // rule as the edit sheet's menu (js/itemsheet.js): never a new choice,
+    // but a row's own type must be an option (see TYPES above).
     const type = document.createElement('select');
     for (const t of TYPES) {
+      if (t === 'general' && it.type !== 'general') continue;
       const opt = document.createElement('option');
       opt.value = t; opt.textContent = t;
       if (t === it.type) opt.selected = true;

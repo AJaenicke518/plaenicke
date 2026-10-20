@@ -43,7 +43,7 @@ export function isLinked() { return getLink() !== null; }
 export function isAdoptionPending() { return loadSyncState().adoptionPending === true; }
 
 export function clearAdoptionPending() {
-  saveSyncState({ ...loadSyncState(), adoptionPending: false });
+  saveSyncState({ adoptionPending: false }); // merges over the stored state
 }
 
 export async function linkWithCode(input) {

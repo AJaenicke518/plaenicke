@@ -2,6 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
+import {
+  makeFakeDocument, makeFakeWindow, mountIds, indexHtmlIds, allText, fire,
+} from './fake-dom.js';
 import { SCHEMA_VERSION } from '../js/merge.js';
 import {
   saveItems, loadItems, saveTombstones, saveFeeds, loadFeeds, loadTombstones, loadSyncState, saveSyncState,
@@ -9,7 +12,7 @@ import {
 } from '../js/storage.js';
 import { linkWithCode, clearAdoptionPending } from '../js/auth.js';
 import { FETCH_TIMEOUT_MS } from '../js/fetchtimeout.js';
-import { bytesToBase64url, TOKEN_BYTES } from '../js/crypto.js';
+import { bytesToBase64url, TOKEN_BYTES, encryptBlob } from '../js/crypto.js';
 import { SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID, SLOW_WRITE_MS } from '../js/linkui.js';
 import { addDays, startOfWeek, weekLabel } from '../js/timegrid.js';
 import { formatDayLabel } from '../js/freshness.js';
@@ -66,179 +69,97 @@ function reloadFromStorage(key) {
   assert.ok(armed.every((ms) => ms === 2000), `fixture reload armed an unexpected timer: ${armed}`);
 }
 
-// --- minimal fake DOM --------------------------------------------------
+// --- MockTimers: never leave a timer pending across reset() ----------------
 //
-// app.js reaches for `document`/`window` at module scope (building its
-// `els` cache, wiring initSettings, registering the storage/visibilitychange/
-// online listeners, and calling render() once). Node has no DOM and this
-// repo has no jsdom dependency (no new dependencies, per this task's
-// constraints), so this fakes only the slice app.js's import graph actually
-// touches. Modeled directly on tests/settings.test.js's fake DOM (Task 6),
-// extended with:
-//   - getElementById: app.js looks up ~30 ids by id, lazily creating one
-//     FakeElement per id (settings.test.js only ever needed two, passed in
-//     directly).
-//   - querySelector: dayview.js reads back its own prior scroll position via
-//     `container.querySelector('.day-grid')`.
-//   - a `_listeners` escape hatch on document/window so this file can invoke
-//     app.js's own registered storage-event listener directly (there is no
-//     other way to dispatch a synthetic 'storage' event from Node).
+// MockTimers handles are positions in a queue that restarts in every mock
+// session. A timer left PENDING when reset() runs keeps a handle that, in a
+// later session, points at an unrelated timer — and app.js's module-scope
+// syncTimer survives between tests, so the next scheduleSync's
+// clearTimeout(syncTimer) silently cancels whatever now sits there (a toast's
+// expiry, typically), and "X did not happen" assertions pass without testing
+// anything. Measured on Node 22: clearing a leftover pending handle cancels
+// an unrelated timer; clearing one that already FIRED does not. The usual
+// source is a toast expiring inside the test's last tick(5000), whose
+// commitDelete runs scheduleSync and arms a 2 s sync timer nobody fires.
+//
+// enableMockTimers tracks every live mocked setTimeout; resetMockTimers ticks
+// until none is pending (letting async callbacks settle between rounds) and
+// only then resets. It throws if the timers do not converge, rather than
+// resetting over a live one.
+let mockTimerTracker = null;
 
-class FakeElement {
-  constructor(tag) {
-    this.tagName = tag.toUpperCase();
-    this.children = [];
-    this.parentNode = null;
-    this._classes = new Set();
-    this._listeners = {};
-    this._attrs = {};
-    this.style = { setProperty(name, val) { this[name] = val; } };
-    this.dataset = {};
-    this.disabled = false;
-    this.hidden = false;
-    this.value = '';
-    this.textContent = '';
-  }
+function enableMockTimers(t, options) {
+  t.mock.timers.enable(options);
+  if (!options.apis.includes('setTimeout')) return;
+  const live = new Map();
+  const mockedSet = globalThis.setTimeout;
+  const mockedClear = globalThis.clearTimeout;
+  globalThis.setTimeout = (fn, ms, ...args) => {
+    const handle = mockedSet((...a) => { live.delete(handle); fn(...a); }, ms, ...args);
+    live.set(handle, ms || 0);
+    return handle;
+  };
+  globalThis.clearTimeout = (handle) => { live.delete(handle); mockedClear(handle); };
+  mockTimerTracker = { t, live };
+}
 
-  get className() { return [...this._classes].join(' '); }
+const pendingMockTimers = () => (mockTimerTracker ? mockTimerTracker.live.size : 0);
 
-  set className(v) { this._classes = new Set(String(v).split(' ').filter(Boolean)); }
-
-  get classList() {
-    const self = this;
-    return {
-      // The real classList.add THROWS InvalidCharacterError on a token
-      // containing whitespace. itemTypeClass can now return two tokens
-      // ('type-task done'), so a fake that silently accepted one would let a
-      // call site pass in a browser-fatal string and stay green here.
-      add(...cs) {
-        for (const c of cs) {
-          assert.doesNotMatch(String(c), /\s/, `classList.add token must not contain whitespace: "${c}"`);
-          self._classes.add(c);
+async function resetMockTimers(t, maxRounds = 20) {
+  const tracker = mockTimerTracker;
+  mockTimerTracker = null;
+  try {
+    if (tracker && tracker.t === t) {
+      for (let round = 0; tracker.live.size > 0; round += 1) {
+        if (round >= maxRounds) {
+          throw new Error(`mock timers did not settle after ${maxRounds} rounds: ${[...tracker.live.values()]} ms still pending`);
         }
-      },
-      remove(c) { self._classes.delete(c); },
-      contains(c) { return self._classes.has(c); },
-      toggle(c, force) {
-        const on = force === undefined ? !self._classes.has(c) : force;
-        if (on) self._classes.add(c); else self._classes.delete(c);
-      },
-    };
-  }
-
-  setAttribute(name, val) { this._attrs[name] = val; }
-
-  getAttribute(name) { return Object.prototype.hasOwnProperty.call(this._attrs, name) ? this._attrs[name] : null; }
-
-  addEventListener(type, fn) { (this._listeners[type] ||= []).push(fn); }
-
-  removeEventListener(type, fn) {
-    if (!this._listeners[type]) return;
-    this._listeners[type] = this._listeners[type].filter((f) => f !== fn);
-  }
-
-  appendChild(child) { this.children.push(child); child.parentNode = this; return child; }
-
-  append(...nodes) { nodes.forEach((n) => this.appendChild(n)); }
-
-  get innerHTML() { return ''; }
-
-  set innerHTML(v) { if (v === '') this.children = []; }
-
-  get childElementCount() { return this.children.length; }
-
-  querySelectorAll(selector) {
-    const tag = selector.toUpperCase();
-    const out = [];
-    const walk = (el) => {
-      for (const c of el.children) {
-        if (c.tagName === tag) out.push(c);
-        walk(c);
+        t.mock.timers.tick(Math.max(...tracker.live.values()));
+        for (let i = 0; i < 20; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
       }
-    };
-    walk(this);
-    return out;
-  }
-
-  querySelector(selector) {
-    const isClass = selector.startsWith('.');
-    const key = isClass ? selector.slice(1) : selector.toUpperCase();
-    const matches = (el) => (isClass ? el._classes.has(key) : el.tagName === key);
-    const walk = (el) => {
-      for (const c of el.children) {
-        if (matches(c)) return c;
-        const found = walk(c);
-        if (found) return found;
-      }
-      return null;
-    };
-    return walk(this);
-  }
-
-  click() { (this._listeners.click || []).forEach((fn) => fn({ target: this })); }
-
-  // Harness only: records focus the way a browser reports it, so a test can
-  // ask what the app focused, and with which options (sweep F: preventScroll).
-  // Production code never reads this.
-  focus(options) {
-    globalThis.document.activeElement = this;
-    globalThis.document.lastFocusOptions = options;
+    }
+  } finally {
+    t.mock.timers.reset();
   }
 }
 
-function makeFakeDocument() {
-  const documentElement = new FakeElement('html');
-  const body = new FakeElement('body');
-  const byId = new Map();
-  const listeners = {};
-  return {
-    documentElement,
-    body,
-    activeElement: null,
-    visibilityState: 'visible',
-    getElementById(id) {
-      if (!byId.has(id)) byId.set(id, new FakeElement('div'));
-      return byId.get(id);
-    },
-    createElement: (tag) => new FakeElement(tag),
-    addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
-    removeEventListener(type, fn) {
-      if (!listeners[type]) return;
-      listeners[type] = listeners[type].filter((f) => f !== fn);
-    },
-    _listeners: listeners,
-  };
-}
+// Before this helper, four tests here reset with a 2 s sync timer still
+// pending (the three "delete:" tests that tick a toast to expiry, and the
+// sheet's Delete test).
+test('resetMockTimers fires timers armed by timers, and leaves none pending', async (t) => {
+  enableMockTimers(t, { apis: ['setTimeout'] });
+  const fired = [];
+  setTimeout(() => { fired.push(5000); setTimeout(() => { fired.push(2000); }, 2000); }, 5000);
+  const cancelled = setTimeout(() => { fired.push('cancelled'); }, 100);
+  clearTimeout(cancelled);
+  assert.equal(pendingMockTimers(), 1);
+  await resetMockTimers(t);
+  assert.deepEqual(fired, [5000, 2000]);
+  assert.equal(pendingMockTimers(), 0);
+});
 
-function makeFakeWindow() {
-  const listeners = {};
-  return {
-    matchMedia: () => ({ matches: false, addEventListener() {} }),
-    addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
-    removeEventListener(type, fn) {
-      if (!listeners[type]) return;
-      listeners[type] = listeners[type].filter((f) => f !== fn);
-    },
-    _listeners: listeners,
-  };
-}
+test('resetMockTimers throws rather than reset over a timer that never settles', async (t) => {
+  enableMockTimers(t, { apis: ['setTimeout'] });
+  const rearm = () => { setTimeout(rearm, 1000); };
+  rearm();
+  await assert.rejects(resetMockTimers(t, 5), /did not settle after 5 rounds/);
+});
 
-// Installed before the dynamic import below, per the brief: app.js reaches
-// for `document`/`window` at module scope.
+// --- fake DOM (tests/fake-dom.js) ------------------------------------------
+//
+// app.js reaches for `document`/`window` at module scope (building its `els`
+// cache, wiring initSettings, registering the storage/visibilitychange/online
+// listeners, and calling render() once), so these are installed before the
+// dynamic import below. The shared fake returns null for an unmounted id, as
+// a browser does, so every id index.html declares is mounted first: app.js
+// runs against the page it ships with, and an id it looks up that index.html
+// lacks is null here exactly as it would be in a browser.
 globalThis.window = makeFakeWindow();
 globalThis.document = makeFakeDocument();
+mountIds(globalThis.document, indexHtmlIds(readFileSync(new URL('../index.html', import.meta.url), 'utf8')));
 
 const item = (id, updatedAt) => ({ id, title: `t-${id}`, date: '2026-08-02', time: null, updatedAt });
 const state = (o = {}) => ({ schemaVersion: SCHEMA_VERSION, items: [], feeds: [], tombstones: [], ...o });
-
-// Recursively concatenates textContent across a FakeElement subtree — the
-// only way to inspect what renderList() actually put on screen, since a
-// list item's title lives on a nested <span>, not on the <li> itself.
-function allText(el) {
-  let out = el.textContent || '';
-  for (const c of el.children) out += ` ${allText(c)}`;
-  return out;
-}
 
 // --- V6 step 0: the shell indicator must be painted at LOAD ----------------
 //
@@ -309,6 +230,58 @@ test('applySyncedState returns what it wrote', async () => {
   const { applySyncedState } = await import('../js/app.js');
   const written = applySyncedState(state({ items: [item('a', '2026-08-01T00:00:00.000Z')] }));
   assert.deepEqual(written.items.map((i) => i.id), loadItems().map((i) => i.id));
+});
+
+// THE TWO MERGES MUST AGREE ON WHICH TOMBSTONES ARE STILL DOING WORK. syncOnce
+// merges local with the server, then hands the result to applySyncedState,
+// which merges AGAIN against live storage and returns what is pushed. When
+// only the SERVER holds a record this device deleted over 90 days ago, the
+// first merge keeps the tombstone (it suppresses the server's copy) and drops
+// the record. Live storage never held the record, so in the re-merge the
+// tombstone suppressed nothing and was pruned: the push carried neither the
+// record nor its tombstone, and the next device still holding it pushed it
+// straight back. Driven through the real syncOnce and applySyncedState.
+test('sync: an old tombstone for a record only the server holds is pushed, not pruned by the apply re-merge', async () => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  const { syncOnce } = await import('../js/sync.js');
+  const { getLink } = await import('../js/auth.js');
+  const { decryptBlob } = await import('../js/crypto.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const ago = (days) => new Date(Date.now() - days * DAY_MS).toISOString();
+  const current = record({ id: 'srv-current', updatedAt: ago(0) });
+  saveItems([current]);
+  saveTombstones([
+    { id: 'srv-only', kind: 'item', deletedAt: ago(100) },
+    { id: 'srv-only-feed', kind: 'feed', deletedAt: ago(100) },
+    // Suppresses nothing on either side: the re-merge must still prune it.
+    { id: 'idle', kind: 'item', deletedAt: ago(100) },
+  ]);
+  const blob = await encryptBlob(getLink().encKey, state({
+    items: [current, record({ id: 'srv-only', updatedAt: ago(200) })],
+    feeds: [{ id: 'srv-only-feed', url: 'https://example.invalid/srv.ics', name: 'S', updatedAt: ago(200) }],
+  }));
+  const puts = [];
+  const status = await syncOnce({
+    readFetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ version: 7, blob }) }),
+    fetchImpl: async (url, opts) => { puts.push(opts); return { ok: true, status: 200, json: async () => ({ version: 8 }) }; },
+    now: () => new Date(),
+    apiBase: 'https://example.invalid',
+    applyState: applySyncedState,
+  });
+  assert.equal(status.status, 'ok', 'fixture check: the sync succeeded');
+  assert.equal(puts.length, 1, 'fixture check: the merge was pushed');
+  const pushed = await decryptBlob(getLink().encKey, JSON.parse(puts[0].body).blob);
+  assert.deepEqual(pushed.items.map((i) => i.id), ['srv-current'], 'fixture check: the deletion applied');
+  assert.deepEqual(pushed.feeds, [], 'fixture check: the feed deletion applied');
+  assert.deepEqual(pushed.tombstones.map((t) => `${t.kind}:${t.id}`), ['feed:srv-only-feed', 'item:srv-only'],
+    'the push must carry the tombstones, or the next device holding the records pushes them back');
+  assert.deepEqual(loadTombstones().map((t) => `${t.kind}:${t.id}`).sort(), ['feed:srv-only-feed', 'item:srv-only'],
+    'and this device keeps them, so its next merge still suppresses the records');
+  saveTombstones([]);
+  seed([]);
 });
 
 // --- no discard path (Replace this device removed, 2026-10-19) -------------
@@ -456,7 +429,7 @@ test('removing a calendar in Settings pushes it, without waiting for a reload', 
     requests.push({ url: String(url), method: (opts && opts.method) || 'GET' });
     return { ok: true, status: 200, json: async () => ({ version: 0, blob: '' }), text: async () => '' };
   };
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     const settingsBtn = globalThis.document.getElementById('settings-btn');
     for (const fn of settingsBtn._listeners.click || []) fn({ target: settingsBtn });
@@ -475,7 +448,7 @@ test('removing a calendar in Settings pushes it, without waiting for a reload', 
     // microtask queue (only setTimeout is mocked).
     for (let i = 0; i < 50; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
   } finally {
-    t.mock.timers.reset();
+    await resetMockTimers(t);
     globalThis.fetch = originalFetch;
   }
 
@@ -535,8 +508,6 @@ function click(el) {
     assert.ok(prevented, 'the form submission was not cancelled; the page would navigate');
   }
 }
-
-function fire(el, type) { (el._listeners[type] || []).forEach((fn) => fn({ target: el })); }
 
 // Walks for the first checkbox whose aria-label names this title.
 function checkboxFor(root, title) {
@@ -623,6 +594,35 @@ test('the To-do page lists open to-dos, and nothing else', async () => {
   assert.doesNotMatch(text, /Dentist appointment/, 'an appointment is not a to-do');
   assert.doesNotMatch(text, /Someones birthday/, 'a general item is not a to-do — birthdays are not chores');
   assert.doesNotMatch(text, /Rework the shelves/, 'an idea is not a to-do');
+});
+
+// Owner decision: a manual add (title + date box) is an EVENT. It shows on the
+// calendar in event colours and is not a to-do. 'general' stays only as the
+// type of old records and makeItem's default.
+test('manual add creates an event: on the calendar, not on the To-do page', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const timers = installManualTimers(); // the add arms a 2 s sync timer; never fired here
+  try {
+    doc.getElementById('entry-text').value = 'Manual dinner';
+    doc.getElementById('entry-date').value = '2099-03-04';
+    doc.getElementById('entry-time').value = '';
+    doc.getElementById('entry-end').value = '';
+    click(doc.getElementById('add-btn'));
+  } finally {
+    timers.restore();
+  }
+  const stored = loadItems();
+  assert.equal(stored.length, 1, 'fixture check: the manual add stored one record');
+  assert.equal(stored[0].type, 'event');
+  assert.equal(stored[0].title, 'Manual dinner');
+  const row = itemList().children.find((li) => allText(li).includes('Manual dinner'));
+  assert.ok(row, 'a manual add shows on the calendar list');
+  assert.ok(row._classes.has('type-event'), 'in event colours');
+  assert.doesNotMatch(allText(todoList()), /Manual dinner/, 'an event is not a to-do');
+  seed([]);
 });
 
 // § 5: soonest first. The comparator is items.js's sortItemsByDate — the
@@ -742,7 +742,7 @@ test('ticking a to-do schedules a sync', async (t) => {
     requests.push({ url: String(url), method: (opts && opts.method) || 'GET' });
     return { ok: true, status: 200, json: async () => ({ version: 0, blob: '' }), text: async () => '' };
   };
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     const box = checkboxFor(todoList(), 'Renew the passport');
     box.checked = true;
@@ -752,7 +752,7 @@ test('ticking a to-do schedules a sync', async (t) => {
     t.mock.timers.tick(2000);
     for (let i = 0; i < 50; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
   } finally {
-    t.mock.timers.reset();
+    await resetMockTimers(t);
     globalThis.fetch = originalFetch;
   }
   assert.ok(requests.some((r) => r.url.includes('/data') && r.method === 'PUT'),
@@ -862,6 +862,20 @@ test('an idea returned by the model is normalised through the same split', async
 // in case that reasoning about sync.js is ever wrong.
 const SENTINEL = 'sentinel: renderSyncStatus has not run';
 
+// The settings panel's status line (#sync-status) exists only while Settings
+// is open; index.html does not declare it. A test that reads it mounts it,
+// standing in for an open panel, instead of relying on an earlier test having
+// left Settings open.
+function panelStatusLine() {
+  const doc = globalThis.document;
+  const existing = doc.getElementById(SYNC_STATUS_ID);
+  if (existing) return existing;
+  const el = doc.createElement('p');
+  el.id = SYNC_STATUS_ID;
+  doc.body.appendChild(el);
+  return el;
+}
+
 // Punchlist L63, decided 2026-10-19: the account READ carries the shared
 // download deadline (js/fetchtimeout.js) and a timed-out read is reported
 // exactly like being offline; the WRITE has none. Manual timers, not
@@ -936,6 +950,55 @@ test('runSync never puts a deadline on the write: a slow PUT is waited for and l
 // with a body of `null`, which throws reading `.version` — and runSync's catch
 // used to only console.log it: lastError stayed null, the indicator stayed
 // dark, and sync stopped with nothing on screen. A crash must light the dot.
+// Spec § 7 requires a quota failure to be surfaced. saveItems translates it
+// (js/storage.js), and the user-action paths are tested, but nothing drove
+// one arriving from a SYNC: the pull's apply runs app.js's real
+// applySyncedState, whose saveItems is the first write.
+test('a sync whose apply runs out of storage on plaenicke.items reads as out of storage', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const { encKey } = await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  const blob = await encryptBlob(encKey, state({ items: [record({ id: 'pulled-big', title: 'Pulled' })] }));
+  const statusLine = panelStatusLine();
+  const shell = globalThis.document.getElementById(SHELL_SYNC_STATUS_ID);
+  shell.hidden = true;
+  shell.textContent = '';
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    requests.push(method);
+    if (method === 'GET') return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 3, blob }) });
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 4 }) });
+  };
+  const realSet = localStorage.setItem.bind(localStorage);
+  let refused = 0;
+  localStorage.setItem = (k, v) => {
+    if (k === 'plaenicke.items') {
+      refused += 1;
+      const e = new Error('full');
+      e.name = 'QuotaExceededError';
+      throw e;
+    }
+    return realSet(k, v);
+  };
+  const timers = installManualTimers();
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    await drain();
+  } finally {
+    timers.restore();
+    localStorage.setItem = realSet;
+    globalThis.fetch = originalFetch;
+  }
+  assert.ok(refused > 0, 'fixture check: the apply reached the items write');
+  assert.deepEqual(requests, ['GET'], 'nothing is pushed after a failed apply');
+  assert.equal(loadSyncState().lastError, 'QuotaError');
+  assert.equal(shell.hidden, false, 'the app shell lights');
+  assert.match(statusLine.textContent, /run out of storage/);
+});
+
 test('runSync records a lastError and lights the indicator when syncOnce itself rejects', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
@@ -943,6 +1006,7 @@ test('runSync records a lastError and lights the indicator when syncOnce itself 
   clearAdoptionPending();
   saveItems([record({ id: 'crash-put', title: 'Crash put' })]);
   saveSyncState({ ...loadSyncState(), lastSyncedAt: '2026-08-01T00:00:00.000Z', lastError: null });
+  const statusLine = panelStatusLine();
   const shell = globalThis.document.getElementById(SHELL_SYNC_STATUS_ID);
   shell.hidden = true;
   shell.textContent = '';
@@ -972,7 +1036,7 @@ test('runSync records a lastError and lights the indicator when syncOnce itself 
   assert.equal(typeof lastError, 'string', 'a sync that crashed must be recorded as a failure');
   assert.equal(shell.hidden, false, 'and the app shell must say so without opening Settings');
   assert.match(shell.textContent, /\S/);
-  assert.match(globalThis.document.getElementById(SYNC_STATUS_ID).textContent, /^Sync problem: something went wrong\./,
+  assert.match(statusLine.textContent, /^Sync problem: something went wrong\./,
     'the recorded value must read as a sync problem in plain words');
 });
 
@@ -1030,7 +1094,7 @@ test('runSync does not proceed into its try/finally while adoption is pending', 
   const token = bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES)));
   await linkWithCode(token);
 
-  const statusEl = globalThis.document.getElementById(SYNC_STATUS_ID);
+  const statusEl = panelStatusLine();
   statusEl.textContent = SENTINEL;
   const syncStateBefore = JSON.stringify(loadSyncState());
 
@@ -1378,9 +1442,10 @@ test('open: a Google feed event links to that day in Google Calendar, unpadded',
   }
 });
 
-test('open: an item of an unknown type shows a message and mounts no sheet', async () => {
+test('open: an item of an unknown type shows a message and mounts no sheet', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
+  const logged = t.mock.method(console, 'error', () => {});
   seed([record({ id: 'open-bogus', type: 'bogus', title: 'Open me with a strange type', date: '2099-02-01' })]);
   globalThis.document.getElementById('message').textContent = '';
   assert.equal(sheetHost().children.length, 0, 'fixture check: no sheet left over from an earlier test');
@@ -1388,8 +1453,10 @@ test('open: an item of an unknown type shows a message and mounts no sheet', asy
   assert.ok(btn, 'fixture check: the row renders');
   assert.doesNotThrow(() => click(btn), 'a sheet that refuses to open must not throw out of the tap');
   assert.equal(sheetHost().children.length, 0, 'no sheet may be mounted');
-  assert.match(messageText(), /can't be edited here/);
-  assert.match(messageText(), /bogus/, 'the message carries the reason');
+  assert.equal(messageText(), "This item can't be edited here.",
+    'plain wording: the internal error is not shown to the user');
+  assert.equal(logged.mock.callCount(), 1, 'the internal detail goes to the console instead');
+  assert.match(logged.mock.calls[0].arguments.map(String).join(' '), /Unknown type: bogus/);
   seed([]);
 });
 
@@ -1399,7 +1466,7 @@ test("open: the sheet's Delete deletes through the existing path, tombstone and 
   installFakeLocalStorage();
   await import('../js/app.js');
   seed([record({ id: 'open-del1', title: 'Open me and delete', date: '2099-02-01' })]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(openControlFor(itemList(), 'Open me and delete'));
     click(sheetHost().querySelector('.sheet-delete'));
@@ -1411,7 +1478,7 @@ test("open: the sheet's Delete deletes through the existing path, tombstone and 
     assert.ok(loadTombstones().some((ts) => ts.id === 'open-del1'), 'and the delete is tombstoned so it syncs');
     assert.equal(toastHost().children.length, 0, 'no toast is left showing');
   } finally {
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
 });
 
@@ -1467,7 +1534,7 @@ test('delete: every delete control hides the item, offers Undo, and commits only
     ['To-do', () => todoList(), record({ id: 'del-site-todo', type: 'task', title: 'Del via todo', date: '2099-03-02' })],
     ['Ideas', () => ideaList(), record({ id: 'del-site-idea', type: 'idea', title: 'Del via ideas', date: today })],
   ];
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     for (const [name, root, rec] of sites) {
       seed([rec]);
@@ -1485,7 +1552,7 @@ test('delete: every delete control hides the item, offers Undo, and commits only
       assert.equal(toastHost().children.length, 0, `${name}: no toast is left showing`);
     }
   } finally {
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   seed([]);
 });
@@ -1501,7 +1568,7 @@ test('delete: a pending delete is hidden from the List, Day, To-do and Ideas pag
   for (const [root, title] of [[itemList(), 'Del hide task'], [dayBody(), 'Del hide task'], [todoList(), 'Del hide task'], [ideaList(), 'Del hide idea']]) {
     assert.match(allText(root), new RegExp(title), `fixture check: ${title} is on screen before the delete`);
   }
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(deleteControlFor(todoList(), 'Del hide task'));
     for (const root of [itemList(), dayBody(), todoList()]) {
@@ -1514,7 +1581,7 @@ test('delete: a pending delete is hidden from the List, Day, To-do and Ideas pag
     assert.equal(toastHost().children.length, 0, 'no toast is left showing');
     assert.ok(tombstoned('del-hide-task') && tombstoned('del-hide-idea'));
   } finally {
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   seed([]);
 });
@@ -1523,7 +1590,7 @@ test('delete: Undo before expiry brings the item back and writes no tombstone', 
   installFakeLocalStorage();
   await import('../js/app.js');
   seed([record({ id: 'del-undo', title: 'Del then undo', date: '2099-03-03' })]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(deleteControlFor(itemList(), 'Del then undo'));
     assert.doesNotMatch(allText(itemList()), /Del then undo/, 'fixture check: hidden while pending');
@@ -1535,7 +1602,7 @@ test('delete: Undo before expiry brings the item back and writes no tombstone', 
     assert.ok(stored('del-undo'), 'and the item is still stored');
     assert.match(allText(itemList()), /Del then undo/);
   } finally {
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   seed([]);
 });
@@ -1547,7 +1614,7 @@ test('delete: going to the background commits a pending delete and leaves no Und
   installFakeLocalStorage();
   await import('../js/app.js');
   seed([record({ id: 'del-hidden', title: 'Del then hide', date: '2099-03-04' })]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(deleteControlFor(itemList(), 'Del then hide'));
     assert.ok(toastHost().querySelector('.toast-undo'), 'fixture check: Undo is showing');
@@ -1562,7 +1629,7 @@ test('delete: going to the background commits a pending delete and leaves no Und
     assert.equal(toastHost().children.length, 0, 'no stale Undo remains for a delete that is already saved');
   } finally {
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   assert.equal(toastHost().children.length, 0);
   seed([]);
@@ -1575,7 +1642,7 @@ test('delete: deleting a second item commits the first at once and leaves the se
     record({ id: 'del-a', title: 'Del first A', date: '2099-03-05' }),
     record({ id: 'del-b', title: 'Del second B', date: '2099-03-06' }),
   ]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(deleteControlFor(itemList(), 'Del first A'));
     click(deleteControlFor(itemList(), 'Del second B'));
@@ -1589,7 +1656,7 @@ test('delete: deleting a second item commits the first at once and leaves the se
     assert.ok(tombstoned('del-b'));
     assert.equal(toastHost().children.length, 0, 'no toast is left showing');
   } finally {
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   seed([]);
 });
@@ -1604,7 +1671,7 @@ test('delete: opening another item commits a pending delete and clears its toast
     record({ id: 'del-open-a', title: 'Del before open', date: '2099-03-07' }),
     record({ id: 'del-open-b', title: 'Del open me after', date: '2099-03-08' }),
   ]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(deleteControlFor(itemList(), 'Del before open'));
     assert.ok(toastHost().querySelector('.toast-undo'), 'fixture check: Undo is showing');
@@ -1617,7 +1684,7 @@ test('delete: opening another item commits a pending delete and clears its toast
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   assert.equal(toastHost().children.length, 0);
   seed([]);
@@ -1629,7 +1696,7 @@ test('delete: Undo, then going to the background, keeps the item', async (t) => 
   installFakeLocalStorage();
   await import('../js/app.js');
   seed([record({ id: 'del-undo-hide', title: 'Del undo then hide', date: '2099-03-09' })]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(deleteControlFor(itemList(), 'Del undo then hide'));
     click(toastHost().querySelector('.toast-undo'));
@@ -1645,7 +1712,7 @@ test('delete: Undo, then going to the background, keeps the item', async (t) => 
     assert.match(allText(itemList()), /Del undo then hide/);
     assert.equal(toastHost().children.length, 0);
   } finally {
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   seed([]);
 });
@@ -1672,7 +1739,7 @@ test('review: a delete whose commit fails is shown again, with the error', async
   installFakeLocalStorage();
   await import('../js/app.js');
   seed([record({ id: 'rv-fail', title: 'Cannot be deleted', date: '2099-03-03' })]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   const real = localStorage.setItem.bind(localStorage);
   try {
     click(deleteControlFor(itemList(), 'Cannot be deleted'));
@@ -1684,7 +1751,7 @@ test('review: a delete whose commit fails is shown again, with the error', async
     t.mock.timers.tick(5000);
   } finally {
     localStorage.setItem = real;
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   assert.match(allText(itemList()), /Cannot be deleted/, 'a delete that did not happen must not look like it did');
   assert.match(messageText(), /quota/i);
@@ -1733,6 +1800,109 @@ function installManualTimers() {
   };
 }
 
+// --- scheduleSync / syncInFlight / syncPending wiring (punchlist) ---------
+//
+// Before these, removing scheduleSync() from addItems or from deleteItem,
+// removing runSync's syncPending re-arm, and removing its syncInFlight guard
+// each passed the whole suite. Manual timers, for the reason given above.
+function linkedWithFetch(handler) {
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    if (String(url).includes('/data')) requests.push(method);
+    return handler(method);
+  };
+  return { requests, restore: () => { globalThis.fetch = originalFetch; } };
+}
+const emptyAccount = () => Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) });
+const putAccepted = () => Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 1 }) });
+
+test('wiring: addItems schedules a debounced sync that pushes the capture', async () => {
+  installFakeLocalStorage();
+  const { addItems } = await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  seed([]);
+  const net = linkedWithFetch((m) => (m === 'GET' ? emptyAccount() : putAccepted()));
+  const timers = installManualTimers();
+  try {
+    addItems([{ title: 'Pushed capture', date: '2099-05-01', type: 'general' }]);
+    assert.deepEqual(net.requests, [], 'the push is debounced');
+    assert.equal(timers.live(2000), 1, 'adding an item arms the 2 s sync timer');
+    timers.fire(2000);
+    await drain();
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  assert.deepEqual(net.requests, ['GET', 'PUT'], 'the capture reaches the account without waiting for a reload');
+  seed([]);
+});
+
+test('wiring: a committed delete schedules a debounced sync that pushes the tombstone', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  seed([record({ id: 'wire-del', title: 'Wire delete', date: '2099-05-02' })]);
+  const net = linkedWithFetch((m) => (m === 'GET' ? emptyAccount() : putAccepted()));
+  const timers = installManualTimers();
+  try {
+    click(deleteControlFor(itemList(), 'Wire delete'));
+    assert.equal(timers.live(2000), 0, 'fixture check: nothing is scheduled while Undo is offered');
+    timers.fire(5000);
+    assert.ok(tombstoned('wire-del'), 'fixture check: the toast expiry committed the delete');
+    assert.deepEqual(net.requests, [], 'the push is debounced');
+    assert.equal(timers.live(2000), 1, 'committing a delete arms the 2 s sync timer');
+    timers.fire(2000);
+    await drain();
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  assert.deepEqual(net.requests, ['GET', 'PUT'], 'the deletion reaches the account without waiting for a reload');
+  seed([]);
+});
+
+// One sync is held open on its GET. A second trigger arriving meanwhile must
+// neither start a concurrent sync (syncInFlight) nor be dropped (syncPending:
+// runSync's finally re-arms the debounce once the first one settles).
+test('wiring: a trigger during a sync waits for it, then runs once it settles', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  let releaseGet = null;
+  const net = linkedWithFetch((m) => {
+    if (m === 'GET' && !releaseGet) return new Promise((resolve) => { releaseGet = () => resolve({ ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) }); });
+    return m === 'GET' ? emptyAccount() : putAccepted();
+  });
+  const timers = installManualTimers();
+  let afterFirst;
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    await drain();
+    assert.deepEqual(net.requests, ['GET'], 'fixture check: the first sync is in flight');
+    for (const fn of globalThis.window._listeners.online) fn();
+    await drain();
+    assert.deepEqual(net.requests, ['GET'], 'a trigger during a sync must not start a second, concurrent one');
+    assert.equal(timers.live(2000), 0, 'and nothing is re-armed while the first is still running');
+    releaseGet();
+    await drain();
+    afterFirst = [...net.requests];
+    assert.equal(timers.live(2000), 1, 'the trigger that arrived mid-sync is re-armed once the first settles');
+    timers.fire(2000);
+    await drain();
+  } finally {
+    if (releaseGet) releaseGet();
+    timers.restore();
+    net.restore();
+  }
+  assert.equal(net.requests.length - afterFirst.length >= 1, true, 'the re-armed sync actually ran');
+  assert.equal(net.requests[afterFirst.length], 'GET', 'and it started with a fresh read');
+});
+
 test('edit: a Save through the sheet writes storage, bumps updatedAt and schedules a sync', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
@@ -1780,7 +1950,7 @@ test('edit: a cleared date is refused, storage is untouched, and the sheet says 
   seed([record({ id: 'edit-nodate', title: 'Keep my date', date: '2099-04-02' })]);
   const beforeRaw = rawStored();
   const beforeItems = loadItems();
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(openControlFor(itemList(), 'Keep my date'));
     sheetHost().querySelector('.sheet-date').value = '';
@@ -1794,7 +1964,7 @@ test('edit: a cleared date is refused, storage is untouched, and the sheet says 
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000); // a failed assertion must not leave a live toast behind
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   seed([]);
 });
@@ -1812,7 +1982,7 @@ test('edit: with an earlier item pending deletion, the edit lands on the right r
     record({ id: 'edit-i1-d', title: 'I1 fourth', date: '2099-04-06' }),
   ]);
   const beforeById = Object.fromEntries(loadItems().map((it) => [it.id, JSON.stringify(it)]));
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(openControlFor(itemList(), 'I1 third'));
     // Delete A while C's sheet is open (opening an item would commit it).
@@ -1836,7 +2006,7 @@ test('edit: with an earlier item pending deletion, the edit lands on the right r
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000); // a failed assertion must not leave a live toast behind
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   seed([]);
 });
@@ -1845,7 +2015,7 @@ test('edit: saving an item that is pending deletion is refused', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
   seed([record({ id: 'edit-pend', title: 'Pending edit', date: '2099-04-07' })]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(openControlFor(itemList(), 'Pending edit'));
     click(deleteControlFor(itemList(), 'Pending edit'));
@@ -1862,7 +2032,7 @@ test('edit: saving an item that is pending deletion is refused', async (t) => {
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000); // a failed assertion must not leave a live toast behind
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   seed([]);
 });
@@ -1871,7 +2041,7 @@ test('edit: Undo restores the edited field and keeps a field a sync changed in b
   installFakeLocalStorage();
   await import('../js/app.js');
   seed([record({ id: 'edit-undo', title: 'Undo me', date: '2099-04-08' })]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(openControlFor(itemList(), 'Undo me'));
     sheetHost().querySelector('.sheet-title').value = 'Undo me, renamed';
@@ -1890,7 +2060,7 @@ test('edit: Undo restores the edited field and keeps a field a sync changed in b
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000); // a failed assertion must not leave a live toast behind
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   seed([]);
 });
@@ -1907,7 +2077,7 @@ test('edit: Undo of a task -> idea switch restores the original task exactly', a
     notes: 'About the kitchen sink', date: '2099-04-09', time: '09:00', endTime: '10:00',
   });
   seed([original]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(openControlFor(itemList(), 'Call the plumber'));
     sheetHost().querySelector('.sheet-type').value = 'idea';
@@ -1926,7 +2096,7 @@ test('edit: Undo of a task -> idea switch restores the original task exactly', a
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000); // a failed assertion must not leave a live toast behind
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   seed([]);
 });
@@ -1936,7 +2106,7 @@ test('edit: a quota failure leaves the in-memory list unchanged and shows the er
   await import('../js/app.js');
   seed([record({ id: 'edit-quota', title: 'Quota original', date: '2099-04-10' })]);
   const beforeRaw = rawStored();
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   const real = localStorage.setItem.bind(localStorage);
   try {
     click(openControlFor(itemList(), 'Quota original'));
@@ -1960,7 +2130,7 @@ test('edit: a quota failure leaves the in-memory list unchanged and shows the er
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000); // a failed assertion must not leave a live toast behind
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   seed([]);
 });
@@ -1971,7 +2141,7 @@ test('edit: a type switch after a sync changed the notes keeps the synced notes'
   installFakeLocalStorage();
   await import('../js/app.js');
   seed([record({ id: 'edit-stale', type: 'task', title: 'Stale check', notes: 'notes as opened', date: '2099-04-11' })]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(openControlFor(itemList(), 'Stale check'));
     simulateSync([{ ...storedById('edit-stale'), notes: 'notes from the other device', updatedAt: '2026-08-20T00:00:00.000Z' }]);
@@ -1986,7 +2156,7 @@ test('edit: a type switch after a sync changed the notes keeps the synced notes'
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000); // a failed assertion must not leave a live toast behind
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   seed([]);
 });
@@ -1997,7 +2167,7 @@ test('edit: a sync carrying an older copy of the record keeps the edit, in stora
   const { applySyncedState } = await import('../js/app.js');
   const original = record({ id: 'edit-lww', title: 'Before the edit', date: '2099-04-12' });
   seed([original]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(openControlFor(itemList(), 'Before the edit'));
     sheetHost().querySelector('.sheet-title').value = 'After the edit';
@@ -2011,7 +2181,7 @@ test('edit: a sync carrying an older copy of the record keeps the edit, in stora
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000); // a failed assertion must not leave a live toast behind
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   seed([]);
 });
@@ -2024,7 +2194,7 @@ test('review: Undo of an item the other device deleted meanwhile says so', async
   const { applySyncedState } = await import('../js/app.js');
   const rec = record({ id: 'rv-remote', title: 'Deleted over there', date: '2099-04-01' });
   seed([rec]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(deleteControlFor(itemList(), 'Deleted over there'));
     applySyncedState(state({
@@ -2036,7 +2206,7 @@ test('review: Undo of an item the other device deleted meanwhile says so', async
     click(undo);
   } finally {
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   assert.match(messageText(), /deleted on your other device/i);
   assert.equal(toastHost().children.length, 0);
@@ -2055,7 +2225,7 @@ test('review4c: an Undo survives a sync that returns the already-pushed edit', a
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
   seed([record({ id: 'rv4-bump', title: 'R orig', date: '2099-06-01' })]);
-  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.parse('2026-09-23T12:00:00.000Z') });
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: Date.parse('2026-09-23T12:00:00.000Z') });
   try {
     click(openControlFor(itemList(), 'R orig'));
     sheetHost().querySelector('.sheet-title').value = 'R edited';
@@ -2068,7 +2238,7 @@ test('review4c: an Undo survives a sync that returns the already-pushed edit', a
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   seed([]);
 });
@@ -2079,7 +2249,7 @@ test('review4c: an Undo that cannot be applied says why', async (t) => {
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
   seed([record({ id: 'rv4-gone', title: 'Gone soon', date: '2099-06-02' })]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(openControlFor(itemList(), 'Gone soon'));
     sheetHost().querySelector('.sheet-title').value = 'Gone soon, renamed';
@@ -2090,7 +2260,7 @@ test('review4c: an Undo that cannot be applied says why', async (t) => {
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   seed([]);
 });
@@ -2104,7 +2274,7 @@ test('review4c: opening another item dismisses the Saved toast', async (t) => {
     record({ id: 'rv4-a', title: 'Saved one', date: '2099-06-03' }),
     record({ id: 'rv4-b', title: 'Next one', date: '2099-06-04' }),
   ]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(openControlFor(itemList(), 'Saved one'));
     sheetHost().querySelector('.sheet-title').value = 'Saved one, renamed';
@@ -2115,7 +2285,7 @@ test('review4c: opening another item dismisses the Saved toast', async (t) => {
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   seed([]);
 });
@@ -2128,7 +2298,7 @@ test('review4c: an Undo that would store an invalid record is refused, and nothi
   installFakeLocalStorage();
   await import('../js/app.js');
   seed([record({ id: 'rv4-inv', title: 'Timed', date: '2099-06-05', time: '09:00', endTime: '10:00' })]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(openControlFor(itemList(), 'Timed'));
     sheetHost().querySelector('.sheet-end').value = '12:00';
@@ -2141,7 +2311,7 @@ test('review4c: an Undo that would store an invalid record is refused, and nothi
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   seed([]);
 });
@@ -2179,7 +2349,7 @@ test('sweep S: an edit of a record stamped in the future survives a sync of the 
   const { applySyncedState } = await import('../js/app.js');
   const original = record({ id: 'sS-skew-edit', title: 'Skewed before', date: '2099-07-01', updatedAt: S_AHEAD });
   seed([original]);
-  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
     click(openControlFor(itemList(), 'Skewed before'));
     sheetHost().querySelector('.sheet-title').value = 'Skewed after';
@@ -2191,7 +2361,7 @@ test('sweep S: an edit of a record stamped in the future survives a sync of the 
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   assert.equal(toastHost().children.length, 0);
   seed([]);
@@ -2203,7 +2373,7 @@ test('sweep S: a tick of a to-do stamped in the future survives a sync of the or
   const { applySyncedState } = await import('../js/app.js');
   const original = record({ id: 'sS-skew-tick', type: 'task', title: 'Skewed tick', date: '2099-07-02', updatedAt: S_AHEAD });
   seed([original]);
-  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
     const box = checkboxFor(todoList(), 'Skewed tick');
     box.checked = true;
@@ -2212,7 +2382,7 @@ test('sweep S: a tick of a to-do stamped in the future survives a sync of the or
     assert.equal(storedById('sS-skew-tick').done, true, 'the tick must not lose to the copy it replaced');
   } finally {
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   assert.equal(toastHost().children.length, 0);
   seed([]);
@@ -2224,7 +2394,7 @@ test('sweep S: an Undo in the same millisecond as its edit survives a sync of th
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
   seed([record({ id: 'sS-skew-undo', title: 'Undo skew orig', date: '2099-07-03', updatedAt: S_AHEAD })]);
-  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
     click(openControlFor(itemList(), 'Undo skew orig'));
     sheetHost().querySelector('.sheet-title').value = 'Undo skew edited';
@@ -2236,7 +2406,7 @@ test('sweep S: an Undo in the same millisecond as its edit survives a sync of th
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   assert.equal(toastHost().children.length, 0);
   seed([]);
@@ -2249,7 +2419,7 @@ test('sweep S: a delete of a record stamped in the future stays deleted after a 
   const { applySyncedState } = await import('../js/app.js');
   const original = record({ id: 'sS-skew-del', title: 'Skewed delete', date: '2099-07-04', updatedAt: S_AHEAD });
   seed([original]);
-  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
     click(deleteControlFor(itemList(), 'Skewed delete'));
     t.mock.timers.tick(5000);
@@ -2259,7 +2429,7 @@ test('sweep S: a delete of a record stamped in the future stays deleted after a 
     assert.doesNotMatch(allText(itemList()), /Skewed delete/);
   } finally {
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   assert.equal(toastHost().children.length, 0);
   seed([]);
@@ -2271,7 +2441,7 @@ test('sweep S: Undo keeps a field a sync changed since the edit, restores the re
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
   seed([record({ id: 'sS-undo-theirs', title: 'Undo base', date: '2099-07-05' })]);
-  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
     clearMessage();
     click(openControlFor(itemList(), 'Undo base'));
@@ -2288,7 +2458,7 @@ test('sweep S: Undo keeps a field a sync changed since the edit, restores the re
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   assert.equal(toastHost().children.length, 0);
   clearMessage();
@@ -2301,7 +2471,7 @@ test('sweep S: Undo with every edited field changed since writes nothing and say
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
   seed([record({ id: 'sS-undo-none', title: 'Undo none base', date: '2099-07-07' })]);
-  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
     clearMessage();
     click(openControlFor(itemList(), 'Undo none base'));
@@ -2315,7 +2485,7 @@ test('sweep S: Undo with every edited field changed since writes nothing and say
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   assert.equal(toastHost().children.length, 0);
   clearMessage();
@@ -2329,7 +2499,7 @@ test('sweep S: saving a sheet whose item changed type underneath it is refused',
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
   seed([record({ id: 'sS-type-under', type: 'task', title: 'Type under', date: '2099-07-08' })]);
-  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
     click(openControlFor(itemList(), 'Type under'));
     applySyncedState(state({ items: [{ ...storedById('sS-type-under'), type: 'due', updatedAt: S_AHEAD }] }));
@@ -2344,7 +2514,7 @@ test('sweep S: saving a sheet whose item changed type underneath it is refused',
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   assert.equal(toastHost().children.length, 0);
   seed([]);
@@ -2359,7 +2529,7 @@ test('sweep S: a tick that fails on quota is not saved by a later, unrelated edi
     record({ id: 'sS-rb-tick', type: 'task', title: 'Rollback tick', date: '2099-07-09' }),
     record({ id: 'sS-rb-other', title: 'Rollback other', date: '2099-07-10' }),
   ]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   const real = localStorage.setItem.bind(localStorage);
   try {
     localStorage.setItem = (k, v) => {
@@ -2382,7 +2552,7 @@ test('sweep S: a tick that fails on quota is not saved by a later, unrelated edi
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   assert.equal(toastHost().children.length, 0);
   seed([]);
@@ -2393,7 +2563,7 @@ test('sweep S: an add that fails on quota is not saved by a later, unrelated edi
   installFakeLocalStorage();
   await import('../js/app.js');
   seed([record({ id: 'sS-rb-add-other', title: 'Rollback add other', date: '2099-07-11' })]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   const real = localStorage.setItem.bind(localStorage);
   try {
     localStorage.setItem = (k, v) => {
@@ -2417,7 +2587,7 @@ test('sweep S: an add that fails on quota is not saved by a later, unrelated edi
     forceCloseSheet();
     ideaText().value = '';
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   assert.equal(toastHost().children.length, 0);
   clearMessage();
@@ -2433,7 +2603,7 @@ test('sweep S: editing an idea\'s text and switching it to a task in one save ke
     id: 'sS-idea-switch', type: 'idea', title: 'Old idea words',
     notes: 'Old idea words, the complete original thought', date: '2099-07-12',
   })]);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(openControlFor(ideaList(), 'Old idea words'));
     sheetHost().querySelector('.sheet-text').value = 'Fresh task text';
@@ -2447,7 +2617,7 @@ test('sweep S: editing an idea\'s text and switching it to a task in one save ke
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   assert.equal(toastHost().children.length, 0);
   seed([]);
@@ -2460,7 +2630,7 @@ test('sweep S: backgrounding commits a pending delete\'s tombstone exactly once'
   installFakeLocalStorage();
   await import('../js/app.js');
   seed([record({ id: 'sS-bg-once', title: 'Background once', date: '2099-07-13' })]);
-  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   const real = localStorage.setItem.bind(localStorage);
   let writes = 0;
   try {
@@ -2483,7 +2653,7 @@ test('sweep S: backgrounding commits a pending delete\'s tombstone exactly once'
   } finally {
     localStorage.setItem = real;
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   assert.equal(toastHost().children.length, 0);
   seed([]);
@@ -2939,7 +3109,7 @@ test('sweep U: after a Save, focus returns to the re-rendered opener on the page
     record({ id: 'sU-focus-idea', type: 'idea', title: 'sU focus idea', date: today }),
   ]);
   const restore = visiblePageButton();
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     for (const [name, buttonId, , root] of PAGES) {
       click(globalThis.document.getElementById(buttonId));
@@ -2964,7 +3134,7 @@ test('sweep U: after a Save, focus returns to the re-rendered opener on the page
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
     if (restore) click(restore);
   }
   assert.equal(toastHost().children.length, 0);
@@ -2978,7 +3148,7 @@ test('sweep U: after a Save, focus returns to a timed Day block\'s opener', asyn
   await import('../js/app.js');
   seed([record({ id: 'sU-timed', type: 'event', title: 'sU timed block', date: localISO(new Date()), time: '10:00', endTime: '11:00' })]);
   const restore = visiblePageButton();
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(globalThis.document.getElementById('show-day'));
     const opener = openControlFor(dayBody(), 'sU timed block');
@@ -2993,7 +3163,7 @@ test('sweep U: after a Save, focus returns to a timed Day block\'s opener', asyn
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
     if (restore) click(restore);
   }
   assert.equal(toastHost().children.length, 0);
@@ -3088,7 +3258,7 @@ test('sweep U: a delete announces its message in #toast-live, and it clears when
   await import('../js/app.js');
   seed([record({ id: 'sU-live', title: 'sU live one', date: '2099-02-04' })]);
   const live = globalThis.document.getElementById('toast-live');
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(deleteControlFor(itemList(), 'sU live one'));
     assert.equal(live.textContent, 'Deleted "sU live one"');
@@ -3097,7 +3267,7 @@ test('sweep U: a delete announces its message in #toast-live, and it clears when
     assert.equal(live.textContent, '');
   } finally {
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   assert.equal(toastHost().children.length, 0);
   seed([]);
@@ -3124,7 +3294,7 @@ test('sF: an Undo across the idea line with a field changed since is refused who
     id: 'sF-boat', type: 'idea', title: 'Buy a boat', notes: 'Buy a boat. A small one, for the lake.', date: '2099-08-01',
   })]);
   const restore = visiblePageButton();
-  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
     clearMessage();
     click(globalThis.document.getElementById('show-ideas'));
@@ -3142,7 +3312,7 @@ test('sF: an Undo across the idea line with a field changed since is refused who
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
     if (restore) click(restore);
   }
   assert.equal(toastHost().children.length, 0);
@@ -3160,7 +3330,7 @@ test('sF: an Undo back across the idea line is refused when the idea text change
   seed([record({
     id: 'sF-toidea', type: 'task', title: 'sF call Bob', date: '2099-08-02', time: '09:00', endTime: '10:00',
   })]);
-  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
     clearMessage();
     click(openControlFor(itemList(), 'sF call Bob'));
@@ -3178,7 +3348,7 @@ test('sF: an Undo back across the idea line is refused when the idea text change
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   assert.equal(toastHost().children.length, 0);
   clearMessage();
@@ -3196,7 +3366,7 @@ test('sF: an Undo whose rebuild would change a skipped field is refused', async 
     notes: 'sF idea keep is the first sentence. Then enough further words to make this a long idea.', date: '2099-08-07',
   })]);
   const restore = visiblePageButton();
-  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
     clearMessage();
     click(globalThis.document.getElementById('show-ideas'));
@@ -3215,7 +3385,7 @@ test('sF: an Undo whose rebuild would change a skipped field is refused', async 
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
     if (restore) click(restore);
   }
   assert.equal(toastHost().children.length, 0);
@@ -3230,7 +3400,7 @@ test('sF: an Undo keeps both times when a sync changed the end since', async (t)
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
   seed([record({ id: 'sF-times', title: 'sF timed', date: '2099-08-03', time: '09:00', endTime: '10:00' })]);
-  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
     clearMessage();
     click(openControlFor(itemList(), 'sF timed'));
@@ -3247,7 +3417,7 @@ test('sF: an Undo keeps both times when a sync changed the end since', async (t)
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   assert.equal(toastHost().children.length, 0);
   clearMessage();
@@ -3264,7 +3434,7 @@ test('sF: a filtered Undo that fails validation says it could not be undone', as
   seed([record({
     id: 'sF-val', title: 'sF val', notes: 'n0', date: '2099-08-04', time: '09:00', endTime: '10:00',
   })]);
-  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: S_NOW });
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
     clearMessage();
     click(openControlFor(itemList(), 'sF val'));
@@ -3282,7 +3452,7 @@ test('sF: a filtered Undo that fails validation says it could not be undone', as
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000);
-    t.mock.timers.reset();
+    await resetMockTimers(t);
   }
   assert.equal(toastHost().children.length, 0);
   clearMessage();
@@ -3401,7 +3571,7 @@ test('sF: a slow batch that is still making progress is not declared failed', as
   const originalFetch = globalThis.fetch;
   globalThis.fetch = () => new Promise((resolve) => { setTimeout(() => resolve(okFeedResponse()), 15000); });
   stampEl().textContent = 'sentinel';
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     resume();
     await settle();
@@ -3414,7 +3584,7 @@ test('sF: a slow batch that is still making progress is not declared failed', as
     for (let i = 0; i < 4; i += 1) { t.mock.timers.tick(60000); await settle(); }
     unseedFeeds();
     for (let i = 0; i < 5; i += 1) await settle();
-    t.mock.timers.reset();
+    await resetMockTimers(t);
     globalThis.fetch = originalFetch;
   }
 });
@@ -3436,7 +3606,7 @@ test('sF: a fetch that never answers is aborted, the batch moves on, and it is n
   const logged = [];
   console.error = (...a) => { logged.push(a); };
   stampEl().textContent = 'sentinel';
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     resume();
     await settle();
@@ -3458,7 +3628,7 @@ test('sF: a fetch that never answers is aborted, the batch moves on, and it is n
     for (let i = 0; i < 4; i += 1) { t.mock.timers.tick(60000); for (let j = 0; j < 3; j += 1) await settle(); }
     unseedFeeds();
     for (let i = 0; i < 5; i += 1) await settle();
-    t.mock.timers.reset();
+    await resetMockTimers(t);
     console.error = originalError;
     globalThis.fetch = originalFetch;
   }
@@ -3641,7 +3811,7 @@ test('sF3: a download whose body never arrives is failed at the timeout, and the
   };
   const fetchesOf = (id) => calls.filter((u) => u.includes(encodeURIComponent(`https://example.com/${id}.ics`))).length;
   stampEl().textContent = 'sentinel';
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     resume();
     for (let i = 0; i < 4; i += 1) await settle();
@@ -3659,7 +3829,7 @@ test('sF3: a download whose body never arrives is failed at the timeout, and the
     for (let i = 0; i < 3; i += 1) { t.mock.timers.tick(60000); for (let j = 0; j < 3; j += 1) await settle(); }
     unseedFeeds();
     for (let i = 0; i < 5; i += 1) await settle();
-    t.mock.timers.reset();
+    await resetMockTimers(t);
     globalThis.fetch = originalFetch;
   }
 });
@@ -3681,7 +3851,7 @@ test('sF3: a finished download is never aborted afterwards', async (t) => {
         text: () => new Promise((r) => { setTimeout(() => r(''), 5000); }) }), 5000);
     });
   };
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     resume();
     await settle();
@@ -3696,7 +3866,7 @@ test('sF3: a finished download is never aborted afterwards', async (t) => {
   } finally {
     unseedFeeds();
     for (let i = 0; i < 5; i += 1) await settle();
-    t.mock.timers.reset();
+    await resetMockTimers(t);
     globalThis.fetch = originalFetch;
   }
 });
@@ -3713,7 +3883,7 @@ test('sF3: a fetch that throws at once fails cleanly, with no stray timeout', as
   const unhandled = [];
   const onUnhandled = (e) => { unhandled.push(e); };
   process.on('unhandledRejection', onUnhandled);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     resume();
     for (let i = 0; i < 6; i += 1) await settle();
@@ -3726,7 +3896,7 @@ test('sF3: a fetch that throws at once fails cleanly, with no stray timeout', as
     process.off('unhandledRejection', onUnhandled);
     unseedFeeds();
     for (let i = 0; i < 5; i += 1) await settle();
-    t.mock.timers.reset();
+    await resetMockTimers(t);
     globalThis.fetch = originalFetch;
   }
 });

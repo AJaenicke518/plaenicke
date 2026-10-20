@@ -71,7 +71,7 @@ A completed to-do leaves the To-do page but **stays on the calendar** — it sti
 
 The To-do and Ideas pages read `items` directly, **not** `visibleItems()` — external feed instances carry no `type`, so they would fail the predicates by accident rather than by design.
 
-**Accepted gap:** manual add hard-codes `type: 'general'` (`js/app.js:143`), which is not on the To-do predicate. Manual add is the offline fallback, used only when Alex picks a date himself. Rejected alternatives: a control on the add box (unnecessary given voice), and treating every `general` item as a to-do (would put birthdays on the to-do list).
+**Superseded 2026-10-20:** manual add now creates `type: 'event'` (owner decision). Original text: **Accepted gap:** manual add hard-codes `type: 'general'` (`js/app.js:143`), which is not on the To-do predicate. Manual add is the offline fallback, used only when Alex picks a date himself. Rejected alternatives: a control on the add box (unnecessary given voice), and treating every `general` item as a to-do (would put birthdays on the to-do list).
 
 ### 3.4 Why `date` is never null
 

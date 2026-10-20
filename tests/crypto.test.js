@@ -167,3 +167,34 @@ test('decryptBlob rejects malformed input', async () => {
   await assert.rejects(() => decryptBlob(key, 'not base64 at all !!!'));
   await assert.rejects(() => decryptBlob(key, btoa('short')));
 });
+
+// --- IV_BYTES is pinned to its shipped value (punchlist: unpinned constants) --
+//
+// Every other assertion in this file reads IV_BYTES symbolically, so encrypt
+// and decrypt stay self-consistent under any value. A device on a changed
+// value cannot read a single blob the account already holds. The vector below
+// was produced outside js/crypto.js (node:crypto's webcrypto directly) with a
+// 12-byte IV of a0..ab, key 00..1f, plaintext {"schemaVersion":1}: it is what
+// a blob written by the shipped code looks like on the wire.
+const KAT_KEY = Uint8Array.from({ length: 32 }, (_, i) => i);
+const KAT_BLOB = 'oKGio6SlpqeoqaqrnToPTi2ub940APWgbhWu/EqdJObZOZfmJXtD5mg69Jlkmd0=';
+
+test('IV_BYTES is 12, the AES-GCM standard nonce every stored blob was written with', () => {
+  assert.equal(IV_BYTES, 12);
+});
+
+test('a blob written with a 12-byte IV still decrypts (known-answer vector)', async () => {
+  assert.deepEqual(await decryptBlob(KAT_KEY, KAT_BLOB), { schemaVersion: 1 });
+});
+
+test('encryptBlob reproduces the known-answer vector byte for byte from a fixed IV', async () => {
+  const real = crypto.getRandomValues.bind(crypto);
+  crypto.getRandomValues = (arr) => { for (let i = 0; i < arr.length; i += 1) arr[i] = 0xa0 + i; return arr; };
+  let blob;
+  try {
+    blob = await encryptBlob(KAT_KEY, { schemaVersion: 1 });
+  } finally {
+    crypto.getRandomValues = real;
+  }
+  assert.equal(blob, KAT_BLOB);
+});

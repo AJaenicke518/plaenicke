@@ -281,13 +281,15 @@ Matches the existing `node --test` setup and the injected-effects pattern.
 | PBKDF2 passwords | Link code (auth + enc secrets) | No email → no password reset; PBKDF2 likely exceeds the 10 ms CPU budget |
 | Per-row tables + rev cursors | Single encrypted blob + CAS | D1 has no interactive transactions; concurrent syncs could silently lose data |
 | Server-side LWW + clock clamp | Client-side merge | Clamped-vs-local timestamps never converged; a fast clock rejected all remote edits forever |
-| Server tombstones + 90-day TTL | Client tombstones in the blob | A long-offline device silently missed pruned deletions |
+| Server tombstones + 90-day TTL | Client tombstones in the blob | A long-offline device silently missed pruned deletions — **relocated, not fixed; see the correction below** |
 | (absent) | `updatedAt` on every record | Conflict resolution had no input — the data model has no edit timestamp |
 | (absent) | Client tombstones key | `deleteItem` destroys the record; nothing left to push |
 | (absent) | Single-writer ownership rule | Module-scope arrays would clobber pulled data deterministically |
 | (absent) | Client-side encryption | Feed URLs are capability tokens the codebase treats as secrets |
 | (absent) | Explicit adoption choice + dedupe | Union silently doubles every shared calendar on first link |
 | Quota on client `today` | Quota on server UTC date | Client-supplied date made the limit bypassable |
+
+**Correction (2026-10-20) — the tombstone row.** Client tombstones did not fix the long-offline case; they moved it. Tombstones in the blob are still pruned after 90 days (`merge()`'s `prune`, `TOMBSTONE_MAX_AGE_DAYS` in `js/merge.js`), on every sync, whether or not every device has seen them. A device unused for longer than that returns holding records the account deleted and has since pruned the tombstones for; its next sync unions them back in and pushes them, and they reappear on every device. Do not cite this row as a solved problem.
 
 ## 13. Custom domain migration (after sync)
 
@@ -297,7 +299,9 @@ Matches the existing `node --test` setup and the injected-effects pattern.
 
 With sync shipped, migration is trivial: link the old origin (data uploads encrypted), then link the new domain (data downloads). Rotate the link code afterward to retire any credential that ever touched the old origin.
 
-**Client code needs no origin changes** — `manifest.json` uses a relative `start_url` and `service-worker.js:44` guards on `self.location.origin`. The only change is `ALLOWED_ORIGIN`, currently duplicated across `index.js:7`, `feed.js:11`, and two test files. Consolidate it into one module that accepts a **list**, allow both origins during the transition, then drop the old one once the new domain is verified working.
+**Client code needs no origin changes** — `manifest.json` uses a relative `start_url` and `service-worker.js`'s fetch handler guards on `self.location.origin`.
+
+**The Worker change is a signature change, not a one-line edit** (corrected 2026-10-20; this paragraph previously called it "the only change"). `ALLOWED_ORIGIN` is now a single constant in `worker/src/cors.js`, but a response can carry only one `Access-Control-Allow-Origin`, so allowing a **list** means echoing the requesting origin when it is on the list. `cors.js`'s `json(obj, status)` takes no request, and it is called 26 times across `worker/src/index.js` and `worker/src/data.js` (plus `cors()` for OPTIONS); `worker/src/feed.js` builds its own CORS headers and runs its own `origin !== ALLOWED_ORIGIN` check. Every one of those sites needs the request threaded through. Add `Vary: Origin` in the same change, or any cache in front of the Worker can serve one origin's header to the other. `worker/tests/feed.test.js` and `worker/tests/index.test.js` each pin the current single origin. Allow both origins during the transition, then drop the old one once the new domain is verified working.
 
 **Owner steps (manual, in this order):**
 1. Buy the domain at Cloudflare Registrar.

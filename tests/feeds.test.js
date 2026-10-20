@@ -8,6 +8,7 @@ import {
   loadFeeds, saveFeeds, loadFeedCache, saveFeedCache, loadTombstones,
 } from '../js/storage.js';
 import { isTodo, isIdea, isScheduled } from '../js/items.js';
+import { merge, toWire, SCHEMA_VERSION } from '../js/merge.js';
 
 // --- fakes -------------------------------------------------------------
 
@@ -673,6 +674,73 @@ test('removeFeed: tombstone-first ordering means the tombstone survives even whe
   // a tombstone now exists for a record still present, rather than a
   // record gone with no tombstone to propagate the deletion.
   assert.deepEqual(loadFeeds().map((f) => f.id), ['f1']);
+});
+
+// A feed record written by a device whose clock runs AHEAD carries an
+// updatedAt in this device's future. applyTombstones keeps a record whose
+// updatedAt is at or after the deletion, so a removal stamped with this
+// device's plain `now` loses to the very record it removes: the feed comes
+// back on the next sync, here and on every other device. removeFeed must
+// stamp strictly later than the record it removes (merge.js's nextStamp),
+// the same rule every item write already follows.
+const syncedState = (o = {}) => ({ schemaVersion: SCHEMA_VERSION, items: [], feeds: [], tombstones: [], ...o });
+const localSyncedState = () => syncedState({ feeds: loadFeeds(), tombstones: loadTombstones() });
+
+test('removeFeed: a feed stamped in this device\'s future stays removed after merge, here and on a second device', () => {
+  resetStorage();
+  const future = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  const ahead = { ...FEED_A, updatedAt: future };
+  saveFeeds([ahead]);
+  // What the account and the second device hold: the same feed, unremoved.
+  const otherDevice = syncedState({ feeds: [ahead] });
+
+  removeFeed('feedA');
+
+  const [tomb] = loadTombstones();
+  assert.ok(Date.parse(tomb.deletedAt) > Date.parse(future),
+    'the tombstone must be stamped strictly after the record it removes');
+  const now = new Date();
+  // This device pulls the account, which still has the feed.
+  assert.deepEqual(merge(localSyncedState(), otherDevice, now).feeds, [],
+    'this device must not resurrect the feed it just removed');
+  // The second device pulls this device's push.
+  assert.deepEqual(merge(otherDevice, localSyncedState(), now).feeds, [],
+    'the second device must apply the removal');
+});
+
+// MUST NOT CHANGE: removing one feed touches no other feed. Feed URLs are
+// unrecoverable (CLAUDE.md), so every survivor is compared byte for byte —
+// in storage, after this device's merge with the account, after the second
+// device's merge, and on the wire — including one survivor that is itself
+// stamped in this device's future.
+test('removeFeed: every other feed is byte-identical through a full merge round trip', () => {
+  resetStorage();
+  const future = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  const feeds = [
+    { ...FEED_A, updatedAt: '2026-08-01T00:00:00.000Z' },
+    { ...FEED_B, updatedAt: future },
+    { id: 'feedC', url: 'https://example.com/c.ics', name: 'C', color: '#00f', hidden: true, updatedAt: '2026-07-01T00:00:00.000Z' },
+  ];
+  saveFeeds(feeds);
+  const survivors = JSON.stringify(feeds.filter((f) => f.id !== 'feedA'));
+  const otherDevice = syncedState({ feeds });
+
+  const before = Date.now();
+  removeFeed('feedA');
+  const after = Date.now();
+
+  // feedA is stamped in the past, so its tombstone is plain now — not pushed
+  // into the future, where it would outrank a later legitimate write.
+  const stamp = Date.parse(loadTombstones()[0].deletedAt);
+  assert.ok(stamp >= before && stamp <= after, 'a past-stamped feed is tombstoned at now');
+  assert.equal(JSON.stringify(loadFeeds()), survivors, 'storage');
+  const now = new Date();
+  const here = merge(localSyncedState(), otherDevice, now);
+  assert.equal(JSON.stringify(here.feeds.slice().sort((a, b) => (a.id < b.id ? -1 : 1))), survivors, 'this device after merge');
+  const there = merge(otherDevice, here, now);
+  assert.equal(JSON.stringify(there.feeds.slice().sort((a, b) => (a.id < b.id ? -1 : 1))), survivors, 'second device after merge');
+  assert.deepEqual(toWire(there).feeds, toWire(syncedState({ feeds: JSON.parse(survivors) })).feeds, 'wire form');
+  assert.deepEqual(loadTombstones().map((t) => `${t.kind}:${t.id}`), ['feed:feedA'], 'exactly one tombstone, for the removed feed');
 });
 
 // --- applyRemoteFeeds --------------------------------------------------------

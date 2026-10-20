@@ -16,6 +16,7 @@ import { WORKER_URL } from './config.js';
 import { parseICS, expandEvents, parseDuration } from './ics.js';
 import { nowISO } from './dateparse.js';
 import { FEED_PALETTE } from './palette.js';
+import { nextStamp } from './merge.js';
 import {
   loadFeeds, saveFeeds, loadFeedCache, saveFeedCache, QuotaError, addTombstone,
 } from './storage.js';
@@ -516,7 +517,14 @@ export function removeFeed(id) {
   // order (save first, tombstone second) let a tombstone-write failure
   // remove the feed locally with no tombstone to propagate — a silent,
   // self-reversing delete once sync ships.
-  addTombstone(id, 'feed', nowISO());
+  //
+  // STRICTLY LATER than the feed it removes (merge.js's nextStamp). A feed
+  // record from a device whose clock runs ahead carries an updatedAt in this
+  // device's future; a plain-`now` tombstone is then earlier than the record,
+  // applyTombstones keeps it, and the removal is undone by the next sync.
+  // This is a READ before the tombstone write; the write order is unchanged.
+  const existing = loadFeeds().find((f) => f.id === id);
+  addTombstone(id, 'feed', nextStamp(nowISO(), existing && existing.updatedAt));
   saveFeeds(loadFeeds().filter((f) => f.id !== id));
   const cache = loadFeedCache();
   if (Object.prototype.hasOwnProperty.call(cache, id)) {

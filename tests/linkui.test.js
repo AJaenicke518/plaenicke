@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
+import { makeFakeDocument, allText, findAll, fire } from './fake-dom.js';
 import {
   describeSyncStatus, classifyPastedCode, chooseAdoption, renderSyncStatus, SLOW_WRITE_MS,
   initLinkUI, failureText, SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID,
@@ -9,6 +10,7 @@ import {
   SYNC_OK, SYNC_NOT_LINKED, SYNC_CORRUPT, SYNC_ADOPTION_PENDING, SYNC_ERROR,
 } from '../js/linkui.js';
 import { linkWithCode, clearAdoptionPending, isLinked } from '../js/auth.js';
+import { syncOnce as realSyncOnce } from '../js/sync.js';
 import {
   bytesToBase64url, generateEncKey, composeLinkCode, encryptBlob, parseLinkCode,
 } from '../js/crypto.js';
@@ -19,101 +21,15 @@ import { SCHEMA_VERSION, toWire } from '../js/merge.js';
 import { WORKER_URL } from '../js/config.js';
 import { fetchWithTimeout, FETCH_TIMEOUT_MS } from '../js/fetchtimeout.js';
 
-// --- minimal fake DOM ------------------------------------------------------
+// --- fake DOM: tests/fake-dom.js ---------------------------------------------
 //
-// Modeled on tests/settings.test.js's fake (Task 6) with ONE deliberate
-// difference: getElementById WALKS THE TREE and returns null for an id that
-// is not mounted. The repo's existing fakes (tests/apply.test.js:170,
-// tests/settings.test.js) lazily create an element for any id and never
-// return null, which makes "renderSyncStatus is safe when the host is
-// absent" a vacuous assertion — an implementation doing
-// `document.getElementById('sync-status').textContent = …` passes under
-// those fakes and throws in a real browser.
-
-class FakeElement {
-  constructor(tag) {
-    this.tagName = tag.toUpperCase();
-    this.children = [];
-    this.parentNode = null;
-    this.id = '';
-    this._classes = new Set();
-    this._listeners = {};
-    this._attrs = {};
-    this.style = { setProperty(name, val) { this[name] = val; } };
-    this.dataset = {};
-    this.disabled = false;
-    this.hidden = false;
-    this.value = '';
-    this.textContent = '';
-  }
-
-  get className() { return [...this._classes].join(' '); }
-
-  set className(v) { this._classes = new Set(String(v).split(' ').filter(Boolean)); }
-
-  get classList() {
-    const self = this;
-    return {
-      add(c) { self._classes.add(c); },
-      remove(c) { self._classes.delete(c); },
-      contains(c) { return self._classes.has(c); },
-    };
-  }
-
-  setAttribute(name, val) { this._attrs[name] = val; }
-
-  getAttribute(name) { return Object.prototype.hasOwnProperty.call(this._attrs, name) ? this._attrs[name] : null; }
-
-  addEventListener(type, fn) { (this._listeners[type] ||= []).push(fn); }
-
-  removeEventListener(type, fn) {
-    if (!this._listeners[type]) return;
-    this._listeners[type] = this._listeners[type].filter((f) => f !== fn);
-  }
-
-  appendChild(child) { this.children.push(child); child.parentNode = this; return child; }
-
-  append(...nodes) { nodes.forEach((n) => this.appendChild(n)); }
-
-  get innerHTML() { return ''; }
-
-  set innerHTML(v) { if (v === '') { this.children.forEach((c) => { c.parentNode = null; }); this.children = []; } }
-
-  get childElementCount() { return this.children.length; }
-
-  click() { (this._listeners.click || []).forEach((fn) => fn({ target: this })); }
-}
-
-function makeFakeDocument() {
-  const body = new FakeElement('body');
-  const walk = (el, pred) => {
-    for (const c of el.children) {
-      if (pred(c)) return c;
-      const found = walk(c, pred);
-      if (found) return found;
-    }
-    return null;
-  };
-  return {
-    body,
-    documentElement: new FakeElement('html'),
-    createElement: (tag) => new FakeElement(tag),
-    // Real semantics: an element that is not in the document is not found.
-    getElementById(id) { return walk(body, (el) => el.id === id); },
-    addEventListener() {},
-    removeEventListener() {},
-  };
-}
+// This file's harness is where tests/fake-dom.js came from: getElementById
+// WALKS THE TREE and returns null for an id that is not mounted, so "safe when
+// the host is absent" assertions here are not vacuous.
 
 function installDom() {
   globalThis.document = makeFakeDocument();
   return globalThis.document;
-}
-
-function allText(el) {
-  let out = el.textContent || '';
-  for (const c of el.children) out += ` ${allText(c)}`;
-  return out;
 }
 
 // Everything a screen reader or a devtools inspector can see EXCEPT the value
@@ -137,28 +53,12 @@ function allNonValueStrings(el) {
   return out;
 }
 
-function findAll(el, tag) {
-  const out = [];
-  const walk = (node) => {
-    for (const c of node.children) {
-      if (c.tagName === tag) out.push(c);
-      walk(c);
-    }
-  };
-  walk(el);
-  return out;
-}
-
 function findButton(el, text) {
   return findAll(el, 'BUTTON').find((b) => (b.textContent || '').includes(text)) || null;
 }
 
 function findInput(el, ariaLabel) {
   return findAll(el, 'INPUT').find((i) => i.getAttribute('aria-label') === ariaLabel) || null;
-}
-
-function fire(el, type) {
-  (el._listeners[type] || []).forEach((fn) => fn({ target: el }));
 }
 
 // --- fixtures --------------------------------------------------------------
@@ -760,6 +660,45 @@ test('an account that keeps changing gives up instead of looping forever', async
   assert.match(allText(host), /kept changing/i, 'giving up must be surfaced, not left spinning on "Combining…"');
   assert.ok(findButton(host, 'Try again'), 'exhaustion must leave a way forward');
   assert.equal(loadSyncState().adoptionPending, true, 'the gate stays raised');
+});
+
+// Pinned exactly (punchlist: unpinned constants). The test above bounds the
+// cycle at "<= 5", so MAX_ADOPT_ATTEMPTS 3 -> 5 passed it. The bound is the
+// number of times this device re-previews and re-writes against an account
+// that will not hold still; it is stated as 3 in js/linkui.js.
+test('an account that keeps changing is attempted exactly three times before giving up', async () => {
+  let version = 0;
+  const { host, syncCalls, fetchCalls } = await setup({
+    fetchImpl: async () => {
+      version += 1;
+      return { ok: true, status: 200, json: async () => ({ version, blob: '' }) };
+    },
+    syncResults: Array.from({ length: 50 }, (_, i) => ({ status: 'changed', version: 100 + i })),
+  });
+  assert.equal(syncCalls.length, 3, 'MAX_ADOPT_ATTEMPTS is 3');
+  assert.equal(fetchCalls.length, 3, 'one preview GET per attempt');
+  assert.match(allText(host), /kept changing/i);
+});
+
+// Every RETRYABLE member, pinned through what the user sees (punchlist:
+// unpinned constants). Dropping 'error' from the set routes a transient HTTP
+// 500 to the re-link paste field, where a user without their 86-character
+// code pastes a bare token and bootstraps a NEW, EMPTY account. The two
+// non-retryable statuses are the ones where a different code is the answer.
+test('each retryable failure offers Try again; unauthorized and undecryptable offer re-linking instead', async () => {
+  const emptyAccount = async () => ({ ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) });
+  for (const status of ['offline', 'error', 'conflict', 'skipped', 'kept-changing', 'malformed']) {
+    const { host, syncCalls } = await setup({ fetchImpl: emptyAccount, syncResults: [{ status, applied: false }] });
+    assert.equal(syncCalls.length, 1, `${status}: fixture check, the adoption must have run`);
+    assert.ok(findButton(host, 'Try again'), `${status}: must offer Try again`);
+    assert.equal(findButton(host, 'Re-link this device'), null, `${status}: must not offer the paste field`);
+  }
+  for (const status of ['unauthorized', 'undecryptable']) {
+    const { host, syncCalls } = await setup({ fetchImpl: emptyAccount, syncResults: [{ status, applied: false }] });
+    assert.equal(syncCalls.length, 1, `${status}: fixture check, the adoption must have run`);
+    assert.equal(findButton(host, 'Try again'), null, `${status}: retrying the same code cannot help`);
+    assert.ok(findButton(host, 'Re-link this device'), `${status}: must offer the paste field`);
+  }
 });
 
 // I2. settings.js calls initLinkUI per open(), and close() cannot cancel the
@@ -2402,4 +2341,63 @@ test('index.html mounts the shell indicator, and does not duplicate the panel id
     'index.html must carry the shell indicator, or a broken sync is invisible outside Settings');
   assert.doesNotMatch(html, new RegExp(`id="${SYNC_STATUS_ID}"`),
     'the app shell must NOT reuse the panel status line id — two elements cannot share one');
+});
+
+// js/sync.js's syncOnce now excludes itself. With the REAL syncOnce behind the
+// panel: an ordinary sync is caught mid-read, then the panel mounts on a
+// device whose gate is raised and adopts automatically ('none': an empty
+// account). The adoption must wait — no request of its own goes out while
+// the ordinary sync is in flight, and the panel shows its ordinary
+// "Combining…" view — and then complete, not be dropped.
+test('an adoption behind an in-flight ordinary sync waits for it, then completes', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  await linkWithCode(bytesToBase64url(generateEncKey()));
+  clearAdoptionPending();
+  const row = { version: 0, blob: '' };
+  const requests = [];
+  let holdNextRead = true;
+  let releaseRead = null;
+  const serverFetch = async (url, opts = {}) => {
+    const method = opts.method || 'GET';
+    requests.push(method);
+    if (method === 'GET') {
+      if (holdNextRead) {
+        holdNextRead = false;
+        await new Promise((resolve) => { releaseRead = resolve; });
+      }
+      return { ok: true, status: 200, json: async () => ({ ...row }) };
+    }
+    const body = JSON.parse(opts.body);
+    if (body.version !== row.version) return { ok: false, status: 409, json: async () => ({ ...row }) };
+    row.version += 1;
+    row.blob = body.blob;
+    return { ok: true, status: 200, json: async () => ({ version: row.version }) };
+  };
+  const ordinary = realSyncOnce({ fetchImpl: serverFetch, readFetchImpl: serverFetch, now: () => NOW,
+    apiBase: 'https://w.example', applyState: (x) => x });
+  await settleUntil(() => releaseRead);
+  saveSyncState({ adoptionPending: true });
+
+  const host = doc.createElement('div');
+  doc.body.appendChild(host);
+  const linkedCalls = [];
+  const ui = initLinkUI({
+    host, applyState: (x) => x, onLinked: () => linkedCalls.push(true),
+    fetchImpl: serverFetch, readFetchImpl: serverFetch, apiBase: 'https://w.example', now: () => NOW,
+  });
+  await settleUntil(() => allText(host).includes('Combining'));
+  assert.ok(allText(host).includes('Combining'), 'the panel is in its ordinary write view');
+  await settleUntil(() => requests.length > 2); // waits for the forbidden state; must run out
+  // The held read and the panel's preview read — nothing from the adoption.
+  assert.deepEqual(requests, ['GET', 'GET'], 'the adoption must not touch the network while the ordinary sync is in flight');
+  assert.equal(loadSyncState().adoptionPending, true);
+
+  releaseRead();
+  await ordinary;
+  await ui.settled();
+  await settleUntil(() => loadSyncState().adoptionPending === false);
+  assert.equal(loadSyncState().adoptionPending, false, 'the queued adoption ran and lifted the gate');
+  assert.equal(requests.length, 3, 'the adoption read once, after the ordinary sync settled');
+  assert.ok(linkedCalls.length >= 1, 'onLinked fired');
 });

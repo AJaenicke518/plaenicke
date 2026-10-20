@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { allText, findAll } from './fake-dom.js';
 import { renderTodoView } from '../js/todoview.js';
 
 // A fixed "today" so relative labels (Today/Tomorrow) are deterministic.
@@ -64,19 +65,6 @@ class FakeElement {
 }
 
 globalThis.document = { createElement: (tag) => new FakeElement(tag) };
-
-function findAll(el, tag) {
-  const out = [];
-  const walk = (node) => { for (const c of node.children) { if (c.tagName === tag) out.push(c); walk(c); } };
-  walk(el);
-  return out;
-}
-
-function allText(el) {
-  let out = el.textContent || '';
-  for (const c of el.children) out += ` ${allText(c)}`;
-  return out;
-}
 
 const host = () => new FakeElement('ul');
 const rows = (el) => el.children.filter((c) => c.tagName === 'LI' && !c._classes.has('empty'));

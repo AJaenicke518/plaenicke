@@ -11,15 +11,23 @@
 import { merge, dedupeState, toWire, emptyState, SCHEMA_VERSION } from './merge.js';
 import { encryptBlob, decryptBlob } from './crypto.js';
 import { getLink, resetSyncStateIfDeviceChanged, isAdoptionPending, clearAdoptionPending } from './auth.js';
-import { loadItems, loadFeeds, loadTombstones, loadSyncState, saveSyncState } from './storage.js';
+import { loadItems, loadFeeds, loadTombstones, saveSyncState } from './storage.js';
 
 export const MAX_ATTEMPTS = 3;
 
-function localState() {
+// THIS DEVICE'S SYNCED STATE, as the storage loaders return it. The one
+// reader for it: syncOnce merges against it, linkui.js's adoption classifier
+// counts it, and app.js's applySyncedState re-merges against it. It goes
+// through the loaders, never the raw JSON — the classifier depends on that
+// (a record a loader drops is not counted — CLAUDE.md, on deserializeItems).
+// Exported so those three agree by construction rather than by copy.
+export function localState() {
   return { schemaVersion: SCHEMA_VERSION, items: loadItems(), feeds: loadFeeds(), tombstones: loadTombstones() };
 }
 
-function record(patch) { saveSyncState({ ...loadSyncState(), ...patch }); }
+// saveSyncState already merges over the persisted state (js/storage.js), so
+// a patch carrying only the fields being recorded is the whole call.
+function record(patch) { saveSyncState(patch); }
 
 // For a caller whose syncOnce REJECTED instead of resolving with a status.
 // Every failure syncOnce anticipates records its own lastError; one it did
@@ -58,10 +66,20 @@ async function fetchRemote({ readFetchImpl, apiBase, link }) {
   // gets its own networkError tag for the same reason the call above does.
   // A read that hits its deadline rejects from one of those same two places,
   // which is what makes a timeout report as 'offline'.
+  //
+  // A CORS FAILURE LANDS HERE TOO, and is reported as offline. The browser
+  // rejects a cross-origin request the Worker's origin list does not allow
+  // with a TypeError from fetch() — the same rejection a dropped connection
+  // gives — and deliberately exposes nothing more to the page. That matters
+  // at spec § 13's custom-domain move: a fresh origin missing from the list
+  // reads as "could not reach the account". The name is logged so the
+  // console at least separates TypeError from a timeout's AbortError; only
+  // the name, never the message, URL or token.
   let res;
   try {
     res = await readFetchImpl(`${apiBase}/data`, { headers: { authorization: `Bearer ${link.authToken}` } });
   } catch (err) {
+    console.error('plaenicke: sync read failed', err && err.name);
     return { networkError: err };
   }
   if (res.status === 401) return { unauthorized: true };
@@ -99,7 +117,58 @@ export async function previewRemote({ readFetchImpl, apiBase }) {
 // The only legal adoptChoice values besides null (an ordinary sync).
 const ADOPT_CHOICES = ['adopt-merge', 'adopt-bootstrap'];
 
+// SYNCONCE EXCLUDES ITSELF, whoever calls it. There are two callers, and
+// each guarded only against itself: app.js's runSync (syncInFlight /
+// syncPending — runSync against runSync) and linkui.js's adoption
+// (activeAdoption / writeInFlight — panel mount against panel mount). The
+// adoption gate kept them apart only while it was raised. With it down —
+// another tab finishes adoption and this tab's storage listener starts
+// runSync, then this tab's own dialog is confirmed — two syncOnce runs
+// interleaved: two applyState re-merges and two CAS loops racing.
+//
+// A second call WAITS for the one in flight to settle, then runs in full.
+// It is not dropped and gets no new status, so neither caller changes:
+// runSync's own guard still coalesces its triggers, and an adoption that
+// waited is still an adoption. Everything below the argument checks — the
+// link, the gate, the pull — is read only once this call holds the turn,
+// so it sees whatever the call before it left behind (an adoption queued
+// behind an ordinary sync that advanced the version gets 'changed' and
+// re-asks, as for any other account move).
+//
+// THE COST: a write never times out (the PUT has no deadline), so a call
+// queued behind a hung write waits as long as that write does. The linking
+// panel already says "taking longer than usual — it's safe to reload" for a
+// write in flight past SLOW_WRITE_MS, and that remains true while queued:
+// the gate stays raised until a write is confirmed. runSync was already
+// blocked behind its own hung write by syncInFlight.
+//
+// The chain only ever holds promises that RESOLVE (each turn's release), so
+// a call that fails or rejects never wedges the ones behind it.
+let turn = Promise.resolve();
+
 export async function syncOnce(deps) {
+  // Refused at once, never queued: a malformed call must not wait behind a
+  // sync in flight to be told it was malformed.
+  const { readFetchImpl, adoptChoice = null } = deps;
+  requireReadFetch(readFetchImpl, 'syncOnce');
+  // Any other adoptChoice is a wiring bug. Refused before the network, rather
+  // than read as one of the legal values: a caller that asked for something
+  // this function no longer does must not silently get a merge instead.
+  if (adoptChoice !== null && !ADOPT_CHOICES.includes(adoptChoice)) {
+    throw new Error('syncOnce: unknown adoptChoice');
+  }
+  const prior = turn;
+  let release;
+  turn = new Promise((resolve) => { release = resolve; });
+  try {
+    await prior;
+    return await syncOnceExclusive(deps);
+  } finally {
+    release();
+  }
+}
+
+async function syncOnceExclusive(deps) {
   // adoptChoice is null on an ordinary sync, or one of exactly two values that
   // only the linking flow (js/linkui.js) ever sets:
   //   'adopt-bootstrap' — an empty account, or an empty device. Adopt as-is.
@@ -115,18 +184,11 @@ export async function syncOnce(deps) {
   const {
     fetchImpl, readFetchImpl, now, apiBase, applyState, adoptChoice = null, expectVersion = null,
   } = deps;
-  requireReadFetch(readFetchImpl, 'syncOnce');
-  // Any other value is a wiring bug. Refused before the network, rather than
-  // read as one of the legal values: a caller that asked for something this
-  // function no longer does must not silently get a merge instead.
-  if (adoptChoice !== null && !ADOPT_CHOICES.includes(adoptChoice)) {
-    throw new Error('syncOnce: unknown adoptChoice');
-  }
+  // (readFetchImpl and adoptChoice were checked by syncOnce, before the queue.)
 
-  // HAS THIS DEVICE ALREADY BEEN CHANGED? applyState runs BEFORE the push loop
-  // (spec 7: apply first, advance the cursor second), so every status returned
-  // from that point on describes a device whose local write has already
-  // landed. A Wi-Fi drop between the GET and the PUT reaches all of them, and
+  // HAS THIS DEVICE ALREADY BEEN CHANGED? applyState runs BEFORE the push loop,
+  // so every status returned from that point on describes a device whose
+  // local write has already landed. A Wi-Fi drop between the GET and the PUT reaches all of them, and
   // by then applySyncedState has already written items, feeds and tombstones
   // through their owners. The caller is the only thing that can tell the user
   // which of the two happened, and it cannot infer it from the status:
@@ -191,12 +253,18 @@ export async function syncOnce(deps) {
     // permanent, cross-device deletion.
     if (adoptChoice === 'adopt-merge') merged = dedupeState(merged, now());
 
-    // Apply BEFORE advancing the cursor, and push what applyState actually
-    // wrote: it re-merges against live storage, so the two can differ.
+    // Apply BEFORE the push, and push what applyState actually wrote: it
+    // re-merges against live storage, so the two can differ.
+    //
+    // NOT load-bearing: the order of this apply against record({ version }).
+    // The stored syncState.version has no reader in the protocol — every PUT
+    // carries the version from THIS sync's GET (or from a 409's body), never
+    // loadSyncState().version — so "apply before advancing the cursor"
+    // guards a write-only field. The real non-atomicity is inside applyState
+    // itself (app.js's applySyncedState makes three separate writes).
     merged = applyState(merged) || merged;
-    // From here the local write HAS happened: spec 7 applies before it
-    // advances the cursor, so everything below reports a device that has
-    // already changed.
+    // From here the local write HAS happened, so everything below reports a
+    // device that has already changed.
     applied = true;
     // toWire can throw on a structurally incomplete state — e.g. applyState
     // returning `{schemaVersion}` with no items/feeds/tombstones. That is
@@ -232,7 +300,9 @@ export async function syncOnce(deps) {
         headers: { authorization: `Bearer ${link.authToken}`, 'content-type': 'application/json' },
         body: JSON.stringify({ version, blob }),
       });
-    } catch {
+    } catch (err) {
+      // Offline, or a CORS rejection — indistinguishable here; see fetchRemote.
+      console.error('plaenicke: sync write failed', err && err.name);
       record({ lastError: 'offline' });
       return done('offline');
     }

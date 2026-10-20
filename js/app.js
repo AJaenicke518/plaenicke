@@ -1,6 +1,6 @@
 import {
   loadItems, saveItems, loadFeeds, loadFeedCache, addTombstone,
-  loadTombstones, saveTombstones, recordLaunch, STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY,
+  saveTombstones, recordLaunch, STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY,
 } from './storage.js';
 import { followToday, formatDayLabel } from './freshness.js';
 import {
@@ -23,9 +23,9 @@ import { openItemSheet } from './itemsheet.js';
 import { showToast } from './toast.js';
 import { applyEdit, typeChangePatch, snapshotOf, nextStamp, EDITABLE_FIELDS } from './edit.js';
 import { uid } from './uid.js';
-import { syncOnce, recordSyncFailure } from './sync.js';
+import { syncOnce, recordSyncFailure, localState } from './sync.js';
 import { isLinked, isAdoptionPending } from './auth.js';
-import { merge, SCHEMA_VERSION } from './merge.js';
+import { merge } from './merge.js';
 import { renderSyncStatus, syncWriteStarted, syncWriteSettled } from './linkui.js';
 import { WORKER_URL } from './config.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
@@ -168,7 +168,12 @@ if (els.mic && isVoiceSupported()) {
 // declaration, so the reference is live here) down to linkui.js's adoption
 // flow, which hands it to syncOnce. It is injected rather than imported
 // there because linkui.js already supplies THIS file with renderSyncStatus;
-// importing it back would close a module cycle (DA-C6).
+// importing it back would close a module cycle (DA-C6). The cycle is the
+// incidental reason. The durable one is dependency inversion at the DOM
+// boundary: this file touches `document` at module scope, so anything that
+// imports it cannot be unit-tested in Node (`ReferenceError: document is not
+// defined`). Keep the injection even if renderSyncStatus moves and the cycle
+// goes away.
 initSettings({
   button: els.settingsBtn,
   host: els.settingsHost,
@@ -229,13 +234,13 @@ export function addItems(list) {
   scheduleSync();
 }
 
-// Manual add: title box + date box, type defaults to general. Works with no network.
+// Manual add: title box + date box, type is always event. Works with no network.
 function handleManualAdd() {
   const title = els.text.value.trim();
   const date = els.date.value;
   if (!title || !date) { setMessage('For manual add, type a title and pick a date.'); return; }
   try {
-    addItems([{ title, date, type: 'general', time: els.time.value || null, endTime: els.end.value || null }]);
+    addItems([{ title, date, type: 'event', time: els.time.value || null, endTime: els.end.value || null }]);
   } catch (e) { setMessage(e.message); return; }
   els.text.value = ''; els.date.value = ''; els.time.value = ''; els.end.value = ''; els.end.hidden = true;
   setMessage('Added.');
@@ -562,7 +567,9 @@ function openItem(item) {
       onClose: () => focusOpener(item.id),
     });
   } catch (e) {
-    setMessage(`This item can't be edited here (${e.message}).`);
+    // The reason is for a developer (e.g. "Unknown type: x"), not the user.
+    console.error('openItemSheet refused to open', item.id, e);
+    setMessage("This item can't be edited here.");
   }
 }
 
@@ -956,10 +963,12 @@ backgroundSyncFeeds(feeds);
 // Sync applies through the owners of each key, never through storage
 // directly. app.js owns `items`; feeds.js owns feeds. See spec 5.5.
 //
-// It re-merges against LIVE storage first: between the merge that produced
-// `state` (in sync.js, possibly across a CAS retry) and this call there may
-// have been a full PUT round trip, during which the user may have added or
-// deleted here. Writing `state` wholesale would destroy those edits — and
+// It re-merges against LIVE storage first. Today sync.js calls this
+// synchronously right after the merge that produced `state` (no await between
+// them, in the main path or the CAS retry), so live storage still equals that
+// merge's local input. The re-merge is the guard that keeps this correct if an
+// await is ever added there: the user may then have added or deleted here,
+// and writing `state` wholesale would destroy those edits — and
 // for a feed, destroy a URL that is never rendered anywhere and so cannot be
 // re-entered. Returns what it actually wrote; sync.js pushes THAT, not the
 // state it was handed.
@@ -967,11 +976,12 @@ backgroundSyncFeeds(feeds);
 // There is no discard path. It existed only for the linking flow's "Replace
 // this device", which was removed on 2026-10-19: every caller is re-merged.
 export function applySyncedState(state) {
-  const live = {
-    schemaVersion: SCHEMA_VERSION,
-    items: loadItems(), feeds: loadFeeds(), tombstones: loadTombstones(),
-  };
-  const written = merge(live, state, new Date());
+  const live = localState();
+  // keepRemoteTombstones: `state` is already pruned, and every tombstone in it
+  // is one the first merge kept — including one that suppressed a record only
+  // the server held, which live storage never had. Re-pruning here dropped
+  // it and pushed the deletion away (js/merge.js, prune()).
+  const written = merge(live, state, new Date(), { keepRemoteTombstones: true });
   items = written.items;
   saveItems(items);
   // applyRemoteFeeds requires the COMPLETE merged feed list (written.feeds,
@@ -981,10 +991,11 @@ export function applySyncedState(state) {
   //
   // ORDER MATTERS here. applyRemoteFeeds's own removeFeed() call (for every
   // local feed absent from written.feeds — i.e. one a merged tombstone
-  // suppresses) writes a feed tombstone via addTombstone() stamped with THIS
-  // device's clock. The full-overwrite saveTombstones() below then leaves the
-  // stored tombstones exactly equal to written.tombstones, so a deletion
-  // pulled from another device keeps its original deletedAt. Swap these two
+  // suppresses) writes a feed tombstone via addTombstone() stamped by THIS
+  // device (now, or just after the feed's own updatedAt — nextStamp). The
+  // full-overwrite saveTombstones() below then leaves the stored tombstones
+  // exactly equal to written.tombstones, so a deletion pulled from another
+  // device keeps its original deletedAt. Swap these two
   // lines and every such deletion is re-stamped with this device's clock.
   const { added } = applyRemoteFeeds(written.feeds);
   saveTombstones(written.tombstones);

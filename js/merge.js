@@ -11,6 +11,16 @@
 // whose clocks are never compared. A phone 90 seconds ahead of a laptop wins
 // every tie for 90 seconds, silently.
 //
+// Skew reaches PRUNING too, with no edit involved: tombstone expiry is a
+// clock comparison. prune() (below) caps "now" at the newest timestamp in
+// the data, and never drops a tombstone that suppresses a record held by
+// either side of the sync in progress — so a device whose clock is months
+// fast no longer expires every deletion on its first sync. It cannot see a
+// record held only by a device that is not syncing right now. A fast device
+// is still exposed once it writes (its own writes become the newest data),
+// and a clock a year fast OR slow makes two devices push at each other on
+// every sync — prune()'s comment sets out exactly what is and is not covered.
+//
 // AN EDIT PATH NOW EXISTS, AND IT IS SIX FIELDS PLUS ONE BOOLEAN. The To-do
 // checkbox (V6 § 5.1) rewrites `done`; the item sheet (edit-items spec) rewrites
 // title, date, time, endTime, type and notes through app.js's editItem, which
@@ -35,13 +45,12 @@
 //      12:00 before either syncs, and it comes back on every device with the
 //      phone's fields. Annoying and re-deletable, not lost data, and it is the
 //      only horn of the two that converges at all.
-//   3. Clock skew decides ties (above). User writes to ITEMS (edit, Undo,
-//      tick, delete commit) are stamped strictly later than the record they
-//      replace (js/edit.js's nextStamp), so a single item write cannot lose to
-//      clock skew; concurrent writes on two devices still can. Only item
-//      writes: a feed removal (js/feeds.js's removeFeed) and the tombstones
-//      dedupeState writes below still stamp plain `now`, so either can still
-//      lose to a record from a clock-ahead device (punchlist).
+//   3. Clock skew decides ties (above). Every write that replaces or deletes
+//      a synced record is stamped strictly later than the record it replaces
+//      (nextStamp, below): item writes (edit, Undo, tick, delete commit), a
+//      feed removal (js/feeds.js's removeFeed) and the tombstones dedupeState
+//      writes. So a single write cannot lose to a record from a clock-ahead
+//      device; concurrent writes on two devices still can.
 //   4. Only the latest action can be undone. A second toast commits the first
 //      action at once, so its delete lands and its Undo is gone. An edit's Undo
 //      is itself a new edit with a new updatedAt; it has no merge special case.
@@ -82,6 +91,33 @@ export function emptyState() {
 function ts(s) {
   const parsed = Date.parse(s);
   return Number.isNaN(parsed) ? -Infinity : parsed;
+}
+
+// nextStamp — the updatedAt (or deletedAt) for a user write that replaces a
+// record stamped `prevIso`: now, or one millisecond after the record's own
+// stamp if that is not earlier than now. Used by every user write to a synced
+// record — editItem (and so Undo), setDone, the delete commit's tombstone,
+// js/feeds.js's removeFeed — and by dedupeState's tombstones below.
+//
+// WHY STRICTLY LATER. unionById's ties go to remote (`>=`) and applyTombstones
+// keeps a record whose updatedAt is at or after the deletion. A record written
+// by a device whose clock runs ahead carries a future updatedAt; a write here
+// stamped with this device's plain `now` then LOSES to the very copy it
+// replaced on the next sync — the edit or delete silently undone. One write
+// can therefore no longer lose to clock skew. Two CONCURRENT writes on two
+// devices still can: this orders a write after the record it saw, nothing more.
+//
+// An unparseable prevIso (a record from before updatedAt was a full instant,
+// or a corrupt one) cannot be compared, so the write takes plain now. So does
+// a record stamped at the last instant a Date can hold (sweep F, O1): there is
+// no millisecond after it, and toISOString would throw on every write to it.
+export function nextStamp(nowIso, prevIso) {
+  const now = Date.parse(nowIso);
+  const prev = typeof prevIso === 'string' ? Date.parse(prevIso) : NaN;
+  if (Number.isNaN(prev) || prev < now) return nowIso;
+  const next = new Date(prev + 1);
+  if (!Number.isFinite(next.getTime())) return nowIso;
+  return next.toISOString();
 }
 
 function requireKnownVersion(state, side) {
@@ -157,9 +193,70 @@ export function applyTombstones(records, tombstones, kind) {
   return records.filter(r => !(dead.has(r.id) && dead.get(r.id) > ts(r.updatedAt)));
 }
 
-function prune(tombstones, now) {
-  const cutoff = now.getTime() - TOMBSTONE_MAX_AGE_DAYS * DAY_MS;
+// PRUNE — when a tombstone may be forgotten. A tombstone is dropped only when
+// BOTH hold:
+//
+//   1. It is not doing work in this sync. A tombstone is doing work when
+//      either input of this merge holds a record it deletes — and, in the
+//      apply re-merge (keepRemoteTombstones, below), when the first merge
+//      kept it. This is not about clocks. syncOnce merges this device with
+//      the server, then app.js's applySyncedState merges AGAIN against live
+//      storage, and pushes THAT. The two merges see different records:
+//        - this device holds the record, the tombstone came from the server:
+//          live storage still holds the record, so the re-merge sees it
+//          suppressed and keeps the tombstone on its own. (Before this
+//          clause, the first merge pruned it and the re-merge resurrected
+//          the record and pushed it, on a correct clock.)
+//        - only the SERVER holds the record, the tombstone is this device's:
+//          live storage never held it, so in the re-merge the tombstone
+//          suppresses nothing. That merge is told keepRemoteTombstones —
+//          its `remote` is the first merge's already-pruned output, and
+//          every tombstone in it is one the first merge kept — or the push
+//          carries neither the record nor its tombstone and the next device
+//          holding the record pushes it back.
+//      WHAT CLAUSE 1 CANNOT SEE: a record held only by a device that is not
+//      part of this sync. Once every syncing device has aged the tombstone
+//      out, that device brings the record back when it returns — the
+//      long-offline gap (spec § 12).
+//   2. It is more than TOMBSTONE_MAX_AGE_DAYS older than the EARLIER of this
+//      device's clock and the newest timestamp in the data (every record's
+//      updatedAt and every tombstone's deletedAt, before pruning).
+//
+// WHY (2) READS THE DATA. A device whose clock is more than 90 days fast saw
+// every tombstone as expired, pruned the lot during merge, and pushed that.
+// The data is the only second opinion a device has about the time: a clock a
+// year fast still sees records and deletions from last week, and the newest
+// of them caps how far "now" can run ahead for pruning purposes.
+//
+// IT CANNOT BE GAMED TOWARDS DELETION. Both clauses only ever KEEP more than
+// the plain `now - 90 days` rule did — the cutoff is min(now, newest), never
+// later than now — and keeping a tombstone cannot lose a record that should
+// exist (it suppresses only records older than the deletion). A corrupt
+// far-FUTURE stamp does not stop pruning either: min() caps it at now. What
+// does pause pruning is data that is all old — an account nobody has touched
+// for months keeps the tombstones it had at its last activity, and starts
+// pruning again with the next write. That is retention, not growth: no new
+// tombstone appears without activity.
+//
+// WHAT IT DOES NOT FIX (tests/convergence.test.js, the year-fast test). Once
+// the fast device WRITES, its own records carry its clock and are the newest
+// data there is, so clause 2 no longer protects it. Clause 1 still stops any
+// record either side holds from resurrecting, but a tombstone that suppresses
+// nothing is then pruned by the fast device and restored by a correctly
+// clocked one, and both push on every sync for as long as the clock is wrong.
+// A clock a year SLOW does the same, and needs no write to do it: its cutoff
+// is its own clock less 90 days, a year early, so it keeps an idle tombstone
+// between 90 days and about 15 months old that a correctly clocked device
+// prunes, and restores it on every sync. And a third device returning with a
+// record whose tombstone was pruned meanwhile still resurrects it — the
+// long-offline gap — sooner than it should when a fast device did the
+// pruning. Nothing in the data distinguishes "my clock is a year fast and I
+// just wrote" from "a year passed and I just wrote"; only a clock the devices
+// share (the server's) could.
+function prune(tombstones, now, newest, keep) {
+  const cutoff = Math.min(now.getTime(), newest) - TOMBSTONE_MAX_AGE_DAYS * DAY_MS;
   return tombstones.filter(t => {
+    if (keep.has(`${t.kind}:${t.id}`)) return true;
     const parsed = Date.parse(t.deletedAt);
     // An unparseable deletedAt must never cause a drop: losing the tombstone
     // resurrects the record on the next sync.
@@ -168,17 +265,39 @@ function prune(tombstones, now) {
   });
 }
 
-export function merge(local, remote, now) {
+export function merge(local, remote, now, { keepRemoteTombstones = false } = {}) {
   requireKnownVersion(local, 'local');
   requireKnownVersion(remote, 'remote');
   const tombstones = mergeTombstones(local.tombstones, remote.tombstones);
+  const allItems = unionById(local.items, remote.items);
+  const allFeeds = unionById(local.feeds, remote.feeds, pickFeed);
   // Suppress BEFORE pruning. Pruning first would drop an old tombstone and let
   // its record resurrect inside this same merge.
+  const items = applyTombstones(allItems, tombstones, 'item');
+  const feeds = applyTombstones(allFeeds, tombstones, 'feed');
+  // Which tombstones did work here — see prune().
+  const keep = new Set();
+  const keptItems = new Set(items.map(r => r.id));
+  const keptFeeds = new Set(feeds.map(r => r.id));
+  for (const r of allItems) if (!keptItems.has(r.id)) keep.add(`item:${r.id}`);
+  for (const r of allFeeds) if (!keptFeeds.has(r.id)) keep.add(`feed:${r.id}`);
+  // The re-merge (app.js's applySyncedState) passes keepRemoteTombstones:
+  // its `remote` is the first merge's output, already pruned, and every
+  // tombstone in it is one that merge decided to keep — see prune().
+  if (keepRemoteTombstones) {
+    for (const t of remote.tombstones) keep.add(`${t.kind}:${t.id}`);
+  }
+  // The newest timestamp in the data — see prune(). ts() reads an
+  // unparseable stamp as -Infinity, so it can never raise this.
+  let newest = -Infinity;
+  for (const r of allItems) newest = Math.max(newest, ts(r.updatedAt));
+  for (const r of allFeeds) newest = Math.max(newest, ts(r.updatedAt));
+  for (const t of tombstones) newest = Math.max(newest, ts(t.deletedAt));
   return {
     schemaVersion: SCHEMA_VERSION,
-    items: applyTombstones(unionById(local.items, remote.items), tombstones, 'item'),
-    feeds: applyTombstones(unionById(local.feeds, remote.feeds, pickFeed), tombstones, 'feed'),
-    tombstones: prune(tombstones, now),
+    items,
+    feeds,
+    tombstones: prune(tombstones, now, newest, keep),
   };
 }
 
@@ -268,13 +387,19 @@ export function dedupeState(state, now) {
   // "collapsed" record right back. Writing tombstones here is what makes
   // the collapse actually propagate through the ordinary merge path, with
   // no special-casing needed at the call site.
+  //
+  // Each tombstone is stamped strictly after the record it drops (nextStamp
+  // above). A loser written by a clock-ahead device carries an updatedAt in
+  // this device's future; a plain-`now` tombstone would be earlier than it,
+  // applyTombstones would keep it, and the peer would bring it back.
+  const nowIso = now.toISOString();
   const survivingFeedIds = new Set(feeds.map(f => f.id));
   const survivingItemIds = new Set(items.map(i => i.id));
   const droppedTombstones = [
     ...state.feeds.filter(f => !survivingFeedIds.has(f.id))
-      .map(f => ({ id: f.id, kind: 'feed', deletedAt: now.toISOString() })),
+      .map(f => ({ id: f.id, kind: 'feed', deletedAt: nextStamp(nowIso, f.updatedAt) })),
     ...state.items.filter(i => !survivingItemIds.has(i.id))
-      .map(i => ({ id: i.id, kind: 'item', deletedAt: now.toISOString() })),
+      .map(i => ({ id: i.id, kind: 'item', deletedAt: nextStamp(nowIso, i.updatedAt) })),
   ];
   return {
     ...state,

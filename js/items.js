@@ -61,9 +61,9 @@ export function isIdea(it) { return it.type === 'idea'; }
 
 const TODO_TYPES = new Set(['due', 'start', 'milestone', 'task']);
 
-// Note what is NOT here: 'general'. Manual add hard-codes it (js/app.js), and
-// it is also every pre-V6 record's type — treating it as actionable would put
-// birthdays on the to-do list. This is the accepted gap in spec § 3.3.
+// Note what is NOT here: 'general'. It is every pre-V6 record's type (and,
+// until manual add switched to 'event', every manual add's) — treating it as
+// actionable would put birthdays on the to-do list. This is the accepted gap in spec § 3.3.
 export function isTodo(it) { return TODO_TYPES.has(it.type) && it.done !== true; }
 
 // Ideas are ordered newest-first: an idea's `date` is when it was captured, so

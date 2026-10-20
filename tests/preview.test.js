@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { findAll } from './fake-dom.js';
 import { renderPreview, TYPES } from '../js/preview.js';
 import { buildRequestBody } from '../worker/src/prompt.js';
 
@@ -43,13 +44,6 @@ class FakeElement {
 
 globalThis.document = { createElement: (tag) => new FakeElement(tag) };
 
-function findAll(el, tag) {
-  const out = [];
-  const walk = (node) => { for (const c of node.children) { if (c.tagName === tag) out.push(c); walk(c); } };
-  walk(el);
-  return out;
-}
-
 const findButton = (el, text) => findAll(el, 'BUTTON').find((b) => b.textContent === text);
 
 const modelItem = (o = {}) => ({
@@ -80,8 +74,8 @@ test('the preview offers every type the Worker can return', () => {
 });
 
 // The other direction is NOT set equality, and this states why so the next
-// person does not "fix" it into one. 'general' is client-only: manual add
-// hard-codes it (js/app.js) and it is every pre-V6 record's type, but the
+// person does not "fix" it into one. 'general' is client-only: it is every
+// pre-V6 record's type (and older manual adds'), but the
 // model is never asked to produce it. Pinning the difference exactly means a
 // THIRD divergence still fails this test.
 test('the only type the preview offers that the Worker cannot return is general', () => {
@@ -105,6 +99,27 @@ test('a task and an idea each render with their OWN option selected', () => {
     assert.deepEqual(selected.map((o) => o.value), [type],
       `a returned ${type} must show as ${type}, not as whatever option happens to be first`);
   }
+});
+
+// Owner decision, same rule as the edit sheet (js/itemsheet.js): 'general' is
+// not offered as a choice, except on a row that already holds it — that row's
+// own type must stay an option, or the first change writes the wrong type in.
+test('the preview type menu does not offer general on a model type', () => {
+  for (const type of TYPES.filter((t) => t !== 'general')) {
+    const container = new FakeElement('section');
+    renderPreview(container, [modelItem({ type })], { onConfirm: () => true, onCancel() {} });
+    const select = findAll(container, 'SELECT')[0];
+    assert.deepEqual(select.children.map((o) => o.value), TYPES.filter((t) => t !== 'general'),
+      `a ${type} row offers every type but general`);
+  }
+});
+
+test('a preview row that holds general keeps general offered and selected', () => {
+  const container = new FakeElement('section');
+  renderPreview(container, [modelItem({ type: 'general' })], { onConfirm: () => true, onCancel() {} });
+  const select = findAll(container, 'SELECT')[0];
+  assert.deepEqual(select.children.map((o) => o.value), TYPES);
+  assert.deepEqual(select.children.filter((o) => o.selected).map((o) => o.value), ['general']);
 });
 
 // draft = items.map(it => ({...it})) — a spread, so notes rides through

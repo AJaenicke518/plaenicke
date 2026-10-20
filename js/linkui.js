@@ -21,9 +21,9 @@
 
 import { getLink, linkWithCode, unlink, isAdoptionPending } from './auth.js';
 import { composeForNewDevice, base64urlToBytes, TOKEN_BYTES, KEY_BYTES } from './crypto.js';
-import { previewRemote, syncOnce } from './sync.js';
+import { previewRemote, syncOnce, localState } from './sync.js';
 import { applyTombstones } from './merge.js';
-import { loadAuth, loadSyncState, loadItems, loadFeeds, loadTombstones } from './storage.js';
+import { loadAuth, loadSyncState } from './storage.js';
 import { WORKER_URL } from './config.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
 
@@ -87,8 +87,8 @@ function relative(iso, now) {
 // actually syncing.
 //
 // BRANCH PRECEDENCE IS FIXED: adoptionPending outranks lastError (DA-I1).
-// Linking while offline sets BOTH — js/sync.js:96 records lastError and does
-// not lower the gate — and that is the exact scenario this string was written
+// Linking while offline sets BOTH — syncOnce (js/sync.js) records
+// lastError: 'offline' on a failed read and does not lower the gate — and that is the exact scenario this string was written
 // for. A device in that state syncs NOTHING until the user completes the
 // dialog; the failure mode is "silently does nothing". If lastError won, the
 // load-bearing signal would be hidden behind an offline banner precisely when
@@ -107,7 +107,7 @@ export function describeSyncStatus(syncState, now) {
 // classifyPastedCode — DECODE, never count characters (DA-I3).
 //
 // linkWithCode branches on `base64urlToBytes(trimmed).length === TOKEN_BYTES`
-// (js/auth.js:45), so a character count disagrees with it on valid-length,
+// (js/auth.js's linkWithCode), so a character count disagrees with it on valid-length,
 // invalid-alphabet input — standard base64 with `+`/`/`, or 43 characters of
 // junk. The UI would show the "creates a NEW account" warning, the user would
 // confirm, and base64urlToBytes would throw out of linkWithCode.
@@ -201,7 +201,7 @@ export function chooseAdoption(localState, remoteState) {
 // they would come to disagree by accident instead.
 //
 // A CORRUPT STORED CODE IS ITS OWN STATE (DA-I2). getLink() returns null for
-// an unparseable code (js/auth.js:30), so isLinked() reads false while a
+// an unparseable code (js/auth.js's getLink), so isLinked() reads false while a
 // credential IS stored: runSync returns before its try/finally and
 // plaenicke.syncState keeps showing the last good lastSyncedAt — a
 // permanently frozen "synced N minutes ago" on an app that will never sync
@@ -325,7 +325,7 @@ const FAILURE_TEXT = {
   conflict: 'Another device kept changing the account while this one was combining. Nothing has been combined yet.',
   // There is no 'no-apply' entry, and that is deliberate. A missing applyState
   // is a wiring bug, not a condition a user can be in: initLinkUI now refuses
-  // to mount without one (:392), applyState is a const closure binding that
+  // to mount without one (initLinkUI's applyState check), applyState is a const closure binding that
   // nothing reassigns, and adopt() is unreachable except through a completed
   // mount — so no code path can set this status. It was REMOVED rather than
   // kept as a belt-and-braces guard because it was not a guard: it converted a
@@ -342,8 +342,8 @@ const FAILURE_TEXT = {
 
 // THE SAME STATUS MEANS TWO DIFFERENT THINGS, EITHER SIDE OF applyState.
 //
-// syncOnce applies BEFORE the push loop (spec 7: write the merged blob first,
-// advance the cursor second), so 'offline', 'error' and 'conflict' are all
+// syncOnce applies BEFORE the push loop (it writes the merged state locally,
+// then PUTs), so 'offline', 'error' and 'conflict' are all
 // reachable with the local write already landed — a Wi-Fi drop between the GET
 // and the PUT reaches every one of them. The messages above say "Nothing has
 // been combined yet", which is false once applySyncedState has run saveItems,
@@ -379,7 +379,7 @@ export function failureText(status, applied) {
 // opposed to re-linking with a different code.
 const RETRYABLE = new Set(['offline', 'error', 'conflict', 'skipped', 'kept-changing', 'malformed']);
 
-// Bounded for the same reason syncOnce's CAS loop is (js/sync.js:217): a
+// Bounded for the same reason syncOnce's CAS loop is (js/sync.js's MAX_ATTEMPTS): a
 // condition that looks transient can be permanent. An account whose version
 // advances on every GET — a caching proxy, or simply a busy account — turns
 // the 'changed' -> re-preview -> adopt cycle into an unbounded loop with no
@@ -388,8 +388,8 @@ const RETRYABLE = new Set(['offline', 'error', 'conflict', 'skipped', 'kept-chan
 const MAX_ADOPT_ATTEMPTS = 3;
 
 // MODULE SCOPE, deliberately. settings.js mounts a NEW initLinkUI on every
-// panel open (js/settings.js:70 rebuilds the whole panel; close() empties the
-// host at :65), and close() cannot cancel the previous closure's in-flight
+// panel open (js/settings.js's open() rebuilds the whole panel; its close()
+// empties the host), and close() cannot cancel the previous closure's in-flight
 // work. Each mount owns its own `inflight` and neither sees the other, so
 // with the gate still raised a user who opens Settings, closes it
 // mid-adoption and re-opens starts a SECOND concurrent adoption — measured
@@ -399,6 +399,13 @@ const MAX_ADOPT_ATTEMPTS = 3;
 // "Merge": two applyState writes with conflicting semantics, resolved by
 // arrival order. app.js's own syncInFlight guard does
 // not cover linkui's syncOnce calls.
+//
+// js/sync.js's syncOnce now serialises every call, from any caller: a second
+// waits for the first, so two syncOnce runs can no longer interleave. That
+// does NOT make this primitive redundant. Serialised, two episodes' writes
+// would still BOTH run, one after the other, so a choice the user abandoned
+// still reaches the account. Deciding which episode may write at all is this
+// primitive's job, and sync.js cannot see it.
 //
 // IT MUST NOT BE ABLE TO OUTLIVE ITS PURPOSE either. It is cleared in the
 // episode's `finally`. The preview's read now gives up at the shared download
@@ -535,10 +542,6 @@ function labelled(node, text) {
 }
 
 function plural(n, one, many) { return `${n} ${n === 1 ? one : many}`; }
-
-function readLocal() {
-  return { items: loadItems(), feeds: loadFeeds(), tombstones: loadTombstones() };
-}
 
 // A blob can decrypt and carry the right schemaVersion and still be
 // structurally unusable. Element shape matters as much as the arrays
@@ -791,7 +794,7 @@ export function initLinkUI(options = {}) {
   // the exact shape DA-C2 named as not an informed choice.
   async function decideAndAct(remote, version, attempt, generation) {
     // tombstones are load-bearing on BOTH sides — see adoptionCounts.
-    const local = readLocal();
+    const local = localState();
     if (chooseAdoption(local, remote) === 'ask') {
       stage = 'ask';
       stageData = { version, remote, ...adoptionCounts(local, remote) };
@@ -801,7 +804,7 @@ export function initLinkUI(options = {}) {
     // 'none' (an empty account — this device bootstraps it) and 'auto'
     // (nothing local to lose) both adopt WITHOUT dedupe.
     //
-    // NEITHER MAY PASS 'adopt-merge' (DA-C1). js/sync.js:118 runs dedupeState
+    // NEITHER MAY PASS 'adopt-merge' (DA-C1). js/sync.js's syncOnce runs dedupeState
     // on exactly that value, and js/merge.js writes a tombstone per dropped
     // id which is then pushed to the account. On 'none' that collapses two
     // legitimately distinct same-title/date/time records into one,
@@ -825,7 +828,7 @@ export function initLinkUI(options = {}) {
   // the dialog described. So re-read at CLICK time and re-ask if it moved.
   async function adoptAgainstFreshCounts(adoptChoice, generation) {
     const shown = stageData;
-    const fresh = adoptionCounts(readLocal(), shown.remote);
+    const fresh = adoptionCounts(localState(), shown.remote);
     // Every count the dialog DESCRIBED, including remoteDeletesLocal, which
     // is a function of local records too.
     const moved = fresh.localItems !== shown.localItems
@@ -914,7 +917,7 @@ export function initLinkUI(options = {}) {
 
   function doMint(rawToken) {
     // composeForNewDevice fails closed on a null link and on an 86-character
-    // token (js/crypto.js:58, :40). An uncaught throw here would leave the
+    // token (js/crypto.js's composeForNewDevice and composeLinkCode). An uncaught throw here would leave the
     // dialog frozen with no diagnostic at all.
     try {
       mintedCode = composeForNewDevice(rawToken, getLink());
@@ -1232,8 +1235,8 @@ export function initLinkUI(options = {}) {
 
   render();
   // NO NETWORK ON MOUNT except for an adoption that is already pending.
-  // settings.js rebuilds its whole panel on every click (js/settings.js:70)
-  // and empties the host on close (:65), so this runs once per panel open
+  // settings.js rebuilds its whole panel on every click (its open())
+  // and empties the host on close (its close()), so this runs once per panel open
   // against a fresh sub-element — never accumulating listeners, and never
   // firing a request just because the user opened Settings.
   if (getLink() && isAdoptionPending()) runAdoption((g) => doPreview(1, g));

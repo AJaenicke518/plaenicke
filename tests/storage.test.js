@@ -4,7 +4,7 @@ import {
   serializeItems, deserializeItems, saveItems,
   serializeFeeds, deserializeFeeds, loadFeeds, saveFeeds,
   serializeFeedCache, deserializeFeedCache, loadFeedCache, saveFeedCache,
-  loadTombstones, saveTombstones, addTombstone, pruneTombstones,
+  loadTombstones, saveTombstones, addTombstone,
   QuotaError,
 } from '../js/storage.js';
 import { installFakeLocalStorage } from './fake-localstorage.js';
@@ -284,21 +284,6 @@ test('addTombstone keeps the newer deletedAt even when the newer one arrives fir
   assert.equal(out[0].deletedAt, '2026-08-02T00:00:00.000Z');
 });
 
-test('pruneTombstones drops entries older than the window and keeps the rest', () => {
-  const now = new Date('2026-08-01T00:00:00.000Z');
-  const list = [
-    { id: 'old', kind: 'item', deletedAt: '2026-01-01T00:00:00.000Z' },
-    { id: 'new', kind: 'item', deletedAt: '2026-07-30T00:00:00.000Z' },
-  ];
-  assert.deepEqual(pruneTombstones(list, now).map(t => t.id), ['new']);
-});
-
-test('pruneTombstones retains an entry whose deletedAt cannot be parsed', () => {
-  const now = new Date('2026-08-01T00:00:00.000Z');
-  const list = [{ id: 'corrupt', kind: 'item', deletedAt: 'not-a-date' }];
-  assert.deepEqual(pruneTombstones(list, now).map(t => t.id), ['corrupt']);
-});
-
 // --- saveItems quota handling ---
 
 test('saveItems throws QuotaError when storage is full', () => {
@@ -419,6 +404,18 @@ test('saveSyncState preserves adoptionPending on a partial update instead of res
   saveSyncState({ version: 1, adoptionPending: true });
   saveSyncState({ version: 9 });
   assert.equal(loadSyncState().adoptionPending, true);
+});
+
+// EVERY field, not only adoptionPending. sync.js's record() and auth.js's
+// clearAdoptionPending pass a one-field patch and rely on this — they used to
+// spread loadSyncState() in by hand first, which read as though saveSyncState
+// were a plain setter.
+test('saveSyncState merges a one-field patch over every existing field', () => {
+  installFakeLocalStorage();
+  const full = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-10-01T00:00:00.000Z', lastError: 'offline', adoptionPending: true };
+  saveSyncState(full);
+  saveSyncState({ lastError: null });
+  assert.deepEqual(loadSyncState(), { ...full, lastError: null });
 });
 
 // Confirms the fix for the above does not break unlink()-style full resets:

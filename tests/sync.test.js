@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
-import { syncOnce as realSyncOnce, previewRemote as realPreviewRemote, MAX_ATTEMPTS } from '../js/sync.js';
+import { syncOnce as realSyncOnce, previewRemote as realPreviewRemote, MAX_ATTEMPTS, recordSyncFailure, localState } from '../js/sync.js';
 import { fetchWithTimeout, FETCH_TIMEOUT_MS } from '../js/fetchtimeout.js';
 import { linkWithCode, clearAdoptionPending, tokenHash } from '../js/auth.js';
 import { encryptBlob, decryptBlob, generateEncKey, bytesToBase64url, composeLinkCode } from '../js/crypto.js';
@@ -57,6 +57,32 @@ test('sync.js never imports a storage writer — the single-writer rule, enforce
     assert.ok(!src.includes(forbidden),
       `sync.js references ${forbidden}; a second writer silently reverts pulled records (spec 5.5)`);
   }
+});
+
+// The rule above covered sync.js alone. linkui.js is the other orchestrator
+// (adoption), and the tombstone writers were not on the list at all — yet
+// app.js's applySyncedState does a FULL-OVERWRITE saveTombstones from a
+// snapshot it read a few lines earlier, which is only correct while nothing
+// else writes tombstones in between. Comments are stripped first: linkui.js
+// legitimately DESCRIBES what applySyncedState writes.
+function codeOnly(src) {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n').map((line) => line.replace(/(^|\s)\/\/.*$/, '$1')).join('\n');
+}
+
+test('neither orchestrator (sync.js, linkui.js) calls a storage writer for synced data or tombstones', () => {
+  for (const file of ['sync.js', 'linkui.js']) {
+    const code = codeOnly(readFileSync(new URL(`../js/${file}`, import.meta.url), 'utf8'));
+    for (const forbidden of ['saveItems', 'saveFeeds', 'saveFeedCache', 'saveTombstones', 'addTombstone']) {
+      assert.doesNotMatch(code, new RegExp(`\\b${forbidden}\\b`),
+        `${file} references ${forbidden}; writes go through the injected applyState (spec 5.5, js/storage.js)`);
+    }
+  }
+});
+
+test('codeOnly strips comments but keeps code, including a URL in a string', () => {
+  assert.equal(codeOnly("a(); // saveItems\n/* saveTombstones */b('https://x');"), "a(); \nb('https://x');");
 });
 
 test('an unlinked device does not sync and does not call the network', async () => {
@@ -871,4 +897,202 @@ test('an encrypt failure before the PUT reports error, not offline', async () =>
   } finally {
     crypto.subtle.encrypt = originalEncrypt;
   }
+});
+
+// record() (reached here through recordSyncFailure) writes only the fields it
+// is given; every other sync-state field, the adoption gate included, stays.
+test('recordSyncFailure records lastError and leaves every other sync-state field alone', () => {
+  installFakeLocalStorage();
+  const full = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-10-01T00:00:00.000Z', lastError: null, adoptionPending: true };
+  saveSyncState(full);
+  recordSyncFailure({ name: 'TypeError' });
+  assert.deepEqual(loadSyncState(), { ...full, lastError: 'TypeError' });
+});
+
+// A browser CORS rejection IS a TypeError from fetch(), so a misconfigured
+// origin list reads exactly like being offline (spec § 13's custom-domain
+// move is where it would bite). The name is logged so the console can tell
+// them apart; what is recorded and returned does not change. Only the name:
+// never the message, the URL or the token.
+test('a rejected read logs the error name, and still records and reports offline', async (t) => {
+  const link = await linked();
+  const logged = [];
+  t.mock.method(console, 'error', (...args) => { logged.push(args); });
+  const res = await syncOnce({ fetchImpl: async () => { throw new TypeError('Failed to fetch'); },
+    now: NOW, apiBase: 'https://w.example', applyState: echo });
+  assert.equal(res.status, 'offline');
+  assert.equal(res.applied, false);
+  assert.equal(loadSyncState().lastError, 'offline');
+  assert.equal(logged.length, 1);
+  assert.ok(logged[0].includes('TypeError'), `logged: ${JSON.stringify(logged)}`);
+  const text = JSON.stringify(logged);
+  assert.ok(!text.includes(link.authToken) && !text.includes('Failed to fetch') && !text.includes('w.example'));
+});
+
+test('a rejected write logs the error name, and still records and reports offline', async (t) => {
+  const link = await linked();
+  const server = fakeServer();
+  const logged = [];
+  t.mock.method(console, 'error', (...args) => { logged.push(args); });
+  const res = await realSyncOnce({
+    readFetchImpl: server.fetchImpl,
+    fetchImpl: async () => { throw new TypeError('Failed to fetch'); },
+    now: NOW, apiBase: 'https://w.example',
+    applyState: () => state({ items: [item('a', '2026-08-01T00:00:00.000Z')] }),
+  });
+  assert.equal(res.status, 'offline');
+  assert.equal(res.applied, true);
+  assert.equal(loadSyncState().lastError, 'offline');
+  assert.equal(logged.length, 1);
+  assert.ok(logged[0].includes('TypeError'), `logged: ${JSON.stringify(logged)}`);
+  const text = JSON.stringify(logged);
+  assert.ok(!text.includes(link.authToken) && !text.includes('Failed to fetch') && !text.includes('w.example'));
+});
+
+// ONE reader of "this device's synced state", shared by sync.js, linkui.js's
+// adoption classifier and app.js's applySyncedState. It must go through the
+// storage DESERIALIZERS, not the raw JSON: linkui's classifier counts what
+// loadItems returns (CLAUDE.md), so a record the loader drops is not counted,
+// and a pre-V5 record arrives with its updatedAt backfilled.
+test('localState reads the synced keys through the storage loaders', () => {
+  installFakeLocalStorage();
+  localStorage.setItem('plaenicke.items', JSON.stringify([
+    { id: 'old', title: 'pre-V5', date: '2026-08-02', time: null, createdAt: '2026-07-01T00:00:00.000Z' },
+    { id: 'bad', title: 'numeric date', date: 20260802, time: null, updatedAt: '2026-08-01T00:00:00.000Z' },
+  ]));
+  saveFeeds([{ id: 'f1', url: 'https://cal.example/a.ics', name: 'A', color: '#111', hidden: false, updatedAt: '2026-08-01T00:00:00.000Z' }]);
+  localStorage.setItem('plaenicke.syncTombstones', JSON.stringify([{ id: 't1', kind: 'item', deletedAt: '2026-08-01T00:00:00.000Z' }]));
+  const out = localState();
+  assert.deepEqual(Object.keys(out).sort(), ['feeds', 'items', 'schemaVersion', 'tombstones']);
+  assert.equal(out.schemaVersion, SCHEMA_VERSION);
+  assert.deepEqual(out.items, loadItems());
+  assert.deepEqual(out.items.map((i) => i.id), ['old']);
+  assert.equal(out.items[0].updatedAt, '2026-07-01T00:00:00.000Z');
+  assert.deepEqual(out.feeds, loadFeeds());
+  assert.deepEqual(out.tombstones, [{ id: 't1', kind: 'item', deletedAt: '2026-08-01T00:00:00.000Z' }]);
+});
+
+// The shape used to be rebuilt in three places. The other two now call
+// localState, so a fourth field is added in one place.
+test('linkui.js and app.js read local synced state through localState, not their own copy', () => {
+  for (const file of ['linkui.js', 'app.js']) {
+    const src = codeOnly(readFileSync(new URL(`../js/${file}`, import.meta.url), 'utf8'));
+    assert.ok(/\blocalState\(\)/.test(src), `${file} does not call localState()`);
+    assert.ok(!src.includes('loadTombstones'), `${file} reads tombstones itself — rebuilding the local state shape`);
+  }
+});
+
+// --- syncOnce excludes itself ------------------------------------------------
+//
+// Two callers reach syncOnce: app.js's runSync (which guards only against
+// itself) and linkui.js's adoption (which guards only against other panel
+// mounts). Nothing excluded one from the other once the adoption gate was
+// down — e.g. a second tab finishes adoption, this tab's storage listener
+// starts runSync, and this tab's own dialog is then confirmed. Two syncOnce
+// runs then interleave: two applyState re-merges and two CAS loops racing.
+// syncOnce now serialises: a second call WAITS for the first, then runs in
+// full. It is never dropped and never answers with a new status.
+
+// A fake server whose GETs can be held open, so a sync can be caught mid-flight.
+function heldServer() {
+  const server = fakeServer();
+  const held = [];
+  const fetchImpl = async (url, opts = {}) => {
+    if ((opts.method || 'GET') === 'GET') {
+      await new Promise((resolve) => held.push(resolve));
+    }
+    return server.fetchImpl(url, opts);
+  };
+  return { ...server, fetchImpl, held };
+}
+// Poll, never a fixed number of ticks: syncOnce hashes the token through
+// WebCrypto before its read, and that completes as a thread-pool MACROTASK,
+// so one setTimeout(0) is not enough under load (measured: 2 failures in 6
+// full runs). For a NEGATIVE check the poll waits for the forbidden state —
+// under a mutant it arrives, under correct code the poll runs out.
+const settle = () => new Promise((r) => setTimeout(r, 0));
+async function settleUntil(pred) {
+  for (let i = 0; i < 200 && !pred(); i += 1) await settle();
+}
+
+test('a second syncOnce waits for the first to settle before it touches the network', async () => {
+  await linked();
+  const server = heldServer();
+  const a = syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: () => state({ items: [item('a', '2026-08-01T00:00:00.000Z')] }) });
+  await settleUntil(() => server.held.length === 1);
+  assert.equal(server.held.length, 1, 'the first sync has issued its read');
+  const b = syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: () => state({ items: [item('a', '2026-08-01T00:00:00.000Z'), item('b', '2026-08-01T00:00:00.000Z')] }) });
+  await settleUntil(() => server.held.length > 1);
+  assert.equal(server.held.length, 1, 'the second sync must not read while the first is in flight');
+  server.held.shift()();
+  const resA = await a;
+  assert.equal(resA.status, 'ok');
+  await settleUntil(() => server.held.length === 1);
+  assert.equal(server.held.length, 1, 'the second sync reads once the first has settled');
+  server.held.shift()();
+  const resB = await b;
+  // Not dropped: it ran in full, against the version the first one wrote.
+  assert.equal(resB.status, 'ok');
+  assert.equal(resB.pushed, true);
+  assert.equal(server.row.version, 2);
+  assert.deepEqual(server.calls.map((c) => c.method), ['GET', 'PUT', 'GET', 'PUT']);
+});
+
+test('an adoption queued behind an ordinary sync still runs and lifts the gate', async () => {
+  await linked();
+  const server = heldServer();
+  const ordinary = syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo });
+  await settleUntil(() => server.held.length === 1);
+  saveSyncState({ adoptionPending: true });
+  const adoption = syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: echo, adoptChoice: 'adopt-bootstrap' });
+  await settleUntil(() => server.held.length > 1);
+  assert.equal(server.held.length, 1, 'the adoption must not read while the ordinary sync is in flight');
+  server.held.shift()();
+  // The ordinary sync, already past its gate check, finishes.
+  await ordinary;
+  await settleUntil(() => server.held.length === 1);
+  assert.equal(server.held.length, 1, 'the adoption reads once the ordinary sync has settled');
+  server.held.shift()();
+  const res = await adoption;
+  assert.equal(res.status, 'ok');
+  assert.equal(loadSyncState().adoptionPending, false);
+});
+
+test('a sync that fails or rejects does not wedge the ones queued behind it', async () => {
+  await linked();
+  const server = fakeServer();
+  // Fails with a status (applyState throws).
+  const failing = syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: () => { throw new Error('boom'); } });
+  // Rejects outright: the read fails, and recording that failure throws
+  // (storage blocked), which is outside every try in syncOnce.
+  const rejecting = syncOnce({
+    fetchImpl: async () => {
+      const store = globalThis.localStorage;
+      store.setItem = () => { delete store.setItem; throw new Error('storage blocked'); };
+      throw new TypeError('Failed to fetch');
+    },
+    now: NOW, apiBase: 'https://w.example', applyState: echo });
+  const after = syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: () => state({ items: [item('a', '2026-08-01T00:00:00.000Z')] }) });
+  assert.equal((await failing).status, 'error');
+  await assert.rejects(rejecting, /storage blocked/);
+  assert.equal((await after).status, 'ok');
+});
+
+// MUST NOT CHANGE: a malformed call is refused at once, before the network,
+// even while another sync is holding the queue.
+test('a malformed syncOnce call is refused immediately, without waiting for one in flight', async () => {
+  await linked();
+  const server = heldServer();
+  const inFlight = syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo });
+  await settleUntil(() => server.held.length === 1);
+  assert.equal(server.held.length, 1);
+  await assert.rejects(realSyncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo }), /readFetchImpl/);
+  await assert.rejects(syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo, adoptChoice: 'adopt-replace' }), /unknown adoptChoice/);
+  server.held.shift()();
+  await inFlight;
 });

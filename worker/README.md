@@ -57,14 +57,15 @@ misleading `bad_json`.
 
 ## One-time setup
 
-`database_id` in `wrangler.toml` is a placeholder
-(`REPLACE_AFTER_wrangler_d1_create`) — it can't be filled in until the
-database exists under your own Cloudflare account, so it stays a placeholder
-in version control until you run the first command below.
+`database_id` in `wrangler.toml` is already set to the production D1
+database, so the deployed Worker needs none of this. The steps below are for
+standing the Worker up from scratch under a different Cloudflare account: the
+first command creates the database, and its returned id replaces the one in
+`wrangler.toml`.
 
 ```bash
 cd worker
-npx wrangler d1 create plaenicke        # copy the returned database_id into wrangler.toml
+npx wrangler d1 create plaenicke        # put the returned database_id in wrangler.toml
 npx wrangler d1 migrations apply plaenicke --remote
 npx wrangler secret put ADMIN_SECRET    # paste a generated secret at the prompt — see below
 npx wrangler deploy
