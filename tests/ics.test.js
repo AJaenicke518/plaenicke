@@ -1481,6 +1481,84 @@ test('expandEvents emits a RECURRENCE-ID override exactly once when the master w
   ]);
 });
 
+// The backward move: an instance rescheduled EARLIER than its original slot
+// (RECURRENCE-ID 15 Sep, new DTSTART 3 Sep). Probe-verified correct when the
+// forward cases were written, never pinned. The failure it guards is the
+// override being emitted only alongside its original slot, which shows
+// nothing on the moved-to day whenever the original slot is out of range.
+const MOVED_MINUS_12 = ics(
+  vevent(
+    'UID:series-1', 'SUMMARY:Weekly sync',
+    'DTSTART;TZID=America/New_York:20260901T090000',
+    'DTEND;TZID=America/New_York:20260901T100000',
+    'RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=4',
+  ),
+  vevent(
+    'UID:series-1', 'SUMMARY:Weekly sync (pulled forward)',
+    'RECURRENCE-ID;TZID=America/New_York:20260915T090000',
+    'DTSTART;TZID=America/New_York:20260903T080000',
+    'DTEND;TZID=America/New_York:20260903T083000',
+  ),
+);
+
+test('expandEvents emits a backward-moved RECURRENCE-ID override in a range covering only the moved-to day', () => {
+  assert.deepEqual(expand(MOVED_MINUS_12, '2026-09-03', '2026-09-03').map((i) => [i.date, i.time, i.endTime, i.title]), [
+    ['2026-09-03', '08:00', '08:30', 'Weekly sync (pulled forward)'],
+  ]);
+});
+
+test('expandEvents emits nothing on the original slot day of a backward-moved override', () => {
+  assert.deepEqual(expand(MOVED_MINUS_12, '2026-09-15', '2026-09-15'), []);
+});
+
+test('expandEvents emits a backward-moved override exactly once, in date order, over the whole month', () => {
+  assert.deepEqual(expand(MOVED_MINUS_12, '2026-09-01', '2026-09-30').map((i) => [i.date, i.time, i.title]), [
+    ['2026-09-01', '09:00', 'Weekly sync'],
+    ['2026-09-03', '08:00', 'Weekly sync (pulled forward)'],
+    ['2026-09-08', '09:00', 'Weekly sync'],
+    ['2026-09-22', '09:00', 'Weekly sync'],
+  ]);
+});
+
+test('expandEvents emits an override moved back into the previous month in that month\'s range only', () => {
+  const text = ics(
+    vevent(
+      'UID:series-1', 'SUMMARY:Weekly sync',
+      'DTSTART;TZID=America/New_York:20260901T090000',
+      'RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=6',
+    ),
+    vevent(
+      'UID:series-1', 'SUMMARY:Weekly sync (previous month)',
+      'RECURRENCE-ID;TZID=America/New_York:20261006T090000',
+      'DTSTART;TZID=America/New_York:20260930T110000',
+    ),
+  );
+  assert.deepEqual(expand(text, '2026-09-30', '2026-09-30').map((i) => [i.date, i.time, i.title]), [
+    ['2026-09-30', '11:00', 'Weekly sync (previous month)'],
+  ]);
+  assert.deepEqual(expand(text, '2026-10-01', '2026-10-31').map((i) => [i.date, i.title]), [],
+    'the October slot it was moved out of stays empty');
+});
+
+test('expandEvents emits an all-day RECURRENCE-ID override moved backward', () => {
+  const text = ics(
+    vevent(
+      'UID:series-1', 'SUMMARY:Holiday',
+      'DTSTART;VALUE=DATE:20260901',
+      'RRULE:FREQ=WEEKLY;BYDAY=TU;COUNT=4',
+    ),
+    vevent(
+      'UID:series-1', 'SUMMARY:Holiday (early)',
+      'RECURRENCE-ID;VALUE=DATE:20260922',
+      'DTSTART;VALUE=DATE:20260918',
+    ),
+  );
+  assert.deepEqual(expand(text, '2026-09-18', '2026-09-18').map((i) => [i.date, i.title]), [
+    ['2026-09-18', 'Holiday (early)'],
+  ]);
+  assert.deepEqual(expand(text, '2026-09-22', '2026-09-22'), []);
+});
+
 test('parseICS skips a RECURRENCE-ID carrying RANGE=THISANDFUTURE rather than applying it to one instance', () => {
   const text = ics(vevent(
     'UID:series-1', 'SUMMARY:Shifted forever',
