@@ -26,6 +26,33 @@ import { formatDayLabel } from '../js/freshness.js';
 // this suite quietly fall back to the stub instead of failing, which is the
 // same class of "assertion that cannot fail" defect DA-C4 flagged below.
 
+// THE FIXTURE RELOAD. seed(), simulateSync() and the feed seeders reload
+// app.js's module-scope snapshot through its storage listener, which also
+// schedules a sync (a write from a tab that hid must be pushed by the visible
+// one — see "cross-tab sync" below). These helpers are setting up fixtures,
+// not modelling a write to push, so that sync is DROPPED here: left in, every
+// reload under real timers armed a real 2 s timer that fired after the file
+// finished and sent GET /data to the production Worker, and every reload
+// under t.mock.timers ran clearTimeout on app.js's syncTimer — a handle from
+// an earlier mock session, which removes an unrelated timer (CLAUDE.md). The
+// listener's only timer is that one; anything else it arms is a fixture
+// error, refused loudly. Tests of the scheduling itself call the listener
+// directly (storageEvent).
+function reloadFromStorage(key) {
+  const realSet = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  const armed = [];
+  globalThis.setTimeout = (fn, ms) => { armed.push(ms); return { droppedFixtureTimer: true }; };
+  globalThis.clearTimeout = () => {};
+  try {
+    for (const fn of globalThis.window._listeners.storage) fn({ key });
+  } finally {
+    globalThis.setTimeout = realSet;
+    globalThis.clearTimeout = realClear;
+  }
+  assert.ok(armed.every((ms) => ms === 2000), `fixture reload armed an unexpected timer: ${armed}`);
+}
+
 // --- minimal fake DOM --------------------------------------------------
 //
 // app.js reaches for `document`/`window` at module scope (building its
@@ -366,10 +393,10 @@ test('the storage listener ignores plaenicke.syncState and only reacts to the th
   saveItems([item('cross-tab-item', '2026-08-01T00:00:00.000Z')]);
   const list = globalThis.document.getElementById('item-list');
 
-  for (const fn of storageListeners) fn({ key: 'plaenicke.syncState' });
+  reloadFromStorage('plaenicke.syncState');
   assert.ok(!allText(list).includes('t-cross-tab-item'), 'a syncState-only write must not trigger a reload/re-render');
 
-  for (const fn of storageListeners) fn({ key: 'plaenicke.items' });
+  reloadFromStorage('plaenicke.items');
   assert.ok(allText(list).includes('t-cross-tab-item'), 'an items write must trigger a reload/re-render');
 
   // The listener reloads items/feeds/feedCache regardless of WHICH of the
@@ -378,11 +405,11 @@ test('the storage listener ignores plaenicke.syncState and only reacts to the th
   // allowlist, not just 'plaenicke.items' (a narrowing regression that
   // dropped the other two would otherwise pass silently).
   saveItems([item('cross-tab-item-feeds-key', '2026-08-01T00:00:00.000Z')]);
-  for (const fn of storageListeners) fn({ key: 'plaenicke.feeds' });
+  reloadFromStorage('plaenicke.feeds');
   assert.ok(allText(list).includes('t-cross-tab-item-feeds-key'), 'a plaenicke.feeds write must also trigger a reload/re-render');
 
   saveItems([item('cross-tab-item-tombstones-key', '2026-08-01T00:00:00.000Z')]);
-  for (const fn of storageListeners) fn({ key: 'plaenicke.syncTombstones' });
+  reloadFromStorage('plaenicke.syncTombstones');
   assert.ok(allText(list).includes('t-cross-tab-item-tombstones-key'), 'a plaenicke.syncTombstones write must also trigger a reload/re-render');
 });
 
@@ -527,7 +554,7 @@ const record = (o) => ({
 // file, so state genuinely carries between tests.)
 function seed(records) {
   saveItems(records);
-  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.items' });
+  reloadFromStorage('plaenicke.items');
   assert.deepEqual(loadItems().map((i) => i.id), records.map((i) => i.id), 'fixture check: the seed is what is stored');
 }
 
@@ -1088,7 +1115,7 @@ test('resuming re-fetches calendar feeds whose cache is stale', async () => {
   await import('../js/app.js');
   const feed = { id: 'feedR', url: 'https://example.com/r.ics', name: 'R', color: 'var(--feed-palette-1)', hidden: false, updatedAt: '2026-08-01T00:00:00.000Z' };
   saveFeeds([feed]);
-  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.feeds' });
+  reloadFromStorage('plaenicke.feeds');
   const calls = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url) => { calls.push(String(url)); return { ok: true, text: async () => '' }; };
@@ -1101,7 +1128,7 @@ test('resuming re-fetches calendar feeds whose cache is stale', async () => {
   assert.ok(calls.some((u) => u.includes('/feed?url=') && u.includes(encodeURIComponent(feed.url))),
     'a resume must refresh stale calendars, not leave last night\'s data on screen');
   saveFeeds([]);
-  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.feeds' });
+  reloadFromStorage('plaenicke.feeds');
 });
 
 // Sweep S-12: these assert the DIFFERENCE a resume makes. Run alone (with
@@ -1234,13 +1261,13 @@ function seedFeed(feed) {
       skipped: [],
     },
   }));
-  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.feeds' });
+  reloadFromStorage('plaenicke.feeds');
 }
 
 function unseedFeeds() {
   saveFeeds([]);
   localStorage.removeItem('plaenicke.feedCache');
-  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.feeds' });
+  reloadFromStorage('plaenicke.feeds');
 }
 
 test('open: tapping an item in the List opens its sheet in #sheet-host', async () => {
@@ -1667,7 +1694,7 @@ const rawStored = () => localStorage.getItem('plaenicke.items');
 // which reloads through its storage listener (the same path as seed()).
 function simulateSync(records) {
   saveItems(records);
-  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.items' });
+  reloadFromStorage('plaenicke.items');
 }
 
 // A hand-rolled timer fake, used INSTEAD of t.mock.timers for the sync test.
@@ -2471,7 +2498,7 @@ function openDayForToday() {
 function seedFeedsWithCache(feedList, cache) {
   saveFeeds(feedList);
   localStorage.setItem('plaenicke.feedCache', JSON.stringify(cache));
-  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.feeds' });
+  reloadFromStorage('plaenicke.feeds');
 }
 const sdFeed = (id, o = {}) => ({
   id, url: `https://example.com/${id}.ics`, name: id, color: 'var(--feed-palette-1)', hidden: false,
@@ -4315,4 +4342,204 @@ test('slow sync write: the line clears when its write settles, even when a retry
   }
   assert.equal(loadSyncState().version, 2, 'fixture check: the retry landed');
   assert.equal(timers.live(SLOW_WRITE_MS), 0, 'no repaint timer is left behind');
+});
+
+// =========================================================================
+// A write in a tab that then hid is pushed by the VISIBLE tab
+// =========================================================================
+//
+// Only the visible tab syncs (see above). A write in tab A schedules A's push,
+// and if A hides inside the 2 s debounce that push is skipped. Tab B, which
+// the user is now working in, sees the write only as a storage event — so the
+// storage listener must schedule B's sync, or the write waits until A is
+// visible again, however long that is. These tests play tab B with this one
+// module: app.js's storage listener is invoked directly, as seed() does.
+
+function storageEvent(key) {
+  for (const fn of globalThis.window._listeners.storage) fn({ key });
+}
+
+test('cross-tab sync: a write from a tab that hid is pushed by the visible tab', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  seed([record({ id: 'xtab-del', title: 'Delete in tab A', date: '2099-05-06' })]);
+  const net = captureAccountRequests();
+  const timers = installManualTimers();
+  try {
+    // Tab A: delete, then hide inside the debounce. Its push is skipped.
+    click(deleteControlFor(itemList(), 'Delete in tab A'));
+    setVisibility('hidden');
+    resume();
+    assert.ok(tombstoned('xtab-del'), 'fixture check: backgrounding committed the delete');
+    timers.fire(2000);
+    await drain();
+    assert.deepEqual(net.requests, [], 'fixture check: the hidden tab pushed nothing');
+
+    // Tab B: visible, and told by the storage events what A wrote.
+    setVisibility('visible');
+    storageEvent('plaenicke.items');
+    storageEvent('plaenicke.syncTombstones');
+    assert.equal(timers.live(2000), 1, 'the storage event schedules one debounced sync');
+    assert.deepEqual(net.requests, [], 'debounced: nothing goes out at once');
+    timers.fire(2000);
+    await drain();
+  } finally {
+    setVisibility('visible');
+    timers.restore();
+    net.restore();
+  }
+  assert.deepEqual(net.requests.map((r) => r.method), ['GET', 'PUT'], 'the visible tab pulls and pushes');
+  const { getLink } = await import('../js/auth.js');
+  const { decryptBlob } = await import('../js/crypto.js');
+  const pushed = await decryptBlob(getLink().encKey, JSON.parse(net.requests[1].body).blob);
+  assert.ok(pushed.tombstones.some((ts) => ts.id === 'xtab-del' && ts.kind === 'item'),
+    "what is pushed carries the other tab's delete");
+  assert.ok(!pushed.items.some((it) => it.id === 'xtab-del'), 'and not the deleted item');
+  seed([]);
+});
+
+// Device-local keys (the feed cache, the launch log, the sync cursor) are not
+// in the synced blob: a storage event for one must not cause a sync.
+test('cross-tab sync: a storage event for a key that is not synced schedules nothing', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  saveItems([record({ id: 'xtab-local', title: 'Unpushed' })]);
+  const net = captureAccountRequests();
+  const timers = installManualTimers();
+  try {
+    setVisibility('visible');
+    for (const key of ['plaenicke.feedCache', 'plaenicke.launches', 'plaenicke.syncState', 'plaenicke.auth', null]) {
+      storageEvent(key);
+    }
+    assert.equal(timers.live(2000), 0, 'no sync is scheduled for a device-local key');
+    timers.fire(2000);
+    await drain();
+  } finally {
+    setVisibility('visible');
+    timers.restore();
+    net.restore();
+  }
+  assert.deepEqual(net.requests, [], 'and nothing is pulled or pushed');
+});
+
+// The storage event reaches EVERY other tab, hidden ones included. A hidden
+// tab must still not sync: the gate in runSync decides, not the listener.
+test('cross-tab sync: a hidden tab that receives the storage event still makes no request', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  saveItems([record({ id: 'xtab-hidden', title: 'Written elsewhere' })]);
+  const net = captureAccountRequests();
+  const timers = installManualTimers();
+  try {
+    setVisibility('hidden');
+    for (const key of ['plaenicke.items', 'plaenicke.feeds', 'plaenicke.syncTombstones']) storageEvent(key);
+    timers.fire(2000);
+    await drain();
+  } finally {
+    setVisibility('visible');
+    timers.restore();
+    net.restore();
+  }
+  assert.deepEqual(net.requests, [], 'a hidden tab neither pulls nor pushes');
+});
+
+// CAN THIS PING-PONG? Every applied sync rewrites items, feeds and tombstones
+// unconditionally (applySyncedState), and with two tabs visible each one's
+// rewrite is a storage event in the other — which now schedules a sync there.
+// A storage event fires only when a value CHANGES (HTML Living Standard, Web
+// Storage: setItem returns early when the old value equals the new one), so
+// the loop ends exactly when a sync rewrites all three keys byte-identically.
+//
+// The run below plays both tabs with this one module. That is faithful for
+// sync: runSync reads storage and the account, never the module's `items`
+// snapshot (applySyncedState re-merges loadItems()/loadFeeds()/
+// loadTombstones()), and the two tabs share both. Each round, the keys whose
+// value changed during the last sync are delivered as storage events to "the
+// other tab", which syncs through the real listener and debounce. The start is
+// deliberately messy: a pre-V5 record with no updatedAt (backfilled on load,
+// so the first rewrite changes it), a feed, tombstones on both sides, and an
+// account holding a record this device has never seen.
+test('cross-tab sync: two visible tabs reacting to each other converge — no ping-pong', async () => {
+  const ls = installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  const { getLink } = await import('../js/auth.js');
+  const { encryptBlob } = await import('../js/crypto.js');
+  const legacy = record({ id: 'pp-legacy', title: 'Pre-V5' });
+  delete legacy.updatedAt;
+  localStorage.setItem('plaenicke.items', JSON.stringify([record({ id: 'pp-local', title: 'Local' }), legacy]));
+  saveFeeds([{ id: 'pp-feed', url: 'https://example.invalid/pp.ics', name: 'PP', color: '#123456', hidden: false, updatedAt: '2026-08-19T00:00:00.000Z' }]);
+  saveTombstones([{ id: 'pp-gone-here', kind: 'item', deletedAt: new Date().toISOString() }]);
+  const server = {
+    version: 3,
+    blob: await encryptBlob(getLink().encKey, {
+      schemaVersion: SCHEMA_VERSION,
+      items: [record({ id: 'pp-remote', title: 'From the other device' })],
+      feeds: [],
+      tombstones: [{ id: 'pp-gone-there', kind: 'item', deletedAt: new Date().toISOString() }],
+    }),
+  };
+  saveSyncState({ ...loadSyncState(), version: 3 });
+
+  // Which synced keys a sync actually CHANGED — exactly the storage events a
+  // spec-conforming browser would deliver to the other tab.
+  const SYNCED = ['plaenicke.items', 'plaenicke.feeds', 'plaenicke.syncTombstones'];
+  let changed = new Set();
+  const realSet = ls.setItem.bind(ls);
+  ls.setItem = (k, v) => {
+    if (SYNCED.includes(k) && ls.getItem(k) !== String(v)) changed.add(k);
+    realSet(k, v);
+  };
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    if (!String(url).includes('/data')) return { ok: true, status: 200, text: async () => '', json: async () => ({}) };
+    requests.push(method);
+    if (method === 'GET') return { ok: true, status: 200, json: async () => ({ version: server.version, blob: server.blob }) };
+    const body = JSON.parse(opts.body);
+    if (body.version !== server.version) {
+      return { ok: false, status: 409, json: async () => ({ version: server.version, blob: server.blob }) };
+    }
+    server.version += 1;
+    server.blob = body.blob;
+    return { ok: true, status: 200, json: async () => ({ version: server.version }) };
+  };
+  const timers = installManualTimers();
+  const rounds = [];
+  try {
+    setVisibility('visible');
+    let deliver = ['plaenicke.items']; // the write that started it, from the other tab
+    for (let round = 0; round < 10 && deliver.length; round += 1) {
+      changed = new Set();
+      const before = requests.length;
+      for (const key of deliver) storageEvent(key);
+      assert.equal(timers.live(2000), 1, `round ${round}: the events schedule one debounced sync`);
+      timers.fire(2000);
+      await drain();
+      rounds.push({ requests: requests.slice(before), changed: [...changed].sort() });
+      deliver = [...changed];
+    }
+  } finally {
+    setVisibility('visible');
+    timers.restore();
+    globalThis.fetch = originalFetch;
+    ls.setItem = realSet;
+  }
+  assert.equal(loadSyncState().lastError, null, 'fixture check: every sync succeeded');
+  assert.deepEqual(rounds[0].requests, ['GET', 'PUT'], 'fixture check: the first sync merged and pushed');
+  assert.ok(rounds[0].changed.length > 0, 'fixture check: the first sync changed what is stored');
+  const last = rounds[rounds.length - 1];
+  assert.deepEqual(last.changed, [], `the exchange ends: a sync that changes nothing raises no event (${JSON.stringify(rounds)})`);
+  assert.ok(rounds.length <= 3, `and it ends within a few rounds (${JSON.stringify(rounds)})`);
+  assert.deepEqual(last.requests, ['GET'], 'the last sync finds nothing new and pushes nothing');
+  assert.deepEqual(loadItems().map((i) => i.id).sort(), ['pp-legacy', 'pp-local', 'pp-remote'],
+    'fixture check: both sides\' records are kept');
 });

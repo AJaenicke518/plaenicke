@@ -1081,6 +1081,16 @@ function scheduleSync() {
 // every sync tick and would otherwise force a full re-render in every other
 // tab on every tick. storage.js's own constants, never literals: a renamed
 // key would otherwise leave this listener silently dead.
+//
+// All three keys are in the synced blob, so the event also SCHEDULES A SYNC.
+// Only the visible tab syncs (runSync's gate): a write made in a tab that
+// hides inside the 2 s debounce has its push skipped there, and without this
+// it would wait, unpushed, for as long as the user works in this tab instead.
+// A hidden tab receiving the event schedules too, and its runSync returns at
+// the gate. This cannot ping-pong between two visible tabs: an applied sync
+// that changes nothing rewrites the three keys with byte-identical values,
+// and setItem with an unchanged value fires no storage event (HTML Living
+// Standard, Web Storage, setItem steps). tests/apply.test.js runs the loop.
 const CROSS_TAB_KEYS = [STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY];
 window.addEventListener('storage', (e) => {
   if (!CROSS_TAB_KEYS.includes(e.key)) return;
@@ -1088,6 +1098,7 @@ window.addEventListener('storage', (e) => {
   feeds = loadFeeds();
   feedCache = loadFeedCache();
   render();
+  scheduleSync();
 });
 
 // --- Phase 0: staying current across a resume -----------------------------
