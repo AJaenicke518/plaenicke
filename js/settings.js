@@ -19,24 +19,16 @@ import { initLinkUI } from './linkui.js';
 import { uid } from './uid.js';
 import { nowISO } from './dateparse.js';
 import { lock } from './scrolllock.js';
+import { fetchWithTimeout } from './fetchtimeout.js';
+import { FEED_PALETTE } from './palette.js';
 
 const CHOICES = ['light', 'dark', 'auto'];
 
-// The fixed 6-color palette calendars are auto-assigned from, tap-to-cycle.
-// Each entry is a CSS custom-property *reference* (not a raw hex) — stored
-// verbatim in feed.color and set as the inline `--feed-color` custom
-// property at every render site (app.js, Task 7), so the actual displayed
-// color resolves through the token cascade and stays theme-correct without
-// this module (or app.js) ever special-casing light/dark. Swatch values
-// themselves live in styles.css as --feed-palette-1..6.
-const PALETTE = [
-  'var(--feed-palette-1)', 'var(--feed-palette-2)', 'var(--feed-palette-3)',
-  'var(--feed-palette-4)', 'var(--feed-palette-5)', 'var(--feed-palette-6)',
-];
-
+// Calendars are auto-assigned from FEED_PALETTE (js/palette.js) and cycle
+// through it on a tap of the colour dot.
 function nextColor(color) {
-  const idx = PALETTE.indexOf(color);
-  return PALETTE[(idx + 1) % PALETTE.length];
+  const idx = FEED_PALETTE.indexOf(color);
+  return FEED_PALETTE[(idx + 1) % FEED_PALETTE.length];
 }
 
 function systemPrefersDark() {
@@ -60,13 +52,21 @@ function getSetting() {
 // already supplies app.js with renderSyncStatus; importing applySyncedState
 // back would close a cycle that drags the whole DOM-bound app.js into
 // linkui.js's unit tests (DA-C6).
-export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged, applyState }) {
+export function initSettings({
+  button, host, onFeedsChanged, onSyncedDataChanged, onFeedFetched, applyState,
+}) {
   // A missing wire here is silent data loss, not a degraded feature: without
   // it a calendar added or removed in this panel never reaches the account
   // until something unrelated happens to trigger a sync. Fail at mount, where
   // it is a one-line fix, rather than at the moment a subscription is lost.
   if (typeof onSyncedDataChanged !== 'function') {
     throw new Error('initSettings requires an onSyncedDataChanged callback');
+  }
+  // Every fetch this panel makes reports its result (feed id, ok) here, before
+  // the view notification: app.js's "Updated" stamp remembers which calendars
+  // failed, and a fetch it never heard about leaves that memory wrong.
+  if (typeof onFeedFetched !== 'function') {
+    throw new Error('initSettings requires an onFeedFetched callback');
   }
 
   // Follow the phone while in auto.
@@ -105,10 +105,15 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
   // sweep F O2); this panel's own hold, or null while it is closed.
   let releaseScroll = null;
 
+  // Focus goes back to the Settings button on every close path (the button,
+  // Escape, a backdrop tap), as the item sheet returns it to its opener (app.js's
+  // focusOpener): otherwise it falls back to the top of the document. Without
+  // scrolling, for the same reason.
   function close() {
     host.innerHTML = '';
     if (releaseScroll) { releaseScroll(); releaseScroll = null; }
     document.removeEventListener('keydown', onKey);
+    button.focus({ preventScroll: true });
   }
 
   function open() {
@@ -124,6 +129,9 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
 
     const h = document.createElement('h2');
     h.textContent = 'Settings';
+    // Focus moves here once the panel is mounted (below), as the item sheet's
+    // does to its heading: focusable by script only (tabindex -1), never by Tab.
+    h.setAttribute('tabindex', '-1');
     panel.appendChild(h);
 
     const appearance = document.createElement('div');
@@ -188,6 +196,13 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
     // draft text must survive that rebuild rather than being wiped.
     let urlDraft = '';
     let nameDraft = '';
+    // The row whose Remove is waiting for its confirmation, or null. Remove is
+    // TWO taps (punchlist, decided 2026-10-19): since sweep fix 1 a removal is
+    // pushed to the account within 2 s, so one mis-tap deleted the calendar
+    // from every device, and its link — a capability token this panel never
+    // shows again — could not be typed back in. The first tap only asks; Cancel
+    // leaves storage, tombstones and the sync schedule exactly as they were.
+    let confirmingRemoveId = null;
     function isBusy() { return syncingFeedId !== null || addBusy; }
 
     // reapplyFeedField: closes the "two writers on plaenicke.feeds" gap —
@@ -232,7 +247,7 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
       renderCalendars();
       let result;
       try {
-        result = await syncFeed(feed, { fetchImpl: fetch, manual: true });
+        result = await syncFeed(feed, { fetchImpl: fetchWithTimeout, manual: true });
       } catch (err) {
         // syncFeed only throws on a genuine non-quota storage bug (see
         // feeds.js); never include the feed object/URL in the log, same
@@ -245,6 +260,7 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
       feedCache = loadFeedCache();
       syncingFeedId = null;
       renderCalendars();
+      onFeedFetched(feed.id, result.ok);
       notifyViewChanged();
     }
 
@@ -312,7 +328,34 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
           removeBtn.className = 'remove';
           removeBtn.textContent = 'Remove';
           removeBtn.disabled = syncingFeedId === feed.id;
+          // First tap: ask, and touch nothing else.
           removeBtn.addEventListener('click', () => {
+            confirmingRemoveId = feed.id;
+            renderCalendars();
+          });
+
+          // The question names the calendar (feed.name — never its URL) and
+          // says what the second tap does.
+          const confirmNote = document.createElement('p');
+          confirmNote.className = 'note feed-remove-confirm';
+          confirmNote.textContent = `Remove "${feed.name}" from every device? `
+            + 'Its calendar link is never shown again and cannot be typed back in.';
+
+          const cancelRemoveBtn = document.createElement('button');
+          cancelRemoveBtn.type = 'button';
+          cancelRemoveBtn.textContent = 'Cancel';
+          cancelRemoveBtn.addEventListener('click', () => {
+            confirmingRemoveId = null;
+            renderCalendars();
+          });
+
+          const confirmRemoveBtn = document.createElement('button');
+          confirmRemoveBtn.type = 'button';
+          confirmRemoveBtn.className = 'remove';
+          confirmRemoveBtn.textContent = 'Remove from every device';
+          confirmRemoveBtn.disabled = syncingFeedId === feed.id;
+          confirmRemoveBtn.addEventListener('click', () => {
+            confirmingRemoveId = null;
             // Same catch+surface shape as runSync/handleAdd above: removeFeed
             // only throws on a genuine storage failure (see feeds.js), never
             // include the feed object/URL in the log. On failure, leave
@@ -343,11 +386,22 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
             notifySyncedChanged();
           });
 
-          actions.append(toggle, syncBtn, removeBtn);
-          row.append(main, status, actions);
+          if (confirmingRemoveId === feed.id) {
+            actions.append(confirmRemoveBtn, cancelRemoveBtn);
+            row.append(main, status, confirmNote, actions);
+          } else {
+            actions.append(toggle, syncBtn, removeBtn);
+            row.append(main, status, actions);
+          }
           list.appendChild(row);
         }
         body.appendChild(list);
+        // Google serves calendar feeds with a lag of hours, so a change made a
+        // minute ago can still be missing after a manual Sync (punchlist L130).
+        const lag = document.createElement('p');
+        lag.className = 'note feed-lag-note';
+        lag.textContent = 'Google calendars can take a few hours to show recent changes.';
+        body.appendChild(lag);
       }
 
       // --- Add calendar ---
@@ -399,6 +453,15 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
           renderCalendars();
           return;
         }
+        // A name is shown on every row and synced; the link is a capability
+        // token that is never shown again. A link pasted into the Name box
+        // would put it on screen and on the wire, so it is refused, and the
+        // message never repeats it.
+        if (/^(https?|webcal):/i.test(nameInput.value.trim())) {
+          urlErrorMsg = 'That name is a link. Put the link in the first box, and a name (or nothing) in the second.';
+          renderCalendars();
+          return;
+        }
         urlErrorMsg = '';
         const url = webcalToHttps(raw);
         const name = nameInput.value.trim() || inferName(url);
@@ -406,7 +469,7 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
         // reapplyFeedField above): appending onto the stale `feeds` closure
         // would silently drop anything sync wrote while this panel sat open.
         const fresh = loadFeeds();
-        const color = PALETTE[fresh.length % PALETTE.length];
+        const color = FEED_PALETTE[fresh.length % FEED_PALETTE.length];
         const feed = {
           id: uid('feed'), url, name, color, hidden: false,
           updatedAt: nowISO(),
@@ -426,7 +489,7 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
 
         let result;
         try {
-          result = await syncFeed(feed, { fetchImpl: fetch, manual: true });
+          result = await syncFeed(feed, { fetchImpl: fetchWithTimeout, manual: true });
         } catch (err) {
           result = { ok: false, error: 'server' };
           console.error('plaenicke: initial calendar sync failed', err && err.name);
@@ -437,6 +500,7 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
         addBusy = false;
         syncingFeedId = null;
         renderCalendars();
+        onFeedFetched(feed.id, result.ok);
         notifyViewChanged();
       }
 
@@ -499,6 +563,7 @@ export function initSettings({ button, host, onFeedsChanged, onSyncedDataChanged
     });
     if (!releaseScroll) releaseScroll = lock(); // no scrolling behind the modal (iOS)
     document.addEventListener('keydown', onKey);
+    h.focus();
   }
 
   button.addEventListener('click', () => { host.childElementCount ? close() : open(); });

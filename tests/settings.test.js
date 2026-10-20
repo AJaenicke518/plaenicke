@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { installFakeLocalStorage } from './fake-localstorage.js';
-import { loadFeeds, saveFeeds, saveItems, loadSyncState } from '../js/storage.js';
+import {
+  loadFeeds, saveFeeds, saveItems, loadItems, loadSyncState, loadTombstones, loadFeedCache, saveFeedCache,
+} from '../js/storage.js';
 import { initSettings } from '../js/settings.js';
 import { linkWithCode } from '../js/auth.js';
 import { bytesToBase64url, generateEncKey, encryptBlob } from '../js/crypto.js';
@@ -85,6 +87,13 @@ class FakeElement {
   click() {
     (this._listeners.click || []).forEach((fn) => fn({ target: this }));
   }
+
+  // Harness only: records focus the way a browser reports it, as
+  // tests/apply.test.js's harness does. Production code never reads this.
+  focus(options) {
+    globalThis.document.activeElement = this;
+    globalThis.document.lastFocusOptions = options;
+  }
 }
 
 function makeFakeDocument() {
@@ -109,11 +118,13 @@ function makeFakeDocument() {
     // that turns every "safe when unmounted" assertion into a vacuous one.
     getElementById(id) { return walk(body, (el) => el.id === id); },
     createElement: (tag) => new FakeElement(tag),
+    activeElement: null,
     addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
     removeEventListener(type, fn) {
       if (!listeners[type]) return;
       listeners[type] = listeners[type].filter((f) => f !== fn);
     },
+    _listeners: listeners,
   };
 }
 
@@ -144,18 +155,21 @@ function openPanel(feeds, seed = () => {}) {
   // onFeedsChanged (this device's own re-render) and 'synced' for
   // onSyncedDataChanged (something the account must be told about).
   const notified = [];
+  const fetched = [];
   initSettings({
     button,
     host,
     onFeedsChanged: () => notified.push('view'),
     onSyncedDataChanged: () => notified.push('synced'),
+    // Every fetch's result, in order: [feedId, ok].
+    onFeedFetched: (id, ok) => fetched.push([id, ok]),
     // Not exercised by any test that uses this helper — they drive the theme
     // and calendar controls — but open() mounts initLinkUI, which refuses to
     // mount without one. app.js always passes applySyncedState here.
     applyState: (s) => s,
   });
   button.click(); // host.childElementCount === 0 -> open()
-  return { host, notified };
+  return { host, notified, button, fetched };
 }
 
 // --- the second-writer fix --------------------------------------------------
@@ -231,6 +245,7 @@ test('settings: removing a calendar is a SYNCED change, not just a re-render', (
   notified.length = 0;
 
   findButtonByText(host, 'Remove').click();
+  findButtonByText(host, 'Remove from every device').click();
 
   assert.deepEqual(loadFeeds(), [], 'fixture check: the feed really was removed');
   assert.ok(notified.includes('synced'),
@@ -287,12 +302,152 @@ test('settings: removing a calendar keeps one that arrived in storage after the 
   saveFeeds([feedA, feedC]);
 
   findButtonByText(host, 'Remove').click(); // feedA's row is first
+  findButtonByText(host, 'Remove from every device').click();
 
   assert.deepEqual(loadFeeds().map((f) => f.id), ['feedC'], 'fixture check: storage is right either way');
   assert.ok(allText(host).includes('C'),
     'the panel must show the calendar sync pulled in, not the snapshot it opened with');
   assert.ok(!allText(host).includes('No calendars linked yet'),
     'a subscription that exists must never be rendered as if the device had none');
+});
+
+// --- Remove asks first (punchlist L88 fix (1), decided 2026-10-19) ----------
+//
+// A feed URL is a capability token this panel never shows again, and since
+// sweep fix 1 a Remove is pushed to the account within 2 s — so one mis-tap
+// used to delete the subscription from EVERY device, with nothing on screen
+// that could restore it. Remove now asks, inline, naming the calendar.
+function twoFeeds() {
+  return [
+    {
+      id: 'feedA', url: 'https://example.com/a.ics', name: 'Classes', color: 'var(--feed-palette-1)', hidden: false,
+      updatedAt: '2026-07-01T00:00:00.000Z',
+    },
+    {
+      id: 'feedB', url: 'https://example.com/b.ics', name: 'Work', color: 'var(--feed-palette-2)', hidden: true,
+      updatedAt: '2026-07-02T00:00:00.000Z',
+    },
+  ];
+}
+
+test('settings: the first Remove tap removes nothing and asks, naming the calendar', () => {
+  const { host, notified } = openPanel(twoFeeds());
+  notified.length = 0;
+
+  findButtonByText(host, 'Remove').click(); // Classes' row is first
+
+  assert.deepEqual(loadFeeds().map((f) => f.id), ['feedA', 'feedB'], 'nothing may be removed on the first tap');
+  assert.deepEqual(loadTombstones(), [], 'no tombstone may be written on the first tap');
+  assert.deepEqual(notified, [], 'nothing may be scheduled or re-rendered app-wide on the first tap');
+  const text = allText(host);
+  assert.ok(text.includes('Classes'), 'the question names the calendar');
+  assert.match(text, /every device/, 'the question says it is removed from every device');
+  assert.match(text, /cannot be typed back in/, 'the question says the link cannot be re-entered');
+  assert.ok(!text.includes('https://example.com/a.ics'), 'the feed URL is never rendered, even here');
+  assert.ok(findButtonByText(host, 'Remove from every device'), 'a confirm control is offered');
+  assert.ok(findButtonByText(host, 'Cancel'), 'a Cancel control is offered');
+});
+
+test('settings: Cancel on the Remove question leaves everything untouched', () => {
+  const { host, notified } = openPanel(twoFeeds());
+  const before = JSON.stringify(loadFeeds());
+  notified.length = 0;
+
+  findButtonByText(host, 'Remove').click();
+  findButtonByText(host, 'Cancel').click();
+
+  assert.equal(JSON.stringify(loadFeeds()), before, 'Cancel must not touch plaenicke.feeds');
+  assert.deepEqual(loadTombstones(), [], 'Cancel must not write a tombstone');
+  assert.deepEqual(notified, [], 'Cancel must not schedule a sync');
+  assert.equal(findButtonByText(host, 'Remove from every device'), null, 'the question goes away');
+  assert.equal(host.querySelectorAll('button').filter((b) => b.textContent === 'Remove').length, 2,
+    'both rows offer Remove again');
+});
+
+test('settings: a confirmed Remove removes exactly one calendar and nothing else', () => {
+  const { host, notified } = openPanel(twoFeeds(), () => {
+    saveItems([{ id: 'i1', title: 'Keep me', date: '2026-08-01', type: 'event', updatedAt: '2026-08-01T00:00:00.000Z' }]);
+    const entry = { fetchedAt: '2026-08-01T00:00:00.000Z', events: [], skipped: [] };
+    saveFeedCache({ feedA: entry, feedB: entry });
+  });
+  assert.deepEqual(Object.keys(loadFeedCache()), ['feedA', 'feedB'], 'fixture check: both calendars are cached');
+  const feedBBefore = JSON.stringify(loadFeeds()[1]);
+  const itemsBefore = JSON.stringify(loadItems());
+  notified.length = 0;
+
+  findButtonByText(host, 'Remove').click(); // Classes
+  findButtonByText(host, 'Remove from every device').click();
+
+  assert.deepEqual(loadFeeds().map((f) => f.id), ['feedB'], 'only the confirmed calendar is removed');
+  assert.equal(JSON.stringify(loadFeeds()[0]), feedBBefore, 'the other calendar is untouched, field for field');
+  assert.deepEqual(loadTombstones().map((t) => [t.id, t.kind]), [['feedA', 'feed']], 'exactly one feed tombstone');
+  assert.equal(JSON.stringify(loadItems()), itemsBefore, 'items are untouched');
+  assert.deepEqual(Object.keys(loadFeedCache()), ['feedB'], "only the removed calendar's cache goes");
+  assert.deepEqual(notified, ['view', 'synced'], 'a confirmed Remove is still a synced change');
+});
+
+// The confirm must follow the CALENDAR, not the row position. A sync can land
+// while the question sits open and re-order the list or insert a calendar
+// ahead of the one being asked about; the next re-render (any row action
+// re-reads storage) must keep asking about the same calendar, and the confirm
+// must remove that one. The test above confirms on the FIRST row, where
+// "the row at this index" and "feeds[0]" both happen to be right.
+test('settings: a Remove question stays on its calendar when a re-render moves it to another row', () => {
+  const F = (id, name, i) => ({
+    id, url: `https://example.com/${id}.ics`, name, color: `var(--feed-palette-${i})`, hidden: false,
+    updatedAt: '2026-07-01T00:00:00.000Z',
+  });
+  const { host, notified } = openPanel([F('A', 'Alpha', 1), F('B', 'Bravo', 2), F('C', 'Charlie', 3)]);
+  const removes = host.querySelectorAll('button').filter((b) => b.textContent === 'Remove');
+  assert.equal(removes.length, 3, 'fixture check: three rows offer Remove');
+  removes[1].click(); // Bravo, the second row
+  assert.match(allText(host), /Remove "Bravo"/, 'fixture check: the question names Bravo');
+
+  // A sync lands while the question is open: a new calendar ahead of Bravo,
+  // and the rest re-ordered, so Bravo is now the third row, not the second.
+  saveFeeds([F('Z', 'Zulu', 4), F('C', 'Charlie', 3), F('B', 'Bravo', 2), F('A', 'Alpha', 1)]);
+  const othersBefore = Object.fromEntries(loadFeeds().filter((f) => f.id !== 'B').map((f) => [f.id, JSON.stringify(f)]));
+  // Re-render through a row action that re-reads storage: Hide then Show on
+  // Zulu (the first row) leaves Zulu field-identical.
+  findButtonByText(host, 'Hide').click();
+  findButtonByText(host, 'Show').click();
+  assert.equal(JSON.stringify(loadFeeds()[0]), othersBefore.Z, 'fixture check: Hide then Show restores Zulu');
+
+  const confirms = host.querySelectorAll('button').filter((b) => b.textContent === 'Remove from every device');
+  assert.equal(confirms.length, 1, 'exactly one question is open');
+  assert.match(allText(host), /Remove "Bravo"/, 'the question still names Bravo after the re-render');
+  assert.doesNotMatch(allText(host), /Remove "(Zulu|Charlie|Alpha)"/, 'and no other calendar');
+  notified.length = 0;
+
+  confirms[0].click();
+
+  assert.deepEqual(loadFeeds().map((f) => f.id), ['Z', 'C', 'A'], 'exactly Bravo is removed');
+  for (const f of loadFeeds()) {
+    assert.equal(JSON.stringify(f), othersBefore[f.id], `${f.name} is untouched, field for field`);
+  }
+  assert.deepEqual(loadTombstones().map((t) => [t.id, t.kind]), [['B', 'feed']], 'exactly one feed tombstone, for Bravo');
+  assert.deepEqual(notified, ['view', 'synced'], 'a confirmed Remove is still a synced change');
+});
+
+// Punchlist L130 (decided 2026-10-19): Google serves its calendar feeds with
+// a lag of hours, so a just-made change can be missing after a manual Sync
+// and look like a broken app. One line, beside the calendars' Sync buttons.
+test('settings: the calendar list carries one line about Google lag, beside the Sync buttons', () => {
+  const { host } = openPanel(twoFeeds());
+  const notes = host.querySelectorAll('p').filter((p) => /Google calendars can take a few hours to show recent changes/.test(p.textContent));
+  assert.equal(notes.length, 1, 'exactly one note, not one per calendar');
+  assert.equal(host.querySelectorAll('button').filter((b) => b.textContent === 'Sync').length, 2,
+    'every calendar still offers its own Sync button');
+  const list = host.querySelectorAll('ul').find((u) => u.className === 'feed-list');
+  const section = list.parentNode;
+  assert.equal(section.children.indexOf(notes[0]), section.children.indexOf(list) + 1,
+    'the note sits directly under the list of calendars and their Sync buttons');
+});
+
+test('settings: with no calendars there is no Sync button, and no Google note', () => {
+  const { host } = openPanel([]);
+  assert.ok(allText(host).includes('No calendars linked yet'), 'fixture check');
+  assert.doesNotMatch(allText(host), /Google calendars/);
 });
 
 test('settings: colour and hidden are per-device preferences and never schedule a sync', () => {
@@ -343,6 +498,7 @@ test('settings: the panel refuses to open its sync section without an applyState
     host: document.createElement('div'),
     onFeedsChanged: () => {},
     onSyncedDataChanged: () => {},
+    onFeedFetched: () => {},
   });
   assert.throws(() => button.click(), /applyState/,
     'a settings panel that cannot save synced data must say so at mount, not after a round trip to the account');
@@ -399,6 +555,7 @@ test('settings: the calendar list refreshes when an adoption lands while the pan
       host,
       onFeedsChanged: () => {},
       onSyncedDataChanged: () => {},
+      onFeedFetched: () => {},
       // Stands in for app.js's applySyncedState: the feed owner assigns a
       // real colour before saving (merge.js hands a first-seen feed
       // color: null, and deserializeFeeds drops any feed whose color is not
@@ -451,4 +608,168 @@ test('settings: a stored launch log of {} reads as no launches, and Settings ope
   assert.equal(host.childElementCount > 0, true, 'the panel must open');
   assert.match(allText(host), /Not opened in the last 7 days\./);
   assert.doesNotMatch(allText(host), /Last opened/);
+});
+
+// --- focus management (punchlist: a11y) ------------------------------------
+//
+// The panel is a modal dialog: focus moves into it on open and goes back to
+// the Settings button on close, by every close path. Without this a keyboard
+// or screen-reader user is left on the page BEHIND the modal, and after a
+// close focus falls back to the top of the document.
+
+function findByTag(el, tag) {
+  for (const c of el.children) {
+    if (c.tagName === tag) return c;
+    const found = findByTag(c, tag);
+    if (found) return found;
+  }
+  return null;
+}
+
+test('settings: opening moves focus to the panel heading, focusable by script only', () => {
+  const { host } = openPanel([]);
+  const heading = findByTag(host, 'H2');
+  assert.equal(heading.textContent, 'Settings', 'fixture check');
+  assert.equal(document.activeElement, heading);
+  assert.equal(heading.getAttribute('tabindex'), '-1', 'a target for focus, never a Tab stop');
+});
+
+test('settings: every close path returns focus to the Settings button, without scrolling', () => {
+  const closers = {
+    'the Settings button': ({ button }) => button.click(),
+    Escape: () => document._listeners.keydown.slice().forEach((fn) => fn({ key: 'Escape' })),
+    'a backdrop tap': ({ host }) => host.children[0].click(),
+  };
+  for (const [label, closeIt] of Object.entries(closers)) {
+    const opened = openPanel([]);
+    assert.notEqual(document.activeElement, opened.button, `fixture check (${label}): focus moved in`);
+    document.lastFocusOptions = undefined;
+    closeIt(opened);
+    assert.equal(opened.host.childElementCount, 0, `fixture check (${label}): closed`);
+    assert.equal(document.activeElement, opened.button, `${label}: focus back on the opener`);
+    assert.deepEqual(document.lastFocusOptions, { preventScroll: true }, label);
+  }
+});
+
+// --- a Name that is itself a link (punchlist: secrets F3) -------------------
+//
+// A feed's name is displayed on every row and synced to the account; its URL
+// is a capability token that is never displayed again. A link pasted into the
+// Name box would put that token on screen and on the wire, so the add is
+// refused with an inline message, like an empty link is.
+test('settings: a calendar Name that is itself a link is refused, with a message, and nothing is added', () => {
+  for (const badName of ['https://calendar.google.com/secret.ics', '  WEBCAL://p01.icloud.com/secret', 'http:x']) {
+    const { host, notified } = openPanel([]);
+    notified.length = 0;
+    const originalFetch = globalThis.fetch;
+    let fetched = 0;
+    globalThis.fetch = async () => { fetched += 1; return { ok: false, status: 500, json: async () => ({}) }; };
+    try {
+      const inputs = host.querySelectorAll('input');
+      inputs.find((i) => i.getAttribute('aria-label') === 'Calendar link').value = 'https://example.com/new.ics';
+      inputs.find((i) => i.getAttribute('aria-label') === 'Calendar name (optional)').value = badName;
+      findButtonByText(host, 'Add calendar').click();
+      assert.deepEqual(loadFeeds(), [], `${badName}: nothing is saved`);
+      assert.equal(fetched, 0, `${badName}: nothing is fetched`);
+      assert.deepEqual(notified, [], `${badName}: nothing is pushed`);
+      const msg = host.querySelectorAll('p').find((p) => p._classes.has('feed-add-msg'));
+      assert.match(msg.textContent, /\S/, `${badName}: the panel says why`);
+      assert.ok(!msg.textContent.includes('secret'), 'the message never repeats the link');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+});
+
+// --- manual fetches have a deadline (punchlist: sF review) ------------------
+//
+// The background refresh aborts a download after 60 s (js/fetchtimeout.js).
+// The panel's own Sync and Add calendar fetched with bare fetch, so a server
+// that never answered left the row on "Syncing…" with every button disabled
+// until a reload. They go through the same fetchWithTimeout now.
+const settleMicro = async () => { for (let i = 0; i < 30; i += 1) await new Promise((r) => { setImmediate(r); }); };
+
+for (const [label, start] of [
+  ['Sync', (host) => findButtonByText(host, 'Sync').click()],
+  ['Add calendar', (host) => {
+    host.querySelectorAll('input').find((i) => i.getAttribute('aria-label') === 'Calendar link').value = 'https://example.com/new.ics';
+    findButtonByText(host, 'Add calendar').click();
+  }],
+]) {
+  test(`settings: a manual ${label} that never answers is aborted at 60 s and the panel recovers`, async (t) => {
+    const feedA = {
+      id: 'feedT', url: 'https://example.com/t.ics', name: 'T', color: 'var(--feed-palette-1)', hidden: false,
+      updatedAt: '2026-07-01T00:00:00.000Z',
+    };
+    const signals = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (url, init) => { signals.push(init && init.signal); return new Promise(() => {}); };
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      const { host } = openPanel(label === 'Sync' ? [feedA] : []);
+      start(host);
+      await settleMicro();
+      assert.equal(signals.length, 1, 'fixture check: one fetch in flight');
+      assert.ok(signals[0], 'the fetch is given an abort signal');
+      const addReady = () => { const b = findButtonByText(host, 'Add calendar'); return Boolean(b) && !b.disabled; };
+      assert.equal(addReady(), false, 'fixture check: busy while it runs');
+      t.mock.timers.tick(59999);
+      await settleMicro();
+      assert.equal(signals[0].aborted, false, 'not before the 60 s budget');
+      t.mock.timers.tick(1);
+      await settleMicro();
+      assert.equal(signals[0].aborted, true, 'aborted at 60 s');
+      assert.equal(addReady(), true, 'the panel is usable again');
+      assert.ok(findButtonByText(host, 'Sync'), 'and the row is no longer "Syncing…"');
+    } finally {
+      t.mock.timers.reset();
+      globalThis.fetch = originalFetch;
+    }
+  });
+}
+
+// The wire app.js's "Updated" stamp depends on (punchlist L211): c6cfbf5
+// reverted a stamp memory because these results never reached it.
+test('settings: initSettings refuses to mount without an onFeedFetched callback', () => {
+  globalThis.window = makeFakeWindow();
+  globalThis.document = makeFakeDocument();
+  installFakeLocalStorage();
+  assert.throws(
+    () => initSettings({
+      button: document.createElement('button'),
+      host: document.createElement('div'),
+      onFeedsChanged: () => {},
+      onSyncedDataChanged: () => {},
+      applyState: (x) => x,
+    }),
+    /onFeedFetched/,
+  );
+});
+
+test('settings: a manual Sync and an Add each report their fetch result, before the view notification', async () => {
+  const feedA = {
+    id: 'feedR', url: 'https://example.com/r.ics', name: 'R', color: 'var(--feed-palette-1)', hidden: false,
+    updatedAt: '2026-07-01T00:00:00.000Z',
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => (String(url).includes(encodeURIComponent('r.ics'))
+    ? { ok: true, status: 200, text: async () => '' }
+    : { ok: false, status: 502, json: async () => ({ error: 'upstream_error' }) });
+  try {
+    const { host, fetched, notified } = openPanel([feedA]);
+    const order = [];
+    notified.push = (x) => { order.push(`view:${x}`); return Array.prototype.push.call(notified, x); };
+    fetched.push = (x) => { order.push(`fetched:${x[1]}`); return Array.prototype.push.call(fetched, x); };
+    findButtonByText(host, 'Sync').click();
+    await waitFor(() => fetched.length === 1, 'the manual Sync to settle');
+    assert.deepEqual(fetched[0], ['feedR', true]);
+    assert.deepEqual(order, ['fetched:true', 'view:view'], 'reported before the repaint it feeds');
+    host.querySelectorAll('input').find((i) => i.getAttribute('aria-label') === 'Calendar link').value = 'https://example.com/bad.ics';
+    findButtonByText(host, 'Add calendar').click();
+    await waitFor(() => fetched.length === 2, 'the Add\'s first fetch to settle');
+    const added = loadFeeds().find((f) => f.url === 'https://example.com/bad.ics');
+    assert.deepEqual(fetched[1], [added.id, false]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

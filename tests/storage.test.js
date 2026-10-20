@@ -9,6 +9,9 @@ import {
 } from '../js/storage.js';
 import { installFakeLocalStorage } from './fake-localstorage.js';
 import { loadAuth, saveAuth, clearAuth, loadSyncState, saveSyncState } from '../js/storage.js';
+import {
+  STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY, AUTH_KEY, SYNC_STATE_KEY,
+} from '../js/storage.js';
 
 const ITEM = { id: 'a', title: 'Bio', date: '2026-07-02', createdAt: '2026-07-01', updatedAt: '2026-07-01' };
 
@@ -143,7 +146,8 @@ test('feeds: loadFeeds returns [] when nothing stored', () => {
 
 test('feeds: saveFeeds propagates errors instead of swallowing them', () => {
   globalThis.localStorage = new QuotaExceedingLocalStorage();
-  assert.throws(() => saveFeeds([FEED]), /quota exceeded/);
+  // Propagated, translated to QuotaError like every other saver (L103).
+  assert.throws(() => saveFeeds([FEED]), QuotaError);
 });
 
 // --- feed cache ---
@@ -191,6 +195,22 @@ test('feed cache: loadFeedCache returns {} when nothing stored', () => {
 test('feed cache: saveFeedCache throws QuotaError on QuotaExceededError', () => {
   globalThis.localStorage = new QuotaExceedingLocalStorage();
   assert.throws(() => saveFeedCache({ f1: CACHE_ENTRY }), QuotaError);
+});
+
+// Punchlist L103: saveFeeds was the only saver with no quota translation.
+test('saveFeeds throws QuotaError on QuotaExceededError', () => {
+  globalThis.localStorage = new QuotaExceedingLocalStorage();
+  assert.throws(() => saveFeeds([FEED]), QuotaError);
+});
+
+test('saveFeeds rethrows any other storage error unchanged, and still writes when there is room', () => {
+  const blocked = new Error('denied');
+  blocked.name = 'SecurityError';
+  globalThis.localStorage = { getItem() { return null; }, setItem() { throw blocked; } };
+  assert.throws(() => saveFeeds([FEED]), (err) => err === blocked);
+  installFakeLocalStorage();
+  saveFeeds([FEED]);
+  assert.deepEqual(loadFeeds(), [FEED]);
 });
 
 test('deserializeItems backfills updatedAt from createdAt', () => {
@@ -497,4 +517,35 @@ test('recordLaunch passes a non-quota storage error through without trimming', (
   }
   assert.equal(calls, 1);
   assert.deepEqual(loadLaunches(), ['2026-09-22T08:00:00.000Z']);
+});
+
+// --- the key names themselves (punchlist: unpinned constants) ---------------
+//
+// A key name is the address of every user's stored data. Renaming one orphans
+// it all — items, subscriptions, tombstones, the link code that is the
+// account's only decryption credential — with nothing else in the suite
+// failing, because every reader and writer moves to the new name together.
+// These literals are deliberately NOT read from the module.
+
+test('storage key names are pinned to their shipped values', () => {
+  assert.equal(STORAGE_KEY, 'plaenicke.items');
+  assert.equal(FEEDS_KEY, 'plaenicke.feeds');
+  assert.equal(TOMBSTONES_KEY, 'plaenicke.syncTombstones');
+  assert.equal(AUTH_KEY, 'plaenicke.auth');
+  assert.equal(SYNC_STATE_KEY, 'plaenicke.syncState');
+});
+
+test('each saver writes to its pinned key, including the two private ones', () => {
+  installFakeLocalStorage();
+  saveItems([]);
+  saveFeeds([]);
+  saveTombstones([]);
+  saveAuth('code');
+  saveSyncState({});
+  saveFeedCache({});
+  recordLaunch('2026-10-19T12:00:00.000Z');
+  for (const key of ['plaenicke.items', 'plaenicke.feeds', 'plaenicke.syncTombstones', 'plaenicke.auth',
+    'plaenicke.syncState', 'plaenicke.feedCache', 'plaenicke.launches']) {
+    assert.notEqual(localStorage.getItem(key), null, `nothing was written to ${key}`);
+  }
 });

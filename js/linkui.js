@@ -25,6 +25,7 @@ import { previewRemote, syncOnce } from './sync.js';
 import { applyTombstones } from './merge.js';
 import { loadAuth, loadSyncState, loadItems, loadFeeds, loadTombstones } from './storage.js';
 import { WORKER_URL } from './config.js';
+import { fetchWithTimeout } from './fetchtimeout.js';
 
 const LINK_CODE_BYTES = TOKEN_BYTES + KEY_BYTES;
 
@@ -58,6 +59,9 @@ const ERROR_LABELS = {
   EncryptError: 'this device could not encrypt its data',
   ApplyError: 'this device could not save what it pulled',
   QuotaError: 'this device has run out of storage',
+  // The Worker refuses a blob over 1,000,000 bytes (worker/src/data.js).
+  // Retrying cannot help, so it is named rather than left as a server error.
+  http_413: "the synced data has reached the account's size limit",
 };
 
 function errorLabel(code) {
@@ -122,8 +126,9 @@ export function classifyPastedCode(input) {
 // previewRemote returns `state: null` ONLY when the response carries no blob
 // at all; an account whose records were all deleted returns a non-null
 // {schemaVersion, items: [], feeds: [], tombstones: [...]}. Reading emptiness
-// as `state === null` classifies that account as "has data", offers Replace
-// this device, and wipes every local item and every feed URL — unrecoverably,
+// as `state === null` classifies that account as "has data", and (while the
+// dialog still offered "Replace this device", removed 2026-10-19) offered a
+// Replace that wiped every local item and every feed URL — unrecoverably,
 // since js/settings.js never re-displays a feed URL.
 //
 // BUT A SIDE'S TOMBSTONES ARE PART OF WHAT IT WOULD DO TO THE OTHER SIDE.
@@ -140,7 +145,7 @@ export function classifyPastedCode(input) {
 //     them to every other device.
 //
 // Counting tombstones outright is the wrong fix too: it sends a tombstone-only
-// account back to 'ask', re-creating the original defect — a Replace button
+// account back to 'ask', re-creating the original defect — a choice offered
 // beside a dialog reading "0 items, 0 calendars". What matters is how many
 // records a side's tombstones would ACTUALLY suppress on the other side, and
 // that rule is merge.js's applyTombstones (`deletedAt > updatedAt`, so a
@@ -222,7 +227,7 @@ export function classifySyncState({ hasCredential, codeReadable, syncState }) {
 }
 
 // The panel's own red styling. It EXCLUDES a pending adoption deliberately:
-// the panel renders the Merge / Replace / Cancel dialog for that state, so
+// the panel renders the Merge / Cancel dialog for that state, so
 // colouring the line red on top of it would be noise.
 export function panelShowsProblem(kind) {
   return kind === SYNC_CORRUPT || kind === SYNC_ERROR;
@@ -274,8 +279,19 @@ function paintStatus(el, now) {
 // problem text is one CSS regression away from reporting a failure that was
 // fixed hours ago — and the whole value of this element is that what it says
 // can be trusted.
-function paintShellIndicator(el) {
+//
+// A slow write outranks a lastError (one left by an EARLIER attempt — the
+// write in flight is what is current, and it clears or re-records lastError
+// when it settles) but not a corrupt code or a pending adoption, which no
+// ordinary write can resolve. It is not a failure, so it is not styled as one.
+function paintShellIndicator(el, now = new Date()) {
   const kind = classifySyncState(readSyncFacts());
+  if ((kind === SYNC_OK || kind === SYNC_ERROR) && shellWriteIsSlow(now)) {
+    el.hidden = false;
+    el.textContent = SHELL_SLOW_WRITE_TEXT;
+    el.className = 'sync-indicator sync-indicator-slow';
+    return;
+  }
   const attention = shellNeedsAttention(kind);
   el.hidden = !attention;
   el.textContent = attention ? SHELL_TEXT[kind] : '';
@@ -295,7 +311,7 @@ export function renderSyncStatus(now = new Date()) {
   const el = document.getElementById(SYNC_STATUS_ID);
   if (el) paintStatus(el, now);
   const shell = document.getElementById(SHELL_SYNC_STATUS_ID);
-  if (shell) paintShellIndicator(shell);
+  if (shell) paintShellIndicator(shell, now);
 }
 
 // --- the panel -------------------------------------------------------------
@@ -330,12 +346,12 @@ const FAILURE_TEXT = {
 // advance the cursor second), so 'offline', 'error' and 'conflict' are all
 // reachable with the local write already landed — a Wi-Fi drop between the GET
 // and the PUT reaches every one of them. The messages above say "Nothing has
-// been combined yet", and on adopt-replace that is not merely imprecise: the
-// local wipe is complete and irreversible (applySyncedState has already run
-// saveItems, applyRemoteFeeds — which calls removeFeed for every local feed —
-// and saveTombstones), and the panel offers Unlink right beside the false
-// report. Round 3's Critical on this branch was the same divergence class: a
-// user's Cancel reversed while the panel said it was not.
+// been combined yet", which is false once applySyncedState has run saveItems,
+// applyRemoteFeeds and saveTombstones (and, when the dialog still offered
+// "Replace this device", described a local wipe that was already complete and
+// irreversible), and the panel offers Unlink right beside the false report.
+// Round 3's Critical on this branch was the same divergence class: a user's
+// Cancel reversed while the panel said it was not.
 //
 // syncOnce answers the question directly (`applied`), so these are keyed on it
 // rather than guessed at. Only the three statuses whose ORIGINAL text makes
@@ -377,18 +393,20 @@ const MAX_ADOPT_ATTEMPTS = 3;
 // work. Each mount owns its own `inflight` and neither sees the other, so
 // with the gate still raised a user who opens Settings, closes it
 // mid-adoption and re-opens starts a SECOND concurrent adoption — measured
-// ['GET','GET','SYNC','SYNC']. The realistic worst case is clicking "Replace
-// this device", closing, re-opening on a slow connection, getting the dialog
-// again and clicking "Merge": two applyState writes with conflicting
-// semantics, resolved by arrival order. app.js's own syncInFlight guard does
+// ['GET','GET','SYNC','SYNC']. The realistic worst case (measured while the
+// dialog still offered "Replace this device") was clicking Replace, closing,
+// re-opening on a slow connection, getting the dialog again and clicking
+// "Merge": two applyState writes with conflicting semantics, resolved by
+// arrival order. app.js's own syncInFlight guard does
 // not cover linkui's syncOnce calls.
 //
 // IT MUST NOT BE ABLE TO OUTLIVE ITS PURPOSE either. It is cleared in the
-// episode's `finally`, and nothing in previewRemote/fetchRemote carries an
-// AbortController or a timeout — so an episode whose request never settles
-// would hold it for the page's lifetime, and every later panel open would
-// render a busy view with no controls at all, on a fully healthy network.
-// A joining mount can therefore TAKE OVER — but ONLY during the preview.
+// episode's `finally`. The preview's read now gives up at the shared download
+// deadline (js/fetchtimeout.js, 60 s), but that is long, and the WRITE has no
+// deadline at all — so without an escape an episode whose request is slow to
+// settle would hold it, and every later panel open would render a busy view
+// with no controls, on a fully healthy network. A joining mount can therefore
+// TAKE OVER — but ONLY during the preview.
 //
 // THE PHASE DISTINCTION IS THE WHOLE DESIGN, and getting it wrong is how the
 // first attempt at this destroyed the exclusion it was written to preserve:
@@ -399,11 +417,12 @@ const MAX_ADOPT_ATTEMPTS = 3;
 //   - A WRITE (syncOnceImpl) is NOT abandonable, and a generation check in
 //     front of it answers the wrong question. It gates whether an episode may
 //     BEGIN a write; it says nothing once an episode is already inside one.
-//     Measured, with the generation counter working exactly as designed:
-//     Merge held inside syncOnce -> close/reopen -> take over -> Replace, and
-//     both writes ran concurrently. The superseded PUT then landed AFTER the
-//     replace, putting the record the user explicitly discarded back into the
-//     account, at a higher version, with no error and no status anywhere.
+//     Measured (while Replace still existed), with the generation counter
+//     working exactly as designed: Merge held inside syncOnce -> close/reopen
+//     -> take over -> Replace, and both writes ran concurrently. The
+//     superseded PUT then landed AFTER the replace, putting the record the
+//     user explicitly discarded back into the account, at a higher version,
+//     with no error and no status anywhere.
 //     A Cancel in the same window reported "nothing was combined" while the
 //     superseded episode's syncOnce went on to call clearAdoptionPending().
 //
@@ -418,6 +437,88 @@ let activeStartedAt = 0;
 // under text that invites the click, turns every ordinary two-second wait
 // into an invitation to start a second episode.
 const STALE_ADOPTION_MS = 10000;
+
+// THE WRITE IS NEVER TIMED OUT (punchlist L63, decided 2026-10-19): a
+// client-side timeout does not stop the server's write, so giving up on one
+// would report 'offline' about a write that may have landed. Past this long in
+// flight the panel says so, and that reloading is safe — it still offers no
+// control, because nothing may interfere with an unabandonable write.
+// Reloading is safe because the adoption gate stays raised until the PUT is
+// confirmed, and the compare-and-swap makes a re-run idempotent.
+export const SLOW_WRITE_MS = 20000;
+const SLOW_WRITE_TEXT = "This is taking longer than usual — it's safe to reload.";
+// When the write now in flight began (module scope, like writeInFlight, so a
+// joining mount can tell how long the live write has been running).
+let writeStartedAt = 0;
+
+// Repaints once `isSlow()` turns true. The timer is REAL but `isSlow()` reads
+// the caller's clock, and the two can disagree (a test clock; a timer that
+// fires a millisecond before Date.now() agrees). A one-shot timer that fired
+// first found the write not yet slow, repainted nothing new and was never
+// armed again, so the line was missed for good (d844ba7). So a timer that
+// fires early re-arms for `remainingMs()` — the time still remaining by the
+// same clock `isSlow()` reads. The delay is always > 0 there (not slow means
+// time remains), so this cannot spin. It stops when the line is shown, or
+// when `isLive()` turns false (the write settled, or the view moved on; the
+// caller also clears the handle). Every re-arm passes its handle to `keep`,
+// so the caller's clearTimeout always reaches the live one. ONE mechanism for
+// both the linking panel and the shell indicator, so they cannot drift onto
+// differently-clocked timers.
+function armSlowRepaint({ remainingMs, isLive, isSlow, repaint, keep }) {
+  keep(setTimeout(() => {
+    if (!isLive()) return;
+    if (isSlow()) repaint();
+    else armSlowRepaint({ remainingMs, isLive, isSlow, repaint, keep });
+  }, Math.max(0, remainingMs())));
+}
+
+// THE SHELL'S OWN SLOW-WRITE LINE, for an ordinary background sync (app.js's
+// runSync). app.js wraps the PUT's fetch — and only the PUT's: the read has
+// its own deadline and reports as offline — in syncWriteStarted /
+// syncWriteSettled, so js/sync.js is untouched. The state lives HERE, not in
+// app.js, because renderSyncStatus is called with no arguments from several
+// places; any of those repaints must keep showing the line while the write is
+// still slow. The clock is Date (new Date()), the same one renderSyncStatus
+// defaults to. runSync is serialised by its syncInFlight flag, so at most one
+// such write is in flight.
+const SHELL_SLOW_WRITE_TEXT = "Sync is taking longer than usual — it's safe to reload.";
+let shellWriteInFlight = false;
+let shellWriteStartedAt = 0;
+let shellSlowTimer = null;
+
+function shellWriteIsSlow(now) {
+  return shellWriteInFlight && now.getTime() - shellWriteStartedAt >= SLOW_WRITE_MS;
+}
+
+export function syncWriteStarted() {
+  clearTimeout(shellSlowTimer);
+  shellWriteInFlight = true;
+  shellWriteStartedAt = Date.now();
+  armSlowRepaint({
+    remainingMs: () => SLOW_WRITE_MS - (Date.now() - shellWriteStartedAt),
+    isLive: () => shellWriteInFlight,
+    isSlow: () => shellWriteIsSlow(new Date()),
+    repaint: () => renderSyncStatus(),
+    keep: (h) => { shellSlowTimer = h; },
+  });
+}
+
+// Cleared and nulled, so no handle outlives the write (a stale handle passed
+// to a later clearTimeout is the MockTimers trap CLAUDE.md describes).
+export function syncWriteSettled() {
+  const wasSlow = shellWriteIsSlow(new Date());
+  shellWriteInFlight = false;
+  clearTimeout(shellSlowTimer);
+  shellSlowTimer = null;
+  if (wasSlow) renderSyncStatus();
+}
+
+// Rendered beside every Unlink button (linked, failed, stalled preview). The
+// link code is the account's only decryption credential and a device never
+// re-displays its own (CLAUDE.md, Device linking), so the note says it goes
+// rather than implying nothing is lost. One constant so the views cannot drift.
+const UNLINK_NOTE = "Unlinking stops syncing and deletes this device's link code, which cannot be shown again. "
+  + 'Your items and calendars stay on this device.';
 
 function el(tag, props = {}) {
   const node = document.createElement(tag);
@@ -454,11 +555,16 @@ export function initLinkUI(options = {}) {
     host, onLinked, onUnlinked, applyState,
     // Effects, injected the way js/feeds.js and js/sync.js already do it. The
     // defaults are the production wiring; tests supply their own.
+    // The WRITE (the PUT inside syncOnce): no deadline, ever.
     fetchImpl = (url, opts) => fetch(url, opts),
+    // The READ (GET /data, for the preview and inside syncOnce): gives up at
+    // the shared download deadline and is reported like being offline.
+    readFetchImpl = fetchWithTimeout,
     apiBase = WORKER_URL,
     now = () => new Date(),
     syncOnceImpl = syncOnce,
     staleAfterMs = STALE_ADOPTION_MS,
+    slowWriteAfterMs = SLOW_WRITE_MS,
   } = options;
 
   // A STATIC WIRING FACT, checked where it becomes known. Everything this
@@ -469,7 +575,7 @@ export function initLinkUI(options = {}) {
   // It used to be checked inside adopt() instead, at the far end of a network
   // round trip: initSettings({button, host, onFeedsChanged}) mounted the whole
   // panel, painted the status line, fired the mount-time GET against the
-  // account and walked the user through Merge / Replace before answering "the
+  // account and walked the user through the Merge dialog before answering "the
   // app is wired up wrong. Reload the page and try again" — advice that cannot
   // possibly help, delivered after the user had already made a decision.
   // Zero fallback: escalate at mount, where it is a one-line fix at the call
@@ -526,6 +632,11 @@ export function initLinkUI(options = {}) {
       joinTimer = setTimeout(() => {
         if (stage === 'joining' && activeAdoption) joinActive();
       }, Math.max(0, staleAfterMs - elapsed));
+    } else if (stage === 'saving' && !writeIsSlow()) {
+      // Re-render once the live write crosses the slow threshold, so the
+      // "taking longer than usual" line appears without another panel open.
+      // Kept in joinTimer, which the settle handler below clears.
+      armSlowWriteRepaint(() => stage === 'saving', (h) => { joinTimer = h; });
     }
     // A JOINED EPISODE'S SETTLE HANDLER MUST NOT REPAINT A VIEW THIS MOUNT HAS
     // SINCE TAKEN OWNERSHIP OF. If this mount goes on to take over, its own
@@ -533,7 +644,7 @@ export function initLinkUI(options = {}) {
     // settles, and an unconditional `stage = null; render()` there throws away
     // a dialog the user is in the middle of. Reproduced: b joins a stalled
     // preview, clicks Try again, b's own preview returns and renders Merge /
-    // Replace / Cancel, then the first preview finally answers and replaces
+    // Cancel, then the first preview finally answers and replaces
     // the dialog with the Continue screen. No wrong write is possible — the
     // superseded episode is generation-gated out of adopt() — but a decision
     // in progress is discarded.
@@ -617,7 +728,27 @@ export function initLinkUI(options = {}) {
     stage = 'busy';
     stageData = { text: 'Checking the account…' };
     render();
-    await handlePreview(await previewRemote({ fetchImpl, apiBase }), attempt, generation);
+    await handlePreview(await previewRemote({ readFetchImpl, apiBase }), attempt, generation);
+  }
+
+  // True while a write is in flight and has been for at least the threshold.
+  function writeIsSlow() {
+    return writeInFlight && now().getTime() - writeStartedAt >= slowWriteAfterMs;
+  }
+
+  // Repaints this mount once writeIsSlow() turns true, by the INJECTED clock
+  // writeIsSlow() reads — see armSlowRepaint (module scope) for why a timer
+  // that fires early re-arms. Stops when the write settles (writeInFlight
+  // false; the caller also clears the handle) or when this mount's view has
+  // moved on (`stillShowing`).
+  function armSlowWriteRepaint(stillShowing, keep) {
+    armSlowRepaint({
+      remainingMs: () => slowWriteAfterMs - (now().getTime() - writeStartedAt),
+      isLive: () => writeInFlight && stillShowing(),
+      isSlow: writeIsSlow,
+      repaint: render,
+      keep,
+    });
   }
 
   // BRANCH ON preview.status BEFORE CONSULTING chooseAdoption (DA-C3).
@@ -656,8 +787,8 @@ export function initLinkUI(options = {}) {
   // The single place the decision is made and acted on. The re-ask path goes
   // through here too: if local emptied while the dialog sat open, the honest
   // answer is no longer "choose" but 'auto', and re-rendering the old dialog
-  // would put "This device holds 0 items and 0 calendars" beside a Replace
-  // button — the exact shape DA-C2 named as not an informed choice.
+  // would put "This device holds 0 items and 0 calendars" beside a choice —
+  // the exact shape DA-C2 named as not an informed choice.
   async function decideAndAct(remote, version, attempt, generation) {
     // tombstones are load-bearing on BOTH sides — see adoptionCounts.
     const local = readLocal();
@@ -687,9 +818,11 @@ export function initLinkUI(options = {}) {
   // calendar section directly above it stays live while the dialog is open
   // (its controls are disabled only by isBusy(), which covers feed syncing
   // alone), with no focus trap keeping app.js's own add path out either.
-  // Measured: dialog read "1 item and 1 calendar", a second calendar was
-  // added, Replace was clicked, and BOTH were destroyed — the user consented
-  // to discarding one. So re-read at CLICK time and re-ask if it moved.
+  // Measured while the dialog still offered Replace: it read "1 item and 1
+  // calendar", a second calendar was added, Replace was clicked, and BOTH were
+  // destroyed — the user consented to discarding one. Merge discards nothing,
+  // but its dedupe and the deletions it pushes are still a function of what
+  // the dialog described. So re-read at CLICK time and re-ask if it moved.
   async function adoptAgainstFreshCounts(adoptChoice, generation) {
     const shown = stageData;
     const fresh = adoptionCounts(readLocal(), shown.remote);
@@ -721,19 +854,23 @@ export function initLinkUI(options = {}) {
     // flight. No mount may take over from it — see `writeInFlight`.
     let res;
     writeInFlight = true;
+    writeStartedAt = now().getTime();
+    // Repaint this mount's "Combining…" view once the write crosses the slow
+    // threshold. Cleared when the write settles, whichever comes first.
+    let slowTimer = null;
+    armSlowWriteRepaint(() => stage === 'busy', (h) => { slowTimer = h; });
     try {
       res = await syncOnceImpl({
-        fetchImpl, now, apiBase, applyState, adoptChoice, expectVersion,
+        fetchImpl, readFetchImpl, now, apiBase, applyState, adoptChoice, expectVersion,
       });
     } finally {
       writeInFlight = false;
+      clearTimeout(slowTimer);
     }
     if (res.status === 'changed') {
       // The account moved between the preview and the write, so the choice
-      // the user made was against data that is no longer there — a Replace
-      // against an account that emptied in between would be a silent full
-      // local wipe with no re-confirmation (DA-I5). Re-preview and re-ask
-      // rather than acting on a stale choice.
+      // the user made was against data that is no longer there (DA-I5).
+      // Re-preview and re-ask rather than acting on a stale choice.
       //
       // BOUNDED. On a 'none'/'auto' decision the re-preview adopts again with
       // no human in the loop, so an account whose version keeps advancing
@@ -846,7 +983,7 @@ export function initLinkUI(options = {}) {
   // enters its write, and both controls are still clickable.
   //
   // Routing that click to doUnlink is worse than the takeover it sits beside.
-  // syncOnce captured `link = getLink()` at entry (js/sync.js:83), so the
+  // syncOnce captured `link = getLink()` at entry, so the
   // in-flight write goes on pushing with a credential the user just revoked,
   // and its applyState has already landed the account's records locally.
   // Reproduced: isLinked() false, local items replaced by the account's, and
@@ -867,6 +1004,9 @@ export function initLinkUI(options = {}) {
 
   function renderBusy(wrap) {
     wrap.appendChild(el('p', { className: 'note', text: stageData.text || 'Working…' }));
+    // Only ever true on the mount doing the write ('Combining…'): a preview
+    // cannot run while a write is in flight.
+    if (writeIsSlow()) wrap.appendChild(el('p', { className: 'note link-slow', text: SLOW_WRITE_TEXT }));
   }
 
   // Shown to a mount that found another episode already PREVIEWING, and not
@@ -875,7 +1015,8 @@ export function initLinkUI(options = {}) {
   // click turns every ordinary wait into a second episode. joinActive()
   // re-renders this into renderJoiningStale once the threshold passes, and
   // out of it entirely once the live episode settles, so it is never a dead
-  // end even though nothing below this has a timeout.
+  // end — the preview's read does give up at the shared download deadline,
+  // but that is 60 s, far past this threshold.
   function renderJoining(wrap) {
     wrap.appendChild(el('p', {
       className: 'note',
@@ -895,7 +1036,7 @@ export function initLinkUI(options = {}) {
     wrap.append(takeOver, unlinkButton('Unlink this device'));
     wrap.appendChild(el('p', {
       className: 'note',
-      text: 'Unlinking stops syncing. Nothing on this device is deleted.',
+      text: UNLINK_NOTE,
     }));
   }
 
@@ -906,14 +1047,16 @@ export function initLinkUI(options = {}) {
   function renderSaving(wrap) {
     // No controls, deliberately — see renderSaving's caller. But a write that
     // never answers would otherwise leave this panel on a bare spinner for
-    // ever (nothing under syncOnce has a timeout), so say what is happening
-    // and that waiting is not the only option. Reloading IS safe: the gate is
-    // still raised, and the compare-and-swap makes a re-run idempotent.
+    // ever (the write has no deadline, by design — see SLOW_WRITE_MS), so say
+    // what is happening and that waiting is not the only option. Reloading IS
+    // safe: the gate is still raised, and the compare-and-swap makes a re-run
+    // idempotent.
     wrap.appendChild(el('p', {
       className: 'note',
       text: 'Saving your choice… This step cannot be interrupted. '
         + 'If it does not finish, it is safe to reload the page and try again — nothing is lost either way.',
     }));
+    if (writeIsSlow()) wrap.appendChild(el('p', { className: 'note link-slow', text: SLOW_WRITE_TEXT }));
   }
 
   function renderAdoptionEntry(wrap) {
@@ -931,8 +1074,8 @@ export function initLinkUI(options = {}) {
     // A side can show 0 items and 0 calendars and still carry pending
     // DELETIONS that would remove records from the other side — that is
     // exactly how this dialog gets reached against a tombstone-only account.
-    // A bare "0 items, 0 calendars" beside a Replace button is not an
-    // informed choice, so the deletions are named.
+    // A bare "0 items, 0 calendars" beside a Merge button is not an informed
+    // choice, so the deletions are named.
     let text = `This device holds ${plural(d.localItems, 'item', 'items')} and ${plural(d.localFeeds, 'calendar', 'calendars')}. `
       + `The account holds ${plural(d.remoteItems, 'item', 'items')} and ${plural(d.remoteFeeds, 'calendar', 'calendars')}.`;
     if (d.remoteDeletesLocal > 0) {
@@ -943,10 +1086,12 @@ export function initLinkUI(options = {}) {
     }
     text += ' Choose how to combine them.';
     wrap.appendChild(el('p', { className: 'note', text }));
+    // TWO choices. "Replace this device" (discard local, take the account) was
+    // removed on 2026-10-19: it added no capability Merge lacks — unlinking,
+    // clearing this device and re-linking reaches the same place — and every
+    // data-destroying defect found on V5 lived on its path.
     const mergeBtn = el('button', { type: 'button', className: 'primary', text: 'Merge (recommended)' });
     mergeBtn.addEventListener('click', () => runAdoption((g) => adoptAgainstFreshCounts('adopt-merge', g)));
-    const replaceBtn = el('button', { type: 'button', text: 'Replace this device' });
-    replaceBtn.addEventListener('click', () => runAdoption((g) => adoptAgainstFreshCounts('adopt-replace', g)));
     const cancelBtn = el('button', { type: 'button', text: 'Cancel' });
     cancelBtn.addEventListener('click', () => {
       notice = 'Nothing was combined. This device will not sync until you choose.';
@@ -954,12 +1099,10 @@ export function initLinkUI(options = {}) {
       stageData = {};
       render();
     });
-    wrap.append(mergeBtn, replaceBtn, cancelBtn);
+    wrap.append(mergeBtn, cancelBtn);
     wrap.appendChild(el('p', {
       className: 'note',
-      text: 'Merge keeps everything from both sides and folds together anything that is obviously the same. '
-        + 'Replace this device throws away what is on this device — including its calendar links, whose addresses '
-        + 'are never shown again and cannot be typed back in.',
+      text: 'Merge keeps everything from both sides and folds together anything that is obviously the same.',
     }));
   }
 
@@ -991,7 +1134,7 @@ export function initLinkUI(options = {}) {
       wrap.appendChild(unlinkButton('Unlink this device'));
       wrap.appendChild(el('p', {
         className: 'note',
-        text: 'Unlinking stops syncing. Nothing on this device is deleted.',
+        text: UNLINK_NOTE,
       }));
     }
   }
@@ -1042,7 +1185,7 @@ export function initLinkUI(options = {}) {
     wrap.appendChild(unlinkButton('Unlink this device'));
     wrap.appendChild(el('p', {
       className: 'note',
-      text: 'Unlinking stops syncing. Nothing on this device is deleted, and the other devices keep their copies.',
+      text: UNLINK_NOTE,
     }));
     renderNewDevice(wrap);
   }

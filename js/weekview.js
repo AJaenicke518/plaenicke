@@ -35,7 +35,14 @@ export function renderWeekView(container, weekStartISO, itemsByDate, todayISO, {
       col.appendChild(more);
     }
 
+    // Keyboard-reachable like a button: Enter or Space selects the day too
+    // (Space is cancelled, or it would also scroll the page).
+    col.setAttribute('role', 'button');
+    col.setAttribute('tabindex', '0');
     col.addEventListener('click', () => onSelectDay(dateISO));
+    col.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectDay(dateISO); }
+    });
     container.appendChild(col);
   }
 }

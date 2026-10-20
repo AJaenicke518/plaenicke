@@ -31,6 +31,14 @@ export function startOfWeek(iso) {
   return addDays(iso, -new Date(y, mo - 1, d).getDay());
 }
 
+// The Week header: "MM/DD – MM/DD", with each year added only when the two
+// differ, so a week across New Year's does not read as running backwards.
+export function weekLabel(startISO, endISO) {
+  const md = (iso) => iso.slice(5).replace('-', '/');
+  if (startISO.slice(0, 4) === endISO.slice(0, 4)) return `${md(startISO)} – ${md(endISO)}`;
+  return `${md(startISO)}/${startISO.slice(0, 4)} – ${md(endISO)}/${endISO.slice(0, 4)}`;
+}
+
 export function bucketDayItems(items) {
   const untimed = [], timed = [];
   for (const it of items) (it.time ? timed : untimed).push(it);

@@ -2,16 +2,26 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
-import { syncOnce, previewRemote, MAX_ATTEMPTS } from '../js/sync.js';
+import { syncOnce as realSyncOnce, previewRemote as realPreviewRemote, MAX_ATTEMPTS } from '../js/sync.js';
+import { fetchWithTimeout, FETCH_TIMEOUT_MS } from '../js/fetchtimeout.js';
 import { linkWithCode, clearAdoptionPending, tokenHash } from '../js/auth.js';
 import { encryptBlob, decryptBlob, generateEncKey, bytesToBase64url, composeLinkCode } from '../js/crypto.js';
-import { SCHEMA_VERSION, toWire, merge } from '../js/merge.js';
+import { SCHEMA_VERSION, toWire } from '../js/merge.js';
 import { saveItems, loadItems, loadFeeds, saveFeeds, saveAuth, loadSyncState, saveSyncState } from '../js/storage.js';
 
 const NOW = () => new Date('2026-08-02T12:00:00.000Z');
 const item = (id, updatedAt) => ({ id, title: `t-${id}`, date: '2026-08-02', time: null, updatedAt });
 const state = (o = {}) => ({ schemaVersion: SCHEMA_VERSION, items: [], feeds: [], tombstones: [], ...o });
 const echo = (s) => s;   // simplest applyState: writes nothing, returns what it got
+
+// READS AND WRITES ARE SEPARATE INJECTIONS: syncOnce/previewRemote take a
+// readFetchImpl for GET /data (production passes fetchWithTimeout) and a
+// fetchImpl for the PUT (never timed out). Almost every test here drives both
+// through ONE fake server, so these two adapters hand the test's fetchImpl in
+// as the read fetch too, unless the test passes its own. The tests that are
+// ABOUT the split call realSyncOnce / realPreviewRemote directly.
+const syncOnce = (deps) => realSyncOnce({ readFetchImpl: deps.fetchImpl, ...deps });
+const previewRemote = (deps) => realPreviewRemote({ readFetchImpl: deps.fetchImpl, ...deps });
 
 // A fake Worker holding one row, enforcing the real compare-and-swap rule.
 // It records the FULL request, body included — a fake that drops the body
@@ -90,16 +100,28 @@ test('an empty server accepts the local state as the first push', async () => {
 });
 
 // DA-M4: the fake records the body, so this assertion can actually fail.
+//
+// The plaintext marker must be a string the wire cannot contain BY CHANCE.
+// It used to be the title 't-a', and every character of that is in the
+// base64url alphabet the random 43-character authToken is drawn from — so
+// the Bearer header carried 't-a' in about 1 run in 6000 and the test failed
+// on correct code. A space is in neither base64url nor standard base64, so no
+// token or ciphertext can produce this; and it has no quote or backslash, so
+// it would survive JSON escaping intact if the title ever did go out in clear.
+const PLAINTEXT_MARKER = 'plaintext title marker';
 test('the Bearer token is sent and the encryption key is NEVER on the wire', async () => {
   const link = await linked();
-  saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
+  saveItems([{ ...item('a', '2026-08-01T00:00:00.000Z'), title: PLAINTEXT_MARKER }]);
   const server = fakeServer();
   await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo });
   assert.ok(server.calls.some(c => c.method === 'PUT'), 'the test must actually exercise a push');
   assert.ok(server.calls.every(c => c.headers.authorization === `Bearer ${link.authToken}`));
+  const pushed = await decryptBlob(link.encKey, server.row.blob);
+  assert.deepEqual(pushed.items.map(i => i.title), [PLAINTEXT_MARKER],
+    'fixture check: the marker is the content that was pushed, encrypted');
   const wire = JSON.stringify(server.calls);
   assert.ok(!wire.includes(bytesToBase64url(link.encKey)), 'encKey must never be transmitted');
-  assert.ok(!wire.includes('t-a'), 'plaintext must never be transmitted');
+  assert.ok(!wire.includes(PLAINTEXT_MARKER), 'plaintext must never be transmitted');
 });
 
 test('remote records are merged and handed to applyState, not written directly', async () => {
@@ -257,14 +279,30 @@ test('a successful sync records lastSyncedAt and clears lastError', async () => 
   assert.equal(loadSyncState().lastSyncedAt, NOW().toISOString());
 });
 
-test('adopt-replace discards local state instead of merging it', async () => {
-  const link = await linked();
-  saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
-  const server = fakeServer({ version: 2, blob: await encryptBlob(link.encKey, state({ items: [item('remote', '2026-08-01T00:00:00.000Z')] })) });
-  let applied = null;
-  await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
-    applyState: (s) => { applied = s; return s; }, adoptChoice: 'adopt-replace' });
-  assert.deepEqual(applied.items.map(i => i.id), ['remote']);
+// adoptChoice has exactly three legal values: null (an ordinary sync),
+// 'adopt-merge' and 'adopt-bootstrap'. "Replace this device" (adopt-replace)
+// was removed on 2026-10-19. Any other value is a wiring bug, and it must stop
+// before the network rather than be read as one of the others: silently
+// treating a caller that asked to DISCARD as a caller that asked to merge is
+// the opposite of what it asked for.
+test('an unknown adoptChoice — including the retired adopt-replace — is refused before anything is pulled or applied', async () => {
+  for (const adoptChoice of ['adopt-replace', 'merge', true]) {
+    installFakeLocalStorage();
+    await linkWithCode(bytesToBase64url(generateEncKey()));
+    saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
+    let called = false;
+    let applied = false;
+    await assert.rejects(
+      syncOnce({ fetchImpl: async () => { called = true; }, now: NOW, apiBase: 'https://w.example',
+        applyState: () => { applied = true; }, adoptChoice }),
+      /adoptChoice/,
+      `${String(adoptChoice)} must be refused`,
+    );
+    assert.equal(called, false, 'nothing may be pulled');
+    assert.equal(applied, false, 'nothing may be applied');
+    assert.equal(loadSyncState().adoptionPending, true, 'the gate stays raised');
+    assert.deepEqual(loadItems().map((i) => i.id), ['local'], 'local data is untouched');
+  }
 });
 
 test('adopt-merge dedupes, and clears the adoption gate on success', async () => {
@@ -286,7 +324,7 @@ test('adopt-merge dedupes, and clears the adoption gate on success', async () =>
 // bootstrap (spec 5.7 step 2 — an empty server means local uploads AS-IS) and
 // on a device with nothing local to dedupe against. sync.js's dedupe
 // condition is `=== 'adopt-merge'` for exactly this reason; without this test
-// a later refactor to `!== 'adopt-replace'` would silently restore a
+// a later refactor to a truthiness check would silently restore a
 // permanent, cross-device collapse of any two records sharing title, date and
 // time — and push a tombstone for the loser to every device.
 test("'adopt-bootstrap' adopts and lifts the gate WITHOUT deduping", async () => {
@@ -315,9 +353,9 @@ test("'adopt-bootstrap' adopts and lifts the gate WITHOUT deduping", async () =>
 });
 
 // DA-I5. The account can empty (or change) between the linking UI's
-// previewRemote and its syncOnce. A user who clicked "Replace this device"
-// against data they SAW would otherwise get a silent full local wipe with no
-// re-confirmation, and sync.js cannot see it. Re-previewing from linkui.js
+// previewRemote and its syncOnce. A user who chose against data they SAW
+// would otherwise have that choice acted on against data they never saw, and
+// sync.js cannot see it. Re-previewing from linkui.js
 // narrows the window but does not close it — the merge is applied against the
 // pull INSIDE syncOnce.
 test('expectVersion matching the pulled version proceeds normally', async () => {
@@ -339,7 +377,7 @@ test('expectVersion that no longer matches applies nothing, pushes nothing and h
   const server = fakeServer({ version: 9, blob: await encryptBlob(link.encKey, state({ items: [item('r', '2026-08-01T00:00:00.000Z')] })) });
   let applied = false;
   const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
-    applyState: () => { applied = true; }, adoptChoice: 'adopt-replace', expectVersion: 4 });
+    applyState: () => { applied = true; }, adoptChoice: 'adopt-merge', expectVersion: 4 });
   assert.equal(res.status, 'changed');
   assert.equal(res.version, 9, 'the caller needs the version it must re-decide against');
   assert.equal(applied, false, 'a choice made against data that has since moved must not be acted on');
@@ -347,85 +385,6 @@ test('expectVersion that no longer matches applies nothing, pushes nothing and h
   assert.deepEqual(JSON.parse(localStorage.getItem('plaenicke.items')).map(i => i.id), ['local']);
   assert.equal(loadSyncState().adoptionPending, true, 'the gate stays raised so the user is asked again');
   assert.equal(loadSyncState().version, 0, 'the cursor must not advance past a pull that was never applied');
-});
-
-// expectVersion is checked once, right after the initial fetchRemote — NOT
-// again on the CAS-retry path, where a 409 hands back a server state the user
-// never saw and the retry adopts it.
-//
-// AN EARLIER VERSION OF THIS COMMENT CLAIMED THE PATH WAS UNREACHABLE
-// ("adopt-replace never issues a PUT"). That is FALSE, and the next test
-// proves it: merge() prunes tombstones past 90 days, so an account carrying an
-// ancient tombstone makes toWire(merged) differ from toWire(remote) and the
-// replace does push. What is actually true is narrower, and is what these two
-// tests pin between them:
-//   1. against an account with nothing prunable — the ordinary case — a
-//      replace is wire-identical to what it pulled and pushes nothing, so the
-//      409 path is not routinely reached;
-//   2. when it IS reached, the retry adopts the account's CURRENT state,
-//      which is what the user asked for ("discard local, take the account").
-//      Local was already discarded on their explicit instruction one apply
-//      earlier, so there is nothing left to re-confirm before.
-// Both are pinned so a change to either turns into a failing test rather than
-// a silent widening of the gap.
-test('adopt-replace against an ordinary account is wire-identical to what it pulled and pushes nothing', async () => {
-  const link = await linked();
-  saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
-  saveFeeds([{ id: 'fLocal', url: 'https://cal.example/l.ics', name: 'L', color: '#111', hidden: false, updatedAt: '2026-08-01T00:00:00.000Z' }]);
-  const server = fakeServer({ version: 2, blob: await encryptBlob(link.encKey, state({
-    items: [item('remote', '2026-08-01T00:00:00.000Z')],
-    feeds: [{ id: 'fRemote', url: 'https://cal.example/r.ics', name: 'R', updatedAt: '2026-08-01T00:00:00.000Z' }],
-    tombstones: [{ id: 'recent', kind: 'item', deletedAt: '2026-07-30T00:00:00.000Z' }],
-  })) });
-  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
-    applyState: echo, adoptChoice: 'adopt-replace', expectVersion: 2 });
-  assert.equal(res.status, 'ok');
-  assert.equal(res.pushed, false);
-  assert.deepEqual(server.calls.filter(c => c.method === 'PUT'), [],
-    'nothing differs from the pulled state, so there is no PUT and therefore no 409 to reach');
-});
-
-test('adopt-replace DOES push when merge prunes an expired tombstone — the 409 path is reachable', async () => {
-  const link = await linked();
-  saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
-  // Older than merge.js's 90-day prune window relative to NOW.
-  const server = fakeServer({ version: 2, blob: await encryptBlob(link.encKey, state({
-    items: [item('remote', '2026-08-01T00:00:00.000Z')],
-    tombstones: [{ id: 'ancient', kind: 'item', deletedAt: '2026-01-01T00:00:00.000Z' }],
-  })) });
-  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
-    applyState: echo, adoptChoice: 'adopt-replace', expectVersion: 2 });
-  assert.equal(res.status, 'ok');
-  assert.equal(res.pushed, true,
-    'pruning makes the merged state differ from the pulled one, so a replace CAN push — the "never PUTs" claim was false');
-  assert.ok(server.calls.some(c => c.method === 'PUT'));
-});
-
-test('a replace that 409s mid-retry adopts the account CURRENT state, which is what Replace means', async () => {
-  const link = await linked();
-  saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
-  const server = fakeServer({ version: 2, blob: await encryptBlob(link.encKey, state({
-    items: [item('remote', '2026-08-01T00:00:00.000Z')],
-    tombstones: [{ id: 'ancient', kind: 'item', deletedAt: '2026-01-01T00:00:00.000Z' }],
-  })) });
-  let forced = false;
-  const fetchImpl = async (url, opts = {}) => {
-    if ((opts.method || 'GET') === 'PUT' && !forced) {
-      forced = true;
-      server.row.version += 1;
-      server.row.blob = await encryptBlob(link.encKey, state({ items: [item('moved', '2026-08-01T00:00:00.000Z')] }));
-      return { ok: false, status: 409, json: async () => ({ error: 'version_conflict', version: server.row.version, blob: server.row.blob }) };
-    }
-    return server.fetchImpl(url, opts);
-  };
-  let lastApplied = null;
-  const res = await syncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example',
-    applyState: (s) => { lastApplied = s; return s; }, adoptChoice: 'adopt-replace', expectVersion: 2 });
-  assert.equal(res.status, 'ok');
-  assert.deepEqual(lastApplied.items.map(i => i.id), ['moved'],
-    'the retry must adopt the account as it now stands, not silently convert the replace into a merge');
-  assert.ok(!lastApplied.items.some(i => i.id === 'local'),
-    'the record the user chose to discard must not come back through the retry');
 });
 
 // THE DEVICE-CHANGE PATH INTO THE GATE, END TO END.
@@ -468,7 +427,7 @@ test('a device whose credential now names a different account is asked again, an
     'nothing may be pulled or pushed — the union must not reach the account at all');
   assert.equal(server.row.version, 12);
   const after = loadSyncState();
-  assert.equal(after.adoptionPending, true, 'the user must be offered Merge / Replace / Cancel again');
+  assert.equal(after.adoptionPending, true, 'the user must be offered Merge / Cancel again');
   assert.equal(after.version, 0, 'a stale cursor from the previous account must never be reused');
   assert.equal(after.lastSyncedAt, null);
   assert.equal(after.tokenHash, await tokenHash(otherToken), 'and the cursor must now name the new device token');
@@ -502,8 +461,7 @@ test('the pushed blob is what applyState returned, not what it was given', async
 // are all reachable with the local write already landed — a Wi-Fi drop between
 // the GET and the PUT reaches every one of them. The caller cannot infer it
 // from the status, and linkui.js's failure text said "Nothing has been
-// combined yet" on all three. On adopt-replace the local wipe is complete and
-// irreversible by that point, and Unlink is offered right beside the false
+// combined yet" on all three, and Unlink is offered right beside the false
 // report.
 
 test('applied is false on every status returned before applyState could run', async () => {
@@ -594,10 +552,144 @@ test('a successful sync also reports applied, and a version mismatch does not', 
   saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
   const moved = fakeServer({ version: 9, blob: await encryptBlob(link2.encKey, state({ items: [item('r', '2026-08-01T00:00:00.000Z')] })) });
   const changed = await syncOnce({ fetchImpl: moved.fetchImpl, now: NOW, apiBase: 'https://w.example',
-    applyState: () => { throw new Error('must not be called'); }, adoptChoice: 'adopt-replace', expectVersion: 4 });
+    applyState: () => { throw new Error('must not be called'); }, adoptChoice: 'adopt-merge', expectVersion: 4 });
   assert.deepEqual([changed.status, changed.applied], ['changed', false],
     "'changed' is the guard that hands the decision back — it applies nothing by construction");
   assert.ok(link.encKey.length === 32); // fixture sanity
+});
+
+// The whole wire for a device that fills up while applying calendars:
+// saveFeeds -> QuotaError -> syncOnce's apply catch records err.name, which
+// linkui.js labels "this device has run out of storage".
+test('a calendar save that runs out of storage during apply is recorded as QuotaError', async () => {
+  const link = await linked();
+  saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer({ version: 1, blob: await encryptBlob(link.encKey, state({ items: [item('r', '2026-08-01T00:00:00.000Z')] })) });
+  const real = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = (k, v) => {
+    if (k === 'plaenicke.feeds') { const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; }
+    return real(k, v);
+  };
+  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: (s) => { saveFeeds(s.feeds); return s; } });
+  assert.equal(res.status, 'error');
+  assert.equal(loadSyncState().lastError, 'QuotaError');
+  assert.equal(server.row.version, 1, 'nothing is pushed after a failed apply');
+});
+
+// --- timeouts: the read gives up, the write does not (punchlist L63) -------
+//
+// A read is side-effect free, so abandoning it is always safe and it is
+// reported exactly like being offline. A PUT is never abandoned: a client-side
+// timeout does not stop the server's write, so timing one out would report
+// 'offline' about a write that may have landed.
+
+test('syncOnce and previewRemote refuse to run without a readFetchImpl', async () => {
+  await linked();
+  let called = false;
+  const fetchImpl = async () => { called = true; };
+  await assert.rejects(realSyncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo }), /readFetchImpl/);
+  await assert.rejects(realPreviewRemote({ apiBase: 'https://w.example' }), /readFetchImpl/);
+  assert.equal(called, false, 'nothing may be fetched through the write fetch instead');
+});
+
+test('the read goes through readFetchImpl and only the PUT goes through fetchImpl', async () => {
+  const link = await linked();
+  saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer({ version: 1, blob: await encryptBlob(link.encKey, state()) });
+  const reads = [];
+  const writes = [];
+  const res = await realSyncOnce({
+    readFetchImpl: (u, o) => { reads.push((o && o.method) || 'GET'); return server.fetchImpl(u, o); },
+    fetchImpl: (u, o) => { writes.push((o && o.method) || 'GET'); return server.fetchImpl(u, o); },
+    now: NOW, apiBase: 'https://w.example', applyState: echo,
+  });
+  assert.equal(res.status, 'ok');
+  assert.deepEqual(reads, ['GET']);
+  assert.deepEqual(writes, ['PUT']);
+});
+
+test('a read that times out is reported as offline: nothing applied, nothing pushed', async (t) => {
+  await linked();
+  saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
+  const originalFetch = globalThis.fetch;
+  let reads = 0;
+  globalThis.fetch = () => { reads += 1; return new Promise(() => {}); }; // a GET that never answers
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let applied = false;
+  let wrote = false;
+  try {
+    let settled = false;
+    const pending = realSyncOnce({
+      readFetchImpl: fetchWithTimeout,
+      fetchImpl: async () => { wrote = true; },
+      now: NOW, apiBase: 'https://w.example', applyState: () => { applied = true; },
+    });
+    pending.then(() => { settled = true; }, () => { settled = true; });
+    for (let i = 0; i < 20; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    assert.equal(reads, 1, 'fixture check: the read really went out');
+    assert.equal(settled, false, 'fixture check: and is still waiting before the deadline');
+    t.mock.timers.tick(FETCH_TIMEOUT_MS);
+    const res = await pending;
+    assert.deepEqual([res.status, res.applied], ['offline', false]);
+  } finally {
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(loadSyncState().lastError, 'offline', 'reported exactly like being offline');
+  assert.equal(applied, false);
+  assert.equal(wrote, false);
+});
+
+test('previewRemote reports a timed-out read as offline', async (t) => {
+  await linked();
+  const originalFetch = globalThis.fetch;
+  let reads = 0;
+  globalThis.fetch = () => { reads += 1; return new Promise(() => {}); };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let settled = false;
+    const pending = realPreviewRemote({ readFetchImpl: fetchWithTimeout, apiBase: 'https://w.example' });
+    pending.then(() => { settled = true; });
+    for (let i = 0; i < 20; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    assert.equal(reads, 1, 'fixture check: the read really went out');
+    assert.equal(settled, false, 'fixture check: and is still waiting before the deadline');
+    t.mock.timers.tick(FETCH_TIMEOUT_MS);
+    assert.equal((await pending).status, 'offline');
+  } finally {
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// Must not change: the PUT has no deadline. One that takes twice the read's
+// budget still lands and is reported as the success it is.
+test('a PUT slower than the read deadline is still waited for, and lands', async (t) => {
+  const link = await linked();
+  saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer({ version: 1, blob: await encryptBlob(link.encKey, state()) });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let putStarted = false;
+    const pending = realSyncOnce({
+      readFetchImpl: server.fetchImpl,
+      fetchImpl: (u, o) => {
+        putStarted = true;
+        return new Promise((resolve) => { setTimeout(() => resolve(server.fetchImpl(u, o)), 2 * FETCH_TIMEOUT_MS); });
+      },
+      now: NOW, apiBase: 'https://w.example', applyState: echo,
+    });
+    for (let i = 0; i < 50 && !putStarted; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    assert.ok(putStarted, 'fixture check: the PUT is in flight');
+    t.mock.timers.tick(2 * FETCH_TIMEOUT_MS);
+    const res = await pending;
+    assert.equal(res.status, 'ok');
+    assert.equal(res.pushed, true);
+  } finally {
+    t.mock.timers.reset();
+  }
+  assert.equal(server.row.version, 2, 'the write landed');
+  assert.equal(loadSyncState().lastError, null);
 });
 
 // --- Second-pass review findings ---
@@ -680,79 +772,16 @@ test('an applyState failure during the retry reports error, not undecryptable', 
   assert.equal(res.status, 'error', 'a local apply failure is not the same as an unreadable remote blob');
 });
 
-// Finding 4: `adopt-replace` must produce a state that a REAL applyState —
-// which re-merges against live storage before writing (Task 7) — does not
-// union local content back into. `echo`, used everywhere else in this file,
-// cannot see this bug: echo writes nothing, so `toWire(merged) ===
-// toWire(remote)` trivially and the push loop is never entered. These two
-// tests use an applyState that behaves like the real one instead.
-function fakeApplySyncedState(state, opts = {}) {
-  const live = { schemaVersion: SCHEMA_VERSION, items: loadItems(), feeds: loadFeeds(), tombstones: [] };
-  const written = opts.replace ? state : merge(live, state, new Date());
-  saveItems(written.items);
-  return written;
-}
-
-test('adopt-replace discards local records even when applyState re-merges against live storage, like Task 7 does', async () => {
-  const link = await linked();
-  saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
-  const server = fakeServer({ version: 2, blob: await encryptBlob(link.encKey, state({ items: [item('remote', '2026-08-01T00:00:00.000Z')] })) });
-  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
-    applyState: fakeApplySyncedState, adoptChoice: 'adopt-replace' });
-  assert.equal(res.status, 'ok');
-  assert.equal(res.pushed, false, 'a faithful replace already matches the remote it discarded local for — nothing needs pushing');
-  const written = JSON.parse(localStorage.getItem('plaenicke.items'));
-  assert.deepEqual(written.map(i => i.id), ['remote'], 'the record the user chose to discard must not survive a real re-merging applyState');
-});
-
-// Isolates the retry's OWN re-merge from the main path's fix: an item with an
-// unparseable date is dropped by the simulated write path (mirroring how
-// smartadd.js already drops items missing a valid ISO date elsewhere in this
-// app), so the first apply legitimately differs from what was pulled and a
-// push — followed by a conflict — becomes unavoidable even under a
-// byte-faithful replace, which otherwise never has anything to push.
-function fakeApplySyncedStateValidating(state, opts = {}) {
-  const cleaned = { ...state, items: state.items.filter(i => typeof i.date === 'string') };
-  const live = { schemaVersion: SCHEMA_VERSION, items: loadItems(), feeds: loadFeeds(), tombstones: [] };
-  const written = opts.replace ? cleaned : merge(live, cleaned, new Date());
-  saveItems(written.items);
-  return written;
-}
-
-test('adopt-replace that hits a 409 mid-retry still replaces with the new server state, not a merge', async () => {
-  const link = await linked();
-  saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
-  const server = fakeServer({ version: 2, blob: await encryptBlob(link.encKey, state({
-    items: [item('remote', '2026-08-01T00:00:00.000Z'), { id: 'bad', title: 'Bad', date: null, time: null, updatedAt: '2026-08-01T00:00:00.000Z' }],
-  })) });
-  let forced = false;
-  const fetchImpl = async (url, opts = {}) => {
-    if ((opts.method || 'GET') === 'PUT' && !forced) {
-      forced = true;
-      server.row.version += 1;
-      server.row.blob = await encryptBlob(link.encKey, state({ items: [item('remote2', '2026-08-01T00:00:00.000Z')] }));
-      return { ok: false, status: 409, json: async () => ({ error: 'version_conflict', version: server.row.version, blob: server.row.blob }) };
-    }
-    return server.fetchImpl(url, opts);
-  };
-  const res = await syncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example',
-    applyState: fakeApplySyncedStateValidating, adoptChoice: 'adopt-replace' });
-  assert.equal(res.status, 'ok');
-  const pushed = await decryptBlob(link.encKey, server.row.blob);
-  assert.deepEqual(pushed.items.map(i => i.id), ['remote2'],
-    'a 409 mid-replace must not silently convert into a merge that unions in what the previous apply already wrote locally');
-});
-
 // --- Third-pass review findings ---
 
-// Finding 5: adopt-replace must still route every remote feed through
-// merge()'s pickFeed, which stamps color:null/hidden:false for a first-seen
+// Finding 5 (first found on the since-removed adopt-replace path; pinned here
+// on adopt-merge): every remote feed must be routed through merge()'s pickFeed, which stamps color:null/hidden:false for a first-seen
 // feed. Server blobs are always wire form (toWire already stripped
 // color/hidden before this blob was ever pushed), and storage.js's
 // deserializeFeeds drops any feed whose color is not a string — undefined is
 // not null, so handing applyState the raw remote feed silently destroys the
 // subscription the moment a real applyState calls saveFeeds.
-test('adopt-replace hands applyState a feed with a color key and boolean hidden, and it survives a save/load round trip', async () => {
+test('adopt-merge hands applyState a feed with a color key and boolean hidden, and it survives a save/load round trip', async () => {
   const link = await linked();
   saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
   const remoteFeed = { id: 'fRemote', url: 'https://cal.example/a.ics', name: 'A', updatedAt: '2026-08-01T00:00:00.000Z' };
@@ -766,7 +795,7 @@ test('adopt-replace hands applyState a feed with a color key and boolean hidden,
     saveFeeds(assigned);
     return { ...s, feeds: assigned };
   };
-  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState, adoptChoice: 'adopt-replace' });
+  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState, adoptChoice: 'adopt-merge' });
   assert.equal(res.status, 'ok');
   assert.equal(handedFeeds.length, 1);
   assert.ok('color' in handedFeeds[0], 'color key must be present (null is fine) so a real applyState can assign one');
@@ -776,11 +805,11 @@ test('adopt-replace hands applyState a feed with a color key and boolean hidden,
     'the feed must survive a real save/load round trip, not be silently dropped by deserializeFeeds');
 });
 
-// Isolates the RETRY's own routing from the main path's: reaching the retry
-// under replace requires forcing a mismatch (see the note on the 409
-// mid-retry test above), so this drops a malformed item to get there, then
-// checks the feed handed to applyState AFTER the conflict, not before.
-test('adopt-replace that hits a 409 mid-retry also routes the new remote feed through pickFeed', async () => {
+// Isolates the RETRY's own routing from the main path's: this drops a
+// malformed item so the first apply differs from what was pulled and a push
+// (and the forced conflict) is reached, then checks the feed handed to
+// applyState AFTER the conflict, not before.
+test('a sync that hits a 409 mid-retry also routes the new remote feed through pickFeed', async () => {
   const link = await linked();
   saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
   const server = fakeServer({ version: 2, blob: await encryptBlob(link.encKey, state({
@@ -802,7 +831,7 @@ test('adopt-replace that hits a 409 mid-retry also routes the new remote feed th
     }
     return server.fetchImpl(url, opts);
   };
-  const res = await syncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example', applyState, adoptChoice: 'adopt-replace' });
+  const res = await syncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example', applyState });
   assert.equal(res.status, 'ok');
   assert.equal(lastFeeds.length, 1);
   assert.ok('color' in lastFeeds[0], 'the retry must also route feeds through pickFeed before handing them to applyState');
@@ -842,23 +871,4 @@ test('an encrypt failure before the PUT reports error, not offline', async () =>
   } finally {
     crypto.subtle.encrypt = originalEncrypt;
   }
-});
-
-// Finding 8: chosen behaviour — adopt-replace against an EMPTY server
-// discards local and pushes nothing. Task 8's chooseAdoption returns 'none'
-// when there is nothing to replace with, so the UI has no path here today,
-// but if this is ever reached, "replace" must mean replace: adopt exactly
-// what the server has, even if that is nothing. Silently falling back to
-// keeping and pushing local data instead is the exact "does not replace"
-// bug Finding 4 fixed, reintroduced for the one case where pulled.state is
-// null.
-test('adopt-replace against an empty server discards local and pushes nothing', async () => {
-  await linked();
-  saveItems([item('local', '2026-08-01T00:00:00.000Z')]);
-  const server = fakeServer(); // version 0, blob ''
-  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
-    applyState: echo, adoptChoice: 'adopt-replace' });
-  assert.equal(res.status, 'ok');
-  assert.equal(res.pushed, false);
-  assert.equal(server.row.version, 0, 'nothing local may be pushed to the account being joined');
 });

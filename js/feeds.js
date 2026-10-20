@@ -15,6 +15,7 @@
 import { WORKER_URL } from './config.js';
 import { parseICS, expandEvents, parseDuration } from './ics.js';
 import { nowISO } from './dateparse.js';
+import { FEED_PALETTE } from './palette.js';
 import {
   loadFeeds, saveFeeds, loadFeedCache, saveFeedCache, QuotaError, addTombstone,
 } from './storage.js';
@@ -400,6 +401,15 @@ export function feedStatus(feed, cacheEntry, now = new Date()) {
 
   const parts = [`fetched ${humanizeAgo(cacheEntry.fetchedAt, nowDate)}`];
 
+  // How many events the feed holds (as cached: a recurring series is one). A
+  // feed that returns none otherwise looks exactly like a broken one. Not
+  // after a quota drop: those events were emptied to free storage, and "0
+  // events" would say the calendar has none.
+  if (!cacheEntry.quotaDropped && Array.isArray(cacheEntry.events)) {
+    const n = cacheEntry.events.length;
+    parts.push(`${n} event${n === 1 ? '' : 's'}`);
+  }
+
   if (cacheEntry.quotaDropped) {
     parts.push('storage limit reached — events not cached, sync again to retry');
   } else if (cacheEntry.quotaPruned) {
@@ -445,6 +455,11 @@ function compareInstances(a, b) {
 // A feed with no cache entry yet (never synced) or an entry a malformed
 // expansion throws on is skipped rather than breaking the whole merge; one
 // bad feed must not blank every other calendar.
+// Feed ids whose expansion failure has already been logged this session.
+// instancesForRange runs on every render, so without this one broken entry
+// logged on every tap and every sync.
+const reportedExpansionFailures = new Set();
+
 export function instancesForRange(feeds, cache, start, end, targetTz) {
   const out = [];
   for (const feed of feeds) {
@@ -459,8 +474,11 @@ export function instancesForRange(feeds, cache, start, end, targetTz) {
       // Skipping keeps one bad feed from blanking every other calendar, but a
       // silent skip is indistinguishable from an empty calendar. Log the error
       // NAME only: a feed URL is a capability token and the feed object carries
-      // it, so neither may ever reach the console.
-      console.error(`instancesForRange: expansion failed (${err && err.name ? err.name : 'unknown'}) — feed skipped`);
+      // it, so neither may ever reach the console. Once per feed per session.
+      if (!reportedExpansionFailures.has(feed.id)) {
+        reportedExpansionFailures.add(feed.id);
+        console.error(`instancesForRange: expansion failed (${err && err.name ? err.name : 'unknown'}) — feed skipped`);
+      }
       continue;
     }
 
@@ -511,15 +529,8 @@ export function removeFeed(id) {
 // applyRemoteFeeds
 // ---------------------------------------------------------------------------
 
-// This device's colour cycle for a feed with no local record of its own —
-// the same 6-slot palette settings.js (Task 7) offers on Add. Duplicated
-// rather than imported: settings.js already imports FROM feeds.js (syncFeed,
-// feedStatus, removeFeed, ...), so importing the other way would be a cycle.
-// Both lists must stay in lockstep with styles.css's --feed-palette-1..6.
-const FEED_PALETTE = [
-  'var(--feed-palette-1)', 'var(--feed-palette-2)', 'var(--feed-palette-3)',
-  'var(--feed-palette-4)', 'var(--feed-palette-5)', 'var(--feed-palette-6)',
-];
+// A feed with no local record of its own takes this device's next colour from
+// FEED_PALETTE (js/palette.js), the same cycle settings.js offers on Add.
 
 // applyRemoteFeeds: the feeds half of the "single writer" fix — js/sync.js
 // hands merged state to applyState(state, opts) and never writes storage

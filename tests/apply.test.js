@@ -4,14 +4,28 @@ import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
 import { SCHEMA_VERSION } from '../js/merge.js';
 import {
-  saveItems, loadItems, saveTombstones, saveFeeds, loadFeeds, loadTombstones, loadSyncState,
+  saveItems, loadItems, saveTombstones, saveFeeds, loadFeeds, loadTombstones, loadSyncState, saveSyncState,
   loadLaunches,
 } from '../js/storage.js';
 import { linkWithCode, clearAdoptionPending } from '../js/auth.js';
+import { FETCH_TIMEOUT_MS } from '../js/fetchtimeout.js';
 import { bytesToBase64url, TOKEN_BYTES } from '../js/crypto.js';
-import { SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID } from '../js/linkui.js';
-import { addDays, startOfWeek } from '../js/timegrid.js';
+import { SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID, SLOW_WRITE_MS } from '../js/linkui.js';
+import { addDays, startOfWeek, weekLabel } from '../js/timegrid.js';
 import { formatDayLabel } from '../js/freshness.js';
+
+// Installed before anything imports app.js: every fetch that a test has not
+// stubbed rejects the way an offline device does.
+globalThis.fetch = () => Promise.reject(new TypeError('network blocked in tests'));
+
+// This file must never reach the production Worker. Tests that need a server
+// stub globalThis.fetch and restore it afterwards, but app.js also schedules
+// syncs on real timers that fire after a test has restored fetch, so that is
+// not enough on its own.
+test('the default fetch in this file is offline, not the production Worker', async () => {
+  const { WORKER_URL } = await import('../js/config.js');
+  await assert.rejects(globalThis.fetch(`${WORKER_URL}/data`), /network blocked in tests/);
+});
 
 // --- historical note: the js/linkui.js resolve hook -------------------------
 //
@@ -24,6 +38,33 @@ import { formatDayLabel } from '../js/freshness.js';
 // while it was present, deleting or renaming js/linkui.js would have made
 // this suite quietly fall back to the stub instead of failing, which is the
 // same class of "assertion that cannot fail" defect DA-C4 flagged below.
+
+// THE FIXTURE RELOAD. seed(), simulateSync() and the feed seeders reload
+// app.js's module-scope snapshot through its storage listener, which also
+// schedules a sync (a write from a tab that hid must be pushed by the visible
+// one — see "cross-tab sync" below). These helpers are setting up fixtures,
+// not modelling a write to push, so that sync is DROPPED here: left in, every
+// reload under real timers armed a real 2 s timer that fired after the file
+// finished and sent GET /data to the production Worker, and every reload
+// under t.mock.timers ran clearTimeout on app.js's syncTimer — a handle from
+// an earlier mock session, which removes an unrelated timer (CLAUDE.md). The
+// listener's only timer is that one; anything else it arms is a fixture
+// error, refused loudly. Tests of the scheduling itself call the listener
+// directly (storageEvent).
+function reloadFromStorage(key) {
+  const realSet = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  const armed = [];
+  globalThis.setTimeout = (fn, ms) => { armed.push(ms); return { droppedFixtureTimer: true }; };
+  globalThis.clearTimeout = () => {};
+  try {
+    for (const fn of globalThis.window._listeners.storage) fn({ key });
+  } finally {
+    globalThis.setTimeout = realSet;
+    globalThis.clearTimeout = realClear;
+  }
+  assert.ok(armed.every((ms) => ms === 2000), `fixture reload armed an unexpected timer: ${armed}`);
+}
 
 // --- minimal fake DOM --------------------------------------------------
 //
@@ -270,40 +311,26 @@ test('applySyncedState returns what it wrote', async () => {
   assert.deepEqual(written.items.map((i) => i.id), loadItems().map((i) => i.id));
 });
 
-// --- opts.replace: a local discard, never a re-merge (mutation M2) ---------
+// --- no discard path (Replace this device removed, 2026-10-19) -------------
 //
-// "Replace this device" means the user explicitly chose to drop local data.
-// Re-merging here would union it straight back in, and sync.js would then
-// push the resurrected data to the account being joined.
-test('applySyncedState with opts.replace discards live storage instead of re-merging it back in', async () => {
-  installFakeLocalStorage();
-  const { applySyncedState } = await import('../js/app.js');
-  saveItems([item('live-only', '2026-08-01T00:00:00.000Z')]);
-  const incoming = state({ items: [item('remote-only', '2026-08-01T00:00:00.000Z')] });
-  const written = applySyncedState(incoming, { replace: true });
-  assert.deepEqual(written.items.map((i) => i.id), ['remote-only']);
-  assert.deepEqual(loadItems().map((i) => i.id), ['remote-only']);
-});
-
-// Replace's "nothing is tombstoned" guarantee depends on the ORDER of the
-// applyRemoteFeeds()/saveTombstones() calls inside applySyncedState:
-// applyRemoteFeeds's own removeFeed() writes a real tombstone for every local
-// feed the replace discards, and the full-overwrite saveTombstones() that
-// runs immediately after is what erases it (see the comment at the two call
-// sites in js/app.js). Swapping those two lines would leave the tombstone in
-// place and push that deletion to the account being joined on the next sync.
-test('applySyncedState with opts.replace leaves no tombstone for a feed the replace discarded', async () => {
+// "Replace this device" was the only caller of a discard: applySyncedState
+// wrote the incoming state wholesale instead of re-merging live storage. The
+// button is gone, so the path is gone. Whatever a caller passes, what is on
+// this device is merged in, never thrown away.
+test('applySyncedState always re-merges live storage, whatever options it is passed', async () => {
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
   const feedX = {
     id: 'feedX', url: 'https://example.com/x.ics', name: 'X', color: 'var(--feed-palette-1)', hidden: false,
     updatedAt: '2026-07-01T00:00:00.000Z',
   };
+  saveItems([item('live-only', '2026-08-01T00:00:00.000Z')]);
   saveFeeds([feedX]);
-  applySyncedState(state({ feeds: [] }), { replace: true });
-  assert.deepEqual(loadFeeds(), [], 'the local-only feed must be gone after replace');
-  assert.deepEqual(loadTombstones(), [],
-    'replace must not leave a tombstone for data it discarded locally — that would push the deletion to the account being joined');
+  const written = applySyncedState(state({ items: [item('remote-only', '2026-08-01T00:00:00.000Z')] }), { replace: true });
+  assert.deepEqual(written.items.map((i) => i.id).sort(), ['live-only', 'remote-only']);
+  assert.deepEqual(loadItems().map((i) => i.id).sort(), ['live-only', 'remote-only']);
+  assert.deepEqual(loadFeeds().map((f) => f.id), ['feedX'], 'a local calendar is never discarded');
+  assert.deepEqual(loadTombstones(), [], 'and nothing is tombstoned');
 });
 
 // --- applyRemoteFeeds must get the COMPLETE merged list (mutation M5) ------
@@ -379,10 +406,10 @@ test('the storage listener ignores plaenicke.syncState and only reacts to the th
   saveItems([item('cross-tab-item', '2026-08-01T00:00:00.000Z')]);
   const list = globalThis.document.getElementById('item-list');
 
-  for (const fn of storageListeners) fn({ key: 'plaenicke.syncState' });
+  reloadFromStorage('plaenicke.syncState');
   assert.ok(!allText(list).includes('t-cross-tab-item'), 'a syncState-only write must not trigger a reload/re-render');
 
-  for (const fn of storageListeners) fn({ key: 'plaenicke.items' });
+  reloadFromStorage('plaenicke.items');
   assert.ok(allText(list).includes('t-cross-tab-item'), 'an items write must trigger a reload/re-render');
 
   // The listener reloads items/feeds/feedCache regardless of WHICH of the
@@ -391,11 +418,11 @@ test('the storage listener ignores plaenicke.syncState and only reacts to the th
   // allowlist, not just 'plaenicke.items' (a narrowing regression that
   // dropped the other two would otherwise pass silently).
   saveItems([item('cross-tab-item-feeds-key', '2026-08-01T00:00:00.000Z')]);
-  for (const fn of storageListeners) fn({ key: 'plaenicke.feeds' });
+  reloadFromStorage('plaenicke.feeds');
   assert.ok(allText(list).includes('t-cross-tab-item-feeds-key'), 'a plaenicke.feeds write must also trigger a reload/re-render');
 
   saveItems([item('cross-tab-item-tombstones-key', '2026-08-01T00:00:00.000Z')]);
-  for (const fn of storageListeners) fn({ key: 'plaenicke.syncTombstones' });
+  reloadFromStorage('plaenicke.syncTombstones');
   assert.ok(allText(list).includes('t-cross-tab-item-tombstones-key'), 'a plaenicke.syncTombstones write must also trigger a reload/re-render');
 });
 
@@ -438,6 +465,7 @@ test('removing a calendar in Settings pushes it, without waiting for a reload', 
     assert.ok(remove, 'fixture check: the open panel must offer a Remove button for the seeded calendar');
 
     remove.click();
+    host.querySelectorAll('button').find((b) => b.textContent === 'Remove from every device').click();
     assert.deepEqual(loadFeeds(), [], 'fixture check: the calendar really was removed');
     assert.deepEqual(requests.filter((r) => r.url.includes('/data')), [],
       'the push is debounced, so nothing may go out before the timer fires');
@@ -539,7 +567,7 @@ const record = (o) => ({
 // file, so state genuinely carries between tests.)
 function seed(records) {
   saveItems(records);
-  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.items' });
+  reloadFromStorage('plaenicke.items');
   assert.deepEqual(loadItems().map((i) => i.id), records.map((i) => i.id), 'fixture check: the seed is what is stored');
 }
 
@@ -834,13 +862,171 @@ test('an idea returned by the model is normalised through the same split', async
 // in case that reasoning about sync.js is ever wrong.
 const SENTINEL = 'sentinel: renderSyncStatus has not run';
 
+// Punchlist L63, decided 2026-10-19: the account READ carries the shared
+// download deadline (js/fetchtimeout.js) and a timed-out read is reported
+// exactly like being offline; the WRITE has none. Manual timers, not
+// t.mock.timers: see installManualTimers below for why app.js's module-scope
+// syncTimer makes MockTimers unsafe here.
+async function drain() {
+  for (let i = 0; i < 50; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+}
+
+test('runSync gives up on an account read that never answers, and reports it as offline', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    requests.push((opts && opts.method) || 'GET');
+    return new Promise(() => {});
+  };
+  const timers = installManualTimers();
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    await drain();
+    assert.deepEqual(requests, ['GET'], 'fixture check: the read went out');
+    assert.equal(timers.live(FETCH_TIMEOUT_MS), 1, 'the read carries the shared download deadline');
+    timers.fire(FETCH_TIMEOUT_MS);
+    await drain();
+  } finally {
+    timers.restore();
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(loadSyncState().lastError, 'offline', 'a timed-out read is reported like being offline');
+  assert.deepEqual(requests, ['GET'], 'nothing is pushed after a read that gave up');
+});
+
+test('runSync never puts a deadline on the write: a slow PUT is waited for and lands', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  saveItems([record({ id: 'slow-put', title: 'Slow put' })]);
+  const requests = [];
+  let releasePut = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    requests.push(method);
+    if (method === 'GET') return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) });
+    return new Promise((resolve) => {
+      releasePut = () => resolve({ ok: true, status: 200, json: async () => ({ version: 1 }) });
+    });
+  };
+  const timers = installManualTimers();
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    for (let i = 0; i < 200 && !releasePut; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    assert.deepEqual(requests, ['GET', 'PUT'], 'fixture check: the write is in flight');
+    assert.equal(timers.live(FETCH_TIMEOUT_MS), 0, 'no deadline is armed while the write is in flight');
+    releasePut();
+    await drain();
+  } finally {
+    timers.restore();
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(loadSyncState().lastError, null);
+  assert.equal(loadSyncState().version, 1, 'the slow write landed and was recorded');
+});
+
+// syncOnce's contract is a RESOLVED status, and every failure it anticipates
+// records a lastError. But it can still reject — here, a PUT that answers 200
+// with a body of `null`, which throws reading `.version` — and runSync's catch
+// used to only console.log it: lastError stayed null, the indicator stayed
+// dark, and sync stopped with nothing on screen. A crash must light the dot.
+test('runSync records a lastError and lights the indicator when syncOnce itself rejects', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  saveItems([record({ id: 'crash-put', title: 'Crash put' })]);
+  saveSyncState({ ...loadSyncState(), lastSyncedAt: '2026-08-01T00:00:00.000Z', lastError: null });
+  const shell = globalThis.document.getElementById(SHELL_SYNC_STATUS_ID);
+  shell.hidden = true;
+  shell.textContent = '';
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    requests.push(method);
+    if (method === 'GET') return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) });
+    return Promise.resolve({ ok: true, status: 200, json: async () => null });
+  };
+  const logged = [];
+  const originalError = console.error;
+  console.error = (...args) => { logged.push(args); };
+  const timers = installManualTimers();
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    await drain();
+  } finally {
+    timers.restore();
+    console.error = originalError;
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual(requests, ['GET', 'PUT'], 'fixture check: the sync reached the write');
+  assert.ok(logged.some((args) => args[0] === 'sync'), 'fixture check: syncOnce rejected into runSync\'s catch');
+  const { lastError } = loadSyncState();
+  assert.equal(typeof lastError, 'string', 'a sync that crashed must be recorded as a failure');
+  assert.equal(shell.hidden, false, 'and the app shell must say so without opening Settings');
+  assert.match(shell.textContent, /\S/);
+  assert.match(globalThis.document.getElementById(SYNC_STATUS_ID).textContent, /^Sync problem: something went wrong\./,
+    'the recorded value must read as a sync problem in plain words');
+});
+
+// Recording the crash writes plaenicke.syncState. If THAT write throws too
+// (the device is out of storage), runSync must still settle: it is called
+// straight from event listeners and timers, so a rejection escaping it is an
+// unhandled rejection, and "never let a sync failure break the app" breaks.
+test('runSync still settles when recording a crash itself throws', async () => {
+  const ls = installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  saveItems([record({ id: 'crash-full', title: 'Crash full' })]);
+  saveSyncState({ ...loadSyncState(), lastSyncedAt: '2026-08-01T00:00:00.000Z', lastError: null });
+  let full = false;
+  const realSet = ls.setItem.bind(ls);
+  ls.setItem = (k, v) => {
+    if (full && k === 'plaenicke.syncState') {
+      const e = new Error('full'); e.name = 'QuotaExceededError'; throw e;
+    }
+    realSet(k, v);
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    if (method === 'GET') return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) });
+    full = true; // the crash below happens with storage already full
+    return Promise.resolve({ ok: true, status: 200, json: async () => null });
+  };
+  const originalError = console.error;
+  console.error = () => {};
+  const timers = installManualTimers();
+  let outcome;
+  try {
+    const [listener] = globalThis.window._listeners.online;
+    outcome = await Promise.resolve(listener()).then(() => 'settled', (e) => `rejected: ${e && e.name}`);
+    await drain();
+  } finally {
+    timers.restore();
+    console.error = originalError;
+    globalThis.fetch = originalFetch;
+    ls.setItem = realSet;
+  }
+  assert.equal(full, true, 'fixture check: the sync reached the write');
+  assert.equal(outcome, 'settled', 'a failure while recording a failure must not escape runSync');
+});
+
 test('runSync does not proceed into its try/finally while adoption is pending', async () => {
   installFakeLocalStorage();
   await import('../js/app.js'); // cached after the first test; online listener already registered
 
   // linkWithCode's bootstrap path accepts any base64url string of exactly
   // TOKEN_BYTES bytes and always sets adoptionPending: true (spec 5.7) — this
-  // device has not yet been offered Merge / Replace / Cancel.
+  // device has not yet been offered Merge / Cancel.
   const token = bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES)));
   await linkWithCode(token);
 
@@ -866,7 +1052,7 @@ test('runSync does not proceed into its try/finally while adoption is pending', 
   assert.equal(statusEl.textContent, SENTINEL,
     'runSync must return before its try/finally while adoption is pending, so renderSyncStatus must never repaint the status line');
   assert.deepEqual(requests.filter((u) => u.includes('/data')), [],
-    'nothing may be pulled or pushed before the user has chosen Merge / Replace / Cancel');
+    'nothing may be pulled or pushed before the user has chosen Merge / Cancel');
   assert.equal(JSON.stringify(loadSyncState()), syncStateBefore,
     'a sync that must not run must not move the cursor either');
 });
@@ -942,7 +1128,7 @@ test('resuming re-fetches calendar feeds whose cache is stale', async () => {
   await import('../js/app.js');
   const feed = { id: 'feedR', url: 'https://example.com/r.ics', name: 'R', color: 'var(--feed-palette-1)', hidden: false, updatedAt: '2026-08-01T00:00:00.000Z' };
   saveFeeds([feed]);
-  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.feeds' });
+  reloadFromStorage('plaenicke.feeds');
   const calls = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url) => { calls.push(String(url)); return { ok: true, text: async () => '' }; };
@@ -955,7 +1141,7 @@ test('resuming re-fetches calendar feeds whose cache is stale', async () => {
   assert.ok(calls.some((u) => u.includes('/feed?url=') && u.includes(encodeURIComponent(feed.url))),
     'a resume must refresh stale calendars, not leave last night\'s data on screen');
   saveFeeds([]);
-  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.feeds' });
+  reloadFromStorage('plaenicke.feeds');
 });
 
 // Sweep S-12: these assert the DIFFERENCE a resume makes. Run alone (with
@@ -1088,13 +1274,13 @@ function seedFeed(feed) {
       skipped: [],
     },
   }));
-  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.feeds' });
+  reloadFromStorage('plaenicke.feeds');
 }
 
 function unseedFeeds() {
   saveFeeds([]);
   localStorage.removeItem('plaenicke.feedCache');
-  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.feeds' });
+  reloadFromStorage('plaenicke.feeds');
 }
 
 test('open: tapping an item in the List opens its sheet in #sheet-host', async () => {
@@ -1521,7 +1707,7 @@ const rawStored = () => localStorage.getItem('plaenicke.items');
 // which reloads through its storage listener (the same path as seed()).
 function simulateSync(records) {
   saveItems(records);
-  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.items' });
+  reloadFromStorage('plaenicke.items');
 }
 
 // A hand-rolled timer fake, used INSTEAD of t.mock.timers for the sync test.
@@ -2325,7 +2511,7 @@ function openDayForToday() {
 function seedFeedsWithCache(feedList, cache) {
   saveFeeds(feedList);
   localStorage.setItem('plaenicke.feedCache', JSON.stringify(cache));
-  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.feeds' });
+  reloadFromStorage('plaenicke.feeds');
 }
 const sdFeed = (id, o = {}) => ({
   id, url: `https://example.com/${id}.ics`, name: id, color: 'var(--feed-palette-1)', hidden: false,
@@ -2575,7 +2761,9 @@ test('sweep D: the List footer names its horizon as a date, not raw ISO', async 
 
 // --- S-1: the week and month cursors follow a resume too --------------------
 
-const weekLabelFor = (iso) => `${iso.slice(5).replace('-', '/')} – ${addDays(iso, 6).slice(5).replace('-', '/')}`;
+// Through weekLabel itself (pinned in tests/timegrid.test.js), so these
+// navigation tests do not fail in the week across New Year's.
+const weekLabelFor = (iso) => weekLabel(iso, addDays(iso, 6));
 const monthLabelFor = (d) => d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 
 test('sweep D: the Week view follows a resume, and a navigated week stays put', async (t) => {
@@ -3296,6 +3484,7 @@ test('sF: removing a calendar in Settings repaints the Updated stamp', async (t)
     const remove = settingsHost.querySelectorAll('button').find((b) => b.textContent === 'Remove');
     assert.ok(remove, 'fixture check: the panel offers Remove');
     click(remove);
+    click(settingsHost.querySelectorAll('button').find((b) => b.textContent === 'Remove from every device'));
     assert.deepEqual(loadFeeds(), [], 'fixture check: removed');
     assert.equal(stampEl().textContent, 'Updated 10:40 AM');
   } finally {
@@ -3539,5 +3728,976 @@ test('sF3: a fetch that throws at once fails cleanly, with no stray timeout', as
     for (let i = 0; i < 5; i += 1) await settle();
     t.mock.timers.reset();
     globalThis.fetch = originalFetch;
+  }
+});
+
+// =========================================================================
+// Punchlist batch — accessibility and small fixes
+// =========================================================================
+
+// A keydown as a browser delivers it, recording whether it was cancelled (a
+// Space that is not cancelled scrolls the page).
+function keydown(el, key) {
+  let prevented = false;
+  (el._listeners.keydown || []).forEach((fn) => fn({ target: el, key, preventDefault() { prevented = true; } }));
+  return prevented;
+}
+
+// Month cells and Week columns open a day on click. A bare <div> with a click
+// handler is unreachable from a keyboard, so each one is a button to assistive
+// tech and to Tab, and Enter or Space opens the same day a click does.
+test('a11y: Month cells open their day from the keyboard, and blanks are not focusable', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  try {
+    click(globalThis.document.getElementById('show-month'));
+    const grid = globalThis.document.getElementById('calendar-grid');
+    const cells = grid.children.filter((c) => c._classes.has('cal-cell') && !c._classes.has('blank'));
+    const blanks = grid.children.filter((c) => c._classes.has('blank'));
+    assert.ok(cells.length >= 28, 'fixture check: a month of day cells');
+    for (const c of cells) {
+      assert.equal(c.getAttribute('role'), 'button');
+      assert.equal(c.getAttribute('tabindex'), '0');
+    }
+    for (const b of blanks) {
+      assert.equal(b.getAttribute('tabindex'), null, 'a blank cell opens nothing, so it is not a tab stop');
+      assert.equal((b._listeners.keydown || []).length, 0);
+    }
+    const now = new Date();
+    const firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    assert.equal(keydown(cells[0], 'a'), false, 'another key is left alone');
+    assert.equal(globalThis.document.getElementById('day-view').hidden, true, 'and opens nothing');
+    assert.equal(keydown(cells[0], 'Enter'), true);
+    assert.equal(globalThis.document.getElementById('day-view').hidden, false, 'Enter opens the Day view');
+    assert.equal(labelText('day-label'), labelFor(firstOfMonth), 'on the cell\'s own day');
+    click(globalThis.document.getElementById('show-month'));
+    const second = globalThis.document.getElementById('calendar-grid').children
+      .filter((c) => c._classes.has('cal-cell') && !c._classes.has('blank'))[1];
+    assert.equal(keydown(second, ' '), true, 'Space is cancelled, or it would also scroll the page');
+    assert.equal(labelText('day-label'), labelFor(new Date(now.getFullYear(), now.getMonth(), 2)));
+  } finally {
+    click(globalThis.document.getElementById('show-month'));
+    openDayForToday();
+    if (restore) click(restore);
+  }
+});
+
+test('a11y: Week columns open their day from the keyboard', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  try {
+    click(globalThis.document.getElementById('show-week'));
+    const cols = globalThis.document.getElementById('week-grid').children;
+    assert.equal(cols.length, 7, 'fixture check: seven columns');
+    for (const c of cols) {
+      assert.equal(c.getAttribute('role'), 'button');
+      assert.equal(c.getAttribute('tabindex'), '0');
+    }
+    const weekStart = startOfWeek(localISO(new Date()));
+    const [y, m, d] = addDays(weekStart, 2).split('-').map(Number);
+    assert.equal(keydown(cols[2], 'Escape'), false);
+    assert.equal(globalThis.document.getElementById('day-view').hidden, true, 'another key opens nothing');
+    assert.equal(keydown(cols[2], 'Enter'), true);
+    assert.equal(globalThis.document.getElementById('day-view').hidden, false, 'Enter opens the Day view');
+    assert.equal(labelText('day-label'), labelFor(new Date(y, m - 1, d)));
+    click(globalThis.document.getElementById('show-week'));
+    const cols2 = globalThis.document.getElementById('week-grid').children;
+    const [y4, m4, d4] = addDays(weekStart, 4).split('-').map(Number);
+    assert.equal(keydown(cols2[4], ' '), true);
+    assert.equal(labelText('day-label'), labelFor(new Date(y4, m4 - 1, d4)), 'and so does Space');
+  } finally {
+    click(globalThis.document.getElementById('show-month'));
+    openDayForToday();
+    if (restore) click(restore);
+  }
+});
+
+// The nav's selected page was shown only by a CSS class, which assistive tech
+// does not read. aria-pressed says it, in the markup at load (showView is not
+// run until a button is tapped) and after every tap.
+test('a11y: index.html marks the Day button pressed and every other nav button not', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  for (const id of ['show-list', 'show-month', 'show-week', 'show-day', 'show-todo', 'show-ideas']) {
+    const tag = html.match(new RegExp(`<button id="${id}"[^>]*>`));
+    assert.ok(tag, `fixture check: #${id}`);
+    assert.match(tag[0], new RegExp(`aria-pressed="${id === 'show-day'}"`), `#${id}`);
+  }
+});
+
+test('a11y: each nav button reports itself pressed, and only itself', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const ids = ['show-list', 'show-month', 'show-week', 'show-day', 'show-todo', 'show-ideas'];
+  try {
+    for (const id of ids) {
+      click(globalThis.document.getElementById(id));
+      for (const other of ids) {
+        assert.equal(globalThis.document.getElementById(other).getAttribute('aria-pressed'), String(other === id),
+          `after #${id}, #${other}`);
+      }
+    }
+  } finally {
+    if (restore) click(restore);
+  }
+});
+
+// The Week header across New Year's: "12/27 – 01/02" named no year at all.
+test('the Week header names both years for a week across New Year\'s', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  assert.equal(labelText('week-label'), weekLabelFor(startOfWeek(localISO(new Date()))), 'fixture check: this week');
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 11, 30, 12).getTime() });
+  try {
+    resume();
+    assert.equal(labelText('week-label'), '12/27/2026 – 01/02/2027');
+  } finally {
+    t.mock.timers.reset();
+  }
+  resume();
+  assert.equal(labelText('week-label'), weekLabelFor(startOfWeek(localISO(new Date()))), 'restored for later tests');
+});
+
+// app.js's cross-tab listener named the three data keys as string literals,
+// so renaming one in storage.js left the listener silently dead with the
+// suite green. It reads storage.js's exported constants now; the literal
+// values are pinned once, in tests/storage.test.js.
+test('app.js names no storage key by a string literal', () => {
+  const appSrc = readFileSync(new URL('../js/app.js', import.meta.url), 'utf8');
+  assert.deepEqual(appSrc.match(/['"`]plaenicke\.[A-Za-z]+['"`]/g), null);
+});
+
+// --- the "Updated" stamp's three accepted behaviours (punchlist L211) -------
+//
+// c6cfbf5 reverted b8ea190's per-calendar failure memory because it brought
+// two worse regressions: a successful manual Sync in Settings did not clear
+// "Couldn't refresh", and a calendar added in Settings whose first fetch
+// failed showed a clean time. Both came from one gap: Settings' own fetches
+// never reached the memory. They do now, and the last three tests below pin
+// both regressions so they cannot come back with it.
+function settingsPanel() {
+  const settingsBtn = globalThis.document.getElementById('settings-btn');
+  const settingsHost = globalThis.document.getElementById('settings-host');
+  if (settingsHost.childElementCount) click(settingsBtn); // left open by an earlier test
+  click(settingsBtn);
+  return { host: settingsHost, close: () => { if (settingsHost.childElementCount) click(settingsBtn); } };
+}
+function tapColourDot(feedName) {
+  const panel = settingsPanel();
+  const dot = panel.host.querySelectorAll('button')
+    .find((b) => (b.getAttribute('aria-label') || '').includes(feedName) && b.className.includes('feed-dot'));
+  assert.ok(dot, `fixture check: a colour dot for ${feedName}`);
+  click(dot);
+  panel.close();
+}
+// The Sync button on the Settings row whose colour dot names this calendar.
+function rowSyncButton(host, feedName) {
+  const row = host.querySelectorAll('li').find((li) => allText(li).includes(` ${feedName}`));
+  assert.ok(row, `fixture check: a Settings row for ${feedName}`);
+  return row.querySelectorAll('button').find((b) => b.textContent === 'Sync');
+}
+const failingFeed = () => ({ ok: false, status: 502, json: async () => ({ error: 'upstream_error' }), text: async () => '' });
+
+test('stamp: a colour tap in Settings after a failed refresh keeps "Couldn\'t refresh"', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sP-bad'), sdFeed('sP-good')],
+    { 'sP-bad': cacheAt(localAt(7, 0)), 'sP-good': cacheAt(localAt(7, 0)) });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url) => Promise.resolve(String(url).includes('sP-bad') ? failingFeed() : okFeedResponse());
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() });
+  try {
+    resume();
+    for (let i = 0; i < 6; i += 1) await settle();
+    assert.equal(stampEl().textContent, "Couldn't refresh calendars", 'fixture check: the refresh failed');
+    tapColourDot('sP-good');
+    assert.equal(stampEl().textContent, "Couldn't refresh calendars", 'a colour tap must not erase the failure');
+  } finally {
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+  unseedFeeds();
+});
+
+test('stamp: a fetch time from an earlier day names the day', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sP-old')], { 'sP-old': cacheAt(new Date(2026, 8, 21, 9, 2)) });
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() }); // Wed Sep 23
+  try {
+    tapColourDot('sP-old');
+    assert.equal(stampEl().textContent, 'Updated Mon, Sep 21, 9:02 AM');
+    seedFeedsWithCache([sdFeed('sP-old')], { 'sP-old': cacheAt(new Date(2026, 8, 22, 9, 2)) });
+    tapColourDot('sP-old');
+    assert.equal(stampEl().textContent, 'Updated Yesterday, 9:02 AM');
+    seedFeedsWithCache([sdFeed('sP-old')], { 'sP-old': cacheAt(localAt(9, 2)) });
+    tapColourDot('sP-old');
+    assert.equal(stampEl().textContent, 'Updated 9:02 AM', 'today needs no day');
+  } finally {
+    t.mock.timers.reset();
+  }
+  unseedFeeds();
+});
+
+test('stamp: a visible calendar not yet fetched for the first time is not a failure', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sP-fetched'), sdFeed('sP-new')], { 'sP-fetched': cacheAt(localAt(9, 30)) });
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() });
+  try {
+    tapColourDot('sP-fetched');
+    assert.equal(stampEl().textContent, 'Updated 9:30 AM', 'the new calendar is simply not counted yet');
+  } finally {
+    t.mock.timers.reset();
+  }
+  unseedFeeds();
+});
+
+// c6cfbf5's regression 1: Settings' manual Sync never reached the memory.
+test('stamp: a successful manual Sync in Settings clears "Couldn\'t refresh"', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sP-flaky')], { 'sP-flaky': cacheAt(localAt(7, 0)) });
+  let up = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve(up ? okFeedResponse() : failingFeed());
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() });
+  const panel = { close() {} };
+  try {
+    resume();
+    for (let i = 0; i < 6; i += 1) await settle();
+    assert.equal(stampEl().textContent, "Couldn't refresh calendars", 'fixture check: the refresh failed');
+    up = true;
+    Object.assign(panel, settingsPanel());
+    click(rowSyncButton(panel.host, 'sP-flaky'));
+    for (let i = 0; i < 6; i += 1) await settle();
+    assert.equal(stampEl().textContent, 'Updated 10:00 AM', 'the manual Sync succeeded, so the stamp says so');
+  } finally {
+    panel.close();
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+  unseedFeeds();
+});
+
+// And the other direction: a manual Sync that fails is a failed refresh too.
+test('stamp: a failed manual Sync in Settings says "Couldn\'t refresh", and a later batch that skips it keeps that', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  // Fresh at 10:00 (fetched 9:45), so the background batch will NOT refetch it.
+  seedFeedsWithCache([sdFeed('sP-manual')], { 'sP-manual': cacheAt(localAt(9, 45)) });
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url) => { calls.push(String(url)); return Promise.resolve(failingFeed()); };
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() });
+  const panel = { close() {} };
+  try {
+    Object.assign(panel, settingsPanel());
+    click(rowSyncButton(panel.host, 'sP-manual'));
+    for (let i = 0; i < 6; i += 1) await settle();
+    assert.equal(calls.length, 1, 'fixture check: one manual fetch');
+    assert.equal(stampEl().textContent, "Couldn't refresh calendars");
+    panel.close();
+    resume();
+    for (let i = 0; i < 6; i += 1) await settle();
+    assert.equal(calls.length, 1, 'fixture check: the batch skipped the fresh calendar');
+    assert.equal(stampEl().textContent, "Couldn't refresh calendars", 'a calendar the batch never fetched keeps its failure');
+  } finally {
+    panel.close();
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+  unseedFeeds();
+});
+
+// c6cfbf5's regression 2: a calendar added in Settings whose first fetch
+// failed was "not yet fetched", so the stamp showed the other calendar's time.
+test('stamp: a calendar added in Settings whose first fetch fails says "Couldn\'t refresh"', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  seedFeedsWithCache([sdFeed('sP-have')], { 'sP-have': cacheAt(localAt(9, 50)) });
+  let answer;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => new Promise((resolve) => { answer = resolve; });
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() });
+  const panel = { close() {} };
+  try {
+    Object.assign(panel, settingsPanel());
+    const inputs = panel.host.querySelectorAll('input');
+    inputs.find((i) => i.getAttribute('aria-label') === 'Calendar link').value = 'https://example.com/sP-added.ics';
+    click(panel.host.querySelectorAll('button').find((b) => b.textContent === 'Add calendar'));
+    await settle();
+    assert.equal(stampEl().textContent, 'Updated 9:50 AM', 'while its first fetch runs, the new calendar is not a failure');
+    answer(failingFeed());
+    for (let i = 0; i < 6; i += 1) await settle();
+    assert.equal(stampEl().textContent, "Couldn't refresh calendars", 'its first fetch failed, and the stamp says so');
+  } finally {
+    panel.close();
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+  saveTombstones([]);
+  unseedFeeds();
+});
+
+// =========================================================================
+// Only the visible tab syncs (decided 2026-10-19, instead of a cross-tab lock)
+// =========================================================================
+//
+// runSync returns while document.visibilityState === 'hidden', whatever
+// triggered it; becoming visible runs one. Manual timers, not t.mock.timers:
+// app.js's module-scope syncTimer (see installManualTimers).
+
+function captureAccountRequests() {
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    if (String(url).includes('/data')) requests.push({ method, body: opts && opts.body });
+    if (method === 'PUT') return { ok: true, status: 200, json: async () => ({ version: 1 }) };
+    return { ok: true, status: 200, json: async () => ({ version: 0, blob: '' }), text: async () => '' };
+  };
+  return { requests, restore() { globalThis.fetch = originalFetch; } };
+}
+
+function setVisibility(value) {
+  if (value === undefined) delete globalThis.document.visibilityState;
+  else globalThis.document.visibilityState = value;
+}
+
+// The delete committed BY backgrounding (CLAUDE.md: deletedAt is when the
+// delete commits — Undo expiry or backgrounding) schedules its push while the
+// tab is already hidden, so that push is always skipped. It must go out when
+// the tab comes back, not be lost.
+test('visible-only sync: a delete committed on backgrounding is pushed when the tab is visible again', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  seed([record({ id: 'vis-del', title: 'Delete then background', date: '2099-05-06' })]);
+  const net = captureAccountRequests();
+  const timers = installManualTimers();
+  try {
+    click(deleteControlFor(itemList(), 'Delete then background'));
+    assert.ok(toastHost().querySelector('.toast-undo'), 'fixture check: Undo is showing');
+    setVisibility('hidden');
+    resume();
+    assert.ok(tombstoned('vis-del'), 'fixture check: backgrounding committed the delete');
+    assert.equal(timers.live(2000), 1, 'fixture check: the commit scheduled its push');
+    timers.fire(2000);
+    await drain();
+    assert.deepEqual(net.requests, [], 'a hidden tab neither pulls nor pushes');
+
+    setVisibility('visible');
+    resume();
+    await drain();
+  } finally {
+    setVisibility('visible');
+    timers.restore();
+    net.restore();
+  }
+  const puts = net.requests.filter((r) => r.method === 'PUT');
+  assert.equal(puts.length, 1, 'becoming visible pushes what was skipped while hidden');
+  const { getLink } = await import('../js/auth.js');
+  const { decryptBlob } = await import('../js/crypto.js');
+  const pushed = await decryptBlob(getLink().encKey, JSON.parse(puts[0].body).blob);
+  assert.ok(pushed.tombstones.some((ts) => ts.id === 'vis-del' && ts.kind === 'item'),
+    'and what is pushed carries the backgrounded delete');
+  assert.equal(toastHost().children.length, 0);
+  seed([]);
+});
+
+test('visible-only sync: an online event while hidden does nothing', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  saveItems([record({ id: 'vis-online', title: 'Online while hidden' })]);
+  const net = captureAccountRequests();
+  const timers = installManualTimers();
+  try {
+    setVisibility('hidden');
+    for (const fn of globalThis.window._listeners.online) fn();
+    await drain();
+  } finally {
+    setVisibility('visible');
+    timers.restore();
+    net.restore();
+  }
+  assert.deepEqual(net.requests, [], 'a hidden tab neither pulls nor pushes');
+});
+
+// An old browser, or a fake document, with no visibilityState at all is
+// treated as visible: it syncs exactly as before the gate existed.
+test('visible-only sync: with no visibilityState at all, the tab syncs as before', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  saveItems([record({ id: 'vis-undef', title: 'No visibility API' })]);
+  const net = captureAccountRequests();
+  const timers = installManualTimers();
+  try {
+    setVisibility(undefined);
+    assert.equal(globalThis.document.visibilityState, undefined, 'fixture check');
+    for (const fn of globalThis.window._listeners.online) fn();
+    await drain();
+  } finally {
+    setVisibility('visible');
+    timers.restore();
+    net.restore();
+  }
+  assert.deepEqual(net.requests.map((r) => r.method), ['GET', 'PUT'], 'an undefined visibilityState syncs as visible');
+});
+
+// =========================================================================
+// "Taking longer than usual" on the main screen, for an ordinary sync
+// =========================================================================
+//
+// The account WRITE has no deadline (punchlist L63), so a slow one used to
+// show nothing at all outside the linking panel. Past SLOW_WRITE_MS in flight
+// the shell indicator says so, and clears when the write settles. Manual
+// setTimeout (see installManualTimers) plus a mocked Date, so the clock the
+// threshold is measured by moves only when the test moves it.
+
+const SHELL_SLOW = /^Sync is taking longer than usual — it's safe to reload\.$/;
+
+function holdAccountWrite() {
+  const requests = [];
+  let releasePut = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    requests.push(method);
+    if (method === 'GET') return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) });
+    return new Promise((resolve) => {
+      releasePut = () => resolve({ ok: true, status: 200, json: async () => ({ version: 1 }) });
+    });
+  };
+  return {
+    requests,
+    release: () => releasePut(),
+    inFlight: () => releasePut !== null,
+    restore() { globalThis.fetch = originalFetch; },
+  };
+}
+
+async function linkedWithAPendingPush(id) {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  saveItems([record({ id, title: id })]);
+  const shell = globalThis.document.getElementById(SHELL_SYNC_STATUS_ID);
+  shell.hidden = true;
+  shell.textContent = '';
+  return shell;
+}
+
+test('slow sync write: the shell says so past the threshold, and clears when the write lands', async (t) => {
+  const shell = await linkedWithAPendingPush('slow-shell');
+  // A failure left over from an earlier attempt: the write now in flight is
+  // what is current, so the slow line is what the shell shows.
+  saveSyncState({ ...loadSyncState(), lastError: 'offline' });
+  const T0 = Date.UTC(2026, 9, 19, 12, 0, 0);
+  t.mock.timers.enable({ apis: ['Date'], now: T0 });
+  const net = holdAccountWrite();
+  const timers = installManualTimers();
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    for (let i = 0; i < 200 && !net.inFlight(); i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    assert.deepEqual(net.requests, ['GET', 'PUT'], 'fixture check: the write is in flight');
+    assert.doesNotMatch(shell.textContent, SHELL_SLOW, 'not slow yet');
+    assert.equal(timers.live(SLOW_WRITE_MS), 1, 'one repaint is armed for the threshold');
+
+    // A timer that fires before the clock agrees re-arms for what remains,
+    // by the same clock (d844ba7) — it does not give up.
+    t.mock.timers.setTime(T0 + 5000);
+    timers.fire(SLOW_WRITE_MS);
+    assert.doesNotMatch(shell.textContent, SHELL_SLOW, 'an early timer shows nothing');
+    assert.equal(timers.live(SLOW_WRITE_MS - 5000), 1, 'and re-arms for the time still remaining');
+
+    t.mock.timers.setTime(T0 + SLOW_WRITE_MS);
+    timers.fire(SLOW_WRITE_MS - 5000);
+    assert.equal(shell.hidden, false, 'past the threshold the shell indicator is shown');
+    assert.match(shell.textContent, SHELL_SLOW);
+
+    // Any other repaint while the write is still slow keeps the line.
+    const { renderSyncStatus } = await import('../js/linkui.js');
+    renderSyncStatus();
+    assert.match(shell.textContent, SHELL_SLOW, 'a repaint from elsewhere keeps the slow line');
+
+    net.release();
+    await drain();
+    assert.equal(loadSyncState().version, 1, 'fixture check: the write landed');
+    assert.equal(shell.hidden, true, 'a write that landed clears the line');
+    assert.equal(shell.textContent, '');
+    assert.equal(timers.live(SLOW_WRITE_MS) + timers.live(SLOW_WRITE_MS - 5000), 0, 'no repaint timer is left behind');
+  } finally {
+    // A failed assertion must not leave this write hanging: runSync would
+    // stay in flight and every later test's sync would queue behind it.
+    if (net.inFlight()) { net.release(); await drain(); }
+    timers.restore();
+    net.restore();
+    t.mock.timers.reset();
+  }
+});
+
+test('slow sync write: a write that settles quickly leaves no timer behind and shows nothing', async (t) => {
+  const shell = await linkedWithAPendingPush('fast-shell');
+  const T0 = Date.UTC(2026, 9, 19, 13, 0, 0);
+  t.mock.timers.enable({ apis: ['Date'], now: T0 });
+  const net = holdAccountWrite();
+  const timers = installManualTimers();
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    for (let i = 0; i < 200 && !net.inFlight(); i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    assert.equal(timers.live(SLOW_WRITE_MS), 1, 'fixture check: the repaint was armed when the write began');
+    net.release();
+    await drain();
+    assert.equal(loadSyncState().version, 1, 'fixture check: the write landed');
+    assert.equal(timers.live(SLOW_WRITE_MS), 0, 'the settled write cleared its repaint timer');
+    // Even if the clock now passes the threshold, nothing is in flight.
+    t.mock.timers.setTime(T0 + 10 * SLOW_WRITE_MS);
+    const { renderSyncStatus } = await import('../js/linkui.js');
+    renderSyncStatus();
+    assert.equal(shell.hidden, true);
+    assert.doesNotMatch(shell.textContent, SHELL_SLOW);
+  } finally {
+    // A failed assertion must not leave this write hanging: runSync would
+    // stay in flight and every later test's sync would queue behind it.
+    if (net.inFlight()) { net.release(); await drain(); }
+    timers.restore();
+    net.restore();
+    t.mock.timers.reset();
+  }
+});
+
+// A READ has its own deadline and reports as offline (js/fetchtimeout.js); it
+// must never show the write's "safe to reload" line.
+test('slow sync write: a slow READ never shows the slow-write line', async (t) => {
+  const shell = await linkedWithAPendingPush('slow-read');
+  const T0 = Date.UTC(2026, 9, 19, 14, 0, 0);
+  t.mock.timers.enable({ apis: ['Date'], now: T0 });
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    requests.push((opts && opts.method) || 'GET');
+    return new Promise(() => {});
+  };
+  const timers = installManualTimers();
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    await drain();
+    assert.deepEqual(requests, ['GET'], 'fixture check: the read is in flight');
+    assert.equal(timers.live(SLOW_WRITE_MS), 0, 'no slow-write repaint is armed for a read');
+    t.mock.timers.setTime(T0 + 2 * SLOW_WRITE_MS);
+    const { renderSyncStatus } = await import('../js/linkui.js');
+    renderSyncStatus();
+    assert.doesNotMatch(shell.textContent, SHELL_SLOW, 'a slow read is not a slow write');
+    timers.fire(FETCH_TIMEOUT_MS);
+    await drain();
+  } finally {
+    timers.restore();
+    globalThis.fetch = originalFetch;
+    t.mock.timers.reset();
+  }
+  assert.equal(loadSyncState().lastError, 'offline', 'fixture check: the read gave up as offline');
+  assert.doesNotMatch(shell.textContent, SHELL_SLOW);
+});
+
+// syncOnce retries a 409 with a SECOND write. The first write's slow line must
+// clear when that write settles, not linger over the fresh retry.
+test('slow sync write: the line clears when its write settles, even when a retry follows', async (t) => {
+  const shell = await linkedWithAPendingPush('slow-409');
+  const T0 = Date.UTC(2026, 9, 19, 15, 0, 0);
+  t.mock.timers.enable({ apis: ['Date'], now: T0 });
+  const requests = [];
+  const pending = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    requests.push(method);
+    if (method === 'GET') return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) });
+    return new Promise((resolve) => { pending.push(resolve); });
+  };
+  const timers = installManualTimers();
+  const waitForPut = async (n) => {
+    for (let i = 0; i < 200 && pending.length < n; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+  };
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    await waitForPut(1);
+    t.mock.timers.setTime(T0 + SLOW_WRITE_MS);
+    timers.fire(SLOW_WRITE_MS);
+    assert.match(shell.textContent, SHELL_SLOW, 'fixture check: the first write is slow');
+
+    pending[0]({ ok: false, status: 409, json: async () => ({ version: 1, blob: '' }) });
+    await waitForPut(2);
+    assert.deepEqual(requests, ['GET', 'PUT', 'PUT'], 'fixture check: the conflict was retried');
+    assert.doesNotMatch(shell.textContent, SHELL_SLOW, 'the settled write took its line with it');
+    pending[1]({ ok: true, status: 200, json: async () => ({ version: 2 }) });
+    await drain();
+  } finally {
+    for (const resolve of pending) resolve({ ok: true, status: 200, json: async () => ({ version: 2 }) });
+    await drain();
+    timers.restore();
+    globalThis.fetch = originalFetch;
+    t.mock.timers.reset();
+  }
+  assert.equal(loadSyncState().version, 2, 'fixture check: the retry landed');
+  assert.equal(timers.live(SLOW_WRITE_MS), 0, 'no repaint timer is left behind');
+});
+
+// =========================================================================
+// A write in a tab that then hid is pushed by the VISIBLE tab
+// =========================================================================
+//
+// Only the visible tab syncs (see above). A write in tab A schedules A's push,
+// and if A hides inside the 2 s debounce that push is skipped. Tab B, which
+// the user is now working in, sees the write only as a storage event — so the
+// storage listener must schedule B's sync, or the write waits until A is
+// visible again, however long that is. These tests play tab B with this one
+// module: app.js's storage listener is invoked directly, as seed() does.
+
+function storageEvent(key) {
+  for (const fn of globalThis.window._listeners.storage) fn({ key });
+}
+
+test('cross-tab sync: a write from a tab that hid is pushed by the visible tab', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  seed([record({ id: 'xtab-del', title: 'Delete in tab A', date: '2099-05-06' })]);
+  const net = captureAccountRequests();
+  const timers = installManualTimers();
+  try {
+    // Tab A: delete, then hide inside the debounce. Its push is skipped.
+    click(deleteControlFor(itemList(), 'Delete in tab A'));
+    setVisibility('hidden');
+    resume();
+    assert.ok(tombstoned('xtab-del'), 'fixture check: backgrounding committed the delete');
+    timers.fire(2000);
+    await drain();
+    assert.deepEqual(net.requests, [], 'fixture check: the hidden tab pushed nothing');
+
+    // Tab B: visible, and told by the storage events what A wrote.
+    setVisibility('visible');
+    storageEvent('plaenicke.items');
+    storageEvent('plaenicke.syncTombstones');
+    assert.equal(timers.live(2000), 1, 'the storage event schedules one debounced sync');
+    assert.deepEqual(net.requests, [], 'debounced: nothing goes out at once');
+    timers.fire(2000);
+    await drain();
+  } finally {
+    setVisibility('visible');
+    timers.restore();
+    net.restore();
+  }
+  assert.deepEqual(net.requests.map((r) => r.method), ['GET', 'PUT'], 'the visible tab pulls and pushes');
+  const { getLink } = await import('../js/auth.js');
+  const { decryptBlob } = await import('../js/crypto.js');
+  const pushed = await decryptBlob(getLink().encKey, JSON.parse(net.requests[1].body).blob);
+  assert.ok(pushed.tombstones.some((ts) => ts.id === 'xtab-del' && ts.kind === 'item'),
+    "what is pushed carries the other tab's delete");
+  assert.ok(!pushed.items.some((it) => it.id === 'xtab-del'), 'and not the deleted item');
+  seed([]);
+});
+
+// Device-local keys (the feed cache, the launch log, the sync cursor) are not
+// in the synced blob: a storage event for one must not cause a sync.
+test('cross-tab sync: a storage event for a key that is not synced schedules nothing', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  saveItems([record({ id: 'xtab-local', title: 'Unpushed' })]);
+  const net = captureAccountRequests();
+  const timers = installManualTimers();
+  try {
+    setVisibility('visible');
+    for (const key of ['plaenicke.feedCache', 'plaenicke.launches', 'plaenicke.syncState', 'plaenicke.auth', null]) {
+      storageEvent(key);
+    }
+    assert.equal(timers.live(2000), 0, 'no sync is scheduled for a device-local key');
+    timers.fire(2000);
+    await drain();
+  } finally {
+    setVisibility('visible');
+    timers.restore();
+    net.restore();
+  }
+  assert.deepEqual(net.requests, [], 'and nothing is pulled or pushed');
+});
+
+// The storage event reaches EVERY other tab, hidden ones included. A hidden
+// tab must still not sync: the gate in runSync decides, not the listener.
+test('cross-tab sync: a hidden tab that receives the storage event still makes no request', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  saveItems([record({ id: 'xtab-hidden', title: 'Written elsewhere' })]);
+  const net = captureAccountRequests();
+  const timers = installManualTimers();
+  try {
+    setVisibility('hidden');
+    for (const key of ['plaenicke.items', 'plaenicke.feeds', 'plaenicke.syncTombstones']) storageEvent(key);
+    timers.fire(2000);
+    await drain();
+  } finally {
+    setVisibility('visible');
+    timers.restore();
+    net.restore();
+  }
+  assert.deepEqual(net.requests, [], 'a hidden tab neither pulls nor pushes');
+});
+
+// CAN THIS PING-PONG? Every applied sync rewrites items, feeds and tombstones
+// unconditionally (applySyncedState), and with two tabs visible each one's
+// rewrite is a storage event in the other — which now schedules a sync there.
+// A storage event fires only when a value CHANGES (HTML Living Standard, Web
+// Storage: setItem returns early when the old value equals the new one), so
+// the loop ends exactly when a sync rewrites all three keys byte-identically.
+//
+// The run below plays both tabs with this one module. That is faithful for
+// sync: runSync reads storage and the account, never the module's `items`
+// snapshot (applySyncedState re-merges loadItems()/loadFeeds()/
+// loadTombstones()), and the two tabs share both. Each round, the keys whose
+// value changed during the last sync are delivered as storage events to "the
+// other tab", which syncs through the real listener and debounce. The start is
+// deliberately messy: a pre-V5 record with no updatedAt (backfilled on load,
+// so the first rewrite changes it), a feed, tombstones on both sides, and an
+// account holding a record this device has never seen.
+test('cross-tab sync: two visible tabs reacting to each other converge — no ping-pong', async () => {
+  const ls = installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  const { getLink } = await import('../js/auth.js');
+  const { encryptBlob } = await import('../js/crypto.js');
+  const legacy = record({ id: 'pp-legacy', title: 'Pre-V5' });
+  delete legacy.updatedAt;
+  localStorage.setItem('plaenicke.items', JSON.stringify([record({ id: 'pp-local', title: 'Local' }), legacy]));
+  saveFeeds([{ id: 'pp-feed', url: 'https://example.invalid/pp.ics', name: 'PP', color: '#123456', hidden: false, updatedAt: '2026-08-19T00:00:00.000Z' }]);
+  saveTombstones([{ id: 'pp-gone-here', kind: 'item', deletedAt: new Date().toISOString() }]);
+  const server = {
+    version: 3,
+    blob: await encryptBlob(getLink().encKey, {
+      schemaVersion: SCHEMA_VERSION,
+      items: [record({ id: 'pp-remote', title: 'From the other device' })],
+      feeds: [],
+      tombstones: [{ id: 'pp-gone-there', kind: 'item', deletedAt: new Date().toISOString() }],
+    }),
+  };
+  saveSyncState({ ...loadSyncState(), version: 3 });
+
+  // Which synced keys a sync actually CHANGED — exactly the storage events a
+  // spec-conforming browser would deliver to the other tab.
+  const SYNCED = ['plaenicke.items', 'plaenicke.feeds', 'plaenicke.syncTombstones'];
+  let changed = new Set();
+  const realSet = ls.setItem.bind(ls);
+  ls.setItem = (k, v) => {
+    if (SYNCED.includes(k) && ls.getItem(k) !== String(v)) changed.add(k);
+    realSet(k, v);
+  };
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    if (!String(url).includes('/data')) return { ok: true, status: 200, text: async () => '', json: async () => ({}) };
+    requests.push(method);
+    if (method === 'GET') return { ok: true, status: 200, json: async () => ({ version: server.version, blob: server.blob }) };
+    const body = JSON.parse(opts.body);
+    if (body.version !== server.version) {
+      return { ok: false, status: 409, json: async () => ({ version: server.version, blob: server.blob }) };
+    }
+    server.version += 1;
+    server.blob = body.blob;
+    return { ok: true, status: 200, json: async () => ({ version: server.version }) };
+  };
+  const timers = installManualTimers();
+  const rounds = [];
+  try {
+    setVisibility('visible');
+    let deliver = ['plaenicke.items']; // the write that started it, from the other tab
+    for (let round = 0; round < 10 && deliver.length; round += 1) {
+      changed = new Set();
+      const before = requests.length;
+      for (const key of deliver) storageEvent(key);
+      assert.equal(timers.live(2000), 1, `round ${round}: the events schedule one debounced sync`);
+      timers.fire(2000);
+      await drain();
+      rounds.push({ requests: requests.slice(before), changed: [...changed].sort() });
+      deliver = [...changed];
+    }
+  } finally {
+    setVisibility('visible');
+    timers.restore();
+    globalThis.fetch = originalFetch;
+    ls.setItem = realSet;
+  }
+  assert.equal(loadSyncState().lastError, null, 'fixture check: every sync succeeded');
+  assert.deepEqual(rounds[0].requests, ['GET', 'PUT'], 'fixture check: the first sync merged and pushed');
+  assert.ok(rounds[0].changed.length > 0, 'fixture check: the first sync changed what is stored');
+  const last = rounds[rounds.length - 1];
+  assert.deepEqual(last.changed, [], `the exchange ends: a sync that changes nothing raises no event (${JSON.stringify(rounds)})`);
+  assert.ok(rounds.length <= 3, `and it ends within a few rounds (${JSON.stringify(rounds)})`);
+  assert.deepEqual(last.requests, ['GET'], 'the last sync finds nothing new and pushes nothing');
+  assert.deepEqual(loadItems().map((i) => i.id).sort(), ['pp-legacy', 'pp-local', 'pp-remote'],
+    'fixture check: both sides\' records are kept');
+});
+
+// The slow state must clear however the write SETTLES, not only when it
+// answers. A write that fails after the threshold (a dropped connection) is
+// recorded as offline; the shell must then say that, not keep claiming the
+// write is merely slow.
+test('slow sync write: a slow write that then fails shows the error, not the slow line', async (t) => {
+  const shell = await linkedWithAPendingPush('slow-reject');
+  const T0 = Date.UTC(2026, 9, 19, 17, 0, 0);
+  t.mock.timers.enable({ apis: ['Date'], now: T0 });
+  const requests = [];
+  let rejectPut = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    requests.push(method);
+    if (method === 'GET') return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) });
+    return new Promise((resolve, reject) => { rejectPut = reject; });
+  };
+  const timers = installManualTimers();
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    for (let i = 0; i < 200 && !rejectPut; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    assert.deepEqual(requests, ['GET', 'PUT'], 'fixture check: the write is in flight');
+    t.mock.timers.setTime(T0 + SLOW_WRITE_MS);
+    timers.fire(SLOW_WRITE_MS);
+    assert.match(shell.textContent, SHELL_SLOW, 'fixture check: the write is slow');
+
+    rejectPut(new TypeError('Failed to fetch'));
+    rejectPut = null;
+    await drain();
+    assert.equal(loadSyncState().lastError, 'offline', 'fixture check: the failed write was recorded');
+    assert.doesNotMatch(shell.textContent, SHELL_SLOW, 'a write that failed is no longer in flight');
+    assert.equal(shell.hidden, false, 'the shell reports the failure instead');
+    assert.equal(shell.textContent, 'Sync problem — open Settings');
+    assert.equal(timers.live(SLOW_WRITE_MS), 0, 'no repaint timer is left behind');
+    // Nor does a later repaint bring the slow line back.
+    t.mock.timers.setTime(T0 + 10 * SLOW_WRITE_MS);
+    const { renderSyncStatus } = await import('../js/linkui.js');
+    renderSyncStatus();
+    assert.doesNotMatch(shell.textContent, SHELL_SLOW);
+  } finally {
+    // Never leave runSync in flight for the tests that follow.
+    if (rejectPut) { rejectPut(new TypeError('released')); await drain(); }
+    timers.restore();
+    globalThis.fetch = originalFetch;
+    t.mock.timers.reset();
+  }
+});
+
+// fetch can throw before it returns a promise at all (a malformed request).
+// That write settled the moment it began; it must leave no slow state.
+test('slow sync write: a write fetch that throws at once leaves no slow state', async (t) => {
+  const shell = await linkedWithAPendingPush('slow-throw');
+  const T0 = Date.UTC(2026, 9, 19, 18, 0, 0);
+  t.mock.timers.enable({ apis: ['Date'], now: T0 });
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    requests.push(method);
+    if (method === 'GET') return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) });
+    throw new TypeError('thrown synchronously');
+  };
+  const timers = installManualTimers();
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    await drain();
+    assert.deepEqual(requests, ['GET', 'PUT'], 'fixture check: the write was attempted');
+    assert.equal(loadSyncState().lastError, 'offline', 'fixture check: the failed write was recorded');
+    assert.equal(timers.live(SLOW_WRITE_MS), 0, 'the failed write armed no lasting repaint timer');
+    t.mock.timers.setTime(T0 + 10 * SLOW_WRITE_MS);
+    const { renderSyncStatus } = await import('../js/linkui.js');
+    renderSyncStatus();
+    assert.doesNotMatch(shell.textContent, SHELL_SLOW, 'nothing is in flight, so nothing is slow');
+    assert.equal(shell.textContent, 'Sync problem — open Settings');
+  } finally {
+    timers.restore();
+    globalThis.fetch = originalFetch;
+    t.mock.timers.reset();
+  }
+});
+
+// The slow line outranks an EARLIER lastError, but never a corrupt stored
+// code or a pending adoption: no ordinary write can resolve either, so they
+// are what the user must be told even while a write is slow.
+async function slowWriteInFlight(t, id, T0) {
+  const shell = await linkedWithAPendingPush(id);
+  t.mock.timers.enable({ apis: ['Date'], now: T0 });
+  const net = holdAccountWrite();
+  const timers = installManualTimers();
+  for (const fn of globalThis.window._listeners.online) fn();
+  for (let i = 0; i < 200 && !net.inFlight(); i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+  assert.deepEqual(net.requests, ['GET', 'PUT'], 'fixture check: the write is in flight');
+  t.mock.timers.setTime(T0 + SLOW_WRITE_MS);
+  timers.fire(SLOW_WRITE_MS);
+  assert.match(shell.textContent, SHELL_SLOW, 'fixture check: the write is slow');
+  return { shell, net, timers };
+}
+
+test('slow sync write: a corrupt stored code outranks the slow line', async (t) => {
+  const { loadAuth, saveAuth } = await import('../js/storage.js');
+  let fx = null;
+  let code = null;
+  try {
+    fx = await slowWriteInFlight(t, 'slow-corrupt', Date.UTC(2026, 9, 19, 20, 0, 0));
+    code = loadAuth();
+    saveAuth('!!! not a link code !!!');
+    const { renderSyncStatus } = await import('../js/linkui.js');
+    renderSyncStatus();
+    assert.equal(fx.shell.hidden, false);
+    assert.equal(fx.shell.textContent, 'Sync is broken — open Settings',
+      'a corrupt code is shown even while a write is slow');
+    assert.equal(fx.shell.className, 'sync-indicator sync-indicator-problem');
+  } finally {
+    if (code !== null) saveAuth(code);
+    if (fx) {
+      if (fx.net.inFlight()) { fx.net.release(); await drain(); }
+      fx.timers.restore();
+      fx.net.restore();
+    }
+    t.mock.timers.reset();
+  }
+});
+
+test('slow sync write: a pending adoption outranks the slow line', async (t) => {
+  let fx = null;
+  try {
+    fx = await slowWriteInFlight(t, 'slow-adopt', Date.UTC(2026, 9, 19, 21, 0, 0));
+    saveSyncState({ ...loadSyncState(), adoptionPending: true });
+    const { renderSyncStatus } = await import('../js/linkui.js');
+    renderSyncStatus();
+    assert.equal(fx.shell.hidden, false);
+    assert.equal(fx.shell.textContent, 'Sync is waiting for you — open Settings',
+      'a pending adoption is shown even while a write is slow');
+    assert.equal(fx.shell.className, 'sync-indicator sync-indicator-problem');
+  } finally {
+    saveSyncState({ ...loadSyncState(), adoptionPending: false });
+    if (fx) {
+      if (fx.net.inFlight()) { fx.net.release(); await drain(); }
+      fx.timers.restore();
+      fx.net.restore();
+    }
+    t.mock.timers.reset();
   }
 });

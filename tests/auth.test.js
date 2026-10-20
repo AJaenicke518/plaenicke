@@ -66,7 +66,7 @@ test('linking hard-resets the cursor so a re-link never reuses a stale version',
 });
 
 // DA-C2: linking must gate the first sync, or the union is applied and pushed
-// before the user is ever offered Merge / Replace / Cancel.
+// before the user is ever offered Merge / Cancel.
 test('linking sets the adoption gate, and only clearAdoptionPending lifts it', async () => {
   installFakeLocalStorage();
   await linkWithCode(bareToken());

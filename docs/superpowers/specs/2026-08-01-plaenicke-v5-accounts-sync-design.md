@@ -173,8 +173,9 @@ Tombstones therefore live in **`plaenicke.syncTombstones`** — `{id, kind, dele
 2. **If the server blob is empty** → local data uploads as-is. Done.
 3. **If it is not empty** → the device already has data *and* the account does. Present an explicit choice rather than silently unioning:
    - **Merge** (default) — union with dedupe (below)
-   - **Replace this device** — discard local, pull server
    - **Cancel**
+
+   *(2026-10-19: a third choice, **Replace this device** — discard local, pull server — was removed. It added no capability Merge lacks: unlinking, clearing the device and re-linking reaches the same state. Every data-destroying defect found while building V5 lived on its path.)*
 4. **Dedupe on merge:** feeds by normalized URL; items by `(title, date, time)`.
 
 Why the explicit step: feed IDs are per-device (`settings.js:37`), so linking a laptop and phone that both subscribe to the same 4 calendars produces **8 feeds** — every event rendered twice, in two colors, in every view. Items entered on both devices duplicate the same way. This hits exactly the person the feature is for, on their first link.
@@ -256,7 +257,7 @@ Matches the existing `node --test` setup and the injected-effects pattern.
 1. **`crypto.randomUUID()` + `updatedAt` + client tombstones.** No server involvement; app behaves identically. Ships the ID-collision fix immediately.
 2. **Explicit Worker routing + 404**, `ALLOWED_ORIGIN` consolidation. No behavior change.
 3. **D1 + device tokens + `/data` endpoints + encryption.** Link the desktop with a freshly minted token (bootstrap — this is the one place a bare token is correct). Verify adoption is non-destructive.
-4. **Link the phone** — with an **86-character code composed on the desktop** via Settings → Sync → *Link another device*, **not** with a second minted token. See § 4.1; a fresh token would start a new empty account instead of joining. Choose **Merge**, never *Replace this device*: Replace discards that device's local data, and a feed URL is never re-displayed anywhere, so a discarded calendar subscription cannot be typed back in. Verify the dedupe path with real duplicate calendars.
+4. **Link the phone** — with an **86-character code composed on the desktop** via Settings → Sync → *Link another device*, **not** with a second minted token. See § 4.1; a fresh token would start a new empty account instead of joining. Choose **Merge** (the dialog offers only Merge and Cancel; *Replace this device* was removed on 2026-10-19). Verify the dedupe path with real duplicate calendars.
 5. **Last: `POST /smart-add` requires auth.** Flipping this earlier breaks your own smart-add while sync is unproven.
 
 ## 10. Deferred (available later, not foreclosed)

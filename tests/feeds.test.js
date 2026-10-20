@@ -395,7 +395,7 @@ test('feedStatus: "fetched Xm ago" wording, never "synced"', () => {
   const now = new Date('2026-07-28T12:05:00.000Z');
   const entry = { fetchedAt: '2026-07-28T12:00:00.000Z', events: [], skipped: [] };
   const status = feedStatus(FEED_A, entry, now);
-  assert.equal(status, 'fetched 5m ago');
+  assert.equal(status, 'fetched 5m ago, 0 events');
   assert.ok(!status.includes('synced'));
 });
 
@@ -414,7 +414,28 @@ test('feedStatus: skipped titles, count + first title + reason', () => {
     ],
   };
   const status = feedStatus(FEED_A, entry, now);
-  assert.equal(status, "fetched 5m ago, 2 skipped: 'Statics Lecture' — unsupported recurrence");
+  assert.equal(status, "fetched 5m ago, 0 events, 2 skipped: 'Statics Lecture' — unsupported recurrence");
+});
+
+// Real incident (punchlist, 2026-08-27): a subscription to the wrong calendar
+// looked exactly like a broken one. "0 events" says the feed itself is empty.
+test('feedStatus: says how many events the feed holds, singular for one', () => {
+  const now = new Date('2026-07-28T12:05:00.000Z');
+  const ev = (uid) => ({ uid, title: uid, dtstart: { value: '20260801T090000Z' }, recurrenceId: null });
+  const entry = (n) => ({ fetchedAt: '2026-07-28T12:00:00.000Z', events: Array.from({ length: n }, (_, i) => ev(`e${i}`)), skipped: [] });
+  assert.equal(feedStatus(FEED_A, entry(0), now), 'fetched 5m ago, 0 events');
+  assert.equal(feedStatus(FEED_A, entry(1), now), 'fetched 5m ago, 1 event');
+  assert.equal(feedStatus(FEED_A, entry(12), now), 'fetched 5m ago, 12 events');
+});
+
+// A dropped entry's events were emptied to free storage, not missing from the
+// feed: a count there would read "0 events" for a calendar that has them.
+test('feedStatus: no event count when the events were dropped for storage', () => {
+  const now = new Date('2026-07-28T12:05:00.000Z');
+  const entry = { fetchedAt: '2026-07-28T12:00:00.000Z', events: [], skipped: [], quotaDropped: true };
+  const status = feedStatus(FEED_A, entry, now);
+  assert.match(status, /storage limit reached/, 'fixture check');
+  assert.doesNotMatch(status, /\d+ events?\b/);
 });
 
 test('feedStatus: quota-prune note', () => {
@@ -557,6 +578,27 @@ test('instancesForRange: an expansion throw is logged by error name only, never 
   // Capability rule: a feed URL is a secret — it must never reach the console.
   assert.ok(!logged[0].includes(FEED_A.url), 'log leaked the feed URL');
   assert.ok(!logged[0].includes('example.com'), 'log leaked the feed host');
+});
+
+// instancesForRange runs on EVERY render (four views each), so an entry that
+// fails expansion used to log on every tap and every sync. Once per feed per
+// session says the same thing.
+test('instancesForRange: a feed that fails expansion is logged once per session, not once per render', () => {
+  const broken = { fetchedAt: '2026-07-28T12:00:00.000Z', events: [{ uid: 'broken', title: 'Broken' }], skipped: [] };
+  const feedX = { ...FEED_A, id: 'feedOnceX' };
+  const feedY = { ...FEED_A, id: 'feedOnceY' };
+  const cache = { feedOnceX: broken, feedOnceY: broken };
+  const logged = [];
+  const realError = console.error;
+  console.error = (...args) => { logged.push(args.map(String).join(' ')); };
+  try {
+    for (let i = 0; i < 3; i += 1) instancesForRange([feedX], cache, '2026-08-01', '2026-08-01', 'UTC');
+    assert.equal(logged.length, 1, 'three renders, one log');
+    instancesForRange([feedX, feedY], cache, '2026-08-01', '2026-08-01', 'UTC');
+    assert.equal(logged.length, 2, 'a second broken feed is still reported, once');
+  } finally {
+    console.error = realError;
+  }
 });
 
 // --- removeFeed --------------------------------------------------------------

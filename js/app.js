@@ -1,6 +1,6 @@
 import {
   loadItems, saveItems, loadFeeds, loadFeedCache, addTombstone,
-  loadTombstones, saveTombstones, recordLaunch,
+  loadTombstones, saveTombstones, recordLaunch, STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY,
 } from './storage.js';
 import { followToday, formatDayLabel } from './freshness.js';
 import {
@@ -11,7 +11,7 @@ import { renderTodoView } from './todoview.js';
 import { renderIdeasView } from './ideasview.js';
 import { toISO, nowISO } from './dateparse.js';
 import { buildMonthGrid, groupItemsByDate, monthCellSummary, chronoFirst, itemTypeClass } from './calendar.js';
-import { startOfWeek, addDays, formatTime, formatTimeRange } from './timegrid.js';
+import { startOfWeek, addDays, formatTime, formatTimeRange, weekLabel } from './timegrid.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
 import { renderDayView } from './dayview.js';
 import { renderWeekView } from './weekview.js';
@@ -23,11 +23,12 @@ import { openItemSheet } from './itemsheet.js';
 import { showToast } from './toast.js';
 import { applyEdit, typeChangePatch, snapshotOf, nextStamp, EDITABLE_FIELDS } from './edit.js';
 import { uid } from './uid.js';
-import { syncOnce } from './sync.js';
+import { syncOnce, recordSyncFailure } from './sync.js';
 import { isLinked, isAdoptionPending } from './auth.js';
 import { merge, SCHEMA_VERSION } from './merge.js';
-import { renderSyncStatus } from './linkui.js';
+import { renderSyncStatus, syncWriteStarted, syncWriteSettled } from './linkui.js';
 import { WORKER_URL } from './config.js';
+import { fetchWithTimeout } from './fetchtimeout.js';
 
 const els = {
   text: document.getElementById('entry-text'),
@@ -99,6 +100,10 @@ let deviceTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const LIST_EXTERNAL_HORIZON_DAYS = 366;
 let feeds = loadFeeds();
 let feedCache = loadFeedCache();
+// Calendars whose latest fetch failed, by id, for the "Updated" stamp (see
+// stampFromFeeds). Fed by every fetch this page makes: each background batch
+// and Settings' own Sync and Add calendar (onFeedFetched below).
+const failedFeedIds = new Set();
 
 // Deletes offered for Undo (edit-items Task 4b). A pending id is still in
 // `items` and in storage — nothing is written until commitDelete — but it is
@@ -171,8 +176,15 @@ initSettings({
   // calendar changes what is on screen, and so what the stamp is about.
   onFeedsChanged: () => {
     feeds = loadFeeds(); feedCache = loadFeedCache(); render();
-    stampUpdated(); stampFromFeeds([]);
+    stampUpdated(); stampFromFeeds();
   },
+  // Settings' manual Sync and Add calendar fetch outside the background batch.
+  // Their results must reach the stamp's failure memory, or a successful
+  // manual Sync leaves "Couldn't refresh" up, and a calendar added there whose
+  // first fetch failed is counted as not yet fetched (both regressions of
+  // b8ea190's memory, reverted in c6cfbf5). Settings calls this before
+  // onFeedsChanged, which repaints.
+  onFeedFetched: (id, ok) => { if (ok) failedFeedIds.delete(id); else failedFeedIds.add(id); },
   // Adding or removing a calendar mutates SYNCED data (spec 6.3): the feed
   // record itself, and for a removal the feed tombstone removeFeed() writes.
   // onFeedsChanged fires on every colour tap too, so it is the wrong signal to
@@ -734,7 +746,16 @@ function renderCalendar() {
         m.textContent = `+${more} more`;
         div.appendChild(m);
       }
+      // A button to Tab and to assistive tech, not a bare clickable <div>:
+      // Enter or Space opens the same day a click does (Space is cancelled, or
+      // it would also scroll the page). Blank cells above open nothing and
+      // stay out of the tab order.
+      div.setAttribute('role', 'button');
+      div.setAttribute('tabindex', '0');
       div.addEventListener('click', () => openDay(cell.date));
+      div.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDay(cell.date); }
+      });
       els.calGrid.appendChild(div);
     }
   }
@@ -742,7 +763,7 @@ function renderCalendar() {
 
 function renderWeek() {
   const end = addDays(viewWeekStart, 6);
-  els.weekLabel.textContent = `${viewWeekStart.slice(5).replace('-', '/')} – ${end.slice(5).replace('-', '/')}`;
+  els.weekLabel.textContent = weekLabel(viewWeekStart, end);
   renderWeekView(els.weekGrid, viewWeekStart,
     groupItemsByDate(sortItemsByDate(visibleItems(viewWeekStart, end))), toISO(new Date()),
     { onSelectDay: openDay });
@@ -800,7 +821,12 @@ function showView(which) {
     todo: els.showTodo, ideas: els.showIdeas,
   };
   for (const [name, el] of Object.entries(views)) el.hidden = name !== which;
-  for (const [name, b] of Object.entries(buttons)) b.classList.toggle('active', name === which);
+  // aria-pressed says which page is showing to assistive tech, which does not
+  // read the class. index.html carries the load-time values.
+  for (const [name, b] of Object.entries(buttons)) {
+    b.classList.toggle('active', name === which);
+    b.setAttribute('aria-pressed', String(name === which));
+  }
   render();
 }
 
@@ -877,50 +903,17 @@ stampUpdated();
 // When the batch settles it repaints the "Updated" stamp from the calendars
 // themselves (sweep D1); see stampFromFeeds.
 //
-// EACH DOWNLOAD IS ABORTED AFTER FEED_FETCH_TIMEOUT_MS (sweep F, I4; reworked
-// twice after review). A download that never finishes would otherwise hold the
-// one batch slot forever: every later refresh dropped, every queued calendar
-// never fetched.
-//   - Per DOWNLOAD, not per batch: syncStale fetches calendars one after
-//     another, so a batch timeout failed slow-but-progressing batches and left
-//     the loop running (a resume could then fetch one calendar twice at once).
-//   - HEADERS AND BODY: fetch() resolves when the headers arrive, and syncFeed
-//     then awaits res.text()/res.json(). A timer cleared at the headers left a
-//     body that stalls mid-download unguarded. The same timer races the body
-//     read and is disarmed only when that read settles.
-//   - 60 s, END TO END. The Worker buffers the whole upstream feed (up to 1 MB,
-//     8 s per hop, up to 3 redirects) before it replies, and the phone then
-//     downloads it, so a tighter budget could fail a large calendar on weak
-//     cellular on EVERY refresh. The timeout exists only so a hung download
-//     cannot hold the slot forever; 60 s still guarantees that.
-// A timed-out download is aborted and rejects, and syncFeed reports it
+// EACH DOWNLOAD IS ABORTED AFTER 60 s (sweep F, I4): fetchWithTimeout, in
+// js/fetchtimeout.js, which Settings' manual Sync and Add calendar share. A
+// download that never finishes would otherwise hold the one batch slot
+// forever: every later refresh dropped, every queued calendar never fetched.
+// The timeout is per DOWNLOAD, not per batch: syncStale fetches calendars one
+// after another, so a batch timeout failed slow-but-progressing batches and
+// left the loop running (a resume could then fetch one calendar twice at
+// once). A timed-out download is aborted and rejects, and syncFeed reports it
 // {ok:false} — 'unreachable' if it timed out waiting for headers, 'parse_error'
 // or 'server' if it timed out reading the body — and the loop moves on. Only
-// `ok` is read here. The race also settles a fetch that ignores its signal.
-const FEED_FETCH_TIMEOUT_MS = 60000;
-function fetchWithTimeout(url, init = {}) {
-  const ac = new AbortController();
-  let timer;
-  const timedOut = new Promise((_, reject) => {
-    timer = setTimeout(() => { ac.abort(); reject(new Error('timeout')); }, FEED_FETCH_TIMEOUT_MS);
-  });
-  const disarm = () => clearTimeout(timer);
-  const guarded = (p) => Promise.race([p, timedOut]);
-  let started;
-  try {
-    started = fetch(url, { ...init, signal: ac.signal });
-  } catch (err) {
-    disarm(); // a fetch that throws at once must not leave the timer armed
-    return Promise.reject(err);
-  }
-  return guarded(started).then((res) => ({
-    ok: res.ok,
-    status: res.status,
-    headers: res.headers,
-    text: () => guarded(Promise.resolve().then(() => res.text())).finally(disarm),
-    json: () => guarded(Promise.resolve().then(() => res.json())).finally(disarm),
-  }), (err) => { disarm(); throw err; });
-}
+// `ok` is read here.
 let feedBatch = null; // ids in the batch in flight, or null
 const feedQueue = new Set();
 
@@ -931,11 +924,17 @@ function backgroundSyncFeeds(feedList) {
   }
   if (feedList.length === 0) return;
   feedBatch = new Set(feedList.map((f) => f.id));
-  const settle = (failedIds) => {
+  // results is syncStale's per-feed map (only the calendars it fetched), or
+  // null when the whole batch failed and which calendars it reached is
+  // unknown: then every one in it counts as failed. A calendar this batch did
+  // not fetch (still fresh) keeps whatever its last fetch said.
+  const settle = (results) => {
     feedBatch = null;
     feedCache = loadFeedCache();
     render();
-    stampFromFeeds(failedIds);
+    if (results === null) for (const f of feedList) failedFeedIds.add(f.id);
+    else for (const [id, r] of Object.entries(results)) { if (r.ok) failedFeedIds.delete(id); else failedFeedIds.add(id); }
+    stampFromFeeds();
     if (feedQueue.size > 0) {
       const queued = new Set(feedQueue);
       feedQueue.clear();
@@ -944,7 +943,7 @@ function backgroundSyncFeeds(feedList) {
   };
   syncStale(feedList, feedCache, { fetchImpl: fetchWithTimeout }).then((results) => {
     // A per-feed failure comes back as {ok:false}, never as a rejection.
-    settle(Object.keys(results).filter((id) => !results[id].ok));
+    settle(results);
   }, (err) => {
     console.error('plaenicke: background calendar sync failed', err && err.name);
     settle(null); // the whole batch failed; which feeds it reached is unknown
@@ -964,17 +963,15 @@ backgroundSyncFeeds(feeds);
 // for a feed, destroy a URL that is never rendered anywhere and so cannot be
 // re-entered. Returns what it actually wrote; sync.js pushes THAT, not the
 // state it was handed.
-export function applySyncedState(state, opts = {}) {
-  // opts.replace is set only by the linking flow's "Replace this device".
-  // The user explicitly chose to discard local data, so re-merging would
-  // union it straight back in — and sync would then push it to the account
-  // being joined. Replace is a LOCAL discard: nothing is tombstoned, so the
-  // other devices keep their own copies.
+//
+// There is no discard path. It existed only for the linking flow's "Replace
+// this device", which was removed on 2026-10-19: every caller is re-merged.
+export function applySyncedState(state) {
   const live = {
     schemaVersion: SCHEMA_VERSION,
     items: loadItems(), feeds: loadFeeds(), tombstones: loadTombstones(),
   };
-  const written = opts.replace ? state : merge(live, state, new Date());
+  const written = merge(live, state, new Date());
   items = written.items;
   saveItems(items);
   // applyRemoteFeeds requires the COMPLETE merged feed list (written.feeds,
@@ -982,16 +979,13 @@ export function applySyncedState(state, opts = {}) {
   // argument, and a partial list would propagate a deletion of every other
   // feed to every device.
   //
-  // ORDER MATTERS here. On replace, applyRemoteFeeds's own removeFeed() call
-  // (for every local feed absent from written.feeds) writes a real feed
-  // tombstone via addTombstone() as it runs. The saveTombstones() line below
-  // is what erases that: on replace, written IS state — the caller's raw
-  // incoming state, not a merge — so written.tombstones carries none of
-  // those just-written tombstones, and this full-overwrite save discards
-  // them, keeping the "Replace is a LOCAL discard, nothing is tombstoned"
-  // guarantee above true. Swap these two lines and a replace would tombstone
-  // every feed it discarded locally and push those deletions to the account
-  // being joined on the very next sync.
+  // ORDER MATTERS here. applyRemoteFeeds's own removeFeed() call (for every
+  // local feed absent from written.feeds — i.e. one a merged tombstone
+  // suppresses) writes a feed tombstone via addTombstone() stamped with THIS
+  // device's clock. The full-overwrite saveTombstones() below then leaves the
+  // stored tombstones exactly equal to written.tombstones, so a deletion
+  // pulled from another device keeps its original deletedAt. Swap these two
+  // lines and every such deletion is re-stamped with this device's clock.
   const { added } = applyRemoteFeeds(written.feeds);
   saveTombstones(written.tombstones);
   feeds = loadFeeds();
@@ -1010,14 +1004,45 @@ let syncPending = false;
 let syncTimer = null;
 
 async function runSync() {
-  // Never run while the user hasn't chosen Merge / Replace / Cancel yet
-  // (spec 5.7) — that choice is what supplies opts.replace above.
+  // Never run while the user hasn't chosen Merge / Cancel yet (spec 5.7) —
+  // only the linking flow's adoption may lift the gate.
   if (!isLinked() || isAdoptionPending()) return;
+  // ONLY THE VISIBLE TAB SYNCS (decided 2026-10-19, instead of a cross-tab
+  // lock). Every trigger comes through here — the scheduleSync timer, the
+  // `online` listener, the load-time call, the visible-again call — so this
+  // one check gates all of them. A hidden tab's skipped sync is not queued:
+  // the visibilitychange listener below runs runSync on EVERY return to
+  // visible, and a sync pushes the whole local state rather than replaying a
+  // queue, so whatever a hidden tab skipped (including the delete that
+  // backgrounding itself commits) goes out then. A flag would add a second
+  // thing to forget. `undefined` (no Page Visibility API) is not 'hidden',
+  // so it syncs as before. This decides whether a sync STARTS; one already
+  // in flight when the tab hides runs to completion.
+  //
+  // ACCEPTED GAP: two windows visible at once (side by side on a desktop) can
+  // both sync. That is bounded by the server's version check (every PUT is a
+  // compare-and-swap on the version it read; adoption also pins
+  // expectVersion), not by this gate.
+  if (document.visibilityState === 'hidden') return;
   if (syncInFlight) { syncPending = true; return; }
   syncInFlight = true;
   try {
     await syncOnce({
-      fetchImpl: (u, o) => fetch(u, o),
+      // The read gives up at the shared download deadline and reports as
+      // offline; the write never does (js/sync.js, punchlist L63).
+      readFetchImpl: fetchWithTimeout,
+      // The write, wrapped so the shell indicator can say "taking longer than
+      // usual" once it has been in flight past linkui.js's SLOW_WRITE_MS, and
+      // clear it when it settles. Only the PUT travels through fetchImpl, so
+      // a slow read never shows it, and sync.js needs no change.
+      fetchImpl: async (u, o) => {
+        syncWriteStarted();
+        try {
+          return await fetch(u, o);
+        } finally {
+          syncWriteSettled();
+        }
+      },
       now: () => new Date(),
       apiBase: WORKER_URL,
       applyState: applySyncedState,
@@ -1025,6 +1050,15 @@ async function runSync() {
   } catch (err) {
     // Never let a sync failure break the app; local data keeps rendering.
     console.error('sync', err && err.name);
+    // But never let it be SILENT either: record it, so the renderSyncStatus
+    // below lights the shell indicator instead of leaving it dark. Recording
+    // writes storage, which can itself throw when the device is full; that
+    // must not escape either, since runSync is called from listeners/timers.
+    try {
+      recordSyncFailure(err);
+    } catch (recordErr) {
+      console.error('sync record', recordErr && recordErr.name);
+    }
   } finally {
     syncInFlight = false;
     renderSyncStatus();
@@ -1045,14 +1079,26 @@ function scheduleSync() {
 // does not fire in the tab that performed the write, so no echo guard is
 // needed. Narrowed to the three data keys — plaenicke.syncState is written on
 // every sync tick and would otherwise force a full re-render in every other
-// tab on every tick.
-const CROSS_TAB_KEYS = ['plaenicke.items', 'plaenicke.feeds', 'plaenicke.syncTombstones'];
+// tab on every tick. storage.js's own constants, never literals: a renamed
+// key would otherwise leave this listener silently dead.
+//
+// All three keys are in the synced blob, so the event also SCHEDULES A SYNC.
+// Only the visible tab syncs (runSync's gate): a write made in a tab that
+// hides inside the 2 s debounce has its push skipped there, and without this
+// it would wait, unpushed, for as long as the user works in this tab instead.
+// A hidden tab receiving the event schedules too, and its runSync returns at
+// the gate. This cannot ping-pong between two visible tabs: an applied sync
+// that changes nothing rewrites the three keys with byte-identical values,
+// and setItem with an unchanged value fires no storage event (HTML Living
+// Standard, Web Storage, setItem steps). tests/apply.test.js runs the loop.
+const CROSS_TAB_KEYS = [STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY];
 window.addEventListener('storage', (e) => {
   if (!CROSS_TAB_KEYS.includes(e.key)) return;
   items = loadItems();
   feeds = loadFeeds();
   feedCache = loadFeedCache();
   render();
+  scheduleSync();
 });
 
 // --- Phase 0: staying current across a resume -----------------------------
@@ -1090,8 +1136,13 @@ function noteLaunch() {
 // the refresh: stampUpdated paints the render time. With visible calendars,
 // the calendars are the part that goes stale, so the stamp waits for the
 // feed batch to settle and stampFromFeeds paints it from their fetch times.
+//
+// A time from an earlier day names the day ("Yesterday, 9:02 AM"), so a
+// days-old fetch can never pass for this morning's.
 function clockLabel(d) {
-  return formatTime(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`);
+  const clock = formatTime(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`);
+  const today = toISO(new Date());
+  return toISO(d) === today ? clock : `${formatDayLabel(toISO(d), today)}, ${clock}`;
 }
 
 function visibleFeeds() { return feeds.filter((f) => !f.hidden); }
@@ -1102,19 +1153,28 @@ function stampUpdated() {
 }
 
 // The OLDEST fetch among the visible calendars: the stamp promises that
-// everything on screen is at least that fresh. A visible calendar whose fetch
-// failed (failedIds null means the whole batch failed), or that has no cached
-// fetch at all, has not been refreshed, and the stamp says so. Hidden
-// calendars are not on screen and do not count either way.
-function stampFromFeeds(failedIds) {
+// everything on screen is at least that fresh.
+//
+// A visible calendar whose latest fetch failed (failedFeedIds) has not been
+// refreshed, and the stamp says so until a fetch of THAT calendar succeeds. The
+// memory is what keeps a later repaint — a colour tap in Settings — from
+// painting an old time over "Couldn't refresh". A visible calendar with no
+// cached fetch and no failure is still being fetched for the first time (one
+// just added in Settings, or queued behind a running batch); it is left out
+// rather than reported failed, and if nothing visible has been fetched yet the
+// stamp is left as it is. Hidden calendars are not on screen and do not count
+// either way.
+function stampFromFeeds() {
   const visible = visibleFeeds();
   if (visible.length === 0) return; // keep the render-time stamp
-  const failed = failedIds === null || visible.some((f) => failedIds.includes(f.id));
-  const times = visible.map((f) => Date.parse(feedCache[f.id] && feedCache[f.id].fetchedAt));
-  if (failed || times.some((t) => !Number.isFinite(t))) {
+  if (visible.some((f) => failedFeedIds.has(f.id))) {
     els.updatedStamp.textContent = "Couldn't refresh calendars";
     return;
   }
+  const times = visible
+    .map((f) => Date.parse(feedCache[f.id] && feedCache[f.id].fetchedAt))
+    .filter((t) => Number.isFinite(t));
+  if (times.length === 0) return; // nothing fetched yet: keep what is shown
   els.updatedStamp.textContent = `Updated ${clockLabel(new Date(Math.min(...times)))}`;
 }
 

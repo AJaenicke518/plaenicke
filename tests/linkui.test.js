@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
 import {
-  describeSyncStatus, classifyPastedCode, chooseAdoption, renderSyncStatus,
+  describeSyncStatus, classifyPastedCode, chooseAdoption, renderSyncStatus, SLOW_WRITE_MS,
   initLinkUI, failureText, SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID,
   classifySyncState, shellNeedsAttention, panelShowsProblem,
   SYNC_OK, SYNC_NOT_LINKED, SYNC_CORRUPT, SYNC_ADOPTION_PENDING, SYNC_ERROR,
@@ -17,6 +17,7 @@ import {
 } from '../js/storage.js';
 import { SCHEMA_VERSION, toWire } from '../js/merge.js';
 import { WORKER_URL } from '../js/config.js';
+import { fetchWithTimeout, FETCH_TIMEOUT_MS } from '../js/fetchtimeout.js';
 
 // --- minimal fake DOM ------------------------------------------------------
 //
@@ -199,6 +200,34 @@ test('describeSyncStatus surfaces lastError alongside the last successful sync',
   assert.doesNotMatch(noPrior, /ago/);
 });
 
+// The Worker caps the blob at 1,000,000 bytes and answers 413 (worker/src/
+// data.js); syncOnce records it as http_413. A generic "the server returned an
+// error" gives the user nothing to act on, and retrying never helps.
+test('a 413 is named as the account size limit, not as a generic server error', () => {
+  const s = describeSyncStatus(syncState({ lastError: 'http_413', lastSyncedAt: '2026-08-05T11:00:00.000Z' }), NOW);
+  assert.match(s, /size limit/i);
+  assert.doesNotMatch(s, /server returned an error/i);
+  // Must not change: every other HTTP status keeps the generic label.
+  assert.match(describeSyncStatus(syncState({ lastError: 'http_500' }), NOW), /the server returned an error/);
+  assert.match(describeSyncStatus(syncState({ lastError: 'http_429' }), NOW), /the server returned an error/);
+});
+
+// saveFeeds used to be the one saver with no quota translation, so a device
+// out of storage while saving calendars recorded the raw DOMException name
+// and read "something went wrong" (punchlist L103).
+test('a device that runs out of storage while saving calendars reads as out of storage', () => {
+  installFakeLocalStorage();
+  const real = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = (k, v) => {
+    if (k === 'plaenicke.feeds') { const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; }
+    return real(k, v);
+  };
+  let caught = null;
+  try { saveFeeds([fd('f')]); } catch (err) { caught = err; }
+  assert.ok(caught, 'fixture check: the save must fail');
+  assert.match(describeSyncStatus(syncState({ lastError: caught.name }), NOW), /run out of storage/);
+});
+
 // The adoption gate means a device that links while offline sits at
 // adoptionPending: true and syncs NOTHING until the user completes the
 // dialog. The failure mode is "silently does nothing", and this string is the
@@ -284,10 +313,10 @@ test('chooseAdoption resolves both-empty to none, not auto', () => {
 //
 // The plan said "tombstones are never counted on either side". That was
 // adjudicated to stop a tombstone-only account being classified 'ask' and
-// offered "Replace this device" — a one-click unrecoverable wipe. But 'none'
-// and 'auto' both route to adopt-bootstrap, which runs AUTOMATICALLY on panel
-// mount with no user interaction: it traded a one-click wipe for a ZERO-click
-// one, in both directions. Reproduced.
+// offered "Replace this device" (since removed) — a one-click unrecoverable
+// wipe. But 'none' and 'auto' both route to adopt-bootstrap, which runs
+// AUTOMATICALLY on panel mount with no user interaction: it traded a one-click
+// wipe for a ZERO-click one, in both directions. Reproduced.
 //
 // A pure count of tombstones is the wrong fix too — it sends a tombstone-only
 // account back to 'ask', re-creating the original defect. What counts is
@@ -384,7 +413,7 @@ test('renderSyncStatus renders a corrupt stored code as its own state, not a fro
 // constructed. Before this guard the only check was inside adopt(), so
 // initSettings({button, host, onFeedsChanged}) — one missing key — mounted the
 // whole panel, rendered the status line, fired the mount-time GET against the
-// account and walked the user through Merge/Replace before reporting "the app
+// account and walked the user through the Merge dialog before reporting "the app
 // is wired up wrong. Reload the page and try again" — advice that cannot
 // possibly help, at the end of a network round trip, with a decision already
 // taken. Zero fallback: escalate at mount, where it is a one-line fix.
@@ -410,6 +439,7 @@ test('initLinkUI mounts with an applyState and makes no network call doing it', 
     host: doc.createElement('div'),
     applyState: (s) => s,
     fetchImpl: async (url) => { calls.push(String(url)); throw new Error('no network call was expected here'); },
+    readFetchImpl: async (url) => { calls.push(String(url)); throw new Error('no network call was expected here'); },
   }));
   assert.deepEqual(calls, []);
 });
@@ -428,16 +458,20 @@ async function setup(o = {}) {
   const fetchCalls = [];
   const linkedCalls = o.linkedCalls || [];
   const unlinkedCalls = o.unlinkedCalls || [];
+  // One fake behind both the read and the write fetch: these tests are about
+  // what the panel decides, not about which fetch carries which request.
+  const fakeFetch = async (url, opts) => {
+    fetchCalls.push({ url: String(url), method: (opts && opts.method) || 'GET' });
+    if (!o.fetchImpl) throw new Error('no network call was expected here');
+    return o.fetchImpl(url, opts);
+  };
   const ui = initLinkUI({
     host,
     applyState: o.applyState || ((s) => s),
     onLinked: () => linkedCalls.push(true),
     onUnlinked: () => unlinkedCalls.push(true),
-    fetchImpl: async (url, opts) => {
-      fetchCalls.push({ url: String(url), method: (opts && opts.method) || 'GET' });
-      if (!o.fetchImpl) throw new Error('no network call was expected here');
-      return o.fetchImpl(url, opts);
-    },
+    fetchImpl: fakeFetch,
+    readFetchImpl: fakeFetch,
     apiBase: 'https://w.example',
     now: () => NOW,
     syncOnceImpl: async (deps) => {
@@ -534,7 +568,7 @@ test("an account with data and an empty device adopts with 'adopt-bootstrap', ne
   assert.equal(syncCalls[0].expectVersion, 7, 'the version previewed must be pinned against the write');
 });
 
-test('a device and an account that both hold data present Merge, Replace and Cancel and adopt nothing yet', async () => {
+test('a device and an account that both hold data present Merge and Cancel, never Replace, and adopt nothing yet', async () => {
   const { host, syncCalls } = await setup({
     seed: () => { saveItems([it('local')]); },
     fetchImpl: async () => ({
@@ -543,12 +577,16 @@ test('a device and an account that both hold data present Merge, Replace and Can
   });
   assert.equal(syncCalls.length, 0, 'nothing may be applied or pushed before the user chooses');
   assert.ok(findButton(host, 'Merge'), 'Merge must be offered');
-  assert.ok(findButton(host, 'Replace this device'), 'Replace this device must be offered');
   assert.ok(findButton(host, 'Cancel'), 'Cancel must be offered');
+  // Removed 2026-10-19 (punchlist design debt (i)): Replace added no capability
+  // Merge lacks and every data-destroying defect on V5 lived on its path.
+  assert.equal(findButton(host, 'Replace'), null, 'Replace this device is no longer offered');
+  assert.doesNotMatch(allText(host), /replace/i, 'and nothing in the dialog describes it');
+  assert.equal(findAll(host, 'BUTTON').length, 2, 'exactly two choices: Merge and Cancel');
 });
 
-test('Merge and Replace pass their own adoptChoice, pinned to the previewed version', async () => {
-  for (const [label, expected] of [['Merge', 'adopt-merge'], ['Replace this device', 'adopt-replace']]) {
+test('Merge passes adopt-merge, pinned to the previewed version', async () => {
+  for (const [label, expected] of [['Merge', 'adopt-merge']]) {
     const { host, ui, syncCalls } = await setup({
       seed: () => { saveItems([it('local')]); },
       fetchImpl: async () => ({
@@ -577,10 +615,10 @@ test('Cancel adopts nothing and leaves the adoption gate raised', async () => {
   assert.deepEqual(loadItems().map((i) => i.id), ['local'], 'Cancel must not touch local data');
 });
 
-// DA-I5. The account can empty between previewRemote and syncOnce, and a user
-// who clicked Replace against data they SAW would get a silent full local
-// wipe with no re-confirmation. syncOnce hands the decision back rather than
-// acting on a stale choice.
+// DA-I5. The account can change between previewRemote and syncOnce, and a
+// user's choice made against data they SAW would be acted on against data
+// they never saw. syncOnce hands the decision back rather than acting on a
+// stale choice.
 test('a version that moved between the preview and the write re-asks instead of acting on a stale choice', async () => {
   let pull = 0;
   const { host, ui, syncCalls } = await setup({
@@ -592,12 +630,12 @@ test('a version that moved between the preview and the write re-asks instead of 
       return { ok: true, status: 200, json: async () => ({ version, blob: await encryptBlob(currentKey, st({ items: [it('r')] })) }) };
     },
   });
-  findButton(host, 'Replace this device').click();
+  findButton(host, 'Merge').click();
   await ui.settled();
   assert.equal(syncCalls.length, 1, 'a stale choice must not be retried automatically against the new state');
   assert.equal(syncCalls[0].expectVersion, 4);
   assert.match(allText(host), /changed/i, 'the user must be told the account moved');
-  assert.ok(findButton(host, 'Replace this device'), 'the choice must be presented again, against the new state');
+  assert.ok(findButton(host, 'Merge'), 'the choice must be presented again, against the new state');
   const again = findButton(host, 'Merge');
   again.click();
   await ui.settled();
@@ -607,8 +645,8 @@ test('a version that moved between the preview and the write re-asks instead of 
 
 // The dialog can now be reached against a side showing 0 items and 0
 // calendars but carrying pending deletions. It must say so — a bare
-// "0 items, 0 calendars" next to a Replace button is not an informed choice.
-test('the dialog names pending deletions instead of showing a bare "0 items" next to Replace', async () => {
+// "0 items, 0 calendars" next to a choice is not an informed choice.
+test('the dialog names pending deletions instead of showing a bare "0 items" next to the choice', async () => {
   const { host, syncCalls } = await setup({
     seed: () => { saveItems([it('a'), it('b')]); },
     fetchImpl: async () => ({
@@ -626,7 +664,7 @@ test('the dialog names pending deletions instead of showing a bare "0 items" nex
     }),
   });
   assert.equal(syncCalls.length, 0, 'a tombstone-only account must not be adopted with no dialog');
-  assert.ok(findButton(host, 'Replace this device'), 'the choice must be presented');
+  assert.ok(findButton(host, 'Merge'), 'the choice must be presented');
   const text = allText(host);
   assert.match(text, /deletion/i, 'the pending deletions must be named, not hidden behind a bare "0 items"');
   assert.match(text, /2 of the items/i);
@@ -666,7 +704,7 @@ test('a device whose only local data is a calendar subscription still gets the d
     }),
   });
   assert.equal(syncCalls.length, 0, 'a local calendar subscription is data — it must not be adopted over silently');
-  assert.ok(findButton(host, 'Replace this device'));
+  assert.ok(findButton(host, 'Merge'));
 });
 
 // IR1. The sibling read (local FEEDS) is pinned by the test above; the local
@@ -698,7 +736,7 @@ test('a device that cleared its list while unlinked still gets the dialog, not a
   });
   assert.equal(syncCalls.length, 0,
     "adopting here deletes the account's item AND calendar and tombstones both to every other device, with no dialog");
-  assert.ok(findButton(host, 'Replace this device'), 'the choice must be presented');
+  assert.ok(findButton(host, 'Merge'), 'the choice must be presented');
   assert.match(allText(host), /2 of the records in the account/i,
     'the deletions this device would push must be named');
 });
@@ -727,9 +765,9 @@ test('an account that keeps changing gives up instead of looping forever', async
 // I2. settings.js calls initLinkUI per open(), and close() cannot cancel the
 // previous closure's in-flight work: each mount owns its own `inflight` and
 // the gate is still raised, so a second mount fires its own adoption.
-// Reproduced: ['GET','GET','SYNC','SYNC']. Worst realistic case is Replace
-// then Merge — two applyState writes with conflicting semantics, resolved by
-// arrival order.
+// Reproduced: ['GET','GET','SYNC','SYNC']. Worst realistic case (while
+// Replace existed) was Replace then Merge — two applyState writes with
+// conflicting semantics, resolved by arrival order.
 test('re-opening the panel mid-adoption does not start a second, concurrent adoption', async () => {
   installFakeLocalStorage();
   const doc = installDom();
@@ -747,7 +785,7 @@ test('re-opening the panel mid-adoption does not start a second, concurrent adop
     return { ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) };
   };
   const syncOnceImpl = async (deps) => { log.push(`SYNC:${deps.adoptChoice}`); return { status: 'ok', pushed: true }; };
-  const deps = { applyState: (s) => s, fetchImpl, apiBase: 'https://w.example', now: () => NOW, syncOnceImpl };
+  const deps = { applyState: (s) => s, fetchImpl, readFetchImpl: fetchImpl, apiBase: 'https://w.example', now: () => NOW, syncOnceImpl };
 
   const hostA = doc.createElement('div');
   doc.body.appendChild(hostA);
@@ -811,7 +849,7 @@ async function settleUntil(pred) {
 
 // Mounts a linked, adoption-pending device with a preview that can be held
 // open, and a syncOnceImpl that can be held open independently.
-async function concurrencyFixture({ staleAfterMs, clock, localEmpty = false } = {}) {
+async function concurrencyFixture({ staleAfterMs, slowWriteAfterMs, clock, localEmpty = false } = {}) {
   installFakeLocalStorage();
   const doc = installDom();
   const link = await linkWithCode(bytesToBase64url(generateEncKey()));
@@ -845,10 +883,12 @@ async function concurrencyFixture({ staleAfterMs, clock, localEmpty = false } = 
   const deps = {
     applyState: (s) => s,
     fetchImpl,
+    readFetchImpl: fetchImpl,
     apiBase: 'https://w.example',
     now: (clock || { now: () => NOW }).now,
     syncOnceImpl,
     ...(staleAfterMs === undefined ? {} : { staleAfterMs }),
+    ...(slowWriteAfterMs === undefined ? {} : { slowWriteAfterMs }),
   };
   const mount = () => {
     const host = doc.createElement('div');
@@ -874,7 +914,8 @@ async function concurrencyFixture({ staleAfterMs, clock, localEmpty = false } = 
   };
 }
 
-// THE CRITICAL. Reproduced verbatim before the fix: Merge held inside
+// THE CRITICAL. Reproduced verbatim before the fix (while the dialog still
+// offered Replace): Merge held inside
 // syncOnce -> close/reopen -> Try again -> Replace gave
 // ['adopt-merge','adopt-replace'] with both writes in flight at once. The
 // superseded PUT then landed after the replace, putting the record the user
@@ -901,7 +942,7 @@ test('a mount arriving while a write is in flight cannot take over from it', asy
     'nothing may take over from an unabandonable write');
   assert.equal(findButton(b.host, 'Unlink'), null,
     'and unlinking here would leave that write pushing with a token the user just revoked');
-  // Nothing under syncOnce has a timeout, so a write that never answers would
+  // The write has no deadline (by design: L63), so a write that never answers would
   // leave this on a bare spinner. With no control to offer, the text has to
   // carry the whole state: what is happening, that it cannot be interrupted,
   // and that reloading is SAFE — the gate is still raised and the
@@ -1211,7 +1252,7 @@ test('a joining mount that never clicks leaves the joining view once the live ep
 // renderJoiningStale's `wrap.append(takeOver, unlinkButton(...))`, so the
 // interleaving is identical — a control rendered before the write began, still
 // on screen after it started — but unlinkButton wired straight to doUnlink()
-// with no gate. syncOnce captured `link = getLink()` at entry (js/sync.js:83),
+// with no gate. syncOnce captured `link = getLink()` at entry,
 // so the in-flight write goes on pushing with a credential the user just
 // revoked, and its applyState has already replaced this device's items with
 // the account's. Reproduced: isLinked() false, local items ['remoteA',
@@ -1270,8 +1311,183 @@ test('a superseded episode settling does not wipe the taking-over mount mid-deci
   await settle();
   assert.ok(findButton(b.host, 'Merge'),
     'a superseded episode settling must not discard a dialog the user is deciding in');
-  assert.ok(findButton(b.host, 'Replace'), 'all three choices, not a half-rendered view');
+  assert.equal(findButton(b.host, 'Replace'), null, 'Replace this device is no longer offered');
   assert.ok(findButton(b.host, 'Cancel'));
+});
+
+// --- timeouts (punchlist L63, decided 2026-10-19) ---------------------------
+//
+// The PREVIEW is a read: with the production default it gives up at the
+// shared download deadline and is reported exactly like being offline.
+test('a preview whose read never answers gives up at the deadline and reads as offline', async (t) => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  await linkWithCode(bytesToBase64url(generateEncKey()));
+  const host = doc.createElement('div');
+  doc.body.appendChild(host);
+  const originalFetch = globalThis.fetch;
+  let reads = 0;
+  globalThis.fetch = () => { reads += 1; return new Promise(() => {}); };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const ui = initLinkUI({
+      host, applyState: (s) => s, apiBase: 'https://w.example', now: () => NOW,
+      fetchImpl: async () => { throw new Error('the preview must not use the write fetch'); },
+      syncOnceImpl: async () => { throw new Error('nothing may be adopted'); },
+    });
+    for (let i = 0; i < 20; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    assert.equal(reads, 1, 'fixture check: the preview read went out through the default');
+    assert.match(allText(host), /Checking the account/, 'fixture check: still waiting before the deadline');
+    t.mock.timers.tick(FETCH_TIMEOUT_MS);
+    await ui.settled();
+  } finally {
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+  assert.match(allText(host), /could not reach the account/);
+});
+
+// The WRITE is never abandoned (a client-side timeout does not stop the
+// server's write). Past SLOW_WRITE_MS the panel says so, and that reloading is
+// safe — and still offers no control, because nothing may interfere with it.
+test('the slow-write threshold is twenty seconds', () => {
+  assert.equal(SLOW_WRITE_MS, 20000);
+});
+
+const SLOW_TEXT = "This is taking longer than usual — it's safe to reload.";
+
+// The slow-write repaint is a REAL timer, but writeIsSlow() reads the INJECTED
+// clock. The two can disagree — a test clock, or a browser timer that fires a
+// millisecond before Date.now() agrees — and when the timer fired first the
+// repaint found writeIsSlow() false, rendered nothing new and never re-armed,
+// so the line was missed for good. Measured: inserting a 40 ms real delay
+// before clock.advance(40) failed both tests below every run.
+//
+// So these tests own the timers instead of sleeping. Every timer with a
+// non-zero delay is captured rather than scheduled (settle()'s 0 ms timers
+// pass through), and the test fires them itself: once BEFORE the injected
+// clock reaches the threshold — exactly the losing order — and once after.
+function captureTimers(t) {
+  const realSet = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  const pending = new Map();
+  let nextId = 0;
+  globalThis.setTimeout = (fn, ms) => {
+    if (!ms) return realSet(fn, ms);
+    nextId += 1;
+    const handle = { capturedTimer: nextId };
+    pending.set(handle, { fn, ms });
+    return handle;
+  };
+  globalThis.clearTimeout = (h) => {
+    if (pending.has(h)) { pending.delete(h); return undefined; }
+    return realClear(h);
+  };
+  t.after(() => { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; });
+  return {
+    delays: () => [...pending.values()].map((p) => p.ms),
+    // Fires every timer pending right now, as a real timer would: once each,
+    // and removed before it runs. Timers armed by these callbacks stay pending.
+    fireAll: () => {
+      const due = [...pending.entries()];
+      due.forEach(([h]) => pending.delete(h));
+      due.forEach(([, p]) => p.fn());
+    },
+  };
+}
+
+test('a write in flight past the threshold says it is taking longer than usual, on the mount writing it', async (t) => {
+  const clock = makeClock(Date.parse('2026-08-05T12:00:00.000Z'));
+  const f = await concurrencyFixture({ clock, slowWriteAfterMs: 30 });
+  t.after(() => f.releaseAll());
+  const timers = captureTimers(t);
+  const a = f.mount();
+  f.releaseGet(0);
+  await a.ui.settled();
+  f.holdNextWrite();
+  findButton(a.host, 'Merge').click();
+  await settleUntil(() => f.syncCalls.length > 0);
+  assert.deepEqual(timers.delays(), [30], 'fixture check: the writing mount armed its slow-write timer');
+  assert.ok(!allText(a.host).includes(SLOW_TEXT), 'not before the threshold');
+
+  // The timer fires while the injected clock is still 10 ms short.
+  clock.advance(20);
+  timers.fireAll();
+  assert.ok(!allText(a.host).includes(SLOW_TEXT), 'still not before the threshold');
+  assert.deepEqual(timers.delays(), [10],
+    'a timer that fired before the clock passed the threshold must re-arm for the time remaining');
+
+  clock.advance(10);
+  timers.fireAll();
+  assert.ok(allText(a.host).includes(SLOW_TEXT), 'past the threshold the panel says so');
+  assert.equal(findAll(a.host, 'BUTTON').length, 0, 'and still offers no control: the write cannot be abandoned');
+  assert.deepEqual(timers.delays(), [], 'and stops re-arming once it has');
+
+  f.letWriteFinish();
+  await a.ui.settled();
+  assert.ok(!allText(a.host).includes(SLOW_TEXT), 'gone once the write settles');
+  assert.deepEqual(f.syncCalls, ['adopt-merge'], 'exactly one write ran');
+});
+
+test('a mount joining a slow write shows the same line, with no takeover and no unlink', async (t) => {
+  const clock = makeClock(Date.parse('2026-08-05T12:00:00.000Z'));
+  const f = await concurrencyFixture({ clock, slowWriteAfterMs: 30 });
+  t.after(() => f.releaseAll());
+  const timers = captureTimers(t);
+  const a = f.mount();
+  f.releaseGet(0);
+  await a.ui.settled();
+  f.holdNextWrite();
+  findButton(a.host, 'Merge').click();
+  await settleUntil(() => f.syncCalls.length > 0);
+  a.host.innerHTML = '';
+  clock.advance(5);
+  const b = f.mount();
+  assert.match(allText(b.host), /Saving your choice/, 'fixture check: b joined the write');
+  assert.deepEqual(timers.delays(), [30, 25], 'fixture check: a armed for 30 ms, b for the 25 ms remaining');
+  assert.ok(!allText(b.host).includes(SLOW_TEXT), 'not before the threshold');
+
+  // Both timers fire while the injected clock is still 10 ms short.
+  clock.advance(15);
+  timers.fireAll();
+  assert.ok(!allText(b.host).includes(SLOW_TEXT), 'still not before the threshold');
+  assert.deepEqual(timers.delays(), [10, 10],
+    'each mount must re-arm for the time remaining, not give up');
+
+  clock.advance(10);
+  timers.fireAll();
+  assert.ok(allText(b.host).includes(SLOW_TEXT), 'the joining view says so too');
+  assert.equal(findButton(b.host, 'Try again'), null);
+  assert.equal(findButton(b.host, 'Unlink'), null);
+  assert.deepEqual(timers.delays(), [], 'and neither mount re-arms once it has');
+
+  f.letWriteFinish();
+  await a.ui.settled();
+  await b.ui.settled();
+  assert.deepEqual(f.syncCalls, ['adopt-merge']);
+});
+
+// The re-arm must not outlive the write: one re-armed timer left pending when
+// the write settles, on either mount, is cleared rather than left to fire.
+test('a re-armed slow-write timer is cleared when the write settles, on the writing and the joining mount', async (t) => {
+  const clock = makeClock(Date.parse('2026-08-05T12:00:00.000Z'));
+  const f = await concurrencyFixture({ clock, slowWriteAfterMs: 30 });
+  t.after(() => f.releaseAll());
+  const timers = captureTimers(t);
+  const a = f.mount();
+  f.releaseGet(0);
+  await a.ui.settled();
+  f.holdNextWrite();
+  findButton(a.host, 'Merge').click();
+  await settleUntil(() => f.syncCalls.length > 0);
+  a.host.innerHTML = '';
+  const b = f.mount();
+  timers.fireAll(); // early: the clock has not moved
+  assert.deepEqual(timers.delays(), [30, 30], 'fixture check: both mounts re-armed');
+  f.letWriteFinish();
+  await a.ui.settled();
+  await b.ui.settled();
+  assert.deepEqual(timers.delays(), [], 'a settled write must leave no re-armed timer behind');
 });
 
 // R4-4. Every other concurrency test injects staleAfterMs or runs on a frozen
@@ -1303,6 +1519,38 @@ test('the production staleness threshold is ten seconds — not instant, and not
   await a.ui.settled();
   await b.ui.settled();
   await c.ui.settled();
+});
+
+// Same shape for the slow-write timers: one armed by the writing mount in
+// adopt(), one by a joining mount's saving view. Neither may outlive the write.
+test('a settled write leaves no slow-write timer behind, on the writing or the joining mount', async (t) => {
+  const realSet = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  const live = new Set();
+  globalThis.setTimeout = (fn, ms) => {
+    const h = realSet(fn, ms);
+    if (ms >= 1000) live.add(h);
+    return h;
+  };
+  globalThis.clearTimeout = (h) => { live.delete(h); return realClear(h); };
+  t.after(() => { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; });
+
+  const f = await concurrencyFixture();            // production SLOW_WRITE_MS
+  t.after(() => f.releaseAll());
+  const a = f.mount();
+  f.releaseGet(0);
+  await a.ui.settled();
+  f.holdNextWrite();
+  findButton(a.host, 'Merge').click();
+  await settleUntil(() => f.syncCalls.length > 0);
+  a.host.innerHTML = '';
+  const b = f.mount();
+  assert.match(allText(b.host), /Saving your choice/, 'fixture check: b joined the write');
+  assert.equal(live.size, 2, 'fixture check: both mounts armed a slow-write timer');
+  f.letWriteFinish();
+  await a.ui.settled();
+  await b.ui.settled();
+  assert.equal(live.size, 0, 'a settled write must not leave a twenty-second timer holding the event loop open');
 });
 
 // R4-5. Deleting the clearTimeout in joinActive's settle handler took
@@ -1371,10 +1619,11 @@ test('a mount joining an already-stale-ish episode waits the remaining time, not
 // covers only feed syncing), and open() installs no focus trap, so app.js's
 // own add path is reachable too. Reproduced against the real syncOnce: the
 // dialog said "1 item and 1 calendar", a second calendar was added, Replace
-// was clicked, and BOTH calendars were destroyed.
+// (since removed) was clicked, and BOTH calendars were destroyed.
 //
-// EVERY limb of the check and BOTH buttons are covered: the Merge button
-// bypassing the check entirely survived when only Replace was exercised.
+// EVERY limb of the check is covered, on Merge — the only adopting button
+// left. A Merge bypassing the check entirely once survived when only Replace
+// was exercised.
 async function dialogFixture(seed) {
   return setup({
     seed,
@@ -1392,7 +1641,7 @@ async function dialogFixture(seed) {
   });
 }
 
-for (const button of ['Merge', 'Replace this device']) {
+for (const button of ['Merge']) {
   test(`${button}: a count that moved while the dialog was open re-asks instead of acting`, async () => {
     const { host, ui, syncCalls } = await dialogFixture(() => {
       saveItems([it('local')]);
@@ -1446,7 +1695,7 @@ test('a swap that changes only remoteDeletesLocal still re-asks', async () => {
   // Same count, different records: 'doomed' (which the account deletes) is
   // replaced by one it does not.
   saveItems([it('local'), it('safe')]);
-  findButton(host, 'Replace this device').click();
+  findButton(host, 'Merge').click();
   await ui.settled();
   assert.equal(syncCalls.length, 0, 'the description changed, so the choice must be re-confirmed');
   assert.doesNotMatch(allText(host), /1 of the items and calendars on this device/i);
@@ -1454,7 +1703,7 @@ test('a swap that changes only remoteDeletesLocal still re-asks', async () => {
 
 // Minor 4: the re-ask must go back through chooseAdoption. If local emptied
 // while the dialog sat open, re-rendering the old dialog reads "This device
-// holds 0 items and 0 calendars" beside a Replace button — the exact shape
+// holds 0 items and 0 calendars" beside a choice — the exact shape
 // DA-C2 named as not an informed choice. chooseAdoption says 'auto'.
 test('a device that emptied while the dialog was open is no longer asked to choose', async () => {
   const { host, ui, syncCalls } = await dialogFixture(() => {
@@ -1465,8 +1714,8 @@ test('a device that emptied while the dialog was open is no longer asked to choo
   saveFeeds([]);
   findButton(host, 'Merge').click();
   await ui.settled();
-  assert.equal(findButton(host, 'Replace this device'), null,
-    'there is nothing left on this device to replace — offering it is not an informed choice');
+  assert.equal(findButton(host, 'Merge'), null,
+    'there is nothing left on this device to merge — offering the choice is not an informed one');
   assert.doesNotMatch(allText(host), /holds 0 items/);
   assert.deepEqual(syncCalls.map((c) => c.adoptChoice), ['adopt-bootstrap'],
     "an empty device adopts; it does not 'merge' with nothing");
@@ -1569,6 +1818,9 @@ test('the injected effects default to the production wiring', async () => {
   assert.ok(seen[0].opts && seen[0].opts.headers && /^Bearer /.test(seen[0].opts.headers.authorization),
     'the default fetchImpl must forward (url, opts) in that order — swapping them drops the Authorization header');
   assert.equal(syncCalls.length, 1);
+  assert.equal(syncCalls[0].readFetchImpl, fetchWithTimeout,
+    'the account read must default to the shared download deadline (js/fetchtimeout.js)');
+  assert.notEqual(syncCalls[0].fetchImpl, fetchWithTimeout, 'and the write must not carry it');
   const stamped = syncCalls[0].now();
   assert.ok(stamped instanceof Date);
   assert.ok(Math.abs(stamped.getTime() - Date.now()) < 60_000,
@@ -1630,6 +1882,7 @@ test('an unlinked device warns that a bare device token creates a NEW account', 
     host,
     applyState: (s) => s,
     fetchImpl: async () => { throw new Error('no network call was expected here'); },
+    readFetchImpl: async () => { throw new Error('no network call was expected here'); },
     apiBase: 'https://w.example',
     now: () => NOW,
     syncOnceImpl: async () => ({ status: 'ok' }),
@@ -1651,8 +1904,8 @@ test('an unlinked device warns that a bare device token creates a NEW account', 
 //
 // syncOnce applies BEFORE the push loop, so 'offline', 'error' and 'conflict'
 // are all reachable with the local write already landed. The panel said
-// "Nothing has been combined yet" on every one of them, and on adopt-replace
-// the local wipe is complete and irreversible by then — with Unlink offered
+// "Nothing has been combined yet" on every one of them, though the local
+// write had already landed — with Unlink offered
 // right beside the false report, so the user can act on it. Same divergence
 // class as round 3's Critical (a Cancel reversed while the panel said it was
 // not), which this branch treated as blocking.
@@ -1682,7 +1935,7 @@ test('a failure AFTER the write says the device was combined; the same failure b
     await after.ui.settled();
     const text = allText(after.host);
     assert.doesNotMatch(text, /nothing has been combined/i,
-      `${status} after applyState wrote must not report that nothing happened — on Replace the local wipe is already irreversible`);
+      `${status} after applyState wrote must not report that nothing happened — the local write has already landed`);
     assert.match(text, /already been combined/i, `${status} must say what actually happened`);
     assert.match(text, /nothing is lost|next sync/i, 'and what happens next');
   }
@@ -1705,6 +1958,58 @@ test('mounting a linked, settled device makes no network call', async () => {
   const { fetchCalls, host } = await setup({ clearGate: true });
   assert.deepEqual(fetchCalls, [], 'mounting the settings panel must not fire a request');
   assert.ok(findButton(host, 'Unlink'), 'a linked device must offer Unlink');
+});
+
+// Punchlist (decided 2026-10-19): the note said "...and the other devices keep
+// their copies" — true of the DATA, not of the KEY. Unlink erases this
+// device's link code, a device never re-displays its own, and the code is the
+// account's only decryption credential. The note must not suggest the account
+// stays readable from here or that the code can be got back from this device.
+test("the linked view's Unlink note says the link code goes, and cannot be shown again", async () => {
+  const { host } = await setup({ clearGate: true });
+  assert.ok(findButton(host, 'Unlink'), 'fixture check: the linked view');
+  const text = allText(host);
+  assert.match(text, /deletes this device's link code/i, 'the note must say the code is erased');
+  assert.match(text, /cannot be shown again/i, 'and that it cannot be recovered from this device');
+  assert.doesNotMatch(text, /keep their copies/i, 'the old wording implied nothing is lost');
+  assert.match(text, /items and calendars stay on this device/i, 'it still says local data is kept');
+});
+
+// The same facts on EVERY view that offers Unlink. The failed view and the
+// stalled-preview view still said "Nothing on this device is deleted" after
+// the linked view's note was corrected — false of the link code, which Unlink
+// erases and a device never re-displays. All three are checked here, each
+// reached the way a user reaches it.
+function assertUnlinkNoteFacts(text, label) {
+  assert.match(text, /deletes this device's link code/i, `${label}: the note must say the code is erased`);
+  assert.match(text, /cannot be shown again/i, `${label}: and that it cannot be recovered from this device`);
+  assert.match(text, /items and calendars stay on this device/i, `${label}: and that local data is kept`);
+  assert.doesNotMatch(text, /Nothing on this device is deleted/i, `${label}: the old wording denies the code is lost`);
+}
+
+test('every view that offers Unlink states the same facts about the link code', async (t) => {
+  const linked = await setup({ clearGate: true });
+  assert.ok(findButton(linked.host, 'Unlink'), 'fixture check: the linked view offers Unlink');
+  assertUnlinkNoteFacts(allText(linked.host), 'linked');
+
+  const failed = await setup({ fetchImpl: async () => { throw new TypeError('Failed to fetch'); } });
+  assert.ok(findButton(failed.host, 'Try again'), 'fixture check: the failed view');
+  assert.ok(findButton(failed.host, 'Unlink'), 'fixture check: the failed view offers Unlink');
+  assertUnlinkNoteFacts(allText(failed.host), 'failed');
+
+  const clock = makeClock(Date.parse('2026-08-05T12:00:00.000Z'));
+  const f = await concurrencyFixture({ staleAfterMs: 50, clock });
+  t.after(() => f.releaseAll());
+  const a = f.mount();
+  a.host.innerHTML = '';
+  clock.advance(60);
+  const b = f.mount();
+  assert.match(allText(b.host), /Still checking the account/, 'fixture check: the stalled-preview view');
+  assert.ok(findButton(b.host, 'Unlink'), 'fixture check: the stalled-preview view offers Unlink');
+  assertUnlinkNoteFacts(allText(b.host), 'joining-stale');
+  f.releaseGet(0);
+  await a.ui.settled();
+  await b.ui.settled();
 });
 
 test('Unlink keeps local data and says so', async () => {
@@ -1778,6 +2083,7 @@ test('a link attempt that throws renders the error and never echoes the pasted c
     host,
     applyState: (s) => s,
     fetchImpl: async () => { throw new Error('no network call was expected here'); },
+    readFetchImpl: async () => { throw new Error('no network call was expected here'); },
     apiBase: 'https://w.example',
     now: () => NOW,
     syncOnceImpl: async () => ({ status: 'ok' }),
@@ -1817,18 +2123,20 @@ test('pasting a valid link code links the device AND goes straight on to the cho
   const fetchCalls = [];
   const syncCalls = [];
   const linkedCalls = [];
+  const fakeFetch = async (url, opts) => {
+    fetchCalls.push({ url: String(url), method: (opts && opts.method) || 'GET' });
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ version: 6, blob: await encryptBlob(encKey, st({ items: [it('r')] })) }),
+    };
+  };
   const ui = initLinkUI({
     host,
     applyState: (s) => s,
     onLinked: () => linkedCalls.push(true),
-    fetchImpl: async (url, opts) => {
-      fetchCalls.push({ url: String(url), method: (opts && opts.method) || 'GET' });
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ version: 6, blob: await encryptBlob(encKey, st({ items: [it('r')] })) }),
-      };
-    },
+    fetchImpl: fakeFetch,
+    readFetchImpl: fakeFetch,
     apiBase: 'https://w.example',
     now: () => NOW,
     syncOnceImpl: async (d) => { syncCalls.push(d); return { status: 'ok', pushed: true, applied: true }; },
@@ -1847,7 +2155,7 @@ test('pasting a valid link code links the device AND goes straight on to the cho
   assert.deepEqual(fetchCalls, [{ url: 'https://w.example/data', method: 'GET' }],
     'linking must check the account in the SAME click — nothing else in the app will start that');
   assert.ok(findButton(host, 'Merge'), 'and must lead to the choice, not to a raised gate with no way forward');
-  assert.ok(findButton(host, 'Replace this device'));
+  assert.equal(findButton(host, 'Replace'), null);
   assert.ok(findButton(host, 'Cancel'));
   assert.equal(syncCalls.length, 0, 'nothing may be adopted before the user chooses');
 
@@ -1882,6 +2190,7 @@ test('a bootstrap adoption drives the real syncOnce, pushes local state and lift
     host,
     applyState: (s) => s,
     fetchImpl,
+    readFetchImpl: fetchImpl,
     apiBase: 'https://w.example',
     now: () => NOW,
   });
@@ -2074,6 +2383,7 @@ test('opening the settings panel refreshes the shell indicator', async () => {
     host,
     applyState: (s) => s,
     fetchImpl: async () => { throw new Error('offline'); },
+    readFetchImpl: async () => { throw new Error('offline'); },
     apiBase: 'https://w.example',
     now: () => NOW,
   });

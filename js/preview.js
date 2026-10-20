@@ -56,7 +56,14 @@ export function renderPreview(container, items, { onConfirm, onCancel }) {
     const end = document.createElement('input');
     end.type = 'time';
     end.value = it.endTime || '';
-    time.addEventListener('input', () => { draft[i].time = time.value || null; if (!time.value) { end.value = ''; draft[i].endTime = null; } });
+    // Hidden until the row has a start time, as manual add's #entry-end is
+    // (app.js): an end with no start is not a range the record can hold.
+    end.hidden = !time.value;
+    time.addEventListener('input', () => {
+      draft[i].time = time.value || null;
+      end.hidden = !time.value;
+      if (!time.value) { end.value = ''; draft[i].endTime = null; }
+    });
     end.addEventListener('input', () => { draft[i].endTime = end.value || null; });
     fields.append(date, type, time, end);
     row.append(title, fields);
