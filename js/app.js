@@ -26,7 +26,7 @@ import { uid } from './uid.js';
 import { syncOnce, recordSyncFailure } from './sync.js';
 import { isLinked, isAdoptionPending } from './auth.js';
 import { merge, SCHEMA_VERSION } from './merge.js';
-import { renderSyncStatus } from './linkui.js';
+import { renderSyncStatus, syncWriteStarted, syncWriteSettled } from './linkui.js';
 import { WORKER_URL } from './config.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
 
@@ -1031,7 +1031,18 @@ async function runSync() {
       // The read gives up at the shared download deadline and reports as
       // offline; the write never does (js/sync.js, punchlist L63).
       readFetchImpl: fetchWithTimeout,
-      fetchImpl: (u, o) => fetch(u, o),
+      // The write, wrapped so the shell indicator can say "taking longer than
+      // usual" once it has been in flight past linkui.js's SLOW_WRITE_MS, and
+      // clear it when it settles. Only the PUT travels through fetchImpl, so
+      // a slow read never shows it, and sync.js needs no change.
+      fetchImpl: async (u, o) => {
+        syncWriteStarted();
+        try {
+          return await fetch(u, o);
+        } finally {
+          syncWriteSettled();
+        }
+      },
       now: () => new Date(),
       apiBase: WORKER_URL,
       applyState: applySyncedState,

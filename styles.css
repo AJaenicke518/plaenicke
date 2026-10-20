@@ -461,6 +461,8 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   background: var(--card);
 }
 .sync-indicator[hidden] { display: none; }
+/* A sync write that is slow, not broken: same place, not styled as a failure. */
+.sync-indicator-slow { border-color: var(--line); color: var(--muted); }
 .link-ui > .note { margin: 0 0 8px; }
 .link-ui h4 {
   font-size: 0.8rem;

@@ -279,8 +279,19 @@ function paintStatus(el, now) {
 // problem text is one CSS regression away from reporting a failure that was
 // fixed hours ago — and the whole value of this element is that what it says
 // can be trusted.
-function paintShellIndicator(el) {
+//
+// A slow write outranks a lastError (one left by an EARLIER attempt — the
+// write in flight is what is current, and it clears or re-records lastError
+// when it settles) but not a corrupt code or a pending adoption, which no
+// ordinary write can resolve. It is not a failure, so it is not styled as one.
+function paintShellIndicator(el, now = new Date()) {
   const kind = classifySyncState(readSyncFacts());
+  if ((kind === SYNC_OK || kind === SYNC_ERROR) && shellWriteIsSlow(now)) {
+    el.hidden = false;
+    el.textContent = SHELL_SLOW_WRITE_TEXT;
+    el.className = 'sync-indicator sync-indicator-slow';
+    return;
+  }
   const attention = shellNeedsAttention(kind);
   el.hidden = !attention;
   el.textContent = attention ? SHELL_TEXT[kind] : '';
@@ -300,7 +311,7 @@ export function renderSyncStatus(now = new Date()) {
   const el = document.getElementById(SYNC_STATUS_ID);
   if (el) paintStatus(el, now);
   const shell = document.getElementById(SHELL_SYNC_STATUS_ID);
-  if (shell) paintShellIndicator(shell);
+  if (shell) paintShellIndicator(shell, now);
 }
 
 // --- the panel -------------------------------------------------------------
@@ -439,6 +450,68 @@ const SLOW_WRITE_TEXT = "This is taking longer than usual — it's safe to reloa
 // When the write now in flight began (module scope, like writeInFlight, so a
 // joining mount can tell how long the live write has been running).
 let writeStartedAt = 0;
+
+// Repaints once `isSlow()` turns true. The timer is REAL but `isSlow()` reads
+// the caller's clock, and the two can disagree (a test clock; a timer that
+// fires a millisecond before Date.now() agrees). A one-shot timer that fired
+// first found the write not yet slow, repainted nothing new and was never
+// armed again, so the line was missed for good (d844ba7). So a timer that
+// fires early re-arms for `remainingMs()` — the time still remaining by the
+// same clock `isSlow()` reads. The delay is always > 0 there (not slow means
+// time remains), so this cannot spin. It stops when the line is shown, or
+// when `isLive()` turns false (the write settled, or the view moved on; the
+// caller also clears the handle). Every re-arm passes its handle to `keep`,
+// so the caller's clearTimeout always reaches the live one. ONE mechanism for
+// both the linking panel and the shell indicator, so they cannot drift onto
+// differently-clocked timers.
+function armSlowRepaint({ remainingMs, isLive, isSlow, repaint, keep }) {
+  keep(setTimeout(() => {
+    if (!isLive()) return;
+    if (isSlow()) repaint();
+    else armSlowRepaint({ remainingMs, isLive, isSlow, repaint, keep });
+  }, Math.max(0, remainingMs())));
+}
+
+// THE SHELL'S OWN SLOW-WRITE LINE, for an ordinary background sync (app.js's
+// runSync). app.js wraps the PUT's fetch — and only the PUT's: the read has
+// its own deadline and reports as offline — in syncWriteStarted /
+// syncWriteSettled, so js/sync.js is untouched. The state lives HERE, not in
+// app.js, because renderSyncStatus is called with no arguments from several
+// places; any of those repaints must keep showing the line while the write is
+// still slow. The clock is Date (new Date()), the same one renderSyncStatus
+// defaults to. runSync is serialised by its syncInFlight flag, so at most one
+// such write is in flight.
+const SHELL_SLOW_WRITE_TEXT = "Sync is taking longer than usual — it's safe to reload.";
+let shellWriteInFlight = false;
+let shellWriteStartedAt = 0;
+let shellSlowTimer = null;
+
+function shellWriteIsSlow(now) {
+  return shellWriteInFlight && now.getTime() - shellWriteStartedAt >= SLOW_WRITE_MS;
+}
+
+export function syncWriteStarted() {
+  clearTimeout(shellSlowTimer);
+  shellWriteInFlight = true;
+  shellWriteStartedAt = Date.now();
+  armSlowRepaint({
+    remainingMs: () => SLOW_WRITE_MS - (Date.now() - shellWriteStartedAt),
+    isLive: () => shellWriteInFlight,
+    isSlow: () => shellWriteIsSlow(new Date()),
+    repaint: () => renderSyncStatus(),
+    keep: (h) => { shellSlowTimer = h; },
+  });
+}
+
+// Cleared and nulled, so no handle outlives the write (a stale handle passed
+// to a later clearTimeout is the MockTimers trap CLAUDE.md describes).
+export function syncWriteSettled() {
+  const wasSlow = shellWriteIsSlow(new Date());
+  shellWriteInFlight = false;
+  clearTimeout(shellSlowTimer);
+  shellSlowTimer = null;
+  if (wasSlow) renderSyncStatus();
+}
 
 // Rendered beside every Unlink button (linked, failed, stalled preview). The
 // link code is the account's only decryption credential and a device never
@@ -663,24 +736,19 @@ export function initLinkUI(options = {}) {
     return writeInFlight && now().getTime() - writeStartedAt >= slowWriteAfterMs;
   }
 
-  // Repaints once writeIsSlow() turns true. The timer is REAL but writeIsSlow()
-  // reads the INJECTED clock, and the two can disagree (a test clock; a timer
-  // that fires a millisecond before Date.now() agrees). A one-shot timer that
-  // fired first found writeIsSlow() false, repainted nothing new and was never
-  // armed again, so the line was missed for good. So a timer that fires early
-  // re-arms for the time still remaining by the same clock writeIsSlow() reads.
-  // The delay is always > 0 there (writeIsSlow() false means time remains), so
-  // this cannot spin. It stops when the line is shown, when the write settles
-  // (writeInFlight false; the caller also clears the handle), or when this
-  // mount's view has moved on (`stillShowing`). Every re-arm passes its handle
-  // to `keep`, so the caller's clearTimeout always reaches the live one.
+  // Repaints this mount once writeIsSlow() turns true, by the INJECTED clock
+  // writeIsSlow() reads — see armSlowRepaint (module scope) for why a timer
+  // that fires early re-arms. Stops when the write settles (writeInFlight
+  // false; the caller also clears the handle) or when this mount's view has
+  // moved on (`stillShowing`).
   function armSlowWriteRepaint(stillShowing, keep) {
-    const remaining = slowWriteAfterMs - (now().getTime() - writeStartedAt);
-    keep(setTimeout(() => {
-      if (!writeInFlight || !stillShowing()) return;
-      if (writeIsSlow()) render();
-      else armSlowWriteRepaint(stillShowing, keep);
-    }, Math.max(0, remaining)));
+    armSlowRepaint({
+      remainingMs: () => slowWriteAfterMs - (now().getTime() - writeStartedAt),
+      isLive: () => writeInFlight && stillShowing(),
+      isSlow: writeIsSlow,
+      repaint: render,
+      keep,
+    });
   }
 
   // BRANCH ON preview.status BEFORE CONSULTING chooseAdoption (DA-C3).

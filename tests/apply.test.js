@@ -10,7 +10,7 @@ import {
 import { linkWithCode, clearAdoptionPending } from '../js/auth.js';
 import { FETCH_TIMEOUT_MS } from '../js/fetchtimeout.js';
 import { bytesToBase64url, TOKEN_BYTES } from '../js/crypto.js';
-import { SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID } from '../js/linkui.js';
+import { SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID, SLOW_WRITE_MS } from '../js/linkui.js';
 import { addDays, startOfWeek, weekLabel } from '../js/timegrid.js';
 import { formatDayLabel } from '../js/freshness.js';
 
@@ -4116,4 +4116,203 @@ test('visible-only sync: with no visibilityState at all, the tab syncs as before
     net.restore();
   }
   assert.deepEqual(net.requests.map((r) => r.method), ['GET', 'PUT'], 'an undefined visibilityState syncs as visible');
+});
+
+// =========================================================================
+// "Taking longer than usual" on the main screen, for an ordinary sync
+// =========================================================================
+//
+// The account WRITE has no deadline (punchlist L63), so a slow one used to
+// show nothing at all outside the linking panel. Past SLOW_WRITE_MS in flight
+// the shell indicator says so, and clears when the write settles. Manual
+// setTimeout (see installManualTimers) plus a mocked Date, so the clock the
+// threshold is measured by moves only when the test moves it.
+
+const SHELL_SLOW = /^Sync is taking longer than usual — it's safe to reload\.$/;
+
+function holdAccountWrite() {
+  const requests = [];
+  let releasePut = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    requests.push(method);
+    if (method === 'GET') return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) });
+    return new Promise((resolve) => {
+      releasePut = () => resolve({ ok: true, status: 200, json: async () => ({ version: 1 }) });
+    });
+  };
+  return {
+    requests,
+    release: () => releasePut(),
+    inFlight: () => releasePut !== null,
+    restore() { globalThis.fetch = originalFetch; },
+  };
+}
+
+async function linkedWithAPendingPush(id) {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  saveItems([record({ id, title: id })]);
+  const shell = globalThis.document.getElementById(SHELL_SYNC_STATUS_ID);
+  shell.hidden = true;
+  shell.textContent = '';
+  return shell;
+}
+
+test('slow sync write: the shell says so past the threshold, and clears when the write lands', async (t) => {
+  const shell = await linkedWithAPendingPush('slow-shell');
+  // A failure left over from an earlier attempt: the write now in flight is
+  // what is current, so the slow line is what the shell shows.
+  saveSyncState({ ...loadSyncState(), lastError: 'offline' });
+  const T0 = Date.UTC(2026, 9, 19, 12, 0, 0);
+  t.mock.timers.enable({ apis: ['Date'], now: T0 });
+  const net = holdAccountWrite();
+  const timers = installManualTimers();
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    for (let i = 0; i < 200 && !net.inFlight(); i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    assert.deepEqual(net.requests, ['GET', 'PUT'], 'fixture check: the write is in flight');
+    assert.doesNotMatch(shell.textContent, SHELL_SLOW, 'not slow yet');
+    assert.equal(timers.live(SLOW_WRITE_MS), 1, 'one repaint is armed for the threshold');
+
+    // A timer that fires before the clock agrees re-arms for what remains,
+    // by the same clock (d844ba7) — it does not give up.
+    t.mock.timers.setTime(T0 + 5000);
+    timers.fire(SLOW_WRITE_MS);
+    assert.doesNotMatch(shell.textContent, SHELL_SLOW, 'an early timer shows nothing');
+    assert.equal(timers.live(SLOW_WRITE_MS - 5000), 1, 'and re-arms for the time still remaining');
+
+    t.mock.timers.setTime(T0 + SLOW_WRITE_MS);
+    timers.fire(SLOW_WRITE_MS - 5000);
+    assert.equal(shell.hidden, false, 'past the threshold the shell indicator is shown');
+    assert.match(shell.textContent, SHELL_SLOW);
+
+    // Any other repaint while the write is still slow keeps the line.
+    const { renderSyncStatus } = await import('../js/linkui.js');
+    renderSyncStatus();
+    assert.match(shell.textContent, SHELL_SLOW, 'a repaint from elsewhere keeps the slow line');
+
+    net.release();
+    await drain();
+    assert.equal(loadSyncState().version, 1, 'fixture check: the write landed');
+    assert.equal(shell.hidden, true, 'a write that landed clears the line');
+    assert.equal(shell.textContent, '');
+    assert.equal(timers.live(SLOW_WRITE_MS) + timers.live(SLOW_WRITE_MS - 5000), 0, 'no repaint timer is left behind');
+  } finally {
+    // A failed assertion must not leave this write hanging: runSync would
+    // stay in flight and every later test's sync would queue behind it.
+    if (net.inFlight()) { net.release(); await drain(); }
+    timers.restore();
+    net.restore();
+    t.mock.timers.reset();
+  }
+});
+
+test('slow sync write: a write that settles quickly leaves no timer behind and shows nothing', async (t) => {
+  const shell = await linkedWithAPendingPush('fast-shell');
+  const T0 = Date.UTC(2026, 9, 19, 13, 0, 0);
+  t.mock.timers.enable({ apis: ['Date'], now: T0 });
+  const net = holdAccountWrite();
+  const timers = installManualTimers();
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    for (let i = 0; i < 200 && !net.inFlight(); i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    assert.equal(timers.live(SLOW_WRITE_MS), 1, 'fixture check: the repaint was armed when the write began');
+    net.release();
+    await drain();
+    assert.equal(loadSyncState().version, 1, 'fixture check: the write landed');
+    assert.equal(timers.live(SLOW_WRITE_MS), 0, 'the settled write cleared its repaint timer');
+    // Even if the clock now passes the threshold, nothing is in flight.
+    t.mock.timers.setTime(T0 + 10 * SLOW_WRITE_MS);
+    const { renderSyncStatus } = await import('../js/linkui.js');
+    renderSyncStatus();
+    assert.equal(shell.hidden, true);
+    assert.doesNotMatch(shell.textContent, SHELL_SLOW);
+  } finally {
+    // A failed assertion must not leave this write hanging: runSync would
+    // stay in flight and every later test's sync would queue behind it.
+    if (net.inFlight()) { net.release(); await drain(); }
+    timers.restore();
+    net.restore();
+    t.mock.timers.reset();
+  }
+});
+
+// A READ has its own deadline and reports as offline (js/fetchtimeout.js); it
+// must never show the write's "safe to reload" line.
+test('slow sync write: a slow READ never shows the slow-write line', async (t) => {
+  const shell = await linkedWithAPendingPush('slow-read');
+  const T0 = Date.UTC(2026, 9, 19, 14, 0, 0);
+  t.mock.timers.enable({ apis: ['Date'], now: T0 });
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    requests.push((opts && opts.method) || 'GET');
+    return new Promise(() => {});
+  };
+  const timers = installManualTimers();
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    await drain();
+    assert.deepEqual(requests, ['GET'], 'fixture check: the read is in flight');
+    assert.equal(timers.live(SLOW_WRITE_MS), 0, 'no slow-write repaint is armed for a read');
+    t.mock.timers.setTime(T0 + 2 * SLOW_WRITE_MS);
+    const { renderSyncStatus } = await import('../js/linkui.js');
+    renderSyncStatus();
+    assert.doesNotMatch(shell.textContent, SHELL_SLOW, 'a slow read is not a slow write');
+    timers.fire(FETCH_TIMEOUT_MS);
+    await drain();
+  } finally {
+    timers.restore();
+    globalThis.fetch = originalFetch;
+    t.mock.timers.reset();
+  }
+  assert.equal(loadSyncState().lastError, 'offline', 'fixture check: the read gave up as offline');
+  assert.doesNotMatch(shell.textContent, SHELL_SLOW);
+});
+
+// syncOnce retries a 409 with a SECOND write. The first write's slow line must
+// clear when that write settles, not linger over the fresh retry.
+test('slow sync write: the line clears when its write settles, even when a retry follows', async (t) => {
+  const shell = await linkedWithAPendingPush('slow-409');
+  const T0 = Date.UTC(2026, 9, 19, 15, 0, 0);
+  t.mock.timers.enable({ apis: ['Date'], now: T0 });
+  const requests = [];
+  const pending = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    requests.push(method);
+    if (method === 'GET') return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) });
+    return new Promise((resolve) => { pending.push(resolve); });
+  };
+  const timers = installManualTimers();
+  const waitForPut = async (n) => {
+    for (let i = 0; i < 200 && pending.length < n; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+  };
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    await waitForPut(1);
+    t.mock.timers.setTime(T0 + SLOW_WRITE_MS);
+    timers.fire(SLOW_WRITE_MS);
+    assert.match(shell.textContent, SHELL_SLOW, 'fixture check: the first write is slow');
+
+    pending[0]({ ok: false, status: 409, json: async () => ({ version: 1, blob: '' }) });
+    await waitForPut(2);
+    assert.deepEqual(requests, ['GET', 'PUT', 'PUT'], 'fixture check: the conflict was retried');
+    assert.doesNotMatch(shell.textContent, SHELL_SLOW, 'the settled write took its line with it');
+    pending[1]({ ok: true, status: 200, json: async () => ({ version: 2 }) });
+    await drain();
+  } finally {
+    for (const resolve of pending) resolve({ ok: true, status: 200, json: async () => ({ version: 2 }) });
+    await drain();
+    timers.restore();
+    globalThis.fetch = originalFetch;
+    t.mock.timers.reset();
+  }
+  assert.equal(loadSyncState().version, 2, 'fixture check: the retry landed');
+  assert.equal(timers.live(SLOW_WRITE_MS), 0, 'no repaint timer is left behind');
 });
