@@ -567,7 +567,9 @@ function openItem(item) {
       onClose: () => focusOpener(item.id),
     });
   } catch (e) {
-    setMessage(`This item can't be edited here (${e.message}).`);
+    // The reason is for a developer (e.g. "Unknown type: x"), not the user.
+    console.error('openItemSheet refused to open', item.id, e);
+    setMessage("This item can't be edited here.");
   }
 }
 

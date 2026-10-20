@@ -1390,9 +1390,10 @@ test('open: a Google feed event links to that day in Google Calendar, unpadded',
   }
 });
 
-test('open: an item of an unknown type shows a message and mounts no sheet', async () => {
+test('open: an item of an unknown type shows a message and mounts no sheet', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
+  const logged = t.mock.method(console, 'error', () => {});
   seed([record({ id: 'open-bogus', type: 'bogus', title: 'Open me with a strange type', date: '2099-02-01' })]);
   globalThis.document.getElementById('message').textContent = '';
   assert.equal(sheetHost().children.length, 0, 'fixture check: no sheet left over from an earlier test');
@@ -1400,8 +1401,10 @@ test('open: an item of an unknown type shows a message and mounts no sheet', asy
   assert.ok(btn, 'fixture check: the row renders');
   assert.doesNotThrow(() => click(btn), 'a sheet that refuses to open must not throw out of the tap');
   assert.equal(sheetHost().children.length, 0, 'no sheet may be mounted');
-  assert.match(messageText(), /can't be edited here/);
-  assert.match(messageText(), /bogus/, 'the message carries the reason');
+  assert.equal(messageText(), "This item can't be edited here.",
+    'plain wording: the internal error is not shown to the user');
+  assert.equal(logged.mock.callCount(), 1, 'the internal detail goes to the console instead');
+  assert.match(logged.mock.calls[0].arguments.map(String).join(' '), /Unknown type: bogus/);
   seed([]);
 });
 
