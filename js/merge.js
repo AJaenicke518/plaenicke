@@ -13,11 +13,13 @@
 //
 // Skew reaches PRUNING too, with no edit involved: tombstone expiry is a
 // clock comparison. prune() (below) caps "now" at the newest timestamp in
-// the data and never drops a tombstone that is still suppressing a record,
-// so a device whose clock is months fast no longer expires every deletion
-// on its first sync. It is still exposed once that device writes, because
-// its own writes then become the newest data — prune()'s comment sets out
-// exactly what is and is not covered.
+// the data, and never drops a tombstone that suppresses a record held by
+// either side of the sync in progress — so a device whose clock is months
+// fast no longer expires every deletion on its first sync. It cannot see a
+// record held only by a device that is not syncing right now. A fast device
+// is still exposed once it writes (its own writes become the newest data),
+// and a clock a year fast OR slow makes two devices push at each other on
+// every sync — prune()'s comment sets out exactly what is and is not covered.
 //
 // AN EDIT PATH NOW EXISTS, AND IT IS SIX FIELDS PLUS ONE BOOLEAN. The To-do
 // checkbox (V6 § 5.1) rewrites `done`; the item sheet (edit-items spec) rewrites
@@ -194,14 +196,28 @@ export function applyTombstones(records, tombstones, kind) {
 // PRUNE — when a tombstone may be forgotten. A tombstone is dropped only when
 // BOTH hold:
 //
-//   1. It suppressed nothing in this merge. If either input still holds a
-//      record this tombstone deletes, it is still doing work. This is not
-//      about clocks: syncOnce merges, and app.js's applySyncedState then
-//      merges AGAIN against live storage, which still holds every record the
-//      first merge suppressed. Pruning the tombstone in the first merge left
-//      the second with nothing to suppress with, and the record came back and
-//      was pushed — on a correctly clocked device, whenever a tombstone over
-//      90 days old met a device still holding its record.
+//   1. It is not doing work in this sync. A tombstone is doing work when
+//      either input of this merge holds a record it deletes — and, in the
+//      apply re-merge (keepRemoteTombstones, below), when the first merge
+//      kept it. This is not about clocks. syncOnce merges this device with
+//      the server, then app.js's applySyncedState merges AGAIN against live
+//      storage, and pushes THAT. The two merges see different records:
+//        - this device holds the record, the tombstone came from the server:
+//          live storage still holds the record, so the re-merge sees it
+//          suppressed and keeps the tombstone on its own. (Before this
+//          clause, the first merge pruned it and the re-merge resurrected
+//          the record and pushed it, on a correct clock.)
+//        - only the SERVER holds the record, the tombstone is this device's:
+//          live storage never held it, so in the re-merge the tombstone
+//          suppresses nothing. That merge is told keepRemoteTombstones —
+//          its `remote` is the first merge's already-pruned output, and
+//          every tombstone in it is one the first merge kept — or the push
+//          carries neither the record nor its tombstone and the next device
+//          holding the record pushes it back.
+//      WHAT CLAUSE 1 CANNOT SEE: a record held only by a device that is not
+//      part of this sync. Once every syncing device has aged the tombstone
+//      out, that device brings the record back when it returns — the
+//      long-offline gap (spec § 12).
 //   2. It is more than TOMBSTONE_MAX_AGE_DAYS older than the EARLIER of this
 //      device's clock and the newest timestamp in the data (every record's
 //      updatedAt and every tombstone's deletedAt, before pruning).
@@ -225,13 +241,17 @@ export function applyTombstones(records, tombstones, kind) {
 // WHAT IT DOES NOT FIX (tests/convergence.test.js, the year-fast test). Once
 // the fast device WRITES, its own records carry its clock and are the newest
 // data there is, so clause 2 no longer protects it. Clause 1 still stops any
-// record it holds from resurrecting, but a tombstone that suppresses nothing
-// is then pruned by the fast device and restored by a correctly clocked one,
-// and both push on every sync for as long as the clock is wrong. And a third
-// device returning with a record whose tombstone was pruned meanwhile still
-// resurrects it — the long-offline gap (spec § 12) — sooner than it should.
-// Nothing in the data distinguishes "my clock is a year fast and I just
-// wrote" from "a year passed and I just wrote"; only a clock the devices
+// record either side holds from resurrecting, but a tombstone that suppresses
+// nothing is then pruned by the fast device and restored by a correctly
+// clocked one, and both push on every sync for as long as the clock is wrong.
+// A clock a year SLOW does the same, and needs no write to do it: its cutoff
+// is its own clock less 90 days, a year early, so it keeps an idle tombstone
+// between 90 days and about 15 months old that a correctly clocked device
+// prunes, and restores it on every sync. And a third device returning with a
+// record whose tombstone was pruned meanwhile still resurrects it — the
+// long-offline gap — sooner than it should when a fast device did the
+// pruning. Nothing in the data distinguishes "my clock is a year fast and I
+// just wrote" from "a year passed and I just wrote"; only a clock the devices
 // share (the server's) could.
 function prune(tombstones, now, newest, keep) {
   const cutoff = Math.min(now.getTime(), newest) - TOMBSTONE_MAX_AGE_DAYS * DAY_MS;
