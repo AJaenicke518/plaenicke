@@ -9,7 +9,7 @@ import {
 } from '../js/storage.js';
 import { linkWithCode, clearAdoptionPending } from '../js/auth.js';
 import { FETCH_TIMEOUT_MS } from '../js/fetchtimeout.js';
-import { bytesToBase64url, TOKEN_BYTES } from '../js/crypto.js';
+import { bytesToBase64url, TOKEN_BYTES, encryptBlob } from '../js/crypto.js';
 import { SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID, SLOW_WRITE_MS } from '../js/linkui.js';
 import { addDays, startOfWeek, weekLabel } from '../js/timegrid.js';
 import { formatDayLabel } from '../js/freshness.js';
@@ -936,6 +936,54 @@ test('runSync never puts a deadline on the write: a slow PUT is waited for and l
 // with a body of `null`, which throws reading `.version` — and runSync's catch
 // used to only console.log it: lastError stayed null, the indicator stayed
 // dark, and sync stopped with nothing on screen. A crash must light the dot.
+// Spec § 7 requires a quota failure to be surfaced. saveItems translates it
+// (js/storage.js), and the user-action paths are tested, but nothing drove
+// one arriving from a SYNC: the pull's apply runs app.js's real
+// applySyncedState, whose saveItems is the first write.
+test('a sync whose apply runs out of storage on plaenicke.items reads as out of storage', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const { encKey } = await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  const blob = await encryptBlob(encKey, state({ items: [record({ id: 'pulled-big', title: 'Pulled' })] }));
+  const shell = globalThis.document.getElementById(SHELL_SYNC_STATUS_ID);
+  shell.hidden = true;
+  shell.textContent = '';
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    requests.push(method);
+    if (method === 'GET') return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 3, blob }) });
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 4 }) });
+  };
+  const realSet = localStorage.setItem.bind(localStorage);
+  let refused = 0;
+  localStorage.setItem = (k, v) => {
+    if (k === 'plaenicke.items') {
+      refused += 1;
+      const e = new Error('full');
+      e.name = 'QuotaExceededError';
+      throw e;
+    }
+    return realSet(k, v);
+  };
+  const timers = installManualTimers();
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    await drain();
+  } finally {
+    timers.restore();
+    localStorage.setItem = realSet;
+    globalThis.fetch = originalFetch;
+  }
+  assert.ok(refused > 0, 'fixture check: the apply reached the items write');
+  assert.deepEqual(requests, ['GET'], 'nothing is pushed after a failed apply');
+  assert.equal(loadSyncState().lastError, 'QuotaError');
+  assert.equal(shell.hidden, false, 'the app shell lights');
+  assert.match(globalThis.document.getElementById(SYNC_STATUS_ID).textContent, /run out of storage/);
+});
+
 test('runSync records a lastError and lights the indicator when syncOnce itself rejects', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
