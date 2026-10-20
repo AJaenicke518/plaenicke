@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
 import { SCHEMA_VERSION } from '../js/merge.js';
 import {
-  saveItems, loadItems, saveTombstones, saveFeeds, loadFeeds, loadTombstones, loadSyncState,
+  saveItems, loadItems, saveTombstones, saveFeeds, loadFeeds, loadTombstones, loadSyncState, saveSyncState,
   loadLaunches,
 } from '../js/storage.js';
 import { linkWithCode, clearAdoptionPending } from '../js/auth.js';
@@ -889,6 +889,51 @@ test('runSync never puts a deadline on the write: a slow PUT is waited for and l
   }
   assert.equal(loadSyncState().lastError, null);
   assert.equal(loadSyncState().version, 1, 'the slow write landed and was recorded');
+});
+
+// syncOnce's contract is a RESOLVED status, and every failure it anticipates
+// records a lastError. But it can still reject — here, a PUT that answers 200
+// with a body of `null`, which throws reading `.version` — and runSync's catch
+// used to only console.log it: lastError stayed null, the indicator stayed
+// dark, and sync stopped with nothing on screen. A crash must light the dot.
+test('runSync records a lastError and lights the indicator when syncOnce itself rejects', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  saveItems([record({ id: 'crash-put', title: 'Crash put' })]);
+  saveSyncState({ ...loadSyncState(), lastSyncedAt: '2026-08-01T00:00:00.000Z', lastError: null });
+  const shell = globalThis.document.getElementById(SHELL_SYNC_STATUS_ID);
+  shell.hidden = true;
+  shell.textContent = '';
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    requests.push(method);
+    if (method === 'GET') return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) });
+    return Promise.resolve({ ok: true, status: 200, json: async () => null });
+  };
+  const logged = [];
+  const originalError = console.error;
+  console.error = (...args) => { logged.push(args); };
+  const timers = installManualTimers();
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    await drain();
+  } finally {
+    timers.restore();
+    console.error = originalError;
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual(requests, ['GET', 'PUT'], 'fixture check: the sync reached the write');
+  assert.ok(logged.some((args) => args[0] === 'sync'), 'fixture check: syncOnce rejected into runSync\'s catch');
+  const { lastError } = loadSyncState();
+  assert.equal(typeof lastError, 'string', 'a sync that crashed must be recorded as a failure');
+  assert.equal(shell.hidden, false, 'and the app shell must say so without opening Settings');
+  assert.match(shell.textContent, /\S/);
+  assert.match(globalThis.document.getElementById(SYNC_STATUS_ID).textContent, /^Sync problem: something went wrong\./,
+    'the recorded value must read as a sync problem in plain words');
 });
 
 test('runSync does not proceed into its try/finally while adoption is pending', async () => {

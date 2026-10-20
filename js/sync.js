@@ -21,6 +21,16 @@ function localState() {
 
 function record(patch) { saveSyncState({ ...loadSyncState(), ...patch }); }
 
+// For a caller whose syncOnce REJECTED instead of resolving with a status.
+// Every failure syncOnce anticipates records its own lastError; one it did
+// not anticipate escapes as a throw, and without this nothing records it, so
+// the shell indicator stays dark while sync has stopped. Same record path and
+// the same err.name convention as the catches below; 'SyncError' (no label of
+// its own, so it reads as "something went wrong") only when there is no name.
+export function recordSyncFailure(err) {
+  record({ lastError: (err && err.name) || 'SyncError' });
+}
+
 // TWO FETCHES, INJECTED SEPARATELY (punchlist L63, decided 2026-10-19).
 //   readFetchImpl — GET /data. Production passes js/fetchtimeout.js's
 //     fetchWithTimeout, so a read that never answers gives up and is reported

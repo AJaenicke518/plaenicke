@@ -23,7 +23,7 @@ import { openItemSheet } from './itemsheet.js';
 import { showToast } from './toast.js';
 import { applyEdit, typeChangePatch, snapshotOf, nextStamp, EDITABLE_FIELDS } from './edit.js';
 import { uid } from './uid.js';
-import { syncOnce } from './sync.js';
+import { syncOnce, recordSyncFailure } from './sync.js';
 import { isLinked, isAdoptionPending } from './auth.js';
 import { merge, SCHEMA_VERSION } from './merge.js';
 import { renderSyncStatus } from './linkui.js';
@@ -1022,6 +1022,9 @@ async function runSync() {
   } catch (err) {
     // Never let a sync failure break the app; local data keeps rendering.
     console.error('sync', err && err.name);
+    // But never let it be SILENT either: record it, so the renderSyncStatus
+    // below lights the shell indicator instead of leaving it dark.
+    recordSyncFailure(err);
   } finally {
     syncInFlight = false;
     renderSyncStatus();
