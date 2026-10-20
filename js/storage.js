@@ -83,6 +83,24 @@ export function serializeFeeds(feeds) {
   return JSON.stringify(feeds);
 }
 
+// THIS FILTER CAN DESTROY EVERY CALENDAR SUBSCRIPTION, silently and for good.
+// A feed it rejects is gone from loadFeeds(), and the next saveFeeds (any
+// colour tap, any sync apply) writes the list back without it. A feed URL is
+// a capability token nothing on screen can restore (CLAUDE.md, "Feed URLs are
+// unrecoverable").
+//
+// `color` and `hidden` are PER-DEVICE fields that never travel over the wire
+// (spec 6.3: toWire strips them, merge.js's pickFeed hands a first-seen feed
+// over with color: null, feeds.js's applyRemoteFeeds assigns one). So a feed
+// reaching this filter from a sync is exactly the shape it rejects unless
+// applyRemoteFeeds did its job. The three call-site warnings live at pickFeed
+// (js/merge.js), applyRemoteFeeds (js/feeds.js) and syncOnce (js/sync.js).
+//
+// Before you change it: adding a required field drops every stored feed that
+// predates it (backfill it in the .map below instead, as updatedAt is);
+// adding a per-device field means applyRemoteFeeds must assign it, or every
+// feed pulled from another device is dropped here; relaxing a check lets junk
+// reach every render site.
 export function deserializeFeeds(json) {
   if (!json) return [];
   let parsed;
