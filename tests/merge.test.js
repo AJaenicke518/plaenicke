@@ -121,6 +121,15 @@ test('tombstones older than 90 days are pruned; newer ones are kept', () => {
   assert.deepEqual(out.tombstones.map(t => t.id), ['new']);
 });
 
+// Moved here from storage.test.js when its dead pruneTombstones copy was
+// removed: this is the live prune, and before this test nothing failed when
+// its unparseable-deletedAt guard was flipped to drop.
+test('prune keeps a tombstone whose deletedAt cannot be parsed', () => {
+  const out = merge(state(), state({ tombstones: [
+    { id: 'corrupt', kind: 'item', deletedAt: 'not-a-date' }] }), NOW);
+  assert.deepEqual(out.tombstones.map(t => t.id), ['corrupt']);
+});
+
 // --- prune under clock skew ---------------------------------------------------
 //
 // A device whose clock runs far ahead must not age out tombstones that are

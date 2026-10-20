@@ -159,11 +159,9 @@ export function saveFeeds(feeds) {
 // Tombstones are NOT kept until every device has seen them: merge() drops any
 // that suppresses nothing and is more than 90 days older than the earlier of
 // the device clock and the newest data (js/merge.js's prune), so a device
-// offline for longer can bring a deleted record back (spec § 12).
-// pruneTombstones below is NOT that rule and has no production caller.
+// offline for longer can bring a deleted record back (spec § 12). That prune
+// is the only one; nothing in this file ages tombstones out.
 export const TOMBSTONES_KEY = 'plaenicke.syncTombstones';
-const TOMBSTONE_MAX_AGE_DAYS = 90;
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 export function loadTombstones() {
   const json = localStorage.getItem(TOMBSTONES_KEY);
@@ -203,17 +201,6 @@ export function addTombstone(id, kind, deletedAt) {
   const kept = existing.filter(t => !(t.id === id && t.kind === kind));
   kept.push({ id, kind, deletedAt });
   saveTombstones(kept);
-}
-
-export function pruneTombstones(list, now, maxAgeDays = TOMBSTONE_MAX_AGE_DAYS) {
-  const cutoff = now.getTime() - maxAgeDays * DAY_MS;
-  return list.filter(t => {
-    const parsed = Date.parse(t.deletedAt);
-    // An unparseable deletedAt must not cause a tombstone to be dropped:
-    // losing it would let the deleted item resurrect on the next sync.
-    if (Number.isNaN(parsed)) return true;
-    return parsed >= cutoff;
-  });
 }
 
 // --- feed cache ---

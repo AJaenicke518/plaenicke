@@ -4,7 +4,7 @@ import {
   serializeItems, deserializeItems, saveItems,
   serializeFeeds, deserializeFeeds, loadFeeds, saveFeeds,
   serializeFeedCache, deserializeFeedCache, loadFeedCache, saveFeedCache,
-  loadTombstones, saveTombstones, addTombstone, pruneTombstones,
+  loadTombstones, saveTombstones, addTombstone,
   QuotaError,
 } from '../js/storage.js';
 import { installFakeLocalStorage } from './fake-localstorage.js';
@@ -282,21 +282,6 @@ test('addTombstone keeps the newer deletedAt even when the newer one arrives fir
   const out = loadTombstones();
   assert.equal(out.length, 1);
   assert.equal(out[0].deletedAt, '2026-08-02T00:00:00.000Z');
-});
-
-test('pruneTombstones drops entries older than the window and keeps the rest', () => {
-  const now = new Date('2026-08-01T00:00:00.000Z');
-  const list = [
-    { id: 'old', kind: 'item', deletedAt: '2026-01-01T00:00:00.000Z' },
-    { id: 'new', kind: 'item', deletedAt: '2026-07-30T00:00:00.000Z' },
-  ];
-  assert.deepEqual(pruneTombstones(list, now).map(t => t.id), ['new']);
-});
-
-test('pruneTombstones retains an entry whose deletedAt cannot be parsed', () => {
-  const now = new Date('2026-08-01T00:00:00.000Z');
-  const list = [{ id: 'corrupt', kind: 'item', deletedAt: 'not-a-date' }];
-  assert.deepEqual(pruneTombstones(list, now).map(t => t.id), ['corrupt']);
 });
 
 // --- saveItems quota handling ---
