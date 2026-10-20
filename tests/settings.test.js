@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { installFakeLocalStorage } from './fake-localstorage.js';
-import { makeFakeDocument, makeFakeWindow } from './fake-dom.js';
+import { makeFakeDocument, makeFakeWindow, allText } from './fake-dom.js';
 import {
   loadFeeds, saveFeeds, saveItems, loadItems, loadSyncState, loadTombstones, loadFeedCache, saveFeedCache,
 } from '../js/storage.js';
@@ -399,12 +399,6 @@ test('settings: the panel refuses to open its sync section without an applyState
 // renderCalendars(). After adopting an account with calendars the panel still
 // read "No calendars linked yet". Display only — reapplyFeedField, handleAdd
 // and removeFeed all re-read storage before writing — but wrong on screen.
-function allText(el) {
-  let out = el.textContent || '';
-  for (const c of el.children) out += ` ${allText(c)}`;
-  return out;
-}
-
 async function waitFor(predicate, label) {
   for (let i = 0; i < 200; i += 1) {
     if (predicate()) return;

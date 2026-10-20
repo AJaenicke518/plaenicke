@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
-import { makeFakeDocument } from './fake-dom.js';
+import { makeFakeDocument, allText, findAll, fire } from './fake-dom.js';
 import {
   describeSyncStatus, classifyPastedCode, chooseAdoption, renderSyncStatus, SLOW_WRITE_MS,
   initLinkUI, failureText, SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID,
@@ -32,12 +32,6 @@ function installDom() {
   return globalThis.document;
 }
 
-function allText(el) {
-  let out = el.textContent || '';
-  for (const c of el.children) out += ` ${allText(c)}`;
-  return out;
-}
-
 // Everything a screen reader or a devtools inspector can see EXCEPT the value
 // of an input — i.e. every place a link code must never appear.
 //
@@ -59,28 +53,12 @@ function allNonValueStrings(el) {
   return out;
 }
 
-function findAll(el, tag) {
-  const out = [];
-  const walk = (node) => {
-    for (const c of node.children) {
-      if (c.tagName === tag) out.push(c);
-      walk(c);
-    }
-  };
-  walk(el);
-  return out;
-}
-
 function findButton(el, text) {
   return findAll(el, 'BUTTON').find((b) => (b.textContent || '').includes(text)) || null;
 }
 
 function findInput(el, ariaLabel) {
   return findAll(el, 'INPUT').find((i) => i.getAttribute('aria-label') === ariaLabel) || null;
-}
-
-function fire(el, type) {
-  (el._listeners[type] || []).forEach((fn) => fn({ target: el }));
 }
 
 // --- fixtures --------------------------------------------------------------

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
 import {
-  makeFakeDocument, makeFakeWindow, mountIds, indexHtmlIds,
+  makeFakeDocument, makeFakeWindow, mountIds, indexHtmlIds, allText, fire,
 } from './fake-dom.js';
 import { SCHEMA_VERSION } from '../js/merge.js';
 import {
@@ -160,15 +160,6 @@ mountIds(globalThis.document, indexHtmlIds(readFileSync(new URL('../index.html',
 
 const item = (id, updatedAt) => ({ id, title: `t-${id}`, date: '2026-08-02', time: null, updatedAt });
 const state = (o = {}) => ({ schemaVersion: SCHEMA_VERSION, items: [], feeds: [], tombstones: [], ...o });
-
-// Recursively concatenates textContent across a FakeElement subtree — the
-// only way to inspect what renderList() actually put on screen, since a
-// list item's title lives on a nested <span>, not on the <li> itself.
-function allText(el) {
-  let out = el.textContent || '';
-  for (const c of el.children) out += ` ${allText(c)}`;
-  return out;
-}
 
 // --- V6 step 0: the shell indicator must be painted at LOAD ----------------
 //
@@ -465,8 +456,6 @@ function click(el) {
     assert.ok(prevented, 'the form submission was not cancelled; the page would navigate');
   }
 }
-
-function fire(el, type) { (el._listeners[type] || []).forEach((fn) => fn({ target: el })); }
 
 // Walks for the first checkbox whose aria-label names this title.
 function checkboxFor(root, title) {

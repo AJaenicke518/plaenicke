@@ -186,3 +186,30 @@ export function mountIds(doc, ids, tag = 'div') {
 export function indexHtmlIds(html) {
   return [...html.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]);
 }
+
+// --- tree helpers shared by the test files ---------------------------------
+// They read only children, tagName, textContent and _listeners, so they work
+// on this file's FakeElement and on the local fakes some test files keep.
+
+// Recursively concatenates textContent across a subtree — the only way to
+// inspect what a render put on screen, since a row's title usually lives on a
+// nested element, not on the row itself.
+export function allText(el) {
+  let out = el.textContent || '';
+  for (const c of el.children) out += ` ${allText(c)}`;
+  return out;
+}
+
+// Every descendant (not el itself) whose tagName is `tag`, in document order.
+export function findAll(el, tag) {
+  const out = [];
+  const walk = (node) => { for (const c of node.children) { if (c.tagName === tag) out.push(c); walk(c); } };
+  walk(el);
+  return out;
+}
+
+// Calls el's `type` listeners with { target: el }. No bubbling, no default
+// action (apply.test.js's click() adds form submission on top).
+export function fire(el, type) {
+  (el._listeners[type] || []).forEach((fn) => fn({ target: el }));
+}

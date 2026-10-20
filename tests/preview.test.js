@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { findAll } from './fake-dom.js';
 import { renderPreview, TYPES } from '../js/preview.js';
 import { buildRequestBody } from '../worker/src/prompt.js';
 
@@ -42,13 +43,6 @@ class FakeElement {
 }
 
 globalThis.document = { createElement: (tag) => new FakeElement(tag) };
-
-function findAll(el, tag) {
-  const out = [];
-  const walk = (node) => { for (const c of node.children) { if (c.tagName === tag) out.push(c); walk(c); } };
-  walk(el);
-  return out;
-}
 
 const findButton = (el, text) => findAll(el, 'BUTTON').find((b) => b.textContent === text);
 

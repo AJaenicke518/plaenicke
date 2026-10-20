@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { allText } from './fake-dom.js';
 import { openItemSheet } from '../js/itemsheet.js';
 import { TYPES } from '../js/preview.js';
 
@@ -104,12 +105,6 @@ const one = (el, cls) => {
   return found[0];
 };
 const byTag = (el, tag) => findAll(el, (c) => c.tagName === tag);
-function allText(el) {
-  let out = el.textContent || '';
-  for (const c of el.children) out += ` ${allText(c)}`;
-  return out;
-}
-
 const TODAY = '2026-09-23';
 
 const task = (o = {}) => ({

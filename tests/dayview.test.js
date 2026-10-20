@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { findAll } from './fake-dom.js';
 import { renderDayView } from '../js/dayview.js';
 
 // --- minimal fake DOM ------------------------------------------------------
@@ -191,13 +192,6 @@ test('Delete on an untimed row still calls onDelete with that item id', () => {
 //
 // This fake does not bubble either, so the structure is what is pinned: no
 // element carrying a click listener may contain another control.
-
-function findAll(el, tag) {
-  const out = [];
-  const walk = (node) => { for (const x of node.children) { if (x.tagName === tag) out.push(x); walk(x); } };
-  walk(el);
-  return out;
-}
 
 function wrappedControls(root) {
   const bad = [];
