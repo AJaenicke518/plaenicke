@@ -349,6 +349,7 @@ function wallToDateTime(wall) {
 // { date: 'YYYY-MM-DD', time: 'HH:MM' | null } wall-clock fields in targetTz.
 // All four forms (see parseIcsDateValue); DATE is untimed, FLOATING is already
 // targetTz wall time so it is not converted.
+// Test entry point into live code: nothing in js/ calls it; it wraps parseIcsDateValue + instantOfWallClock + formatZonedParts.
 export function icsDateToLocal(value, params, targetTz) {
   const parsed = parseIcsDateValue(value, params);
   if (parsed.form === 'DATE') {
@@ -804,6 +805,7 @@ function generateOccurrenceDays(startDay, startCivil, rule, genStartDay, genEndD
 //     -> ['2026-03-30', '2026-04-20']   (cycle weeks 12 and 15, not 10 and 13)
 // An empty `bydays` means "the start date's own weekday". Window bounds are
 // inclusive; no instance before startISO is ever returned.
+// Test entry point into live code: nothing in js/ calls it; it wraps generateOccurrenceDays with a WEEKLY rule.
 export function nextWeeklyInstances(startISO, bydays, interval, fromISO, toISO) {
   if (!Number.isInteger(interval) || interval < 1) throw new Error(`Invalid interval: ${interval}`);
   const startDay = dayNumOfISO(startISO);
