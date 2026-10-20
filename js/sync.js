@@ -117,7 +117,58 @@ export async function previewRemote({ readFetchImpl, apiBase }) {
 // The only legal adoptChoice values besides null (an ordinary sync).
 const ADOPT_CHOICES = ['adopt-merge', 'adopt-bootstrap'];
 
+// SYNCONCE EXCLUDES ITSELF, whoever calls it. There are two callers, and
+// each guarded only against itself: app.js's runSync (syncInFlight /
+// syncPending — runSync against runSync) and linkui.js's adoption
+// (activeAdoption / writeInFlight — panel mount against panel mount). The
+// adoption gate kept them apart only while it was raised. With it down —
+// another tab finishes adoption and this tab's storage listener starts
+// runSync, then this tab's own dialog is confirmed — two syncOnce runs
+// interleaved: two applyState re-merges and two CAS loops racing.
+//
+// A second call WAITS for the one in flight to settle, then runs in full.
+// It is not dropped and gets no new status, so neither caller changes:
+// runSync's own guard still coalesces its triggers, and an adoption that
+// waited is still an adoption. Everything below the argument checks — the
+// link, the gate, the pull — is read only once this call holds the turn,
+// so it sees whatever the call before it left behind (an adoption queued
+// behind an ordinary sync that advanced the version gets 'changed' and
+// re-asks, as for any other account move).
+//
+// THE COST: a write never times out (the PUT has no deadline), so a call
+// queued behind a hung write waits as long as that write does. The linking
+// panel already says "taking longer than usual — it's safe to reload" for a
+// write in flight past SLOW_WRITE_MS, and that remains true while queued:
+// the gate stays raised until a write is confirmed. runSync was already
+// blocked behind its own hung write by syncInFlight.
+//
+// The chain only ever holds promises that RESOLVE (each turn's release), so
+// a call that fails or rejects never wedges the ones behind it.
+let turn = Promise.resolve();
+
 export async function syncOnce(deps) {
+  // Refused at once, never queued: a malformed call must not wait behind a
+  // sync in flight to be told it was malformed.
+  const { readFetchImpl, adoptChoice = null } = deps;
+  requireReadFetch(readFetchImpl, 'syncOnce');
+  // Any other adoptChoice is a wiring bug. Refused before the network, rather
+  // than read as one of the legal values: a caller that asked for something
+  // this function no longer does must not silently get a merge instead.
+  if (adoptChoice !== null && !ADOPT_CHOICES.includes(adoptChoice)) {
+    throw new Error('syncOnce: unknown adoptChoice');
+  }
+  const prior = turn;
+  let release;
+  turn = new Promise((resolve) => { release = resolve; });
+  try {
+    await prior;
+    return await syncOnceExclusive(deps);
+  } finally {
+    release();
+  }
+}
+
+async function syncOnceExclusive(deps) {
   // adoptChoice is null on an ordinary sync, or one of exactly two values that
   // only the linking flow (js/linkui.js) ever sets:
   //   'adopt-bootstrap' — an empty account, or an empty device. Adopt as-is.
@@ -133,13 +184,7 @@ export async function syncOnce(deps) {
   const {
     fetchImpl, readFetchImpl, now, apiBase, applyState, adoptChoice = null, expectVersion = null,
   } = deps;
-  requireReadFetch(readFetchImpl, 'syncOnce');
-  // Any other value is a wiring bug. Refused before the network, rather than
-  // read as one of the legal values: a caller that asked for something this
-  // function no longer does must not silently get a merge instead.
-  if (adoptChoice !== null && !ADOPT_CHOICES.includes(adoptChoice)) {
-    throw new Error('syncOnce: unknown adoptChoice');
-  }
+  // (readFetchImpl and adoptChoice were checked by syncOnce, before the queue.)
 
   // HAS THIS DEVICE ALREADY BEEN CHANGED? applyState runs BEFORE the push loop,
   // so every status returned from that point on describes a device whose

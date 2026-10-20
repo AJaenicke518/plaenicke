@@ -400,6 +400,13 @@ const MAX_ADOPT_ATTEMPTS = 3;
 // arrival order. app.js's own syncInFlight guard does
 // not cover linkui's syncOnce calls.
 //
+// js/sync.js's syncOnce now serialises every call, from any caller: a second
+// waits for the first, so two syncOnce runs can no longer interleave. That
+// does NOT make this primitive redundant. Serialised, two episodes' writes
+// would still BOTH run, one after the other, so a choice the user abandoned
+// still reaches the account. Deciding which episode may write at all is this
+// primitive's job, and sync.js cannot see it.
+//
 // IT MUST NOT BE ABLE TO OUTLIVE ITS PURPOSE either. It is cleared in the
 // episode's `finally`. The preview's read now gives up at the shared download
 // deadline (js/fetchtimeout.js, 60 s), but that is long, and the WRITE has no

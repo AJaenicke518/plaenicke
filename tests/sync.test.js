@@ -981,3 +981,118 @@ test('linkui.js and app.js read local synced state through localState, not their
     assert.ok(!src.includes('loadTombstones'), `${file} reads tombstones itself — rebuilding the local state shape`);
   }
 });
+
+// --- syncOnce excludes itself ------------------------------------------------
+//
+// Two callers reach syncOnce: app.js's runSync (which guards only against
+// itself) and linkui.js's adoption (which guards only against other panel
+// mounts). Nothing excluded one from the other once the adoption gate was
+// down — e.g. a second tab finishes adoption, this tab's storage listener
+// starts runSync, and this tab's own dialog is then confirmed. Two syncOnce
+// runs then interleave: two applyState re-merges and two CAS loops racing.
+// syncOnce now serialises: a second call WAITS for the first, then runs in
+// full. It is never dropped and never answers with a new status.
+
+// A fake server whose GETs can be held open, so a sync can be caught mid-flight.
+function heldServer() {
+  const server = fakeServer();
+  const held = [];
+  const fetchImpl = async (url, opts = {}) => {
+    if ((opts.method || 'GET') === 'GET') {
+      await new Promise((resolve) => held.push(resolve));
+    }
+    return server.fetchImpl(url, opts);
+  };
+  return { ...server, fetchImpl, held };
+}
+// Poll, never a fixed number of ticks: syncOnce hashes the token through
+// WebCrypto before its read, and that completes as a thread-pool MACROTASK,
+// so one setTimeout(0) is not enough under load (measured: 2 failures in 6
+// full runs). For a NEGATIVE check the poll waits for the forbidden state —
+// under a mutant it arrives, under correct code the poll runs out.
+const settle = () => new Promise((r) => setTimeout(r, 0));
+async function settleUntil(pred) {
+  for (let i = 0; i < 200 && !pred(); i += 1) await settle();
+}
+
+test('a second syncOnce waits for the first to settle before it touches the network', async () => {
+  await linked();
+  const server = heldServer();
+  const a = syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: () => state({ items: [item('a', '2026-08-01T00:00:00.000Z')] }) });
+  await settleUntil(() => server.held.length === 1);
+  assert.equal(server.held.length, 1, 'the first sync has issued its read');
+  const b = syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: () => state({ items: [item('a', '2026-08-01T00:00:00.000Z'), item('b', '2026-08-01T00:00:00.000Z')] }) });
+  await settleUntil(() => server.held.length > 1);
+  assert.equal(server.held.length, 1, 'the second sync must not read while the first is in flight');
+  server.held.shift()();
+  const resA = await a;
+  assert.equal(resA.status, 'ok');
+  await settleUntil(() => server.held.length === 1);
+  assert.equal(server.held.length, 1, 'the second sync reads once the first has settled');
+  server.held.shift()();
+  const resB = await b;
+  // Not dropped: it ran in full, against the version the first one wrote.
+  assert.equal(resB.status, 'ok');
+  assert.equal(resB.pushed, true);
+  assert.equal(server.row.version, 2);
+  assert.deepEqual(server.calls.map((c) => c.method), ['GET', 'PUT', 'GET', 'PUT']);
+});
+
+test('an adoption queued behind an ordinary sync still runs and lifts the gate', async () => {
+  await linked();
+  const server = heldServer();
+  const ordinary = syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo });
+  await settleUntil(() => server.held.length === 1);
+  saveSyncState({ adoptionPending: true });
+  const adoption = syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: echo, adoptChoice: 'adopt-bootstrap' });
+  await settleUntil(() => server.held.length > 1);
+  assert.equal(server.held.length, 1, 'the adoption must not read while the ordinary sync is in flight');
+  server.held.shift()();
+  // The ordinary sync, already past its gate check, finishes.
+  await ordinary;
+  await settleUntil(() => server.held.length === 1);
+  assert.equal(server.held.length, 1, 'the adoption reads once the ordinary sync has settled');
+  server.held.shift()();
+  const res = await adoption;
+  assert.equal(res.status, 'ok');
+  assert.equal(loadSyncState().adoptionPending, false);
+});
+
+test('a sync that fails or rejects does not wedge the ones queued behind it', async () => {
+  await linked();
+  const server = fakeServer();
+  // Fails with a status (applyState throws).
+  const failing = syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: () => { throw new Error('boom'); } });
+  // Rejects outright: the read fails, and recording that failure throws
+  // (storage blocked), which is outside every try in syncOnce.
+  const rejecting = syncOnce({
+    fetchImpl: async () => {
+      const store = globalThis.localStorage;
+      store.setItem = () => { delete store.setItem; throw new Error('storage blocked'); };
+      throw new TypeError('Failed to fetch');
+    },
+    now: NOW, apiBase: 'https://w.example', applyState: echo });
+  const after = syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: () => state({ items: [item('a', '2026-08-01T00:00:00.000Z')] }) });
+  assert.equal((await failing).status, 'error');
+  await assert.rejects(rejecting, /storage blocked/);
+  assert.equal((await after).status, 'ok');
+});
+
+// MUST NOT CHANGE: a malformed call is refused at once, before the network,
+// even while another sync is holding the queue.
+test('a malformed syncOnce call is refused immediately, without waiting for one in flight', async () => {
+  await linked();
+  const server = heldServer();
+  const inFlight = syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo });
+  await settleUntil(() => server.held.length === 1);
+  assert.equal(server.held.length, 1);
+  await assert.rejects(realSyncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo }), /readFetchImpl/);
+  await assert.rejects(syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo, adoptChoice: 'adopt-replace' }), /unknown adoptChoice/);
+  server.held.shift()();
+  await inFlight;
+});

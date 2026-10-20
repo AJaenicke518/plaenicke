@@ -10,6 +10,7 @@ import {
   SYNC_OK, SYNC_NOT_LINKED, SYNC_CORRUPT, SYNC_ADOPTION_PENDING, SYNC_ERROR,
 } from '../js/linkui.js';
 import { linkWithCode, clearAdoptionPending, isLinked } from '../js/auth.js';
+import { syncOnce as realSyncOnce } from '../js/sync.js';
 import {
   bytesToBase64url, generateEncKey, composeLinkCode, encryptBlob, parseLinkCode,
 } from '../js/crypto.js';
@@ -2362,4 +2363,63 @@ test('index.html mounts the shell indicator, and does not duplicate the panel id
     'index.html must carry the shell indicator, or a broken sync is invisible outside Settings');
   assert.doesNotMatch(html, new RegExp(`id="${SYNC_STATUS_ID}"`),
     'the app shell must NOT reuse the panel status line id — two elements cannot share one');
+});
+
+// js/sync.js's syncOnce now excludes itself. With the REAL syncOnce behind the
+// panel: an ordinary sync is caught mid-read, then the panel mounts on a
+// device whose gate is raised and adopts automatically ('none': an empty
+// account). The adoption must wait — no request of its own goes out while
+// the ordinary sync is in flight, and the panel shows its ordinary
+// "Combining…" view — and then complete, not be dropped.
+test('an adoption behind an in-flight ordinary sync waits for it, then completes', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  await linkWithCode(bytesToBase64url(generateEncKey()));
+  clearAdoptionPending();
+  const row = { version: 0, blob: '' };
+  const requests = [];
+  let holdNextRead = true;
+  let releaseRead = null;
+  const serverFetch = async (url, opts = {}) => {
+    const method = opts.method || 'GET';
+    requests.push(method);
+    if (method === 'GET') {
+      if (holdNextRead) {
+        holdNextRead = false;
+        await new Promise((resolve) => { releaseRead = resolve; });
+      }
+      return { ok: true, status: 200, json: async () => ({ ...row }) };
+    }
+    const body = JSON.parse(opts.body);
+    if (body.version !== row.version) return { ok: false, status: 409, json: async () => ({ ...row }) };
+    row.version += 1;
+    row.blob = body.blob;
+    return { ok: true, status: 200, json: async () => ({ version: row.version }) };
+  };
+  const ordinary = realSyncOnce({ fetchImpl: serverFetch, readFetchImpl: serverFetch, now: () => NOW,
+    apiBase: 'https://w.example', applyState: (x) => x });
+  await settleUntil(() => releaseRead);
+  saveSyncState({ adoptionPending: true });
+
+  const host = doc.createElement('div');
+  doc.body.appendChild(host);
+  const linkedCalls = [];
+  const ui = initLinkUI({
+    host, applyState: (x) => x, onLinked: () => linkedCalls.push(true),
+    fetchImpl: serverFetch, readFetchImpl: serverFetch, apiBase: 'https://w.example', now: () => NOW,
+  });
+  await settleUntil(() => allText(host).includes('Combining'));
+  assert.ok(allText(host).includes('Combining'), 'the panel is in its ordinary write view');
+  await settleUntil(() => requests.length > 2); // waits for the forbidden state; must run out
+  // The held read and the panel's preview read — nothing from the adoption.
+  assert.deepEqual(requests, ['GET', 'GET'], 'the adoption must not touch the network while the ordinary sync is in flight');
+  assert.equal(loadSyncState().adoptionPending, true);
+
+  releaseRead();
+  await ordinary;
+  await ui.settled();
+  await settleUntil(() => loadSyncState().adoptionPending === false);
+  assert.equal(loadSyncState().adoptionPending, false, 'the queued adoption ran and lifted the gate');
+  assert.equal(requests.length, 3, 'the adoption read once, after the ordinary sync settled');
+  assert.ok(linkedCalls.length >= 1, 'onLinked fired');
 });
