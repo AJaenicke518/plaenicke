@@ -624,8 +624,14 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   background: var(--scrim);
   z-index: 15;
 }
-/* Pinned to the bottom and scrolling INSIDE itself, so a tall form (or the
-   iOS keyboard) never pushes the top bar's Save/Cancel off screen. */
+/* Pinned to the bottom and scrolling INSIDE itself, so a tall form never
+   pushes the top bar's Save/Cancel off screen. This alone does NOT survive
+   the iOS keyboard: there the keyboard shrinks only the visual viewport, so
+   bottom: 0 and 85dvh still measure the full layout viewport, the sheet sits
+   behind the keyboard and its top bar is above the visible area. While a
+   sheet is open, js/itemsheet.js (followVisualViewport) overrides bottom,
+   top, transform and max-height inline from window.visualViewport; these
+   rules are what applies without it. */
 .sheet {
   position: fixed;
   left: 0; right: 0; bottom: 0;

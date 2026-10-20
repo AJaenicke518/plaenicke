@@ -11,6 +11,16 @@ import { TYPES } from '../js/preview.js';
 // optional event so a backdrop click can be given a target other than the
 // backdrop itself (a tap inside the sheet, as a real browser reports it).
 
+// Inline style through setProperty/removeProperty only, as a real
+// CSSStyleDeclaration is written by property NAME ('max-height'). Each set
+// property is an own key, so "no inline style" is `inlineStyle(el)` being {}.
+class FakeStyle {
+  setProperty(name, value) { this[name] = String(value); }
+
+  removeProperty(name) { delete this[name]; }
+}
+const inlineStyle = (el) => ({ ...el.style });
+
 class FakeElement {
   constructor(tag) {
     this.tagName = tag.toUpperCase();
@@ -28,6 +38,7 @@ class FakeElement {
     this.target = '';
     this.rel = '';
     this.scrollTop = 0;
+    this.style = new FakeStyle();
   }
 
   // Harness only: records focus the way a browser reports it, so a test can
@@ -842,4 +853,173 @@ test('a replacement sheet whose build throws leaves the old sheet open and closa
   assert.deepEqual(closes, ['first'], 'Escape closes it');
   assert.equal(host.children.length, 0);
   assert.equal(document.body.style.overflow, '', 'and releases the page');
+});
+
+// =========================================================================
+// iOS keyboard: the sheet follows the visual viewport
+// =========================================================================
+// On iOS Safari the keyboard shrinks and scrolls the VISUAL viewport only; the
+// layout viewport (the box `position: fixed` and `dvh` measure against) keeps
+// its size. A sheet pinned to the layout viewport's bottom then sits behind
+// the keyboard, and its top (the bar with Save and Cancel) is above the
+// visible area. While open, the sheet is placed by the visual viewport.
+
+// An EventTarget-like visualViewport: width/height/offsetTop, listeners kept
+// by identity, and dispatch() to deliver a resize or scroll.
+function fakeViewport({ width = 390, height = 800, offsetTop = 0 } = {}) {
+  const listeners = {};
+  return {
+    width, height, offsetTop,
+    addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
+    removeEventListener(type, fn) {
+      const list = listeners[type] || [];
+      const i = list.indexOf(fn);
+      if (i !== -1) list.splice(i, 1);
+    },
+    dispatch(type) { [...(listeners[type] || [])].forEach((fn) => fn({ type })); },
+    count() { return Object.values(listeners).reduce((n, l) => n + l.length, 0); },
+  };
+}
+
+// Runs fn with globalThis.visualViewport set to vv, and always removes it.
+function withViewport(vv, fn) {
+  globalThis.visualViewport = vv;
+  try { return fn(); } finally { delete globalThis.visualViewport; }
+}
+
+// The sheet's box in layout-viewport px, read from its inline style. The
+// sheet is placed by its BOTTOM edge: `top` is that edge and
+// translateY(-100%) lifts the sheet by its own height, so no layout height
+// and no measurement of the sheet are needed. Its tallest possible top edge
+// is bottom − maxHeight.
+function sheetBox(sheet) {
+  assert.equal(sheet.style.bottom, 'auto', 'the stylesheet\'s bottom: 0 must be overridden');
+  assert.equal(sheet.style.transform, 'translateY(-100%)');
+  const px = (v, name) => {
+    assert.match(String(v), /^-?\d+(\.\d+)?px$/, `${name} must be px, got ${v}`);
+    return parseFloat(v);
+  };
+  const bottom = px(sheet.style.top, 'top');
+  const maxHeight = px(sheet.style['max-height'], 'max-height');
+  return { bottom, maxHeight, top: bottom - maxHeight };
+}
+
+// The bar is at the sheet's top; the sheet is inside the visible area when
+// its whole possible box is.
+function assertInside(sheet, vv) {
+  const box = sheetBox(sheet);
+  assert.equal(box.bottom, vv.offsetTop + vv.height, 'the sheet\'s bottom sits on the visible area\'s bottom edge');
+  assert.ok(box.top >= vv.offsetTop, `the sheet's top (${box.top}) must be at or below the visible top (${vv.offsetTop})`);
+  assert.ok(box.maxHeight <= vv.height);
+}
+
+test('vv: with the keyboard down the sheet sits at the bottom at 85% of the visible height', () => {
+  const vv = fakeViewport({ height: 800, offsetTop: 0 });
+  withViewport(vv, () => {
+    const { host } = open(task());
+    const sheet = one(host, 'sheet');
+    assert.deepEqual(sheetBox(sheet), { bottom: 800, maxHeight: 680, top: 120 });
+  });
+});
+
+test('vv: the keyboard opening (height shrinks, view scrolls) keeps the bar inside the visible area', () => {
+  const vv = fakeViewport({ height: 800, offsetTop: 0 });
+  withViewport(vv, () => {
+    const { host } = open(task());
+    const sheet = one(host, 'sheet');
+    // The keyboard rises: the visible area shrinks first, then iOS scrolls it
+    // down to keep the focused field in view. Each arrives as its own event.
+    vv.height = 420;
+    vv.dispatch('resize');
+    assertInside(sheet, vv);
+    vv.offsetTop = 260;
+    vv.dispatch('scroll');
+    assertInside(sheet, vv);
+    assert.deepEqual(sheetBox(sheet), { bottom: 680, maxHeight: 357, top: 323 });
+    // And it comes back down when the keyboard closes.
+    vv.height = 800;
+    vv.offsetTop = 0;
+    vv.dispatch('resize');
+    assert.deepEqual(sheetBox(sheet), { bottom: 800, maxHeight: 680, top: 120 });
+  });
+});
+
+test('vv: the external (read-only) sheet is positioned the same way', () => {
+  const vv = fakeViewport({ height: 500, offsetTop: 100 });
+  withViewport(vv, () => {
+    const { host } = open(external(), { calendarName: 'Work' });
+    assertInside(one(host, 'sheet'), vv);
+    one(host, 'sheet-close').fire('click');
+    assert.equal(vv.count(), 0);
+  });
+});
+
+for (const [name, close] of Object.entries(CLOSE_PATHS)) {
+  test(`vv: closing by ${name} removes the viewport listeners and the inline style`, () => {
+    const vv = fakeViewport({ height: 420, offsetTop: 260 });
+    withViewport(vv, () => {
+      const { host } = open(task());
+      const sheet = one(host, 'sheet');
+      assert.equal(vv.count(), 2, 'one resize and one scroll listener while open');
+      close(host);
+      assert.equal(host.children.length, 0);
+      assert.equal(vv.count(), 0, `${name} left a visualViewport listener registered`);
+      assert.deepEqual(inlineStyle(sheet), {}, `${name} left inline positioning on the sheet`);
+      // A later keyboard change reaches nothing.
+      vv.height = 300;
+      vv.dispatch('resize');
+      vv.dispatch('scroll');
+      assert.deepEqual(inlineStyle(sheet), {});
+    });
+  });
+}
+
+test('vv: a replacement sheet takes over the viewport; the replaced one stops following it', () => {
+  const vv = fakeViewport({ height: 800, offsetTop: 0 });
+  withViewport(vv, () => {
+    const host = new FakeElement('div');
+    const opts = { today: () => TODAY, onSave: () => ({ ok: true }), onDelete() {}, onClose() {} };
+    openItemSheet(host, task(), opts);
+    const first = one(host, 'sheet');
+    openItemSheet(host, task({ id: 'a2' }), opts);
+    const second = one(host, 'sheet');
+    assert.notEqual(first, second);
+    assert.equal(vv.count(), 2, 'only the sheet on screen listens');
+    assert.deepEqual(inlineStyle(first), {});
+    vv.height = 420;
+    vv.offsetTop = 260;
+    vv.dispatch('resize');
+    assertInside(second, vv);
+    assert.deepEqual(inlineStyle(first), {});
+    pressKey('Escape');
+    assert.equal(vv.count(), 0);
+  });
+});
+
+test('vv: a replacement whose build throws leaves the old sheet still following the viewport', () => {
+  const vv = fakeViewport({ height: 800, offsetTop: 0 });
+  withViewport(vv, () => {
+    const host = new FakeElement('div');
+    openItemSheet(host, task(), { today: () => TODAY, onSave: () => ({ ok: true }), onDelete() {}, onClose() {} });
+    const sheet = one(host, 'sheet');
+    assert.throws(() => openItemSheet(host, task({ id: 'a2' }), {
+      today: () => { throw new Error('build failed'); }, onSave: () => ({ ok: true }), onDelete() {}, onClose() {},
+    }), /build failed/);
+    assert.equal(vv.count(), 2);
+    vv.height = 420;
+    vv.offsetTop = 260;
+    vv.dispatch('scroll');
+    assertInside(sheet, vv);
+    pressKey('Escape');
+    assert.equal(vv.count(), 0);
+  });
+});
+
+test('vv: without visualViewport the sheet has no inline style and nothing listens', () => {
+  assert.equal(globalThis.visualViewport, undefined);
+  const { host } = open(task());
+  assert.deepEqual(inlineStyle(one(host, 'sheet')), {});
+  pressKey('Escape');
+  const ext = open(external());
+  assert.deepEqual(inlineStyle(one(ext.host, 'sheet')), {});
 });
