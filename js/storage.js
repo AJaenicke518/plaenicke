@@ -242,9 +242,13 @@ export function saveFeedCache(cache) {
   }
 }
 
-// --- sync credentials and cursor ---
+// --- sync credentials and sync state ---
 // The link code contains the encryption key, so it is a secret: never log it
 // and never render it outside the linking UI.
+//
+// syncState.version is recorded after each sync but read by nothing in the
+// sync protocol: syncOnce PUTs against the version its own GET returned. Its
+// projection in loadSyncState is hygiene, not a guard.
 
 export const AUTH_KEY = 'plaenicke.auth';
 export const SYNC_STATE_KEY = 'plaenicke.syncState';

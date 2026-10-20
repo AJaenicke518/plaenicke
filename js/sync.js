@@ -123,10 +123,9 @@ export async function syncOnce(deps) {
     throw new Error('syncOnce: unknown adoptChoice');
   }
 
-  // HAS THIS DEVICE ALREADY BEEN CHANGED? applyState runs BEFORE the push loop
-  // (spec 7: apply first, advance the cursor second), so every status returned
-  // from that point on describes a device whose local write has already
-  // landed. A Wi-Fi drop between the GET and the PUT reaches all of them, and
+  // HAS THIS DEVICE ALREADY BEEN CHANGED? applyState runs BEFORE the push loop,
+  // so every status returned from that point on describes a device whose
+  // local write has already landed. A Wi-Fi drop between the GET and the PUT reaches all of them, and
   // by then applySyncedState has already written items, feeds and tombstones
   // through their owners. The caller is the only thing that can tell the user
   // which of the two happened, and it cannot infer it from the status:
@@ -191,12 +190,18 @@ export async function syncOnce(deps) {
     // permanent, cross-device deletion.
     if (adoptChoice === 'adopt-merge') merged = dedupeState(merged, now());
 
-    // Apply BEFORE advancing the cursor, and push what applyState actually
-    // wrote: it re-merges against live storage, so the two can differ.
+    // Apply BEFORE the push, and push what applyState actually wrote: it
+    // re-merges against live storage, so the two can differ.
+    //
+    // NOT load-bearing: the order of this apply against record({ version }).
+    // The stored syncState.version has no reader in the protocol — every PUT
+    // carries the version from THIS sync's GET (or from a 409's body), never
+    // loadSyncState().version — so "apply before advancing the cursor"
+    // guards a write-only field. The real non-atomicity is inside applyState
+    // itself (app.js's applySyncedState makes three separate writes).
     merged = applyState(merged) || merged;
-    // From here the local write HAS happened: spec 7 applies before it
-    // advances the cursor, so everything below reports a device that has
-    // already changed.
+    // From here the local write HAS happened, so everything below reports a
+    // device that has already changed.
     applied = true;
     // toWire can throw on a structurally incomplete state — e.g. applyState
     // returning `{schemaVersion}` with no items/feeds/tombstones. That is

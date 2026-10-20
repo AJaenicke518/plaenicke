@@ -342,8 +342,8 @@ const FAILURE_TEXT = {
 
 // THE SAME STATUS MEANS TWO DIFFERENT THINGS, EITHER SIDE OF applyState.
 //
-// syncOnce applies BEFORE the push loop (spec 7: write the merged blob first,
-// advance the cursor second), so 'offline', 'error' and 'conflict' are all
+// syncOnce applies BEFORE the push loop (it writes the merged state locally,
+// then PUTs), so 'offline', 'error' and 'conflict' are all
 // reachable with the local write already landed — a Wi-Fi drop between the GET
 // and the PUT reaches every one of them. The messages above say "Nothing has
 // been combined yet", which is false once applySyncedState has run saveItems,
