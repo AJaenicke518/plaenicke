@@ -4543,3 +4543,84 @@ test('cross-tab sync: two visible tabs reacting to each other converge — no pi
   assert.deepEqual(loadItems().map((i) => i.id).sort(), ['pp-legacy', 'pp-local', 'pp-remote'],
     'fixture check: both sides\' records are kept');
 });
+
+// The slow state must clear however the write SETTLES, not only when it
+// answers. A write that fails after the threshold (a dropped connection) is
+// recorded as offline; the shell must then say that, not keep claiming the
+// write is merely slow.
+test('slow sync write: a slow write that then fails shows the error, not the slow line', async (t) => {
+  const shell = await linkedWithAPendingPush('slow-reject');
+  const T0 = Date.UTC(2026, 9, 19, 17, 0, 0);
+  t.mock.timers.enable({ apis: ['Date'], now: T0 });
+  const requests = [];
+  let rejectPut = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    requests.push(method);
+    if (method === 'GET') return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) });
+    return new Promise((resolve, reject) => { rejectPut = reject; });
+  };
+  const timers = installManualTimers();
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    for (let i = 0; i < 200 && !rejectPut; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    assert.deepEqual(requests, ['GET', 'PUT'], 'fixture check: the write is in flight');
+    t.mock.timers.setTime(T0 + SLOW_WRITE_MS);
+    timers.fire(SLOW_WRITE_MS);
+    assert.match(shell.textContent, SHELL_SLOW, 'fixture check: the write is slow');
+
+    rejectPut(new TypeError('Failed to fetch'));
+    rejectPut = null;
+    await drain();
+    assert.equal(loadSyncState().lastError, 'offline', 'fixture check: the failed write was recorded');
+    assert.doesNotMatch(shell.textContent, SHELL_SLOW, 'a write that failed is no longer in flight');
+    assert.equal(shell.hidden, false, 'the shell reports the failure instead');
+    assert.equal(shell.textContent, 'Sync problem — open Settings');
+    assert.equal(timers.live(SLOW_WRITE_MS), 0, 'no repaint timer is left behind');
+    // Nor does a later repaint bring the slow line back.
+    t.mock.timers.setTime(T0 + 10 * SLOW_WRITE_MS);
+    const { renderSyncStatus } = await import('../js/linkui.js');
+    renderSyncStatus();
+    assert.doesNotMatch(shell.textContent, SHELL_SLOW);
+  } finally {
+    // Never leave runSync in flight for the tests that follow.
+    if (rejectPut) { rejectPut(new TypeError('released')); await drain(); }
+    timers.restore();
+    globalThis.fetch = originalFetch;
+    t.mock.timers.reset();
+  }
+});
+
+// fetch can throw before it returns a promise at all (a malformed request).
+// That write settled the moment it began; it must leave no slow state.
+test('slow sync write: a write fetch that throws at once leaves no slow state', async (t) => {
+  const shell = await linkedWithAPendingPush('slow-throw');
+  const T0 = Date.UTC(2026, 9, 19, 18, 0, 0);
+  t.mock.timers.enable({ apis: ['Date'], now: T0 });
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    requests.push(method);
+    if (method === 'GET') return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) });
+    throw new TypeError('thrown synchronously');
+  };
+  const timers = installManualTimers();
+  try {
+    for (const fn of globalThis.window._listeners.online) fn();
+    await drain();
+    assert.deepEqual(requests, ['GET', 'PUT'], 'fixture check: the write was attempted');
+    assert.equal(loadSyncState().lastError, 'offline', 'fixture check: the failed write was recorded');
+    assert.equal(timers.live(SLOW_WRITE_MS), 0, 'the failed write armed no lasting repaint timer');
+    t.mock.timers.setTime(T0 + 10 * SLOW_WRITE_MS);
+    const { renderSyncStatus } = await import('../js/linkui.js');
+    renderSyncStatus();
+    assert.doesNotMatch(shell.textContent, SHELL_SLOW, 'nothing is in flight, so nothing is slow');
+    assert.equal(shell.textContent, 'Sync problem — open Settings');
+  } finally {
+    timers.restore();
+    globalThis.fetch = originalFetch;
+    t.mock.timers.reset();
+  }
+});
