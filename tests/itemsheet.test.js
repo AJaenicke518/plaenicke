@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openItemSheet } from '../js/itemsheet.js';
 import { TYPES } from '../js/preview.js';
-import { splitIdeaText } from '../js/ideas.js';
 
 // --- minimal fake DOM ------------------------------------------------------
 // Modelled on tests/v6views.test.js. Events DO NOT BUBBLE here, so a test of

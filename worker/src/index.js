@@ -25,7 +25,7 @@ function utcTodayISO() {
   return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`;
 }
 
-export async function handleSmartAdd(request, env) {
+async function handleSmartAdd(request, env) {
   if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
 
   let payload;
