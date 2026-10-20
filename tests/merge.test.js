@@ -19,6 +19,22 @@ test('the higher updatedAt wins, in both directions', () => {
                      state({ items: [item('a', newer, { title: 'REMOTE' })] }), NOW).items[0].title, 'REMOTE');
 });
 
+// An unparseable updatedAt reads as the oldest possible time (ts() returns
+// -Infinity), so a garbage stamp can never win a last-write-wins comparison.
+// Returning +Infinity instead passed the whole suite: such a record would
+// overwrite every valid edit, forever, on every device.
+test('a record with an unparseable updatedAt loses to a valid one, in both directions', () => {
+  const valid = '2026-08-01T00:00:00.000Z';
+  for (const garbage of ['not a date', '', undefined, null]) {
+    assert.equal(merge(state({ items: [item('a', valid, { title: 'VALID' })] }),
+                       state({ items: [item('a', garbage, { title: 'GARBAGE' })] }), NOW).items[0].title, 'VALID',
+      `remote updatedAt ${JSON.stringify(garbage)} must not beat a valid local one`);
+    assert.equal(merge(state({ items: [item('a', garbage, { title: 'GARBAGE' })] }),
+                       state({ items: [item('a', valid, { title: 'VALID' })] }), NOW).items[0].title, 'VALID',
+      `a valid remote updatedAt must beat local ${JSON.stringify(garbage)}`);
+  }
+});
+
 test('a tie goes to remote, which is what makes a re-push idempotent', () => {
   const same = '2026-08-01T00:00:00.000Z';
   assert.equal(merge(state({ items: [item('a', same, { title: 'LOCAL' })] }),
