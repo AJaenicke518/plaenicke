@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
-import { syncOnce as realSyncOnce, previewRemote as realPreviewRemote, MAX_ATTEMPTS } from '../js/sync.js';
+import { syncOnce as realSyncOnce, previewRemote as realPreviewRemote, MAX_ATTEMPTS, recordSyncFailure } from '../js/sync.js';
 import { fetchWithTimeout, FETCH_TIMEOUT_MS } from '../js/fetchtimeout.js';
 import { linkWithCode, clearAdoptionPending, tokenHash } from '../js/auth.js';
 import { encryptBlob, decryptBlob, generateEncKey, bytesToBase64url, composeLinkCode } from '../js/crypto.js';
@@ -897,4 +897,14 @@ test('an encrypt failure before the PUT reports error, not offline', async () =>
   } finally {
     crypto.subtle.encrypt = originalEncrypt;
   }
+});
+
+// record() (reached here through recordSyncFailure) writes only the fields it
+// is given; every other sync-state field, the adoption gate included, stays.
+test('recordSyncFailure records lastError and leaves every other sync-state field alone', () => {
+  installFakeLocalStorage();
+  const full = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-10-01T00:00:00.000Z', lastError: null, adoptionPending: true };
+  saveSyncState(full);
+  recordSyncFailure({ name: 'TypeError' });
+  assert.deepEqual(loadSyncState(), { ...full, lastError: 'TypeError' });
 });

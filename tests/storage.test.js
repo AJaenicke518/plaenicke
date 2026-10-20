@@ -421,6 +421,18 @@ test('saveSyncState preserves adoptionPending on a partial update instead of res
   assert.equal(loadSyncState().adoptionPending, true);
 });
 
+// EVERY field, not only adoptionPending. sync.js's record() and auth.js's
+// clearAdoptionPending pass a one-field patch and rely on this — they used to
+// spread loadSyncState() in by hand first, which read as though saveSyncState
+// were a plain setter.
+test('saveSyncState merges a one-field patch over every existing field', () => {
+  installFakeLocalStorage();
+  const full = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-10-01T00:00:00.000Z', lastError: 'offline', adoptionPending: true };
+  saveSyncState(full);
+  saveSyncState({ lastError: null });
+  assert.deepEqual(loadSyncState(), { ...full, lastError: null });
+});
+
 // Confirms the fix for the above does not break unlink()-style full resets:
 // a caller supplying every field still gets exactly that object back.
 test('saveSyncState with a complete object overwrites every field, including lifting adoptionPending', () => {

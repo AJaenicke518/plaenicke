@@ -11,7 +11,7 @@
 import { merge, dedupeState, toWire, emptyState, SCHEMA_VERSION } from './merge.js';
 import { encryptBlob, decryptBlob } from './crypto.js';
 import { getLink, resetSyncStateIfDeviceChanged, isAdoptionPending, clearAdoptionPending } from './auth.js';
-import { loadItems, loadFeeds, loadTombstones, loadSyncState, saveSyncState } from './storage.js';
+import { loadItems, loadFeeds, loadTombstones, saveSyncState } from './storage.js';
 
 export const MAX_ATTEMPTS = 3;
 
@@ -19,7 +19,9 @@ function localState() {
   return { schemaVersion: SCHEMA_VERSION, items: loadItems(), feeds: loadFeeds(), tombstones: loadTombstones() };
 }
 
-function record(patch) { saveSyncState({ ...loadSyncState(), ...patch }); }
+// saveSyncState already merges over the persisted state (js/storage.js), so
+// a patch carrying only the fields being recorded is the whole call.
+function record(patch) { saveSyncState(patch); }
 
 // For a caller whose syncOnce REJECTED instead of resolving with a status.
 // Every failure syncOnce anticipates records its own lastError; one it did

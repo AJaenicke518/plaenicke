@@ -191,3 +191,12 @@ test('a corrupt stored link code reads as unlinked rather than throwing on every
   assert.equal(getLink(), null);
   assert.equal(isLinked(), false);
 });
+
+// clearAdoptionPending changes adoptionPending and nothing else.
+test('clearAdoptionPending lowers the gate and leaves every other sync-state field alone', () => {
+  installFakeLocalStorage();
+  const full = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-10-01T00:00:00.000Z', lastError: 'offline', adoptionPending: true };
+  saveSyncState(full);
+  clearAdoptionPending();
+  assert.deepEqual(loadSyncState(), { ...full, adoptionPending: false });
+});
