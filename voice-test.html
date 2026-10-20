@@ -21,8 +21,9 @@
 </head>
 <body>
 <h1>Voice test</h1>
-<p>Tap the button, say one or two sentences, pause for a few seconds, keep talking, then tap again to stop. Then screenshot this page (or read me the summary line).</p>
-<button id="go">Tap to start</button>
+<p>Try each button in order. For each: tap, say a sentence, pause ~5 s, say more, tap again to stop. Then screenshot (or read me the summary line under each).</p>
+<div id="modes"></div>
+<button id="go" style="display:none">Tap to start</button>
 <div id="live"></div>
 <div id="summary" style="font-weight:600;margin-bottom:8px"></div>
 <div id="log"></div>
@@ -43,49 +44,55 @@
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   log(`UA: ${navigator.userAgent}`);
   log(`SpeechRecognition: ${SR ? 'yes' : 'NO'}  standalone(home screen): ${!!navigator.standalone}`);
-  summary();
-  btn.addEventListener('click', () => {
+  const MODES = [
+    { key: '1', label: '1 · like the app today (one phrase, final words only)', continuous: false, interim: false },
+    { key: '2', label: '2 · live words, one phrase', continuous: false, interim: true },
+    { key: '3', label: '3 · keep listening, final words only', continuous: true, interim: false },
+    { key: '4', label: '4 · keep listening + live words (the design)', continuous: true, interim: true },
+  ];
+  const results = {};
+  const modesEl = document.getElementById('modes');
+  for (const m of MODES) {
+    const b = document.createElement('button');
+    b.textContent = m.label; b.style.marginBottom = '6px';
+    const line = document.createElement('div'); line.style.cssText = 'font-size:13px;margin:0 0 12px;font-weight:600';
+    line.textContent = `${m.key}: not tried`;
+    modesEl.append(b, line);
+    b.addEventListener('click', () => run(m, b, line));
+  }
+  function run(m, b, line) {
     if (!SR) { log('not supported here'); return; }
-    if (listening) {
-      stopTappedAt = Date.now();
-      log('stop tapped -> rec.stop()');
-      rec.stop();
-      return;
-    }
-    finalText = '';
-    live.textContent = '';
+    if (listening) { stopTappedAt = Date.now(); log(`[${m.key}] stop tapped -> rec.stop()`); rec.stop(); return; }
+    const r = { start: false, interim: false, final: false, endedOnItsOwn: false, textAfterStop: null, error: 'none' };
+    const show = () => { line.textContent = `${m.key}: start=${r.start} interim=${r.interim} final=${r.final} endedOnItsOwn=${r.endedOnItsOwn} textAfterStop=${r.textAfterStop} error=${r.error}`; };
+    finalText = ''; live.textContent = ''; stopTappedAt = 0;
     rec = new SR();
-    rec.lang = 'en-US';
-    rec.continuous = true;
-    rec.interimResults = true;
-    rec.onstart = () => { seen.start = true; listening = true; btn.textContent = 'Listening… tap to stop'; btn.classList.add('on'); log('onstart'); summary(); };
-    rec.onaudiostart = () => log('onaudiostart');
-    rec.onspeechstart = () => log('onspeechstart');
-    rec.onspeechend = () => log('onspeechend');
+    rec.lang = 'en-US'; rec.continuous = m.continuous; rec.interimResults = m.interim; rec.maxAlternatives = 1;
+    rec.onstart = () => { r.start = true; listening = true; b.classList.add('on'); log(`[${m.key}] onstart`); show(); };
+    rec.onspeechstart = () => log(`[${m.key}] onspeechstart`);
+    rec.onspeechend = () => log(`[${m.key}] onspeechend`);
     rec.onresult = (e) => {
       let interim = '';
       for (let i = e.resultIndex; i < e.results.length; i++) {
-        const r = e.results[i];
-        if (r.isFinal) { finalText += r[0].transcript; seen.final = true; log(`FINAL: "${r[0].transcript}"`); if (stopTappedAt) seen.stopDelivered = true; }
-        else { interim += r[0].transcript; seen.interim = true; }
+        const x = e.results[i];
+        if (x.isFinal) { finalText += x[0].transcript; r.final = true; if (stopTappedAt) r.textAfterStop = true; log(`[${m.key}] FINAL "${x[0].transcript}"`); }
+        else { interim += x[0].transcript; r.interim = true; }
       }
-      live.innerHTML = '';
-      live.append(document.createTextNode(finalText));
+      live.innerHTML = ''; live.append(document.createTextNode(finalText));
       const s = document.createElement('span'); s.className = 'interim'; s.textContent = interim; live.append(s);
-      summary();
+      show();
     };
-    rec.onerror = (e) => { seen.error = e.error || 'unknown'; log(`onerror: ${e.error}`); summary(); };
+    rec.onerror = (e) => { r.error = e.error || 'unknown'; log(`[${m.key}] onerror: ${e.error}`); show(); };
     rec.onend = () => {
-      listening = false;
-      btn.textContent = 'Tap to start'; btn.classList.remove('on');
-      if (!stopTappedAt) seen.autoEnd = true;
-      if (stopTappedAt && seen.stopDelivered === null) seen.stopDelivered = false;
-      log(`onend (${stopTappedAt ? 'after stop tap' : 'ON ITS OWN, no stop tap'})`);
-      stopTappedAt = 0;
-      summary();
+      listening = false; b.classList.remove('on');
+      if (!stopTappedAt) r.endedOnItsOwn = true;
+      if (stopTappedAt && r.textAfterStop === null) r.textAfterStop = false;
+      log(`[${m.key}] onend (${stopTappedAt ? 'after stop tap' : 'on its own'})`);
+      stopTappedAt = 0; show();
     };
-    try { rec.start(); log('rec.start() called'); } catch (err) { seen.error = err.name; log(`start threw: ${err.name} ${err.message}`); summary(); }
-  });
+    try { rec.start(); log(`[${m.key}] start() continuous=${m.continuous} interim=${m.interim}`); }
+    catch (err) { r.error = err.name; log(`[${m.key}] start threw ${err.name}`); show(); }
+  }
 </script>
 </body>
 </html>
