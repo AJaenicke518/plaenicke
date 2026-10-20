@@ -157,8 +157,10 @@ export function saveFeeds(feeds) {
 // removeFeed) is for a feed that written.tombstones already covers. Any
 // asynchronous tombstone writer breaks the overwrite.
 // Tombstones are NOT kept until every device has seen them: merge() drops any
-// older than its 90-day TOMBSTONE_MAX_AGE_DAYS on every sync, so a device
+// that suppresses nothing and is more than 90 days older than the earlier of
+// the device clock and the newest data (js/merge.js's prune), so a device
 // offline for longer can bring a deleted record back (spec § 12).
+// pruneTombstones below is NOT that rule and has no production caller.
 export const TOMBSTONES_KEY = 'plaenicke.syncTombstones';
 const TOMBSTONE_MAX_AGE_DAYS = 90;
 const DAY_MS = 24 * 60 * 60 * 1000;

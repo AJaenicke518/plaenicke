@@ -236,3 +236,135 @@ test('two devices converge and stop pushing', () => {
     `only ${divergentTrials} trials entered quiesce divergent (floor 75, measured 93-100) — `
     + 'operations and syncs have re-coupled and convergence is barely tested');
 });
+
+// ONE DEVICE'S CLOCK A YEAR FAST (punchlist: "prune() is clock-skew-
+// destructive"). Device 1's clock jumps a year ahead after both devices have
+// been in sync on correct clocks. Each sync is modelled the way the shipped
+// code runs it: syncOnce's merge(local, remote), then app.js's
+// applySyncedState merging AGAIN against live storage — which still holds
+// everything the first merge suppressed. That second merge is what turns a
+// pruned tombstone into a resurrected record on the very device that pruned
+// it; the test above, which merges once, cannot see it.
+//
+// Two scenarios, each over 100 trials:
+//   - 'syncs only': after the jump only device 0 writes. Device 1 just
+//     syncs, as it would on the first load after its clock moved.
+//   - 'writes': both devices write after the jump, so device 1's own records
+//     carry its clock and become the newest data there is.
+// Measured on the code before this fix: records resurrected in 89/100 and
+// 56/100 trials, and no trial in either scenario ever reached a fixed point.
+//
+// KNOWN LIMIT, NOT ASSERTED: in 'writes', the devices still never reach a
+// fixed point. Device 1 ages out a tombstone that suppresses nothing (by its
+// clock it is a year old) and device 0 puts it back (by its clock it is not),
+// so each of their syncs pushes. No record is lost or resurrected by that —
+// asserted below — but it is a push per sync for as long as the clock is
+// wrong. No rule over the data alone can tell "my clock is a year fast and I
+// just wrote" from "a year passed and I just wrote".
+test('one device a year fast: no deletion is undone, and without its own writes the devices converge', () => {
+  const YEAR = 365 * 24 * 60 * 60 * 1000;
+  const TTL = 90 * 24 * 60 * 60 * 1000;
+  for (const scenario of ['syncs only', 'writes']) {
+    let seed = 20261020;
+    const rnd = (n) => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return (seed >>> 16) % n; };
+    let prunableTrials = 0; // coverage: device 1 saw a tombstone the old rule would have pruned
+    let holderTrials = 0;   // coverage: device 1 held a record a tombstone then suppressed
+
+    for (let trial = 0; trial < 100; trial += 1) {
+      const server = { wire: emptyState() };
+      const devices = [emptyState(), emptyState()];
+      const skew = [0, 0];
+      let clock = Date.UTC(2026, 7, 1);
+      const created = new Map();
+      const deleted = new Map();
+      const bump = (m, k, v) => { if (!m.has(k) || v > m.get(k)) m.set(k, v); };
+      let sawPrunable = false;
+      let sawHolder = false;
+
+      const sync = (d) => {
+        const now = new Date(clock + skew[d]);
+        const local = devices[d];
+        if (d === 1 && skew[1] > 0) {
+          const tombs = [...local.tombstones, ...server.wire.tombstones];
+          if (tombs.some((t) => Date.parse(t.deletedAt) < now.getTime() - TTL)) sawPrunable = true;
+          for (const t of server.wire.tombstones) {
+            const list = t.kind === 'item' ? local.items : local.feeds;
+            if (list.some((r) => r.id === t.id && Date.parse(r.updatedAt) < Date.parse(t.deletedAt))) sawHolder = true;
+          }
+        }
+        const merged = merge(local, server.wire, now);
+        devices[d] = merge(local, merged, now); // applySyncedState's re-merge against live storage
+        const wire = toWire(devices[d]);
+        if (JSON.stringify(wire) !== JSON.stringify(toWire(server.wire))) {
+          server.wire = wire;
+          return true;
+        }
+        return false;
+      };
+
+      const ops = (steps, writers) => {
+        for (let step = 0; step < steps; step += 1) {
+          clock += 3600000;
+          const d = writers[rnd(writers.length)];
+          const at = new Date(clock + skew[d]).toISOString();
+          const atMs = Date.parse(at);
+          const id = `r${rnd(8)}`;
+          const op = rnd(4);
+          if (op === 0) {
+            devices[d] = { ...devices[d], items: [...devices[d].items.filter((i) => i.id !== id), { id, title: 't', date: '2026-08-05', time: null, updatedAt: at, by: d }] };
+            bump(created, `item:${id}`, atMs);
+          } else if (op === 1) {
+            devices[d] = { ...devices[d], tombstones: [...devices[d].tombstones.filter((t) => !(t.id === id && t.kind === 'item')), { id, kind: 'item', deletedAt: at }] };
+            bump(deleted, `item:${id}`, atMs);
+          } else if (op === 2) {
+            devices[d] = { ...devices[d], feeds: [...devices[d].feeds.filter((f) => f.id !== id), { id, url: `https://cal.example/${id}.ics`, name: id, color: '#111', hidden: false, updatedAt: at, by: d }] };
+            bump(created, `feed:${id}`, atMs);
+          } else {
+            devices[d] = { ...devices[d], tombstones: [...devices[d].tombstones.filter((t) => !(t.id === id && t.kind === 'feed')), { id, kind: 'feed', deletedAt: at }] };
+            bump(deleted, `feed:${id}`, atMs);
+          }
+          if (rnd(3) === 0) sync(d);
+        }
+      };
+
+      ops(24, [0, 1]);   // both clocks correct
+      sync(0); sync(1); sync(0);
+      skew[1] = YEAR;    // device 1's clock jumps a year ahead
+      ops(16, scenario === 'writes' ? [0, 1] : [0]);
+
+      let rounds = 0;
+      let fixed = false;
+      for (; rounds < 50; rounds += 1) {
+        const a = sync(0);
+        const b = sync(1);
+        if (!a && !b) { fixed = true; break; }
+      }
+      if (sawPrunable) prunableTrials += 1;
+      if (sawHolder) holderTrials += 1;
+
+      const alive = (kind) => [...created]
+        .filter(([k]) => k.startsWith(`${kind}:`))
+        .filter(([k, c]) => !(deleted.has(k) && deleted.get(k) > c))
+        .map(([k]) => k.slice(kind.length + 1)).sort();
+      for (const d of [0, 1]) {
+        const w = toWire(devices[d]);
+        assert.deepEqual(w.items.map((i) => i.id).sort(), alive('item'), `${scenario}, trial ${trial}, device ${d}: item set does not match the op log`);
+        assert.deepEqual(w.feeds.map((f) => f.id).sort(), alive('feed'), `${scenario}, trial ${trial}, device ${d}: feed set does not match the op log`);
+      }
+      if (scenario === 'syncs only') {
+        assert.ok(fixed, `${scenario}, trial ${trial}: never reached a fixed point`);
+        assert.deepEqual(toWire(devices[0]), toWire(devices[1]), `${scenario}, trial ${trial}: devices diverged`);
+        assert.deepEqual(toWire(devices[0]), toWire(server.wire), `${scenario}, trial ${trial}: the server holds something else`);
+      }
+    }
+    // Coverage floors. Measured over eight seeds (20261020, 1, 2, 3, 42, 1337,
+    // 987654321, 55555): prunableTrials 100 in every one; holderTrials 93-97
+    // ('syncs only') and 62-77 ('writes'). Without the first, device 1 never
+    // saw a tombstone a year-fast clock would expire and the test proves
+    // nothing about prune; without the second, the re-merge resurrection path
+    // is never exercised.
+    assert.ok(prunableTrials >= 80, `${scenario}: only ${prunableTrials} trials gave device 1 a tombstone its clock would expire (floor 80, measured 100)`);
+    const holderFloor = scenario === 'writes' ? 45 : 75;
+    assert.ok(holderTrials >= holderFloor, `${scenario}: only ${holderTrials} trials had device 1 holding a record a tombstone then suppressed (floor ${holderFloor})`);
+  }
+});

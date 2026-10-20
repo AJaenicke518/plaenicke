@@ -98,11 +98,20 @@ test('an item tombstone does not delete a feed with the same id, and vice versa'
     state({ tombstones: [{ id: 'a', kind: 'feed', deletedAt: '2026-08-02T00:00:00.000Z' }] }), NOW).items.map(i => i.id), ['a']);
 });
 
+// This test used to assert the tombstone was ALSO pruned in the same merge.
+// That is the resurrection path: app.js's applySyncedState re-merges against
+// live storage, which still holds 'a', and with the tombstone gone the second
+// merge brings 'a' back (see the prune tests below). A tombstone that
+// suppressed a record is kept for that merge, and pruned by age on the next
+// one, once nothing holds the record any more.
 test('a tombstone suppresses a record BEFORE age-pruning can drop the tombstone', () => {
   const out = merge(state({ items: [item('a', '2020-01-01T00:00:00.000Z')] }),
     state({ tombstones: [{ id: 'a', kind: 'item', deletedAt: '2020-06-01T00:00:00.000Z' }] }), NOW);
   assert.deepEqual(out.items, []);
-  assert.deepEqual(out.tombstones, []);
+  assert.deepEqual(out.tombstones.map(t => t.id), ['a'], 'kept while it is still suppressing a record');
+  // Nothing holds 'a' any more, and a current record exists: now it ages out.
+  const next = merge(out, state({ items: [item('b', '2026-08-01T00:00:00.000Z')] }), NOW);
+  assert.deepEqual(next.tombstones, []);
 });
 
 test('tombstones older than 90 days are pruned; newer ones are kept', () => {
@@ -110,6 +119,63 @@ test('tombstones older than 90 days are pruned; newer ones are kept', () => {
     { id: 'old', kind: 'item', deletedAt: '2026-01-01T00:00:00.000Z' },
     { id: 'new', kind: 'item', deletedAt: '2026-07-30T00:00:00.000Z' }] }), NOW);
   assert.deepEqual(out.tombstones.map(t => t.id), ['new']);
+});
+
+// --- prune under clock skew ---------------------------------------------------
+//
+// A device whose clock runs far ahead must not age out tombstones that are
+// recent relative to the data itself: it would push a blob with them gone, and
+// every record they were suppressing anywhere would come back.
+const DAY = 24 * 60 * 60 * 1000;
+const iso = (ms) => new Date(ms).toISOString();
+
+test('prune: a device a year fast keeps a tombstone one day older than the newest record', () => {
+  const newest = Date.parse('2026-08-01T00:00:00.000Z');
+  const out = merge(state({ items: [item('kept', iso(newest))] }),
+    state({ tombstones: [{ id: 'gone', kind: 'item', deletedAt: iso(newest - DAY) }] }),
+    new Date(newest + 365 * DAY));
+  assert.deepEqual(out.tombstones.map(t => t.id), ['gone']);
+});
+
+// syncOnce merges, then app.js's applySyncedState merges AGAIN against live
+// storage — which still holds every record the first merge suppressed. If the
+// first merge pruned the tombstone that did the suppressing, the second merge
+// has nothing to suppress with and the record comes straight back, and is
+// pushed. A tombstone that suppressed a record in this merge is still needed.
+test('prune: a tombstone that suppressed a record in this merge is kept, so the apply re-merge cannot resurrect it', () => {
+  const local = state({ items: [item('x', '2026-01-01T00:00:00.000Z'), item('y', '2026-08-01T00:00:00.000Z')] });
+  const remote = state({ items: [item('y', '2026-08-01T00:00:00.000Z')],
+    tombstones: [{ id: 'x', kind: 'item', deletedAt: '2026-01-02T00:00:00.000Z' }] });
+  for (const now of [NOW, new Date(NOW.getTime() + 365 * DAY)]) {
+    const merged = merge(local, remote, now);
+    const written = merge(local, merged, now); // applySyncedState: live storage still holds x
+    assert.deepEqual(written.items.map(i => i.id), ['y'], `x must stay deleted (now ${now.toISOString()})`);
+    assert.deepEqual(written.tombstones.map(t => t.id), ['x']);
+  }
+});
+
+// MUST NOT CHANGE: on a correct clock, with current data, a genuinely old
+// tombstone that suppresses nothing is still pruned — including when some
+// record carries a corrupt far-future stamp, which min(now, …) ignores.
+test('prune: a correctly clocked device still prunes old idle tombstones, even beside a far-future record', () => {
+  const tombs = [
+    { id: 'old', kind: 'item', deletedAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'new', kind: 'item', deletedAt: '2026-07-30T00:00:00.000Z' }];
+  for (const extra of [[], [item('corrupt', '9999-01-01T00:00:00.000Z')]]) {
+    const out = merge(state({ items: [item('a', '2026-08-01T00:00:00.000Z'), ...extra] }), state({ tombstones: tombs }), NOW);
+    assert.deepEqual(out.tombstones.map(t => t.id), ['new'], `extra: ${extra.map(i => i.id)}`);
+  }
+  // A current FEED counts as current data just as an item does.
+  const onlyFeed = merge(state({ feeds: [feed('f', '2026-08-01T00:00:00.000Z')] }),
+    state({ tombstones: [{ id: 'old', kind: 'item', deletedAt: '2026-01-01T00:00:00.000Z' }] }), NOW);
+  assert.deepEqual(onlyFeed.tombstones, []);
+  // Suppression is per kind: a feed tombstone doing work keeps itself, not
+  // an old item tombstone that happens to share its id.
+  const crossKind = merge(state({ feeds: [feed('x', '2020-01-01T00:00:00.000Z')], items: [item('a', '2026-08-01T00:00:00.000Z')] }),
+    state({ tombstones: [
+      { id: 'x', kind: 'feed', deletedAt: '2020-06-01T00:00:00.000Z' },
+      { id: 'x', kind: 'item', deletedAt: '2020-06-01T00:00:00.000Z' }] }), NOW);
+  assert.deepEqual(crossKind.tombstones.map(t => `${t.kind}:${t.id}`), ['feed:x']);
 });
 
 test('the newer of two tombstones for the same record wins', () => {
