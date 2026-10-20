@@ -293,7 +293,7 @@ test('one device a year fast: no deletion is undone, and without its own writes 
           }
         }
         const merged = merge(local, server.wire, now);
-        devices[d] = merge(local, merged, now); // applySyncedState's re-merge against live storage
+        devices[d] = merge(local, merged, now, { keepRemoteTombstones: true }); // applySyncedState's re-merge against live storage
         const wire = toWire(devices[d]);
         if (JSON.stringify(wire) !== JSON.stringify(toWire(server.wire))) {
           server.wire = wire;

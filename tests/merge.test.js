@@ -157,10 +157,29 @@ test('prune: a tombstone that suppressed a record in this merge is kept, so the 
     tombstones: [{ id: 'x', kind: 'item', deletedAt: '2026-01-02T00:00:00.000Z' }] });
   for (const now of [NOW, new Date(NOW.getTime() + 365 * DAY)]) {
     const merged = merge(local, remote, now);
-    const written = merge(local, merged, now); // applySyncedState: live storage still holds x
+    const written = merge(local, merged, now, { keepRemoteTombstones: true }); // applySyncedState: live storage still holds x
     assert.deepEqual(written.items.map(i => i.id), ['y'], `x must stay deleted (now ${now.toISOString()})`);
     assert.deepEqual(written.tombstones.map(t => t.id), ['x']);
   }
+});
+
+// The other way round: only the SERVER holds x. The first merge keeps the
+// tombstone (it suppresses the server's x) but live storage never held x, so
+// in the re-merge it suppresses nothing. keepRemoteTombstones is what stops
+// that merge pruning it; without it the push carries neither x nor its
+// tombstone, and the next device holding x pushes it back. A tombstone the
+// first merge pruned is still pruned by the re-merge.
+test('prune: the apply re-merge keeps a tombstone the first merge kept for a record only the server held', () => {
+  const local = state({ items: [item('y', '2026-08-01T00:00:00.000Z')], tombstones: [
+    { id: 'x', kind: 'item', deletedAt: '2026-01-02T00:00:00.000Z' },
+    { id: 'idle', kind: 'item', deletedAt: '2026-01-02T00:00:00.000Z' }] });
+  const remote = state({ items: [item('x', '2026-01-01T00:00:00.000Z'), item('y', '2026-08-01T00:00:00.000Z')] });
+  const merged = merge(local, remote, NOW);
+  assert.deepEqual(merged.tombstones.map(t => t.id), ['x'], 'fixture check: the first merge keeps x, prunes idle');
+  const written = merge(local, merged, NOW, { keepRemoteTombstones: true });
+  assert.deepEqual(written.items.map(i => i.id), ['y']);
+  assert.deepEqual(written.tombstones.map(t => t.id), ['x']);
+  assert.deepEqual(merge(local, merged, NOW).tombstones, [], 'without the option, the re-merge prunes it');
 });
 
 // MUST NOT CHANGE: on a correct clock, with current data, a genuinely old

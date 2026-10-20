@@ -975,7 +975,11 @@ backgroundSyncFeeds(feeds);
 // this device", which was removed on 2026-10-19: every caller is re-merged.
 export function applySyncedState(state) {
   const live = localState();
-  const written = merge(live, state, new Date());
+  // keepRemoteTombstones: `state` is already pruned, and every tombstone in it
+  // is one the first merge kept — including one that suppressed a record only
+  // the server held, which live storage never had. Re-pruning here dropped
+  // it and pushed the deletion away (js/merge.js, prune()).
+  const written = merge(live, state, new Date(), { keepRemoteTombstones: true });
   items = written.items;
   saveItems(items);
   // applyRemoteFeeds requires the COMPLETE merged feed list (written.feeds,

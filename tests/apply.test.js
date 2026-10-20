@@ -232,6 +232,58 @@ test('applySyncedState returns what it wrote', async () => {
   assert.deepEqual(written.items.map((i) => i.id), loadItems().map((i) => i.id));
 });
 
+// THE TWO MERGES MUST AGREE ON WHICH TOMBSTONES ARE STILL DOING WORK. syncOnce
+// merges local with the server, then hands the result to applySyncedState,
+// which merges AGAIN against live storage and returns what is pushed. When
+// only the SERVER holds a record this device deleted over 90 days ago, the
+// first merge keeps the tombstone (it suppresses the server's copy) and drops
+// the record. Live storage never held the record, so in the re-merge the
+// tombstone suppressed nothing and was pruned: the push carried neither the
+// record nor its tombstone, and the next device still holding it pushed it
+// straight back. Driven through the real syncOnce and applySyncedState.
+test('sync: an old tombstone for a record only the server holds is pushed, not pruned by the apply re-merge', async () => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  const { syncOnce } = await import('../js/sync.js');
+  const { getLink } = await import('../js/auth.js');
+  const { decryptBlob } = await import('../js/crypto.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const ago = (days) => new Date(Date.now() - days * DAY_MS).toISOString();
+  const current = record({ id: 'srv-current', updatedAt: ago(0) });
+  saveItems([current]);
+  saveTombstones([
+    { id: 'srv-only', kind: 'item', deletedAt: ago(100) },
+    { id: 'srv-only-feed', kind: 'feed', deletedAt: ago(100) },
+    // Suppresses nothing on either side: the re-merge must still prune it.
+    { id: 'idle', kind: 'item', deletedAt: ago(100) },
+  ]);
+  const blob = await encryptBlob(getLink().encKey, state({
+    items: [current, record({ id: 'srv-only', updatedAt: ago(200) })],
+    feeds: [{ id: 'srv-only-feed', url: 'https://example.invalid/srv.ics', name: 'S', updatedAt: ago(200) }],
+  }));
+  const puts = [];
+  const status = await syncOnce({
+    readFetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ version: 7, blob }) }),
+    fetchImpl: async (url, opts) => { puts.push(opts); return { ok: true, status: 200, json: async () => ({ version: 8 }) }; },
+    now: () => new Date(),
+    apiBase: 'https://example.invalid',
+    applyState: applySyncedState,
+  });
+  assert.equal(status.status, 'ok', 'fixture check: the sync succeeded');
+  assert.equal(puts.length, 1, 'fixture check: the merge was pushed');
+  const pushed = await decryptBlob(getLink().encKey, JSON.parse(puts[0].body).blob);
+  assert.deepEqual(pushed.items.map((i) => i.id), ['srv-current'], 'fixture check: the deletion applied');
+  assert.deepEqual(pushed.feeds, [], 'fixture check: the feed deletion applied');
+  assert.deepEqual(pushed.tombstones.map((t) => `${t.kind}:${t.id}`), ['feed:srv-only-feed', 'item:srv-only'],
+    'the push must carry the tombstones, or the next device holding the records pushes them back');
+  assert.deepEqual(loadTombstones().map((t) => `${t.kind}:${t.id}`).sort(), ['feed:srv-only-feed', 'item:srv-only'],
+    'and this device keeps them, so its next merge still suppresses the records');
+  saveTombstones([]);
+  seed([]);
+});
+
 // --- no discard path (Replace this device removed, 2026-10-19) -------------
 //
 // "Replace this device" was the only caller of a discard: applySyncedState

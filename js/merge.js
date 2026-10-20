@@ -233,10 +233,10 @@ export function applyTombstones(records, tombstones, kind) {
 // Nothing in the data distinguishes "my clock is a year fast and I just
 // wrote" from "a year passed and I just wrote"; only a clock the devices
 // share (the server's) could.
-function prune(tombstones, now, newest, stillSuppressing) {
+function prune(tombstones, now, newest, keep) {
   const cutoff = Math.min(now.getTime(), newest) - TOMBSTONE_MAX_AGE_DAYS * DAY_MS;
   return tombstones.filter(t => {
-    if (stillSuppressing.has(`${t.kind}:${t.id}`)) return true;
+    if (keep.has(`${t.kind}:${t.id}`)) return true;
     const parsed = Date.parse(t.deletedAt);
     // An unparseable deletedAt must never cause a drop: losing the tombstone
     // resurrects the record on the next sync.
@@ -245,7 +245,7 @@ function prune(tombstones, now, newest, stillSuppressing) {
   });
 }
 
-export function merge(local, remote, now) {
+export function merge(local, remote, now, { keepRemoteTombstones = false } = {}) {
   requireKnownVersion(local, 'local');
   requireKnownVersion(remote, 'remote');
   const tombstones = mergeTombstones(local.tombstones, remote.tombstones);
@@ -256,11 +256,17 @@ export function merge(local, remote, now) {
   const items = applyTombstones(allItems, tombstones, 'item');
   const feeds = applyTombstones(allFeeds, tombstones, 'feed');
   // Which tombstones did work here — see prune().
-  const stillSuppressing = new Set();
+  const keep = new Set();
   const keptItems = new Set(items.map(r => r.id));
   const keptFeeds = new Set(feeds.map(r => r.id));
-  for (const r of allItems) if (!keptItems.has(r.id)) stillSuppressing.add(`item:${r.id}`);
-  for (const r of allFeeds) if (!keptFeeds.has(r.id)) stillSuppressing.add(`feed:${r.id}`);
+  for (const r of allItems) if (!keptItems.has(r.id)) keep.add(`item:${r.id}`);
+  for (const r of allFeeds) if (!keptFeeds.has(r.id)) keep.add(`feed:${r.id}`);
+  // The re-merge (app.js's applySyncedState) passes keepRemoteTombstones:
+  // its `remote` is the first merge's output, already pruned, and every
+  // tombstone in it is one that merge decided to keep — see prune().
+  if (keepRemoteTombstones) {
+    for (const t of remote.tombstones) keep.add(`${t.kind}:${t.id}`);
+  }
   // The newest timestamp in the data — see prune(). ts() reads an
   // unparseable stamp as -Infinity, so it can never raise this.
   let newest = -Infinity;
@@ -271,7 +277,7 @@ export function merge(local, remote, now) {
     schemaVersion: SCHEMA_VERSION,
     items,
     feeds,
-    tombstones: prune(tombstones, now, newest, stillSuppressing),
+    tombstones: prune(tombstones, now, newest, keep),
   };
 }
 
