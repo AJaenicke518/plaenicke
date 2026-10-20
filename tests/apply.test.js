@@ -14,6 +14,19 @@ import { SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID, SLOW_WRITE_MS } from '../js/linku
 import { addDays, startOfWeek, weekLabel } from '../js/timegrid.js';
 import { formatDayLabel } from '../js/freshness.js';
 
+// Installed before anything imports app.js: every fetch that a test has not
+// stubbed rejects the way an offline device does.
+globalThis.fetch = () => Promise.reject(new TypeError('network blocked in tests'));
+
+// This file must never reach the production Worker. Tests that need a server
+// stub globalThis.fetch and restore it afterwards, but app.js also schedules
+// syncs on real timers that fire after a test has restored fetch, so that is
+// not enough on its own.
+test('the default fetch in this file is offline, not the production Worker', async () => {
+  const { WORKER_URL } = await import('../js/config.js');
+  await assert.rejects(globalThis.fetch(`${WORKER_URL}/data`), /network blocked in tests/);
+});
+
 // --- historical note: the js/linkui.js resolve hook -------------------------
 //
 // Until Task 8, this file registered an ESM resolve hook that redirected
