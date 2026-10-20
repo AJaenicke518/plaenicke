@@ -42,6 +42,49 @@ const TYPE_LABELS = {
   general: 'General', task: 'To-do', idea: 'Idea',
 };
 
+// The share of the visible height a sheet may take; the rest shows the scrim,
+// so a tap above the sheet can still dismiss it. styles.css's 85dvh is the
+// same figure for a browser without visualViewport.
+const SHEET_MAX_SHARE = 0.85;
+
+// Keeps an open sheet inside the VISUAL viewport (the part of the page the
+// user can actually see) and returns the function that stops doing so.
+//
+// Why: on iOS Safari the keyboard does not resize the layout viewport, which
+// is what `position: fixed`, `bottom: 0` and `dvh` measure against. It shrinks
+// the visual viewport and scrolls it within the layout viewport instead. A
+// sheet pinned to the layout viewport's bottom then sits behind the keyboard,
+// and its top (the bar with Save and Cancel) is above the visible area, where
+// no scroll inside the sheet can bring it.
+//
+// The sheet is placed by its bottom edge: `top` is set to the visible area's
+// bottom edge in layout-viewport px (offsetTop + height; offsetTop is the
+// visual viewport's offset within the layout viewport, which is the fixed
+// sheet's containing block) and translateY(-100%) lifts it by its own height.
+// That needs neither the layout viewport's height nor a measurement of the
+// sheet. max-height keeps its top edge inside the visible area too.
+//
+// No visualViewport: nothing is set and nothing listens; the stylesheet's
+// bottom: 0 / 85dvh applies exactly as before.
+function followVisualViewport(sheet) {
+  const vv = globalThis.visualViewport;
+  if (!vv) return () => {};
+  const place = () => {
+    sheet.style.setProperty('bottom', 'auto');
+    sheet.style.setProperty('top', `${vv.offsetTop + vv.height}px`);
+    sheet.style.setProperty('transform', 'translateY(-100%)');
+    sheet.style.setProperty('max-height', `${Math.floor(vv.height * SHEET_MAX_SHARE)}px`);
+  };
+  vv.addEventListener('resize', place);
+  vv.addEventListener('scroll', place);
+  place();
+  return () => {
+    vv.removeEventListener('resize', place);
+    vv.removeEventListener('scroll', place);
+    for (const prop of ['bottom', 'top', 'transform', 'max-height']) sheet.style.removeProperty(prop);
+  };
+}
+
 function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -129,14 +172,19 @@ export function openItemSheet(host, item, {
   // so the page stays locked while either is open, whichever closes first.
   // Taken when the sheet mounts, below.
   let releaseScroll = null;
+  // Stops the sheet following the visual viewport (iOS keyboard) and removes
+  // its inline placement. Started when the sheet mounts, below.
+  let stopViewport = null;
   // Detach without notifying: used when another sheet replaces this one.
   // The scroll lock is released here too; a replaced sheet's release and its
-  // replacement's lock leave the page locked throughout.
+  // replacement's lock leave the page locked throughout. So is the visual
+  // viewport tracking, so a replaced sheet stops being placed.
   const teardown = () => {
     if (closed) return false;
     closed = true;
     document.removeEventListener('keydown', onKey);
     releaseScroll();
+    stopViewport();
     if (mounted.get(host) === teardown) mounted.delete(host);
     return true;
   };
@@ -356,6 +404,7 @@ export function openItemSheet(host, item, {
   host.innerHTML = '';
   host.appendChild(backdrop);
   releaseScroll = lock();
+  stopViewport = followVisualViewport(sheet);
   document.addEventListener('keydown', onKey);
   mounted.set(host, teardown);
   initialFocus.focus();
