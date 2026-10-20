@@ -168,7 +168,12 @@ if (els.mic && isVoiceSupported()) {
 // declaration, so the reference is live here) down to linkui.js's adoption
 // flow, which hands it to syncOnce. It is injected rather than imported
 // there because linkui.js already supplies THIS file with renderSyncStatus;
-// importing it back would close a module cycle (DA-C6).
+// importing it back would close a module cycle (DA-C6). The cycle is the
+// incidental reason. The durable one is dependency inversion at the DOM
+// boundary: this file touches `document` at module scope, so anything that
+// imports it cannot be unit-tested in Node (`ReferenceError: document is not
+// defined`). Keep the injection even if renderSyncStatus moves and the cycle
+// goes away.
 initSettings({
   button: els.settingsBtn,
   host: els.settingsHost,
