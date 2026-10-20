@@ -1023,8 +1023,14 @@ async function runSync() {
     // Never let a sync failure break the app; local data keeps rendering.
     console.error('sync', err && err.name);
     // But never let it be SILENT either: record it, so the renderSyncStatus
-    // below lights the shell indicator instead of leaving it dark.
-    recordSyncFailure(err);
+    // below lights the shell indicator instead of leaving it dark. Recording
+    // writes storage, which can itself throw when the device is full; that
+    // must not escape either, since runSync is called from listeners/timers.
+    try {
+      recordSyncFailure(err);
+    } catch (recordErr) {
+      console.error('sync record', recordErr && recordErr.name);
+    }
   } finally {
     syncInFlight = false;
     renderSyncStatus();

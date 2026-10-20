@@ -936,6 +936,50 @@ test('runSync records a lastError and lights the indicator when syncOnce itself 
     'the recorded value must read as a sync problem in plain words');
 });
 
+// Recording the crash writes plaenicke.syncState. If THAT write throws too
+// (the device is out of storage), runSync must still settle: it is called
+// straight from event listeners and timers, so a rejection escaping it is an
+// unhandled rejection, and "never let a sync failure break the app" breaks.
+test('runSync still settles when recording a crash itself throws', async () => {
+  const ls = installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  saveItems([record({ id: 'crash-full', title: 'Crash full' })]);
+  saveSyncState({ ...loadSyncState(), lastSyncedAt: '2026-08-01T00:00:00.000Z', lastError: null });
+  let full = false;
+  const realSet = ls.setItem.bind(ls);
+  ls.setItem = (k, v) => {
+    if (full && k === 'plaenicke.syncState') {
+      const e = new Error('full'); e.name = 'QuotaExceededError'; throw e;
+    }
+    realSet(k, v);
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    if (method === 'GET') return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) });
+    full = true; // the crash below happens with storage already full
+    return Promise.resolve({ ok: true, status: 200, json: async () => null });
+  };
+  const originalError = console.error;
+  console.error = () => {};
+  const timers = installManualTimers();
+  let outcome;
+  try {
+    const [listener] = globalThis.window._listeners.online;
+    outcome = await Promise.resolve(listener()).then(() => 'settled', (e) => `rejected: ${e && e.name}`);
+    await drain();
+  } finally {
+    timers.restore();
+    console.error = originalError;
+    globalThis.fetch = originalFetch;
+    ls.setItem = realSet;
+  }
+  assert.equal(full, true, 'fixture check: the sync reached the write');
+  assert.equal(outcome, 'settled', 'a failure while recording a failure must not escape runSync');
+});
+
 test('runSync does not proceed into its try/finally while adoption is pending', async () => {
   installFakeLocalStorage();
   await import('../js/app.js'); // cached after the first test; online listener already registered
