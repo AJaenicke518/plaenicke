@@ -963,10 +963,12 @@ backgroundSyncFeeds(feeds);
 // Sync applies through the owners of each key, never through storage
 // directly. app.js owns `items`; feeds.js owns feeds. See spec 5.5.
 //
-// It re-merges against LIVE storage first: between the merge that produced
-// `state` (in sync.js, possibly across a CAS retry) and this call there may
-// have been a full PUT round trip, during which the user may have added or
-// deleted here. Writing `state` wholesale would destroy those edits — and
+// It re-merges against LIVE storage first. Today sync.js calls this
+// synchronously right after the merge that produced `state` (no await between
+// them, in the main path or the CAS retry), so live storage still equals that
+// merge's local input. The re-merge is the guard that keeps this correct if an
+// await is ever added there: the user may then have added or deleted here,
+// and writing `state` wholesale would destroy those edits — and
 // for a feed, destroy a URL that is never rendered anywhere and so cannot be
 // re-entered. Returns what it actually wrote; sync.js pushes THAT, not the
 // state it was handed.
