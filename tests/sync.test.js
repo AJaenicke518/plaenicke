@@ -908,3 +908,43 @@ test('recordSyncFailure records lastError and leaves every other sync-state fiel
   recordSyncFailure({ name: 'TypeError' });
   assert.deepEqual(loadSyncState(), { ...full, lastError: 'TypeError' });
 });
+
+// A browser CORS rejection IS a TypeError from fetch(), so a misconfigured
+// origin list reads exactly like being offline (spec § 13's custom-domain
+// move is where it would bite). The name is logged so the console can tell
+// them apart; what is recorded and returned does not change. Only the name:
+// never the message, the URL or the token.
+test('a rejected read logs the error name, and still records and reports offline', async (t) => {
+  const link = await linked();
+  const logged = [];
+  t.mock.method(console, 'error', (...args) => { logged.push(args); });
+  const res = await syncOnce({ fetchImpl: async () => { throw new TypeError('Failed to fetch'); },
+    now: NOW, apiBase: 'https://w.example', applyState: echo });
+  assert.equal(res.status, 'offline');
+  assert.equal(res.applied, false);
+  assert.equal(loadSyncState().lastError, 'offline');
+  assert.equal(logged.length, 1);
+  assert.ok(logged[0].includes('TypeError'), `logged: ${JSON.stringify(logged)}`);
+  const text = JSON.stringify(logged);
+  assert.ok(!text.includes(link.authToken) && !text.includes('Failed to fetch') && !text.includes('w.example'));
+});
+
+test('a rejected write logs the error name, and still records and reports offline', async (t) => {
+  const link = await linked();
+  const server = fakeServer();
+  const logged = [];
+  t.mock.method(console, 'error', (...args) => { logged.push(args); });
+  const res = await realSyncOnce({
+    readFetchImpl: server.fetchImpl,
+    fetchImpl: async () => { throw new TypeError('Failed to fetch'); },
+    now: NOW, apiBase: 'https://w.example',
+    applyState: () => state({ items: [item('a', '2026-08-01T00:00:00.000Z')] }),
+  });
+  assert.equal(res.status, 'offline');
+  assert.equal(res.applied, true);
+  assert.equal(loadSyncState().lastError, 'offline');
+  assert.equal(logged.length, 1);
+  assert.ok(logged[0].includes('TypeError'), `logged: ${JSON.stringify(logged)}`);
+  const text = JSON.stringify(logged);
+  assert.ok(!text.includes(link.authToken) && !text.includes('Failed to fetch') && !text.includes('w.example'));
+});

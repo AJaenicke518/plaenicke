@@ -60,10 +60,20 @@ async function fetchRemote({ readFetchImpl, apiBase, link }) {
   // gets its own networkError tag for the same reason the call above does.
   // A read that hits its deadline rejects from one of those same two places,
   // which is what makes a timeout report as 'offline'.
+  //
+  // A CORS FAILURE LANDS HERE TOO, and is reported as offline. The browser
+  // rejects a cross-origin request the Worker's origin list does not allow
+  // with a TypeError from fetch() — the same rejection a dropped connection
+  // gives — and deliberately exposes nothing more to the page. That matters
+  // at spec § 13's custom-domain move: a fresh origin missing from the list
+  // reads as "could not reach the account". The name is logged so the
+  // console at least separates TypeError from a timeout's AbortError; only
+  // the name, never the message, URL or token.
   let res;
   try {
     res = await readFetchImpl(`${apiBase}/data`, { headers: { authorization: `Bearer ${link.authToken}` } });
   } catch (err) {
+    console.error('plaenicke: sync read failed', err && err.name);
     return { networkError: err };
   }
   if (res.status === 401) return { unauthorized: true };
@@ -239,7 +249,9 @@ export async function syncOnce(deps) {
         headers: { authorization: `Bearer ${link.authToken}`, 'content-type': 'application/json' },
         body: JSON.stringify({ version, blob }),
       });
-    } catch {
+    } catch (err) {
+      // Offline, or a CORS rejection — indistinguishable here; see fetchRemote.
+      console.error('plaenicke: sync write failed', err && err.name);
       record({ lastError: 'offline' });
       return done('offline');
     }
