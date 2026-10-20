@@ -1,6 +1,6 @@
 import {
   loadItems, saveItems, loadFeeds, loadFeedCache, addTombstone,
-  loadTombstones, saveTombstones, recordLaunch, STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY,
+  saveTombstones, recordLaunch, STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY,
 } from './storage.js';
 import { followToday, formatDayLabel } from './freshness.js';
 import {
@@ -23,9 +23,9 @@ import { openItemSheet } from './itemsheet.js';
 import { showToast } from './toast.js';
 import { applyEdit, typeChangePatch, snapshotOf, nextStamp, EDITABLE_FIELDS } from './edit.js';
 import { uid } from './uid.js';
-import { syncOnce, recordSyncFailure } from './sync.js';
+import { syncOnce, recordSyncFailure, localState } from './sync.js';
 import { isLinked, isAdoptionPending } from './auth.js';
-import { merge, SCHEMA_VERSION } from './merge.js';
+import { merge } from './merge.js';
 import { renderSyncStatus, syncWriteStarted, syncWriteSettled } from './linkui.js';
 import { WORKER_URL } from './config.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
@@ -972,10 +972,7 @@ backgroundSyncFeeds(feeds);
 // There is no discard path. It existed only for the linking flow's "Replace
 // this device", which was removed on 2026-10-19: every caller is re-merged.
 export function applySyncedState(state) {
-  const live = {
-    schemaVersion: SCHEMA_VERSION,
-    items: loadItems(), feeds: loadFeeds(), tombstones: loadTombstones(),
-  };
+  const live = localState();
   const written = merge(live, state, new Date());
   items = written.items;
   saveItems(items);

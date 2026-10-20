@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
-import { syncOnce as realSyncOnce, previewRemote as realPreviewRemote, MAX_ATTEMPTS, recordSyncFailure } from '../js/sync.js';
+import { syncOnce as realSyncOnce, previewRemote as realPreviewRemote, MAX_ATTEMPTS, recordSyncFailure, localState } from '../js/sync.js';
 import { fetchWithTimeout, FETCH_TIMEOUT_MS } from '../js/fetchtimeout.js';
 import { linkWithCode, clearAdoptionPending, tokenHash } from '../js/auth.js';
 import { encryptBlob, decryptBlob, generateEncKey, bytesToBase64url, composeLinkCode } from '../js/crypto.js';
@@ -947,4 +947,37 @@ test('a rejected write logs the error name, and still records and reports offlin
   assert.ok(logged[0].includes('TypeError'), `logged: ${JSON.stringify(logged)}`);
   const text = JSON.stringify(logged);
   assert.ok(!text.includes(link.authToken) && !text.includes('Failed to fetch') && !text.includes('w.example'));
+});
+
+// ONE reader of "this device's synced state", shared by sync.js, linkui.js's
+// adoption classifier and app.js's applySyncedState. It must go through the
+// storage DESERIALIZERS, not the raw JSON: linkui's classifier counts what
+// loadItems returns (CLAUDE.md), so a record the loader drops is not counted,
+// and a pre-V5 record arrives with its updatedAt backfilled.
+test('localState reads the synced keys through the storage loaders', () => {
+  installFakeLocalStorage();
+  localStorage.setItem('plaenicke.items', JSON.stringify([
+    { id: 'old', title: 'pre-V5', date: '2026-08-02', time: null, createdAt: '2026-07-01T00:00:00.000Z' },
+    { id: 'bad', title: 'numeric date', date: 20260802, time: null, updatedAt: '2026-08-01T00:00:00.000Z' },
+  ]));
+  saveFeeds([{ id: 'f1', url: 'https://cal.example/a.ics', name: 'A', color: '#111', hidden: false, updatedAt: '2026-08-01T00:00:00.000Z' }]);
+  localStorage.setItem('plaenicke.syncTombstones', JSON.stringify([{ id: 't1', kind: 'item', deletedAt: '2026-08-01T00:00:00.000Z' }]));
+  const out = localState();
+  assert.deepEqual(Object.keys(out).sort(), ['feeds', 'items', 'schemaVersion', 'tombstones']);
+  assert.equal(out.schemaVersion, SCHEMA_VERSION);
+  assert.deepEqual(out.items, loadItems());
+  assert.deepEqual(out.items.map((i) => i.id), ['old']);
+  assert.equal(out.items[0].updatedAt, '2026-07-01T00:00:00.000Z');
+  assert.deepEqual(out.feeds, loadFeeds());
+  assert.deepEqual(out.tombstones, [{ id: 't1', kind: 'item', deletedAt: '2026-08-01T00:00:00.000Z' }]);
+});
+
+// The shape used to be rebuilt in three places. The other two now call
+// localState, so a fourth field is added in one place.
+test('linkui.js and app.js read local synced state through localState, not their own copy', () => {
+  for (const file of ['linkui.js', 'app.js']) {
+    const src = codeOnly(readFileSync(new URL(`../js/${file}`, import.meta.url), 'utf8'));
+    assert.ok(/\blocalState\(\)/.test(src), `${file} does not call localState()`);
+    assert.ok(!src.includes('loadTombstones'), `${file} reads tombstones itself — rebuilding the local state shape`);
+  }
 });

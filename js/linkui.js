@@ -21,9 +21,9 @@
 
 import { getLink, linkWithCode, unlink, isAdoptionPending } from './auth.js';
 import { composeForNewDevice, base64urlToBytes, TOKEN_BYTES, KEY_BYTES } from './crypto.js';
-import { previewRemote, syncOnce } from './sync.js';
+import { previewRemote, syncOnce, localState } from './sync.js';
 import { applyTombstones } from './merge.js';
-import { loadAuth, loadSyncState, loadItems, loadFeeds, loadTombstones } from './storage.js';
+import { loadAuth, loadSyncState } from './storage.js';
 import { WORKER_URL } from './config.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
 
@@ -536,10 +536,6 @@ function labelled(node, text) {
 
 function plural(n, one, many) { return `${n} ${n === 1 ? one : many}`; }
 
-function readLocal() {
-  return { items: loadItems(), feeds: loadFeeds(), tombstones: loadTombstones() };
-}
-
 // A blob can decrypt and carry the right schemaVersion and still be
 // structurally unusable. Element shape matters as much as the arrays
 // themselves: adoptionCounts feeds these lists STRAIGHT to merge.js's
@@ -791,7 +787,7 @@ export function initLinkUI(options = {}) {
   // the exact shape DA-C2 named as not an informed choice.
   async function decideAndAct(remote, version, attempt, generation) {
     // tombstones are load-bearing on BOTH sides — see adoptionCounts.
-    const local = readLocal();
+    const local = localState();
     if (chooseAdoption(local, remote) === 'ask') {
       stage = 'ask';
       stageData = { version, remote, ...adoptionCounts(local, remote) };
@@ -825,7 +821,7 @@ export function initLinkUI(options = {}) {
   // the dialog described. So re-read at CLICK time and re-ask if it moved.
   async function adoptAgainstFreshCounts(adoptChoice, generation) {
     const shown = stageData;
-    const fresh = adoptionCounts(readLocal(), shown.remote);
+    const fresh = adoptionCounts(localState(), shown.remote);
     // Every count the dialog DESCRIBED, including remoteDeletesLocal, which
     // is a function of local records too.
     const moved = fresh.localItems !== shown.localItems

@@ -15,7 +15,13 @@ import { loadItems, loadFeeds, loadTombstones, saveSyncState } from './storage.j
 
 export const MAX_ATTEMPTS = 3;
 
-function localState() {
+// THIS DEVICE'S SYNCED STATE, as the storage loaders return it. The one
+// reader for it: syncOnce merges against it, linkui.js's adoption classifier
+// counts it, and app.js's applySyncedState re-merges against it. It goes
+// through the loaders, never the raw JSON — the classifier depends on that
+// (a record a loader drops is not counted — CLAUDE.md, on deserializeItems).
+// Exported so those three agree by construction rather than by copy.
+export function localState() {
   return { schemaVersion: SCHEMA_VERSION, items: loadItems(), feeds: loadFeeds(), tombstones: loadTombstones() };
 }
 
