@@ -1,6 +1,20 @@
 // storage.js — the ONLY file that touches localStorage.
 
+// WHO MAY WRITE EACH SYNCED KEY. The three synced keys are protected by
+// different invariants, and a writer added under the wrong one fails
+// silently. sync.js and linkui.js write none of them: merged state reaches
+// storage only through the injected applyState (app.js's applySyncedState).
+// tests/sync.test.js enforces that half for both files.
+
+// plaenicke.items — SOLE OWNERSHIP. Only app.js calls saveItems, and it saves
+// from its module-scope `items` snapshot rather than re-reading storage, so
+// any other writer in this tab is overwritten by app.js's next save. Another
+// tab's write reaches the snapshot through app.js's storage listener.
 export const STORAGE_KEY = 'plaenicke.items';
+// plaenicke.feeds — READ IMMEDIATELY BEFORE WRITE. Several writers (feeds.js's
+// removeFeed and applyRemoteFeeds, settings.js twice), each loading the list
+// and saving it in one synchronous step. A writer that holds a list across
+// an await, or keeps a snapshot and saves from it later, breaks this.
 export const FEEDS_KEY = 'plaenicke.feeds';
 const FEED_CACHE_KEY = 'plaenicke.feedCache';
 
@@ -114,8 +128,19 @@ export function saveFeeds(feeds) {
 // --- tombstones ---
 // Deletions live here, NOT in plaenicke.items: a tombstone has no title/date,
 // so deserializeItems would discard it on the next load and the deletion would
-// be lost. Cleared only once a sync has acknowledged them. See spec 5.6.
+// be lost. See spec 5.6.
 
+// plaenicke.syncTombstones — TWO KINDS OF WRITE, both synchronous.
+// addTombstone (app.js's deleteItem, feeds.js's removeFeed) is a
+// read-modify-write of one entry. app.js's applySyncedState is a FULL
+// OVERWRITE, saveTombstones(written.tombstones), from a list it loaded at its
+// own start; that is correct only because nothing between that load and the
+// save awaits, and the one tombstone written in between (applyRemoteFeeds's
+// removeFeed) is for a feed that written.tombstones already covers. Any
+// asynchronous tombstone writer breaks the overwrite.
+// Tombstones are NOT kept until every device has seen them: merge() drops any
+// older than its 90-day TOMBSTONE_MAX_AGE_DAYS on every sync, so a device
+// offline for longer can bring a deleted record back (spec § 12).
 export const TOMBSTONES_KEY = 'plaenicke.syncTombstones';
 const TOMBSTONE_MAX_AGE_DAYS = 90;
 const DAY_MS = 24 * 60 * 60 * 1000;

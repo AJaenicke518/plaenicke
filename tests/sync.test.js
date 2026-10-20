@@ -59,6 +59,32 @@ test('sync.js never imports a storage writer — the single-writer rule, enforce
   }
 });
 
+// The rule above covered sync.js alone. linkui.js is the other orchestrator
+// (adoption), and the tombstone writers were not on the list at all — yet
+// app.js's applySyncedState does a FULL-OVERWRITE saveTombstones from a
+// snapshot it read a few lines earlier, which is only correct while nothing
+// else writes tombstones in between. Comments are stripped first: linkui.js
+// legitimately DESCRIBES what applySyncedState writes.
+function codeOnly(src) {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n').map((line) => line.replace(/(^|\s)\/\/.*$/, '$1')).join('\n');
+}
+
+test('neither orchestrator (sync.js, linkui.js) calls a storage writer for synced data or tombstones', () => {
+  for (const file of ['sync.js', 'linkui.js']) {
+    const code = codeOnly(readFileSync(new URL(`../js/${file}`, import.meta.url), 'utf8'));
+    for (const forbidden of ['saveItems', 'saveFeeds', 'saveFeedCache', 'saveTombstones', 'addTombstone']) {
+      assert.doesNotMatch(code, new RegExp(`\\b${forbidden}\\b`),
+        `${file} references ${forbidden}; writes go through the injected applyState (spec 5.5, js/storage.js)`);
+    }
+  }
+});
+
+test('codeOnly strips comments but keeps code, including a URL in a string', () => {
+  assert.equal(codeOnly("a(); // saveItems\n/* saveTombstones */b('https://x');"), "a(); \nb('https://x');");
+});
+
 test('an unlinked device does not sync and does not call the network', async () => {
   installFakeLocalStorage();
   let called = false;
