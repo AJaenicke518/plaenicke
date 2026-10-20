@@ -762,6 +762,45 @@ test('an account that keeps changing gives up instead of looping forever', async
   assert.equal(loadSyncState().adoptionPending, true, 'the gate stays raised');
 });
 
+// Pinned exactly (punchlist: unpinned constants). The test above bounds the
+// cycle at "<= 5", so MAX_ADOPT_ATTEMPTS 3 -> 5 passed it. The bound is the
+// number of times this device re-previews and re-writes against an account
+// that will not hold still; it is stated as 3 in js/linkui.js.
+test('an account that keeps changing is attempted exactly three times before giving up', async () => {
+  let version = 0;
+  const { host, syncCalls, fetchCalls } = await setup({
+    fetchImpl: async () => {
+      version += 1;
+      return { ok: true, status: 200, json: async () => ({ version, blob: '' }) };
+    },
+    syncResults: Array.from({ length: 50 }, (_, i) => ({ status: 'changed', version: 100 + i })),
+  });
+  assert.equal(syncCalls.length, 3, 'MAX_ADOPT_ATTEMPTS is 3');
+  assert.equal(fetchCalls.length, 3, 'one preview GET per attempt');
+  assert.match(allText(host), /kept changing/i);
+});
+
+// Every RETRYABLE member, pinned through what the user sees (punchlist:
+// unpinned constants). Dropping 'error' from the set routes a transient HTTP
+// 500 to the re-link paste field, where a user without their 86-character
+// code pastes a bare token and bootstraps a NEW, EMPTY account. The two
+// non-retryable statuses are the ones where a different code is the answer.
+test('each retryable failure offers Try again; unauthorized and undecryptable offer re-linking instead', async () => {
+  const emptyAccount = async () => ({ ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) });
+  for (const status of ['offline', 'error', 'conflict', 'skipped', 'kept-changing', 'malformed']) {
+    const { host, syncCalls } = await setup({ fetchImpl: emptyAccount, syncResults: [{ status, applied: false }] });
+    assert.equal(syncCalls.length, 1, `${status}: fixture check, the adoption must have run`);
+    assert.ok(findButton(host, 'Try again'), `${status}: must offer Try again`);
+    assert.equal(findButton(host, 'Re-link this device'), null, `${status}: must not offer the paste field`);
+  }
+  for (const status of ['unauthorized', 'undecryptable']) {
+    const { host, syncCalls } = await setup({ fetchImpl: emptyAccount, syncResults: [{ status, applied: false }] });
+    assert.equal(syncCalls.length, 1, `${status}: fixture check, the adoption must have run`);
+    assert.equal(findButton(host, 'Try again'), null, `${status}: retrying the same code cannot help`);
+    assert.ok(findButton(host, 'Re-link this device'), `${status}: must offer the paste field`);
+  }
+});
+
 // I2. settings.js calls initLinkUI per open(), and close() cannot cancel the
 // previous closure's in-flight work: each mount owns its own `inflight` and
 // the gate is still raised, so a second mount fires its own adoption.
