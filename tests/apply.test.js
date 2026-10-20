@@ -4624,3 +4624,67 @@ test('slow sync write: a write fetch that throws at once leaves no slow state', 
     t.mock.timers.reset();
   }
 });
+
+// The slow line outranks an EARLIER lastError, but never a corrupt stored
+// code or a pending adoption: no ordinary write can resolve either, so they
+// are what the user must be told even while a write is slow.
+async function slowWriteInFlight(t, id, T0) {
+  const shell = await linkedWithAPendingPush(id);
+  t.mock.timers.enable({ apis: ['Date'], now: T0 });
+  const net = holdAccountWrite();
+  const timers = installManualTimers();
+  for (const fn of globalThis.window._listeners.online) fn();
+  for (let i = 0; i < 200 && !net.inFlight(); i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+  assert.deepEqual(net.requests, ['GET', 'PUT'], 'fixture check: the write is in flight');
+  t.mock.timers.setTime(T0 + SLOW_WRITE_MS);
+  timers.fire(SLOW_WRITE_MS);
+  assert.match(shell.textContent, SHELL_SLOW, 'fixture check: the write is slow');
+  return { shell, net, timers };
+}
+
+test('slow sync write: a corrupt stored code outranks the slow line', async (t) => {
+  const { loadAuth, saveAuth } = await import('../js/storage.js');
+  let fx = null;
+  let code = null;
+  try {
+    fx = await slowWriteInFlight(t, 'slow-corrupt', Date.UTC(2026, 9, 19, 20, 0, 0));
+    code = loadAuth();
+    saveAuth('!!! not a link code !!!');
+    const { renderSyncStatus } = await import('../js/linkui.js');
+    renderSyncStatus();
+    assert.equal(fx.shell.hidden, false);
+    assert.equal(fx.shell.textContent, 'Sync is broken — open Settings',
+      'a corrupt code is shown even while a write is slow');
+    assert.equal(fx.shell.className, 'sync-indicator sync-indicator-problem');
+  } finally {
+    if (code !== null) saveAuth(code);
+    if (fx) {
+      if (fx.net.inFlight()) { fx.net.release(); await drain(); }
+      fx.timers.restore();
+      fx.net.restore();
+    }
+    t.mock.timers.reset();
+  }
+});
+
+test('slow sync write: a pending adoption outranks the slow line', async (t) => {
+  let fx = null;
+  try {
+    fx = await slowWriteInFlight(t, 'slow-adopt', Date.UTC(2026, 9, 19, 21, 0, 0));
+    saveSyncState({ ...loadSyncState(), adoptionPending: true });
+    const { renderSyncStatus } = await import('../js/linkui.js');
+    renderSyncStatus();
+    assert.equal(fx.shell.hidden, false);
+    assert.equal(fx.shell.textContent, 'Sync is waiting for you — open Settings',
+      'a pending adoption is shown even while a write is slow');
+    assert.equal(fx.shell.className, 'sync-indicator sync-indicator-problem');
+  } finally {
+    saveSyncState({ ...loadSyncState(), adoptionPending: false });
+    if (fx) {
+      if (fx.net.inFlight()) { fx.net.release(); await drain(); }
+      fx.timers.restore();
+      fx.net.restore();
+    }
+    t.mock.timers.reset();
+  }
+});
