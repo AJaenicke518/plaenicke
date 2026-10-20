@@ -4007,3 +4007,113 @@ test('stamp: a calendar added in Settings whose first fetch fails says "Couldn\'
   saveTombstones([]);
   unseedFeeds();
 });
+
+// =========================================================================
+// Only the visible tab syncs (decided 2026-10-19, instead of a cross-tab lock)
+// =========================================================================
+//
+// runSync returns while document.visibilityState === 'hidden', whatever
+// triggered it; becoming visible runs one. Manual timers, not t.mock.timers:
+// app.js's module-scope syncTimer (see installManualTimers).
+
+function captureAccountRequests() {
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    if (String(url).includes('/data')) requests.push({ method, body: opts && opts.body });
+    if (method === 'PUT') return { ok: true, status: 200, json: async () => ({ version: 1 }) };
+    return { ok: true, status: 200, json: async () => ({ version: 0, blob: '' }), text: async () => '' };
+  };
+  return { requests, restore() { globalThis.fetch = originalFetch; } };
+}
+
+function setVisibility(value) {
+  if (value === undefined) delete globalThis.document.visibilityState;
+  else globalThis.document.visibilityState = value;
+}
+
+// The delete committed BY backgrounding (CLAUDE.md: deletedAt is when the
+// delete commits — Undo expiry or backgrounding) schedules its push while the
+// tab is already hidden, so that push is always skipped. It must go out when
+// the tab comes back, not be lost.
+test('visible-only sync: a delete committed on backgrounding is pushed when the tab is visible again', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  seed([record({ id: 'vis-del', title: 'Delete then background', date: '2099-05-06' })]);
+  const net = captureAccountRequests();
+  const timers = installManualTimers();
+  try {
+    click(deleteControlFor(itemList(), 'Delete then background'));
+    assert.ok(toastHost().querySelector('.toast-undo'), 'fixture check: Undo is showing');
+    setVisibility('hidden');
+    resume();
+    assert.ok(tombstoned('vis-del'), 'fixture check: backgrounding committed the delete');
+    assert.equal(timers.live(2000), 1, 'fixture check: the commit scheduled its push');
+    timers.fire(2000);
+    await drain();
+    assert.deepEqual(net.requests, [], 'a hidden tab neither pulls nor pushes');
+
+    setVisibility('visible');
+    resume();
+    await drain();
+  } finally {
+    setVisibility('visible');
+    timers.restore();
+    net.restore();
+  }
+  const puts = net.requests.filter((r) => r.method === 'PUT');
+  assert.equal(puts.length, 1, 'becoming visible pushes what was skipped while hidden');
+  const { getLink } = await import('../js/auth.js');
+  const { decryptBlob } = await import('../js/crypto.js');
+  const pushed = await decryptBlob(getLink().encKey, JSON.parse(puts[0].body).blob);
+  assert.ok(pushed.tombstones.some((ts) => ts.id === 'vis-del' && ts.kind === 'item'),
+    'and what is pushed carries the backgrounded delete');
+  assert.equal(toastHost().children.length, 0);
+  seed([]);
+});
+
+test('visible-only sync: an online event while hidden does nothing', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  saveItems([record({ id: 'vis-online', title: 'Online while hidden' })]);
+  const net = captureAccountRequests();
+  const timers = installManualTimers();
+  try {
+    setVisibility('hidden');
+    for (const fn of globalThis.window._listeners.online) fn();
+    await drain();
+  } finally {
+    setVisibility('visible');
+    timers.restore();
+    net.restore();
+  }
+  assert.deepEqual(net.requests, [], 'a hidden tab neither pulls nor pushes');
+});
+
+// An old browser, or a fake document, with no visibilityState at all is
+// treated as visible: it syncs exactly as before the gate existed.
+test('visible-only sync: with no visibilityState at all, the tab syncs as before', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  saveItems([record({ id: 'vis-undef', title: 'No visibility API' })]);
+  const net = captureAccountRequests();
+  const timers = installManualTimers();
+  try {
+    setVisibility(undefined);
+    assert.equal(globalThis.document.visibilityState, undefined, 'fixture check');
+    for (const fn of globalThis.window._listeners.online) fn();
+    await drain();
+  } finally {
+    setVisibility('visible');
+    timers.restore();
+    net.restore();
+  }
+  assert.deepEqual(net.requests.map((r) => r.method), ['GET', 'PUT'], 'an undefined visibilityState syncs as visible');
+});

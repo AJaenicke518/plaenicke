@@ -1007,6 +1007,23 @@ async function runSync() {
   // Never run while the user hasn't chosen Merge / Cancel yet (spec 5.7) —
   // only the linking flow's adoption may lift the gate.
   if (!isLinked() || isAdoptionPending()) return;
+  // ONLY THE VISIBLE TAB SYNCS (decided 2026-10-19, instead of a cross-tab
+  // lock). Every trigger comes through here — the scheduleSync timer, the
+  // `online` listener, the load-time call, the visible-again call — so this
+  // one check gates all of them. A hidden tab's skipped sync is not queued:
+  // the visibilitychange listener below runs runSync on EVERY return to
+  // visible, and a sync pushes the whole local state rather than replaying a
+  // queue, so whatever a hidden tab skipped (including the delete that
+  // backgrounding itself commits) goes out then. A flag would add a second
+  // thing to forget. `undefined` (no Page Visibility API) is not 'hidden',
+  // so it syncs as before. This decides whether a sync STARTS; one already
+  // in flight when the tab hides runs to completion.
+  //
+  // ACCEPTED GAP: two windows visible at once (side by side on a desktop) can
+  // both sync. That is bounded by the server's version check (every PUT is a
+  // compare-and-swap on the version it read; adoption also pins
+  // expectVersion), not by this gate.
+  if (document.visibilityState === 'hidden') return;
   if (syncInFlight) { syncPending = true; return; }
   syncInFlight = true;
   try {
