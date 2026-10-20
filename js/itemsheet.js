@@ -69,9 +69,14 @@ function input(type, className, value) {
   return i;
 }
 
+// 'general' is not offered as a choice (owner decision: nothing new should
+// become one), EXCEPT on a record that already has it — its own type must be
+// an option, or the select shows another one selected while the record holds
+// 'general' and the first change writes the wrong type in (js/preview.js).
 function typeSelect(current) {
   const sel = el('select', 'sheet-type');
   for (const t of TYPES) {
+    if (t === 'general' && current !== 'general') continue;
     const opt = el('option', null, TYPE_LABELS[t]);
     opt.value = t;
     if (t === current) opt.selected = true;

@@ -39,8 +39,12 @@ export function renderPreview(container, items, { onConfirm, onCancel }) {
     date.value = it.date;
     date.addEventListener('input', () => { draft[i].date = date.value; });
 
+    // 'general' is offered only on a row that already holds it — the same
+    // rule as the edit sheet's menu (js/itemsheet.js): never a new choice,
+    // but a row's own type must be an option (see TYPES above).
     const type = document.createElement('select');
     for (const t of TYPES) {
+      if (t === 'general' && it.type !== 'general') continue;
       const opt = document.createElement('option');
       opt.value = t; opt.textContent = t;
       if (t === it.type) opt.selected = true;

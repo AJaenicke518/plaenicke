@@ -198,7 +198,8 @@ test('fields are prefilled from the item', () => {
   const sel = one(host, 'sheet-type');
   assert.equal(sel.tagName, 'SELECT');
   assert.equal(sel.value, 'task');
-  assert.deepEqual(sel.children.map((o) => o.value), TYPES, 'the options are preview.js\'s TYPES, not a fifth copy');
+  assert.deepEqual(sel.children.map((o) => o.value), TYPES.filter((t) => t !== 'general'),
+    'the options are preview.js\'s TYPES (less general), not a fifth copy');
   assert.deepEqual(sel.children.filter((o) => o.selected).map((o) => o.value), ['task']);
 });
 
@@ -704,14 +705,38 @@ test('submitting the form (Enter in a field) saves the changes', () => {
 test('the type select shows human labels over preview.js\'s values', () => {
   const { host } = open(task());
   const sel = one(host, 'sheet-type');
-  assert.deepEqual(sel.children.map((o) => o.value), TYPES, 'values stay exactly preview.js\'s TYPES');
+  assert.deepEqual(sel.children.map((o) => o.value), TYPES.filter((t) => t !== 'general'),
+    'values stay exactly preview.js\'s TYPES, less general');
   assert.deepEqual(
     Object.fromEntries(sel.children.map((o) => [o.value, o.textContent])),
     {
       due: 'Deadline', start: 'Start', milestone: 'Milestone', event: 'Event',
-      general: 'General', task: 'To-do', idea: 'Idea',
+      task: 'To-do', idea: 'Idea',
     },
   );
+});
+
+// Owner decision: 'general' is no longer offered as a choice — nothing new
+// should become one. But a record that already IS general must still open with
+// it offered and selected: a <select> with no matching option shows the first
+// option while the record holds the real value, and the first change event
+// writes the wrong type in for good (CLAUDE.md, js/preview.js).
+for (const type of TYPES.filter((t) => t !== 'general')) {
+  test(`the type menu of a ${type} record does not offer general`, () => {
+    const { host } = open(task({ type }));
+    const sel = one(host, 'sheet-type');
+    assert.equal(sel.value, type, 'fixture check: the record\'s own type is selected');
+    assert.ok(!sel.children.some((o) => o.value === 'general'), 'general is not offered');
+  });
+}
+
+test('a general record opens with general offered and selected, labelled', () => {
+  const { host } = open(task({ type: 'general' }));
+  const sel = one(host, 'sheet-type');
+  assert.equal(sel.value, 'general');
+  assert.deepEqual(sel.children.map((o) => o.value), TYPES, 'every type, general in its usual place');
+  assert.deepEqual(sel.children.filter((o) => o.selected).map((o) => o.value), ['general']);
+  assert.equal(sel.children.find((o) => o.value === 'general').textContent, 'General');
 });
 
 // U12: the dialog is the sheet, it is named by a visible heading, and the

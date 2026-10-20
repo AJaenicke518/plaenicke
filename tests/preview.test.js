@@ -107,6 +107,27 @@ test('a task and an idea each render with their OWN option selected', () => {
   }
 });
 
+// Owner decision, same rule as the edit sheet (js/itemsheet.js): 'general' is
+// not offered as a choice, except on a row that already holds it — that row's
+// own type must stay an option, or the first change writes the wrong type in.
+test('the preview type menu does not offer general on a model type', () => {
+  for (const type of TYPES.filter((t) => t !== 'general')) {
+    const container = new FakeElement('section');
+    renderPreview(container, [modelItem({ type })], { onConfirm: () => true, onCancel() {} });
+    const select = findAll(container, 'SELECT')[0];
+    assert.deepEqual(select.children.map((o) => o.value), TYPES.filter((t) => t !== 'general'),
+      `a ${type} row offers every type but general`);
+  }
+});
+
+test('a preview row that holds general keeps general offered and selected', () => {
+  const container = new FakeElement('section');
+  renderPreview(container, [modelItem({ type: 'general' })], { onConfirm: () => true, onCancel() {} });
+  const select = findAll(container, 'SELECT')[0];
+  assert.deepEqual(select.children.map((o) => o.value), TYPES);
+  assert.deepEqual(select.children.filter((o) => o.selected).map((o) => o.value), ['general']);
+});
+
 // draft = items.map(it => ({...it})) — a spread, so notes rides through
 // untouched even though no control edits it. If that ever became a
 // field-by-field rebuild, an idea confirmed through the preview would lose its
