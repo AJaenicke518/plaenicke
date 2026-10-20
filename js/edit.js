@@ -145,28 +145,8 @@ export function typeChangePatch(record, patch) {
   return patch;
 }
 
-// nextStamp — the updatedAt (or deletedAt) for a user write that replaces a
-// record stamped `prevIso`: now, or one millisecond after the record's own
-// stamp if that is not earlier than now. Used by every user write to a synced
-// record — editItem (and so Undo), setDone, and the delete commit's tombstone.
-//
-// WHY STRICTLY LATER. unionById's ties go to remote (`>=`) and applyTombstones
-// keeps a record whose updatedAt is at or after the deletion. A record written
-// by a device whose clock runs ahead carries a future updatedAt; a write here
-// stamped with this device's plain `now` then LOSES to the very copy it
-// replaced on the next sync — the edit or delete silently undone. One write
-// can therefore no longer lose to clock skew. Two CONCURRENT writes on two
-// devices still can: this orders a write after the record it saw, nothing more.
-//
-// An unparseable prevIso (a record from before updatedAt was a full instant,
-// or a corrupt one) cannot be compared, so the write takes plain now. So does
-// a record stamped at the last instant a Date can hold (sweep F, O1): there is
-// no millisecond after it, and toISOString would throw on every write to it.
-export function nextStamp(nowIso, prevIso) {
-  const now = Date.parse(nowIso);
-  const prev = typeof prevIso === 'string' ? Date.parse(prevIso) : NaN;
-  if (Number.isNaN(prev) || prev < now) return nowIso;
-  const next = new Date(prev + 1);
-  if (!Number.isFinite(next.getTime())) return nowIso;
-  return next.toISOString();
-}
+// nextStamp lives in js/merge.js (re-exported here for the item write path).
+// It moved there so merge.js's dedupeState can use the same strictly-later
+// rule without merge.js importing anything; js/feeds.js's removeFeed uses it
+// too. One copy of the rule, not three.
+export { nextStamp } from './merge.js';

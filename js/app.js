@@ -986,10 +986,11 @@ export function applySyncedState(state) {
   //
   // ORDER MATTERS here. applyRemoteFeeds's own removeFeed() call (for every
   // local feed absent from written.feeds — i.e. one a merged tombstone
-  // suppresses) writes a feed tombstone via addTombstone() stamped with THIS
-  // device's clock. The full-overwrite saveTombstones() below then leaves the
-  // stored tombstones exactly equal to written.tombstones, so a deletion
-  // pulled from another device keeps its original deletedAt. Swap these two
+  // suppresses) writes a feed tombstone via addTombstone() stamped by THIS
+  // device (now, or just after the feed's own updatedAt — nextStamp). The
+  // full-overwrite saveTombstones() below then leaves the stored tombstones
+  // exactly equal to written.tombstones, so a deletion pulled from another
+  // device keeps its original deletedAt. Swap these two
   // lines and every such deletion is re-stamped with this device's clock.
   const { added } = applyRemoteFeeds(written.feeds);
   saveTombstones(written.tombstones);

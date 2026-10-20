@@ -337,6 +337,45 @@ test('a peer device does not resurrect an ITEM dedupeState collapsed away', () =
     'i1 must not come back — adoption would otherwise be a no-op in the two-device case it exists for');
 });
 
+// A duplicate written by a device whose clock runs AHEAD carries an
+// updatedAt in this device's future. A tombstone stamped with plain `now`
+// is then EARLIER than the record it is meant to delete, applyTombstones
+// keeps the record, and the peer's next sync brings the collapsed duplicate
+// right back. The tombstone must be strictly later than the dropped record.
+test('dedupeState: a dropped record stamped in the future stays dropped on this device and a peer', () => {
+  const ahead1 = new Date(NOW.getTime() + 60 * 60 * 1000).toISOString();
+  const ahead2 = new Date(NOW.getTime() + 2 * 60 * 60 * 1000).toISOString();
+  const dup = (id, updatedAt) => ({ ...item(id, updatedAt), title: 'Dentist', date: '2026-08-05', time: '09:00' });
+  const sameUrl = (id, updatedAt) => ({ ...feed(id, updatedAt), url: 'https://cal.example/x.ics' });
+  const before = state({
+    items: [dup('i1', ahead1), dup('i2', ahead2)],
+    feeds: [sameUrl('f1', ahead1), sameUrl('f2', ahead2)],
+  });
+  const adopted = dedupeState(before, NOW);
+  for (const t of adopted.tombstones) {
+    assert.ok(Date.parse(t.deletedAt) > Date.parse(ahead1), `${t.kind}:${t.id} must be stamped after the record it drops`);
+  }
+  // This device pulls an account that still holds both copies.
+  const here = merge(adopted, before, NOW);
+  assert.deepEqual(here.items.map(i => i.id), ['i2']);
+  assert.deepEqual(here.feeds.map(f => f.id), ['f2']);
+  // A peer that never ran adoption still holds the loser locally.
+  const peer = merge(state({ items: [dup('i1', ahead1)], feeds: [sameUrl('f1', ahead1)] }), adopted, NOW);
+  assert.deepEqual(peer.items.map(i => i.id), ['i2'], 'i1 must not come back on the peer');
+  assert.deepEqual(peer.feeds.map(f => f.id), ['f2'], 'f1 must not come back on the peer');
+});
+
+// MUST NOT CHANGE: a dropped record stamped in the PAST still gets plain
+// `now`, and the survivor is untouched — same object content, no tombstone.
+test('dedupeState: past-stamped losers still get plain now, and survivors are byte-identical', () => {
+  const dup = (id, updatedAt) => ({ ...item(id, updatedAt), title: 'Dentist', date: '2026-08-05', time: '09:00' });
+  const survivor = dup('i2', '2026-08-02T00:00:00.000Z');
+  const other = item('i3', '2026-07-01T00:00:00.000Z');
+  const out = dedupeState(state({ items: [dup('i1', '2026-08-01T00:00:00.000Z'), survivor, other] }), NOW);
+  assert.deepEqual(out.tombstones, [{ id: 'i1', kind: 'item', deletedAt: NOW.toISOString() }]);
+  assert.equal(JSON.stringify(out.items), JSON.stringify([survivor, other]));
+});
+
 // Review finding 2: `${i.time}` stringifies null -> "null" and undefined ->
 // "undefined", so a legacy pre-V5 item with no time key at all, one with
 // time: null and one with time: undefined would land in three different

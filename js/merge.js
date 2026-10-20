@@ -35,13 +35,12 @@
 //      12:00 before either syncs, and it comes back on every device with the
 //      phone's fields. Annoying and re-deletable, not lost data, and it is the
 //      only horn of the two that converges at all.
-//   3. Clock skew decides ties (above). User writes to ITEMS (edit, Undo,
-//      tick, delete commit) are stamped strictly later than the record they
-//      replace (js/edit.js's nextStamp), so a single item write cannot lose to
-//      clock skew; concurrent writes on two devices still can. Only item
-//      writes: a feed removal (js/feeds.js's removeFeed) and the tombstones
-//      dedupeState writes below still stamp plain `now`, so either can still
-//      lose to a record from a clock-ahead device (punchlist).
+//   3. Clock skew decides ties (above). Every write that replaces or deletes
+//      a synced record is stamped strictly later than the record it replaces
+//      (nextStamp, below): item writes (edit, Undo, tick, delete commit), a
+//      feed removal (js/feeds.js's removeFeed) and the tombstones dedupeState
+//      writes. So a single write cannot lose to a record from a clock-ahead
+//      device; concurrent writes on two devices still can.
 //   4. Only the latest action can be undone. A second toast commits the first
 //      action at once, so its delete lands and its Undo is gone. An edit's Undo
 //      is itself a new edit with a new updatedAt; it has no merge special case.
@@ -82,6 +81,33 @@ export function emptyState() {
 function ts(s) {
   const parsed = Date.parse(s);
   return Number.isNaN(parsed) ? -Infinity : parsed;
+}
+
+// nextStamp — the updatedAt (or deletedAt) for a user write that replaces a
+// record stamped `prevIso`: now, or one millisecond after the record's own
+// stamp if that is not earlier than now. Used by every user write to a synced
+// record — editItem (and so Undo), setDone, the delete commit's tombstone,
+// js/feeds.js's removeFeed — and by dedupeState's tombstones below.
+//
+// WHY STRICTLY LATER. unionById's ties go to remote (`>=`) and applyTombstones
+// keeps a record whose updatedAt is at or after the deletion. A record written
+// by a device whose clock runs ahead carries a future updatedAt; a write here
+// stamped with this device's plain `now` then LOSES to the very copy it
+// replaced on the next sync — the edit or delete silently undone. One write
+// can therefore no longer lose to clock skew. Two CONCURRENT writes on two
+// devices still can: this orders a write after the record it saw, nothing more.
+//
+// An unparseable prevIso (a record from before updatedAt was a full instant,
+// or a corrupt one) cannot be compared, so the write takes plain now. So does
+// a record stamped at the last instant a Date can hold (sweep F, O1): there is
+// no millisecond after it, and toISOString would throw on every write to it.
+export function nextStamp(nowIso, prevIso) {
+  const now = Date.parse(nowIso);
+  const prev = typeof prevIso === 'string' ? Date.parse(prevIso) : NaN;
+  if (Number.isNaN(prev) || prev < now) return nowIso;
+  const next = new Date(prev + 1);
+  if (!Number.isFinite(next.getTime())) return nowIso;
+  return next.toISOString();
 }
 
 function requireKnownVersion(state, side) {
@@ -268,13 +294,19 @@ export function dedupeState(state, now) {
   // "collapsed" record right back. Writing tombstones here is what makes
   // the collapse actually propagate through the ordinary merge path, with
   // no special-casing needed at the call site.
+  //
+  // Each tombstone is stamped strictly after the record it drops (nextStamp
+  // above). A loser written by a clock-ahead device carries an updatedAt in
+  // this device's future; a plain-`now` tombstone would be earlier than it,
+  // applyTombstones would keep it, and the peer would bring it back.
+  const nowIso = now.toISOString();
   const survivingFeedIds = new Set(feeds.map(f => f.id));
   const survivingItemIds = new Set(items.map(i => i.id));
   const droppedTombstones = [
     ...state.feeds.filter(f => !survivingFeedIds.has(f.id))
-      .map(f => ({ id: f.id, kind: 'feed', deletedAt: now.toISOString() })),
+      .map(f => ({ id: f.id, kind: 'feed', deletedAt: nextStamp(nowIso, f.updatedAt) })),
     ...state.items.filter(i => !survivingItemIds.has(i.id))
-      .map(i => ({ id: i.id, kind: 'item', deletedAt: now.toISOString() })),
+      .map(i => ({ id: i.id, kind: 'item', deletedAt: nextStamp(nowIso, i.updatedAt) })),
   ];
   return {
     ...state,
