@@ -57,7 +57,9 @@ export async function parseViaWorker(text) {
     throw new Error(err && err.name === 'SyntaxError' ? 'server' : 'unreachable');
   }
   // A 200 that is not { items: [...] } (null, say) would otherwise reach
-  // decideFlow, whose TypeError left "Thinking…" up for good.
-  if (!body || typeof body !== 'object' || !Array.isArray(body.items)) throw new Error('server');
+  // decideFlow, whose TypeError left "Thinking…" up for good; an item that is
+  // not an object would surface makeItem's raw TypeError to the user.
+  const isRecord = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
+  if (!isRecord(body) || !Array.isArray(body.items) || !body.items.every(isRecord)) throw new Error('server');
   return body;
 }

@@ -275,7 +275,17 @@ async function handleAdd() {
   }
   // If a date is picked, treat Add as an explicit MANUAL add — no Worker needed.
   // This is the always-available fallback (works offline and on iPhone).
-  if (els.date.value) { addGeneration += 1; handleManualAdd(); return; }
+  if (els.date.value) {
+    // Refused here, before the bump, so a refused manual add (no title) starts
+    // nothing and leaves a pending smart add alone; a landed one supersedes it
+    // and closes any preview that request opened.
+    if (!els.text.value.trim()) { setMessage('For manual add, type a title and pick a date.'); return; }
+    addGeneration += 1;
+    els.preview.hidden = true;
+    els.preview.innerHTML = '';
+    handleManualAdd();
+    return;
+  }
 
   const raw = els.text.value.trim();
   if (!raw) { setMessage('Type something first.'); return; }

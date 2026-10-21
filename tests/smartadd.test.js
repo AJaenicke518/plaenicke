@@ -98,6 +98,17 @@ test('parseViaWorker: 413 → too_long, and the body is read so no deadline stay
 
 // The error is decided by the status line alone; its body is only drained so
 // fetchWithTimeout can disarm. A stalled error body must not delay the message.
+test('parseViaWorker: an items array holding a non-object → server, not a raw TypeError later', async () => {
+  for (const items of [[null], [1], ['x'], [[]]]) {
+    const net = stubFetch(async () => response(200, { json: async () => ({ items, needsReview: false }) }));
+    try {
+      await assert.rejects(parseViaWorker('x'), { message: 'server' }, JSON.stringify(items));
+    } finally {
+      net.restore();
+    }
+  }
+});
+
 test('parseViaWorker: a 413 whose body stalls still rejects at once', async (t) => {
   const net = stubFetch(async () => response(413, { text: () => new Promise(() => {}) }));
   t.mock.timers.enable({ apis: ['setTimeout'] });

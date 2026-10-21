@@ -5514,6 +5514,113 @@ test('smart add: a second Add of the same text while the first is pending sends 
   seed([]);
 });
 
+// The same-text guard must lift once its request is over, however it ended,
+// or the user cannot retry the exact words after a failure.
+test('smart add: after an error the same text can be sent again', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const net = smartAddFetch((n) => (n === 1 ? Promise.reject(new TypeError('offline')) : Promise.resolve(smartReply([]))));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('dentist on may 17');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.match(messageText(), /unavailable/, 'fixture check: the first request failed');
+    typeIntoAddBox('dentist on may 17');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.equal(net.posts.length, 2, 'a failed request must not block re-sending the same text');
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+test('smart add: after a newer manual add the same text can be sent again', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('gym on may 18');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    typeIntoAddBox('Manual note', '2099-05-18');
+    click(doc.getElementById('add-btn'));
+    assert.equal(messageText(), 'Added.', 'fixture check: the manual add superseded the request');
+    typeIntoAddBox('gym on may 18');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.equal(net.posts.length, 2, 'a superseded request must not block re-sending its text');
+    for (const r of held) r(smartReply([]));
+    await settle();
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+// A manual Add the app refuses (a date but no title) starts nothing, so it
+// must not cancel the smart add still in flight.
+test('smart add: a refused manual add leaves the pending smart add alone', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('lunch on may 20');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    typeIntoAddBox('', '2099-05-20');
+    click(doc.getElementById('add-btn'));
+    assert.match(messageText(), /type a title and pick a date/, 'fixture check: the manual add was refused');
+    held[0](smartReply([{ title: 'Lunch', date: '2099-05-20', type: 'event' }]));
+    await settle();
+    assert.deepEqual(loadItems().map((it) => it.title), ['Lunch'], 'the smart add still lands');
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+test('smart add: a manual add closes an open preview from an earlier smart add', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const net = smartAddFetch(() => Promise.resolve(smartReply([
+    { title: 'Read ch 1', date: '2099-05-21', type: 'task' },
+    { title: 'Read ch 2', date: '2099-05-22', type: 'task' },
+  ])));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('read ch 1 and 2');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.equal(doc.getElementById('preview').hidden, false, 'fixture check: the preview is open');
+    typeIntoAddBox('Manual entry', '2099-05-23');
+    click(doc.getElementById('add-btn'));
+    assert.equal(messageText(), 'Added.', 'fixture check: the manual add landed');
+    assert.equal(doc.getElementById('preview').hidden, true, 'the stale preview must not stay confirmable');
+    assert.equal(doc.getElementById('preview').children.length, 0);
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
 // With the message guarded by messageToken, this is what still needs the
 // manual add to bump addGeneration: the older smart add's ITEMS.
 test('smart add: a success arriving after a newer manual add adds nothing', async () => {
