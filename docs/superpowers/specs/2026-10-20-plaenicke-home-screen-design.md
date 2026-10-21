@@ -175,3 +175,5 @@ No open questions remain. Each answer is applied in the section named.
 7. **Only `FREQ=DAILY`/`WEEKLY` series repeat;** yearly and monthly behave as one-offs. (§ 2.4)
 8. **Canvas-shaped feeds may use the series heuristic:** "yeah the app can use its discretion for determining if it is a series." Explicit approval of the fallback; it applies only to a feed with no RRULE, and a guessed series is labelled. (§ 2.4)
 9. **Everything past its date is overdue, `start` included:** "just say everything is past due i want to feel like i am behind so i cant procrastinate." Deadlines (`due`, `milestone`, `task`) in red, start dates in orange; never ideas, done items, events or feed instances. (§ 2.3, § 5)
+
+**Confirmed by Alex, 2026-10-21** (the five "Claude's call — confirm" items, now Decided): past events are never overdue ("i dont want past events included"); the `--overdue-start` orange as specified (check on the phone in both modes); List as a Calendar-switcher segment; the "Repeats weekly (guessed)" label; relative time only within 12 hours of the next event.
