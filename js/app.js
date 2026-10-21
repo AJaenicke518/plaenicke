@@ -202,7 +202,10 @@ initSettings({
   applyState: applySyncedState,
 });
 
-function setMessage(t) { els.message.textContent = t || ''; }
+// messageToken is bumped by EVERY message, so a smart add can tell whether
+// the "Thinking…" it set is still the one on screen (see handleAdd).
+let messageToken = 0;
+function setMessage(t) { messageToken += 1; els.message.textContent = t || ''; }
 
 export function addItems(list) {
   // createdAt stays a local calendar date (toISO) — sortItemsByDate depends
@@ -246,6 +249,25 @@ function handleManualAdd() {
   setMessage('Added.');
 }
 
+// Which Add is the latest. parseViaWorker can take up to SMART_ADD_TIMEOUT_MS
+// to settle, and by then the user may have added manually or started another
+// smart add; a result or error from a superseded request changes nothing, or
+// it would overwrite the newer outcome ("Added." → "unavailable") or add items
+// the user has moved past. Bumped by every Add that passes validation, manual
+// ones included; a refused Add (time with no date, empty box) leaves the
+// pending smart add alone.
+//
+// Whether a CURRENT request may still change the message is separate: only
+// if the message is still the "Thinking…" it set (messageToken). Another
+// action's message — the Ideas box's "Kept." — is left alone, while the
+// request still adds its items (the Ideas box does not cancel them). The one
+// exception is a failed save of those items: that is shown regardless, since
+// nothing else would tell the user the capture was lost.
+let addGeneration = 0;
+// The trimmed text and generation of the smart add in flight, so a second Add
+// of the same text sends no second (paid) request.
+let pendingSmart = null;
+
 async function handleAdd() {
   if (els.time.value && !els.date.value) {
     setMessage('Add a date to use that time, or clear the time to use smart add.');
@@ -253,36 +275,61 @@ async function handleAdd() {
   }
   // If a date is picked, treat Add as an explicit MANUAL add — no Worker needed.
   // This is the always-available fallback (works offline and on iPhone).
-  if (els.date.value) { handleManualAdd(); return; }
+  if (els.date.value) {
+    // Refused here, before the bump, so a refused manual add (no title) starts
+    // nothing and leaves a pending smart add alone; a landed one supersedes it
+    // and closes any preview that request opened.
+    if (!els.text.value.trim()) { setMessage('For manual add, type a title and pick a date.'); return; }
+    addGeneration += 1;
+    els.preview.hidden = true;
+    els.preview.innerHTML = '';
+    handleManualAdd();
+    return;
+  }
 
   const raw = els.text.value.trim();
   if (!raw) { setMessage('Type something first.'); return; }
+  if (pendingSmart && pendingSmart.generation === addGeneration && pendingSmart.raw === raw) return;
+  const generation = ++addGeneration;
+  pendingSmart = { generation, raw };
+  // An earlier request's preview must not stay confirmable under a new one.
+  els.preview.hidden = true;
+  els.preview.innerHTML = '';
   setMessage('Thinking…');
+  const thinking = messageToken;
+  const say = (t) => { if (messageToken === thinking) setMessage(t); };
+  // Only clear the box if it still holds what was sent: text typed while
+  // waiting (or reviewing) is the user's next entry.
+  const clearSentText = () => { if (els.text.value.trim() === raw) els.text.value = ''; };
 
   let result;
   try {
     result = await parseViaWorker(raw);
   } catch (e) {
-    if (e.message === 'too_long') setMessage('That was a lot at once — try adding fewer items in one go.');
-    else setMessage('Smart add is unavailable — pick a date below and tap Add to add it manually.');
+    if (generation !== addGeneration) return;
+    pendingSmart = null;
+    if (e.message === 'too_long') say('That was a lot at once — try adding fewer items in one go.');
+    else say('Smart add is unavailable — pick a date below and tap Add to add it manually.');
     return;
   }
+  if (generation !== addGeneration) return;
+  pendingSmart = null;
 
   const flow = decideFlow(result);
-  if (flow === 'empty') { setMessage("I couldn't find anything to add — try rephrasing."); return; }
+  if (flow === 'empty') { say("I couldn't find anything to add — try rephrasing."); return; }
   if (flow === 'direct') {
     try {
       addItems(result.items);
     } catch (e) { setMessage(e.message); return; }
-    els.text.value = '';
-    setMessage('Added.');
+    clearSentText();
+    say('Added.');
     return;
   }
-  setMessage('Review the items below.');
+  say('Review the items below.');
   renderPreview(els.preview, result.items, {
     onConfirm: (confirmed) => {
       try { addItems(confirmed); } catch (e) { setMessage(e.message); return false; }
-      els.text.value = '';
+      clearSentText();
       setMessage('Added.');
       return true;
     },
@@ -982,8 +1029,12 @@ export function applySyncedState(state) {
   // the server held, which live storage never had. Re-pruning here dropped
   // it and pushed the deletion away (js/merge.js, prune()).
   const written = merge(live, state, new Date(), { keepRemoteTombstones: true });
+  // Save BEFORE assigning, as addItems does: app.js saves from `items`, so a
+  // failed write (QuotaError) that had already replaced it would render
+  // records storage does not hold and have the next save of ANY item persist
+  // them outside the sync path.
+  saveItems(written.items);
   items = written.items;
-  saveItems(items);
   // applyRemoteFeeds requires the COMPLETE merged feed list (written.feeds,
   // never a delta) — it deletes+tombstones every local feed absent from its
   // argument, and a partial list would propagate a deletion of every other

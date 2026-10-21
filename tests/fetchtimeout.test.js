@@ -43,3 +43,63 @@ test('a body read with json() disarms the timer once it settles', async (t) => {
     globalThis.fetch = originalFetch;
   }
 });
+
+// Smart add passes its own budget (js/smartadd.js SMART_ADD_TIMEOUT_MS). The
+// third argument is optional: every existing caller passes two and keeps 60 s.
+test('an explicit budget is honoured: aborted at that budget, not before', async (t) => {
+  let signal = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, init) => { signal = init.signal; return new Promise(() => {}); };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const pending = fetchWithTimeout('https://example.com/x', {}, 1000);
+    let rejected = null;
+    pending.catch((err) => { rejected = err; });
+    t.mock.timers.tick(999);
+    await Promise.resolve();
+    assert.equal(signal.aborted, false, 'not aborted before the budget');
+    t.mock.timers.tick(1);
+    await Promise.resolve();
+    assert.equal(signal.aborted, true, 'aborted at the budget');
+    await assert.rejects(pending, /timeout/);
+    assert.ok(rejected);
+  } finally {
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// A typo'd budget (a string, NaN, 0, a negative) used to reach setTimeout,
+// which treats it as 0 or 1 ms and aborts every request at once. Only an
+// omitted budget defaults.
+for (const bad of [null, '1000', NaN, 0, -1, Infinity]) {
+  test(`a budget of ${String(bad)} is refused with a TypeError, before any fetch`, () => {
+    let fetched = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = () => { fetched += 1; return new Promise(() => {}); };
+    try {
+      assert.throws(() => fetchWithTimeout('https://example.com/x', {}, bad), TypeError);
+      assert.equal(fetched, 0, 'nothing is fetched with a bad budget');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+}
+
+test('an omitted budget still defaults to FETCH_TIMEOUT_MS', async (t) => {
+  let signal = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, init) => { signal = init.signal; return new Promise(() => {}); };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const pending = fetchWithTimeout('https://example.com/x', {}, undefined);
+    pending.catch(() => {});
+    t.mock.timers.tick(FETCH_TIMEOUT_MS - 1);
+    assert.equal(signal.aborted, false);
+    t.mock.timers.tick(1);
+    assert.equal(signal.aborted, true);
+  } finally {
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+});
