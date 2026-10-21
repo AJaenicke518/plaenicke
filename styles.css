@@ -537,7 +537,7 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 .link-warning:empty, .link-notice:empty, .link-failure:empty { display: none; }
 .link-failure { color: var(--danger); }
 /* A link code is 86 characters and must stay readable in a 360px panel
-   without wrapping into something that copies wrong: monospace, small, and
+   without wrapping into something that copies wrong: monospace at the 16px iOS needs to avoid focus zoom, and
    left to scroll horizontally inside its own field. */
 .link-code-input, .link-code-output, .link-token-input {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

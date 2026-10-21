@@ -9,7 +9,7 @@
 //
 // Capture phase, so a handler that stops propagation cannot strand a press,
 // and so pointerleave (which does not bubble) still reaches the root.
-// Passive: this never calls preventDefault, so it can never block a scroll.
+// Passive: never calls preventDefault (scrolling is governed by touch-action, not by pointer listeners).
 // Only the pointer that started the press can end it.
 
 export const PRESS_SELECTOR = 'button, [data-press]';
