@@ -652,7 +652,6 @@ test('settings: a manual Sync and an Add each report their fetch result, before 
   }
 });
 
-
 // --- the feed-shape readout (home-screen spec § 2.4, stage 1) ---------------
 //
 // One read-only line per calendar row: how its cached events repeat and which

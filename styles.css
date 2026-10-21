@@ -7,6 +7,10 @@
   --accent: #8a5a3b;        /* leather brown */
   --accent-ink: #fffdf8;    /* text on accent */
   --danger: #b04a3a;
+  /* A passed START date's age on Today's Overdue (home-screen spec § 2.3);
+     --danger stays the passed-deadline red. Light: 5.04 on --bg, 5.59 on
+     --card (tests/styles.test.js computes them). */
+  --overdue-start: #9c5418;
   --line: #e0d8c8;
   --chip-bg: #efe9dc;
   --chip-ink: #6b6152;
@@ -33,6 +37,26 @@
   --feed-palette-4: #4f6070;  /* slate */
   --feed-palette-5: #8a7a2e;  /* olive */
   --feed-palette-6: #b3654a;  /* terracotta */
+  /* Spacing and radii (home-screen spec § 5). Theme-independent: defined
+     here only, never in [data-theme="dark"], so the two cannot drift. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --radius-control: 8px;
+  --radius-sheet: 14px;
+  --radius-round: 50%;
+  /* Type scale for the NEW screens only — Today, the tab bar, the capture box
+     (spec § 5). Month, Week and Day keep their compact sizes and never read
+     these; tests/styles.test.js pins theirs. */
+  --text-label: 13px;
+  --text-row: 16px;
+  --text-title: 20px;
+  --text-hero: 28px;
+  --label-tracking: 0.06em;
+  --sans: system-ui, -apple-system, sans-serif;
 }
 
 [data-theme="dark"] {
@@ -46,6 +70,8 @@
   --accent: #8fa7c8;
   --accent-ink: #14161a;
   --danger: #e06c5e;
+  /* Dark: 7.77 on --bg, 6.93 on --card. */
+  --overdue-start: #e39a52;
   --line: #33373f;
   --chip-bg: #262a31;
   --chip-ink: #a6acb8;
@@ -73,6 +99,9 @@
 
 /* ---------- base ---------- */
 * { box-sizing: border-box; }
+
+/* No double-tap-to-zoom delay on any tap (home-screen spec § 5). */
+html { touch-action: manipulation; }
 
 /* Read by screen readers, not shown (the toast's live region, #toast-live).
    Never display: none — that hides it from screen readers too. */
@@ -113,7 +142,7 @@ header h1 { font-size: 1.7rem; font-style: italic; font-weight: 700; margin: 16p
   background: transparent;
   border: 1px solid var(--line);
   color: var(--ink);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   font-size: 1.1rem;
   padding: 6px 10px;
 }
@@ -134,7 +163,7 @@ header h1 { font-size: 1.7rem; font-style: italic; font-weight: 700; margin: 16p
   font-family: inherit;
   padding: 12px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: var(--card);
   color: var(--ink);
 }
@@ -161,7 +190,7 @@ header h1 { font-size: 1.7rem; font-style: italic; font-weight: 700; margin: 16p
   font-family: inherit;
   padding: 10px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: var(--card);
   color: var(--ink);
 }
@@ -171,12 +200,22 @@ button {
   font-family: inherit;
   padding: 10px 16px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: var(--accent);
   color: var(--accent-ink);
 }
 
 .message { color: var(--muted); min-height: 1.2em; margin: 8px 0 0; }
+
+/* ---------- press state (home-screen spec § 5) ---------- */
+/* js/press.js adds .pressed on pointerdown and removes it on pointerup,
+   pointercancel, pointerleave or a move past 10px (a scroll). A class, not
+   :active, which can stick during an iOS scroll (WebKit 255277, 221366).
+   Instant on purpose: no transition. The grey iOS tap highlight is turned off
+   only where .pressed replaces it; links and checkboxes keep it. */
+button, [data-press] { -webkit-tap-highlight-color: transparent; }
+button.pressed { opacity: 0.7; }
+[data-press].pressed { background: var(--chip-bg); }
 
 /* ---------- view toggle ---------- */
 .view-toggle { display: flex; gap: 6px; margin-bottom: 12px; }
@@ -426,12 +465,12 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 .feed-add input {
   display: block;
   width: 100%;
-  font-size: 0.9rem;
+  font-size: 1rem;              /* under 16px iOS zooms the page on focus */
   font-family: inherit;
   padding: 8px;
   margin-bottom: 6px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: var(--card);
   color: var(--ink);
 }
@@ -475,12 +514,12 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 .link-ui input {
   display: block;
   width: 100%;
-  font-size: 0.9rem;
+  font-size: 1rem;              /* under 16px iOS zooms the page on focus */
   font-family: inherit;
   padding: 8px;
   margin-bottom: 6px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: var(--card);
   color: var(--ink);
 }
@@ -498,11 +537,11 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 .link-warning:empty, .link-notice:empty, .link-failure:empty { display: none; }
 .link-failure { color: var(--danger); }
 /* A link code is 86 characters and must stay readable in a 360px panel
-   without wrapping into something that copies wrong: monospace, small, and
+   without wrapping into something that copies wrong: monospace at the 16px iOS needs to avoid focus zoom, and
    left to scroll horizontally inside its own field. */
 .link-code-input, .link-code-output, .link-token-input {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.7rem;
+  font-size: 1rem;              /* under 16px iOS zooms the page on focus */
 }
 .link-code-output { background: var(--bg); }
 
@@ -515,8 +554,8 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
    Five controls in one row measure ~112px too wide for an iPhone — don't regress this. */
 .preview-row { border-bottom: 1px solid var(--line); padding-bottom: 8px; margin-bottom: 10px; }
 .preview-row input, .preview-row select {
-  padding: 8px; border: 1px solid var(--line); border-radius: 6px;
-  font-size: 0.9rem; font-family: inherit; background: var(--card); color: var(--ink);
+  padding: 8px; border: 1px solid var(--line); border-radius: var(--radius-control);
+  font-size: 1rem; font-family: inherit; background: var(--card); color: var(--ink);
 }
 .preview-row input[type="text"] { width: 100%; margin-bottom: 6px; }
 .preview-fields { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -586,7 +625,7 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   min-width: 0;
   padding: 10px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   font: inherit;
   font-size: 1rem;              /* under 16px iOS zooms the page on focus */
   background: var(--card);
@@ -642,7 +681,7 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   background: var(--card);
   color: var(--ink);
   border-top: 1px solid var(--line);
-  border-radius: 12px 12px 0 0;
+  border-radius: var(--radius-sheet) var(--radius-sheet) 0 0;
   padding: 0 16px;
   padding-bottom: env(safe-area-inset-bottom);
   box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.2);
@@ -678,7 +717,7 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   font-size: 1rem;
   padding: 10px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: var(--bg);
   color: var(--ink);
 }

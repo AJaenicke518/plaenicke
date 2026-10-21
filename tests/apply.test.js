@@ -5647,3 +5647,14 @@ test('smart add: a success arriving after a newer manual add adds nothing', asyn
   }
   seed([]);
 });
+
+// --- home-screen stage 2: the press state is wired (spec § 5) ---------------
+// js/press.js's behaviour is pinned in tests/press.test.js; this pins that the
+// app actually installs it, on the document, exactly once.
+test('app.js installs the press listeners on the document, once each', async () => {
+  await import('../js/app.js');
+  const { PRESS_EVENTS } = await import('../js/press.js');
+  for (const type of PRESS_EVENTS) {
+    assert.equal((globalThis.document._listeners[type] || []).length, 1, type);
+  }
+});

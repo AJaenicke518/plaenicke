@@ -350,3 +350,173 @@ test('.visually-hidden hides from sight only', () => {
 test('the external sheet has room after its last line', () => {
   assert.equal(declOf('.sheet-external', 'padding-bottom'), 'calc(16px + env(safe-area-inset-bottom))');
 });
+
+// --- home-screen stage 2: the overdue-start colour (spec § 2.3, § 5) --------
+// Two themes, two surfaces each. The contrast is COMPUTED from the declared
+// values, so a later tweak that makes the orange unreadable fails here
+// rather than on the phone. Red/orange distinguishability is not computable
+// this way and stays on the on-device checklist.
+function luminance(hex) {
+  const m = /^#([0-9a-f]{6})$/i.exec(hex || '');
+  assert.ok(m, `cannot read a #rrggbb colour from ${JSON.stringify(hex)}`);
+  const [r, g, b] = [0, 2, 4].map((i) => parseInt(m[1].slice(i, i + 2), 16) / 255)
+    .map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+function contrast(a, b) {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+test('--overdue-start is the spec\'s orange in both themes', () => {
+  assert.equal(declOf(':root', '--overdue-start'), '#9c5418');
+  assert.equal(declOf('[data-theme="dark"]', '--overdue-start'), '#e39a52');
+});
+
+for (const theme of [':root', '[data-theme="dark"]']) {
+  test(`${theme}: --overdue-start reads at WCAG AA (4.5:1) on --bg and on --card`, () => {
+    const fg = declOf(theme, '--overdue-start');
+    for (const surface of ['--bg', '--card']) {
+      const ratio = contrast(fg, declOf(theme, surface));
+      assert.ok(ratio >= 4.5, `${theme} ${surface}: ${ratio.toFixed(2)} < 4.5`);
+    }
+  });
+  test(`${theme}: --overdue-start is not --danger`, () => {
+    assert.notEqual(declOf(theme, '--overdue-start').toLowerCase(), declOf(theme, '--danger').toLowerCase());
+  });
+}
+
+test('contrast() reproduces the spec\'s computed ratios (fixture check on the helper)', () => {
+  assert.equal(contrast('#9c5418', '#f4f1ea').toFixed(2), '5.04');
+  assert.equal(contrast('#9c5418', '#fffdf8').toFixed(2), '5.59');
+  assert.equal(contrast('#e39a52', '#14161a').toFixed(2), '7.77');
+  assert.equal(contrast('#e39a52', '#1e2126').toFixed(2), '6.93');
+});
+
+// --- home-screen stage 2: spacing and radii (spec § 5) ----------------------
+const SPACING = { '--space-1': '4px', '--space-2': '8px', '--space-3': '12px', '--space-4': '16px', '--space-5': '24px', '--space-6': '32px' };
+const RADII = { '--radius-control': '8px', '--radius-sheet': '14px', '--radius-round': '50%' };
+
+test('the spacing and radius scales are the spec\'s values', () => {
+  for (const [name, value] of Object.entries({ ...SPACING, ...RADII })) {
+    assert.equal(declOf(':root', name), value, name);
+  }
+});
+
+test('spacing and radii are theme-independent: dark mode never redefines them', () => {
+  for (const name of Object.keys({ ...SPACING, ...RADII })) {
+    assert.equal(declOf('[data-theme="dark"]', name), null, `${name} must have one definition`);
+  }
+});
+
+// Every form control and button rule that sets a corner. Containers (cards,
+// panels, list rows, the day grid) keep their own radius.
+const CONTROL_RULES = [
+  'button', '.icon-btn', '#entry-text', '#entry-date', '#entry-time', '#entry-end',
+  '.feed-add input', '.link-ui input', '.preview-row input', '.preview-row select',
+  '.idea-add textarea', '.sheet input', '.sheet select', '.sheet textarea',
+];
+for (const sel of CONTROL_RULES) {
+  test(`${sel} uses the control radius`, () => {
+    assert.ok(ruleExists(sel), `no rule for ${sel}`);
+    assert.equal(declOf(sel, 'border-radius'), 'var(--radius-control)');
+  });
+}
+
+test('the item sheet uses the sheet radius on its top corners', () => {
+  assert.equal(declOf('.sheet', 'border-radius'), 'var(--radius-sheet) var(--radius-sheet) 0 0');
+});
+
+// --- home-screen stage 2: 16px on every input (spec § 5) --------------------
+// Under 16px, iOS Safari zooms the whole page when the field takes focus.
+// Two checks: every known control rule resolves to >= 16px, and NO rule
+// anywhere that targets a form control declares a smaller font-size — so a
+// control added later with a small size fails here without being listed.
+// (The item sheet's three are pinned by the edit-items tests above.)
+const INPUT_RULES = [
+  '#entry-text', '#entry-date', '#entry-time', '#entry-end', '.idea-add textarea',
+  '.feed-add input', '.link-ui input', '.preview-row input', '.preview-row select',
+];
+for (const sel of INPUT_RULES) {
+  test(`${sel} is at least 16px`, () => {
+    assert.ok(ruleExists(sel), `no rule for ${sel}`);
+    const fs = declOf(sel, 'font-size');
+    assert.ok(fs !== null, `${sel} declares no font-size`);
+    assert.ok(px(fs) >= 16, `expected ${sel} font-size >= 16px, got ${fs}`);
+  });
+}
+
+const CONTROL_SELECTOR = /(^|[\s>+~])(input|select|textarea)\b|#entry-|#idea-text|\.link-(code|token)-/;
+test('no rule that targets a form control sets a font-size under 16px', () => {
+  const offenders = [];
+  let seen = 0;
+  for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+    const selectors = sel.split(',').map((x) => x.trim().replace(/\s+/g, ' '));
+    if (!selectors.some((s) => CONTROL_SELECTOR.test(s))) continue;
+    seen += 1;
+    for (const decl of body.split(';')) {
+      const i = decl.indexOf(':');
+      if (i < 0 || decl.slice(0, i).trim().toLowerCase() !== 'font-size') continue;
+      const value = decl.slice(i + 1).trim();
+      if (px(value) < 16) offenders.push(`${sel.trim()}: ${value}`);
+    }
+  }
+  assert.ok(seen >= 10, `fixture check: the scan found only ${seen} control rules`);
+  assert.deepEqual(offenders, []);
+});
+
+// --- home-screen stage 2: the type scale is for NEW screens only (spec § 5) --
+test('the new screens\' type scale is defined', () => {
+  assert.equal(declOf(':root', '--text-label'), '13px');
+  assert.equal(declOf(':root', '--text-row'), '16px');
+  assert.equal(declOf(':root', '--text-title'), '20px');
+  assert.equal(declOf(':root', '--text-hero'), '28px');
+  assert.equal(declOf(':root', '--label-tracking'), '0.06em');
+  assert.equal(declOf(':root', '--sans'), 'system-ui, -apple-system, sans-serif');
+});
+
+// Month, Week and Day keep their compact sizes. Pinned at their values on
+// main (d7b3b30) so a "consistency" pass that moves them onto the new scale
+// fails here: a 13px label in a 72px month cell or a 22px Day block clips.
+const CALENDAR_SIZES = {
+  '.cal-head': '0.75rem', '.cal-cell': '0.72rem',
+  '.week-head': '0.7rem', '.week-head b': '0.85rem', '.week-more': '0.65rem',
+  '.day-hour': '0.7rem', '.day-block': '0.75rem', '.day-pin': '0.75rem',
+};
+for (const [sel, size] of Object.entries(CALENDAR_SIZES)) {
+  test(`${sel} keeps its compact font-size (${size})`, () => {
+    assert.equal(declOf(sel, 'font-size'), size);
+  });
+}
+
+test('no existing rule reads the new type scale yet', () => {
+  const body = css.replace(/:root\s*\{[^}]*\}/, '');
+  assert.doesNotMatch(body, /var\(--(text-label|text-row|text-title|text-hero|label-tracking|sans)\)/,
+    'stage 3 is the first consumer; Month, Week and Day never are');
+});
+
+// --- home-screen stage 2: press state (spec § 5) ----------------------------
+test('every tap skips the double-tap-zoom wait', () => {
+  assert.equal(declOf('html', 'touch-action'), 'manipulation');
+});
+
+test('pressed buttons dim and pressed rows take the chip background', () => {
+  assert.equal(declOf('button.pressed', 'opacity'), '0.7');
+  assert.equal(declOf('[data-press].pressed', 'background'), 'var(--chip-bg)');
+});
+
+test('the grey iOS tap highlight is off exactly where .pressed replaces it', () => {
+  assert.equal(declOf('button', '-webkit-tap-highlight-color'), 'transparent');
+  assert.equal(declOf('[data-press]', '-webkit-tap-highlight-color'), 'transparent');
+  assert.equal(declOf('html', '-webkit-tap-highlight-color'), null, 'links and checkboxes keep the native highlight');
+});
+
+// Feedback on touch-down means instantly. And stage 2 adds no motion at all,
+// so nothing needs a prefers-reduced-motion override yet: stage 4's capture
+// box is the first animation, and it must add that override and change this.
+test('press state is instant, and the stylesheet declares no motion yet', () => {
+  assert.equal(declOf('button.pressed', 'transition'), null);
+  assert.equal(declOf('[data-press].pressed', 'transition'), null);
+  assert.doesNotMatch(css, /(^|[;{\s])(transition|animation)(-[a-z-]+)?\s*:/);
+  assert.doesNotMatch(css, /@keyframes/);
+});
