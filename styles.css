@@ -37,6 +37,17 @@
   --feed-palette-4: #4f6070;  /* slate */
   --feed-palette-5: #8a7a2e;  /* olive */
   --feed-palette-6: #b3654a;  /* terracotta */
+  /* Spacing and radii (home-screen spec § 5). Theme-independent: defined
+     here only, never in [data-theme="dark"], so the two cannot drift. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --radius-control: 8px;
+  --radius-sheet: 14px;
+  --radius-round: 50%;
 }
 
 [data-theme="dark"] {
@@ -119,7 +130,7 @@ header h1 { font-size: 1.7rem; font-style: italic; font-weight: 700; margin: 16p
   background: transparent;
   border: 1px solid var(--line);
   color: var(--ink);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   font-size: 1.1rem;
   padding: 6px 10px;
 }
@@ -140,7 +151,7 @@ header h1 { font-size: 1.7rem; font-style: italic; font-weight: 700; margin: 16p
   font-family: inherit;
   padding: 12px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: var(--card);
   color: var(--ink);
 }
@@ -167,7 +178,7 @@ header h1 { font-size: 1.7rem; font-style: italic; font-weight: 700; margin: 16p
   font-family: inherit;
   padding: 10px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: var(--card);
   color: var(--ink);
 }
@@ -177,7 +188,7 @@ button {
   font-family: inherit;
   padding: 10px 16px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: var(--accent);
   color: var(--accent-ink);
 }
@@ -437,7 +448,7 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   padding: 8px;
   margin-bottom: 6px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: var(--card);
   color: var(--ink);
 }
@@ -486,7 +497,7 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   padding: 8px;
   margin-bottom: 6px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: var(--card);
   color: var(--ink);
 }
@@ -521,7 +532,7 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
    Five controls in one row measure ~112px too wide for an iPhone — don't regress this. */
 .preview-row { border-bottom: 1px solid var(--line); padding-bottom: 8px; margin-bottom: 10px; }
 .preview-row input, .preview-row select {
-  padding: 8px; border: 1px solid var(--line); border-radius: 6px;
+  padding: 8px; border: 1px solid var(--line); border-radius: var(--radius-control);
   font-size: 0.9rem; font-family: inherit; background: var(--card); color: var(--ink);
 }
 .preview-row input[type="text"] { width: 100%; margin-bottom: 6px; }
@@ -592,7 +603,7 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   min-width: 0;
   padding: 10px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   font: inherit;
   font-size: 1rem;              /* under 16px iOS zooms the page on focus */
   background: var(--card);
@@ -648,7 +659,7 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   background: var(--card);
   color: var(--ink);
   border-top: 1px solid var(--line);
-  border-radius: 12px 12px 0 0;
+  border-radius: var(--radius-sheet) var(--radius-sheet) 0 0;
   padding: 0 16px;
   padding-bottom: env(safe-area-inset-bottom);
   box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.2);
@@ -684,7 +695,7 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   font-size: 1rem;
   padding: 10px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: var(--bg);
   color: var(--ink);
 }

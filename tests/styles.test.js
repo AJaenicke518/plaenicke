@@ -392,3 +392,37 @@ test('contrast() reproduces the spec\'s computed ratios (fixture check on the he
   assert.equal(contrast('#e39a52', '#14161a').toFixed(2), '7.77');
   assert.equal(contrast('#e39a52', '#1e2126').toFixed(2), '6.93');
 });
+
+// --- home-screen stage 2: spacing and radii (spec § 5) ----------------------
+const SPACING = { '--space-1': '4px', '--space-2': '8px', '--space-3': '12px', '--space-4': '16px', '--space-5': '24px', '--space-6': '32px' };
+const RADII = { '--radius-control': '8px', '--radius-sheet': '14px', '--radius-round': '50%' };
+
+test('the spacing and radius scales are the spec\'s values', () => {
+  for (const [name, value] of Object.entries({ ...SPACING, ...RADII })) {
+    assert.equal(declOf(':root', name), value, name);
+  }
+});
+
+test('spacing and radii are theme-independent: dark mode never redefines them', () => {
+  for (const name of Object.keys({ ...SPACING, ...RADII })) {
+    assert.equal(declOf('[data-theme="dark"]', name), null, `${name} must have one definition`);
+  }
+});
+
+// Every form control and button rule that sets a corner. Containers (cards,
+// panels, list rows, the day grid) keep their own radius.
+const CONTROL_RULES = [
+  'button', '.icon-btn', '#entry-text', '#entry-date', '#entry-time', '#entry-end',
+  '.feed-add input', '.link-ui input', '.preview-row input', '.preview-row select',
+  '.idea-add textarea', '.sheet input', '.sheet select', '.sheet textarea',
+];
+for (const sel of CONTROL_RULES) {
+  test(`${sel} uses the control radius`, () => {
+    assert.ok(ruleExists(sel), `no rule for ${sel}`);
+    assert.equal(declOf(sel, 'border-radius'), 'var(--radius-control)');
+  });
+}
+
+test('the item sheet uses the sheet radius on its top corners', () => {
+  assert.equal(declOf('.sheet', 'border-radius'), 'var(--radius-sheet) var(--radius-sheet) 0 0');
+});
