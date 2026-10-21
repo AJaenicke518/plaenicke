@@ -11,7 +11,7 @@
 // shown.
 import { resolveTheme, THEME_KEY } from './theme.js';
 import {
-  syncFeed, feedStatus, removeFeed, webcalToHttps, inferName,
+  syncFeed, feedStatus, removeFeed, webcalToHttps, inferName, feedShape, describeFeedShape,
 } from './feeds.js';
 import { loadFeeds, saveFeeds, loadFeedCache, loadLaunches } from './storage.js';
 import { describeLaunches } from './freshness.js';
@@ -238,6 +238,28 @@ export function initSettings({
       return feedStatus(feed, entry, new Date());
     }
 
+    // The stage-1 readout (home-screen spec § 2.4): how this calendar's cached
+    // events repeat, and whether stage 3a reads it by RRULE or by the
+    // heuristic. Cache only — no network, and the feed URL is never read. No
+    // line before a first sync (no entry), and none after a quota drop: those
+    // events were emptied to free storage (feedStatus says so), and counting
+    // the empty list would describe a calendar that is not there. A throw is
+    // shown on the row and logged by error name only, never swallowed.
+    function shapeLineFor(feed) {
+      const entry = feedCache[feed.id];
+      if (!entry || entry.quotaDropped || !Array.isArray(entry.events)) return null;
+      const line = document.createElement('div');
+      line.className = 'feed-shape';
+      try {
+        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        line.textContent = describeFeedShape(feedShape(entry.events, tz));
+      } catch (err) {
+        line.textContent = "Couldn't classify this calendar's events.";
+        console.error(`plaenicke: feed shape failed (${err && err.name ? err.name : 'unknown'})`);
+      }
+      return line;
+    }
+
     async function runSync(feed) {
       // Entry-point lock (see comment above `syncErrors`): text inputs have
       // no `.disabled` gate, so this guard — not the buttons' disabled state
@@ -386,12 +408,14 @@ export function initSettings({
             notifySyncedChanged();
           });
 
+          const shapeLine = shapeLineFor(feed);
+          const head = shapeLine ? [main, status, shapeLine] : [main, status];
           if (confirmingRemoveId === feed.id) {
             actions.append(confirmRemoveBtn, cancelRemoveBtn);
-            row.append(main, status, confirmNote, actions);
+            row.append(...head, confirmNote, actions);
           } else {
             actions.append(toggle, syncBtn, removeBtn);
-            row.append(main, status, actions);
+            row.append(...head, actions);
           }
           list.appendChild(row);
         }
