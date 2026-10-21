@@ -1223,10 +1223,12 @@ test('runSync still settles when recording a crash itself throws', async () => {
 });
 
 // applySyncedState's three writes run saveItems → applyRemoteFeeds →
-// saveTombstones, and the order is load-bearing (see the comment there):
-// saving tombstones before applyRemoteFeeds lets removeFeed re-stamp a feed
-// tombstone pulled from the other device with THIS device's clock. Nothing
-// pinned the order until a review found every reorder passed the suite.
+// saveTombstones, and the order is load-bearing (see the comment there). A
+// review found every reorder passed the suite; two tests now pin it.
+//
+// This one pins feeds BEFORE tombstones: saving tombstones before
+// applyRemoteFeeds lets removeFeed re-stamp a feed tombstone pulled from the
+// other device with THIS device's clock. It does not see where saveItems is.
 test('a pulled feed tombstone keeps its original deletedAt through applySyncedState', async () => {
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
@@ -1237,6 +1239,42 @@ test('a pulled feed tombstone keeps its original deletedAt through applySyncedSt
   assert.deepEqual(loadFeeds().map((f) => f.id), [], 'fixture check: the pulled tombstone removed the feed');
   assert.deepEqual(loadTombstones().filter((x) => x.id === 'order-feed'), [pulled],
     'the stored tombstone must keep the other device\'s deletedAt, not be re-stamped here');
+  seed([]);
+});
+
+// This one pins items FIRST: a failed items save (QuotaError) must leave the
+// apply having written nothing, so the feeds and tombstones written after it
+// are never ahead of the items they were merged with. Fails with saveItems
+// moved after applyRemoteFeeds (the feed is already gone) or after
+// saveTombstones (both are already written).
+test('an apply whose items write runs out of storage writes no feeds and no tombstones', async () => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  seed([]);
+  saveFeeds([{ id: 'first-feed', url: 'https://example.com/first.ics', name: 'First', color: 'var(--feed-palette-1)', hidden: false, updatedAt: '2026-07-01T00:00:00.000Z' }]);
+  saveTombstones([]);
+  const feedsBefore = loadFeeds();
+  const tombstonesBefore = loadTombstones();
+  const pulled = { id: 'first-feed', kind: 'feed', deletedAt: '2026-08-05T00:00:00.000Z' };
+  const quota = refuseItemsWrites();
+  let thrown = null;
+  try {
+    applySyncedState(state({
+      items: [record({ id: 'first-item', title: 'First item', date: '2099-06-05' })],
+      feeds: [],
+      tombstones: [pulled],
+    }));
+  } catch (e) {
+    thrown = e;
+  } finally {
+    quota.restore();
+  }
+  assert.ok(quota.refused() > 0, 'fixture check: the apply reached the items write');
+  assert.equal(thrown && thrown.name, 'QuotaError', 'fixture check: the failed save surfaced');
+  assert.deepEqual(loadFeeds(), feedsBefore, 'a failed items save must not have removed the feed');
+  assert.deepEqual(loadTombstones(), tombstonesBefore, 'a failed items save must not have written a tombstone');
+  saveFeeds([]);
+  saveTombstones([]);
   seed([]);
 });
 
