@@ -349,7 +349,7 @@ function wallToDateTime(wall) {
 // { date: 'YYYY-MM-DD', time: 'HH:MM' | null } wall-clock fields in targetTz.
 // All four forms (see parseIcsDateValue); DATE is untimed, FLOATING is already
 // targetTz wall time so it is not converted.
-// Test entry point into live code: nothing in js/ calls it; it wraps parseIcsDateValue + instantOfWallClock + formatZonedParts.
+// Called by js/feeds.js's feedShape (the heuristic's local weekday and start time); it wraps parseIcsDateValue + instantOfWallClock + formatZonedParts.
 export function icsDateToLocal(value, params, targetTz) {
   const parsed = parseIcsDateValue(value, params);
   if (parsed.form === 'DATE') {

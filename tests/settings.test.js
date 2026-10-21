@@ -651,3 +651,96 @@ test('settings: a manual Sync and an Add each report their fetch result, before 
     globalThis.fetch = originalFetch;
   }
 });
+
+
+// --- the feed-shape readout (home-screen spec § 2.4, stage 1) ---------------
+//
+// One read-only line per calendar row: how its cached events repeat and which
+// method stage 3a would use. Alex reads it for LMU Classes.
+
+const SHAPE_FEED = {
+  id: 'feedS', url: 'https://calendar.example/private-token-abc/basic.ics', name: 'LMU Classes',
+  color: 'var(--feed-palette-1)', hidden: false, updatedAt: '2026-07-01T00:00:00.000Z',
+};
+
+function shapeEvent(uid, value, rrule = null) {
+  return {
+    uid, title: uid, form: 'UTC', dtstart: { value, tzid: null }, dtend: null, duration: null,
+    rrule, exdates: [], recurrenceId: null,
+  };
+}
+
+function cacheWith(entry) {
+  return () => saveFeedCache({ feedS: { fetchedAt: new Date().toISOString(), skipped: [], ...entry } });
+}
+
+function byClass(el, cls) {
+  const out = [];
+  const walk = (node) => { for (const c of node.children) { if (c._classes.has(cls)) out.push(c); walk(c); } };
+  walk(el);
+  return out;
+}
+
+test('settings: a synced calendar row says how its events repeat and which method it uses', () => {
+  const events = [
+    shapeEvent('stats', '20260824T170000Z', 'FREQ=WEEKLY;BYDAY=MO,WE'),
+    shapeEvent('midterm', '20261015T170000Z'),
+    shapeEvent('final', '20261210T170000Z'),
+  ];
+  const { host } = openPanel([SHAPE_FEED], cacheWith({ events }));
+  const lines = byClass(host, 'feed-shape');
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].textContent, '3 events: 1 repeat (RRULE), 2 single. Uses the rule.');
+  const row = byClass(host, 'feed-row')[0];
+  const status = byClass(row, 'feed-status')[0];
+  assert.equal(row.children.indexOf(lines[0]), row.children.indexOf(status) + 1, 'directly under the status line');
+});
+
+test('settings: the shape line never shows the calendar link', () => {
+  const { host } = openPanel([SHAPE_FEED], cacheWith({ events: [shapeEvent('a', '20260824T170000Z')] }));
+  assert.ok(byClass(host, 'feed-shape').length === 1, 'fixture check: the line is there');
+  const text = allText(host);
+  assert.ok(!text.includes('private-token-abc'), 'the capability token is never rendered');
+  assert.ok(!text.includes('calendar.example'), 'nor the host');
+});
+
+test('settings: no shape line before a calendar\'s first sync', () => {
+  const { host } = openPanel([SHAPE_FEED]);
+  assert.match(allText(host), /not yet synced/, 'fixture check');
+  assert.equal(byClass(host, 'feed-shape').length, 0);
+});
+
+test('settings: a synced calendar with no events says there is nothing to classify', () => {
+  const { host } = openPanel([SHAPE_FEED], cacheWith({ events: [] }));
+  assert.equal(byClass(host, 'feed-shape')[0].textContent, 'No events to classify.');
+});
+
+test('settings: no shape line after a quota drop — the empty cache is not the calendar', () => {
+  const { host } = openPanel([SHAPE_FEED], cacheWith({ events: [], quotaDropped: true }));
+  assert.match(allText(host), /storage limit reached/, 'fixture check: the status explains the drop');
+  assert.equal(byClass(host, 'feed-shape').length, 0);
+});
+
+test('settings: a cache the readout cannot read says so on its row, logs the error name only, and the panel still works', (t) => {
+  const errors = t.mock.method(console, 'error', () => {});
+  const other = { ...SHAPE_FEED, id: 'feedO', name: 'Other' };
+  const { host } = openPanel([SHAPE_FEED, other], () => saveFeedCache({
+    feedS: { fetchedAt: new Date().toISOString(), skipped: [], events: [{ uid: 'broken', title: 'Broken' }] },
+    feedO: { fetchedAt: new Date().toISOString(), skipped: [], events: [shapeEvent('a', '20260824T170000Z')] },
+  }));
+  const lines = byClass(host, 'feed-shape');
+  assert.equal(lines.length, 2, 'both rows still render');
+  assert.equal(lines[0].textContent, "Couldn't classify this calendar's events.");
+  assert.match(lines[1].textContent, /Uses the heuristic\.$/);
+  assert.equal(errors.mock.callCount(), 1);
+  assert.equal(errors.mock.calls[0].arguments.length, 1, 'one string, no error object or feed');
+  assert.match(errors.mock.calls[0].arguments[0], /^plaenicke: feed shape failed \(TypeError\)$/);
+  assert.equal(host.querySelectorAll('button').filter((b) => b.textContent === 'Sync').length, 2);
+});
+
+test('settings: the shape line stays while the row asks to confirm a Remove', () => {
+  const { host } = openPanel([SHAPE_FEED], cacheWith({ events: [shapeEvent('a', '20260824T170000Z')] }));
+  findButtonByText(host, 'Remove').click();
+  assert.ok(findButtonByText(host, 'Remove from every device'), 'fixture check: asking');
+  assert.equal(byClass(host, 'feed-shape').length, 1);
+});

@@ -409,6 +409,8 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   white-space: nowrap;
 }
 .feed-status { color: var(--muted); font-size: 0.75rem; margin: 4px 0 6px; }
+/* The stage-1 feed-shape readout (home-screen spec § 2.4), under the status. */
+.feed-shape { color: var(--muted); font-size: 0.75rem; margin: 0 0 6px; }
 .feed-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .feed-actions button {
   flex: 1 1 auto;
