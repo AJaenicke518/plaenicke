@@ -1,3 +1,7 @@
+// The offline fetch is the FIRST import, so it is installed before anything
+// below — app.js included — is evaluated (tests/offline-fetch.js): every fetch
+// a test has not stubbed rejects the way an offline device does.
+import './offline-fetch.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -16,10 +20,6 @@ import { bytesToBase64url, TOKEN_BYTES, encryptBlob } from '../js/crypto.js';
 import { SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID, SLOW_WRITE_MS } from '../js/linkui.js';
 import { addDays, startOfWeek, weekLabel } from '../js/timegrid.js';
 import { formatDayLabel } from '../js/freshness.js';
-
-// Installed before anything imports app.js: every fetch that a test has not
-// stubbed rejects the way an offline device does.
-globalThis.fetch = () => Promise.reject(new TypeError('network blocked in tests'));
 
 // This file must never reach the production Worker. Tests that need a server
 // stub globalThis.fetch and restore it afterwards, but app.js also schedules
@@ -884,6 +884,31 @@ function panelStatusLine() {
 async function drain() {
   for (let i = 0; i < 50; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
 }
+// Poll for a POSITIVE wait instead of a fixed tick count: syncOnce hashes the
+// token through WebCrypto, which completes on the thread pool as a macrotask,
+// so 50 setImmediates was not always enough under load (measured: 1 failure
+// in 7 full runs of the wiring tests). Bounded by wall time AND by a poll
+// count, so a test that mocks Date (freezing Date.now) still ends; setImmediate
+// and Date are never replaced by installManualTimers, so this works inside one.
+async function drainUntil(pred, ms = 2000, maxPolls = 200000) {
+  const end = Date.now() + ms;
+  for (let i = 0; !pred() && Date.now() < end && i < maxPolls; i += 1) {
+    await new Promise((resolve) => { setImmediate(resolve); });
+  }
+}
+
+// A mocked Date (t.mock.timers with apis: ['Date']) freezes Date.now(), and
+// the wall-time bound alone then never ends the loop.
+test('drainUntil gives up even when Date is frozen', { timeout: 10000 }, async (t) => {
+  t.mock.timers.enable({ apis: ['Date'] });
+  try {
+    let polls = 0;
+    await drainUntil(() => { polls += 1; return false; });
+    assert.ok(polls > 1, 'fixture check: it polled');
+  } finally {
+    t.mock.timers.reset();
+  }
+});
 
 test('runSync gives up on an account read that never answers, and reports it as offline', async () => {
   installFakeLocalStorage();
@@ -999,6 +1024,139 @@ test('a sync whose apply runs out of storage on plaenicke.items reads as out of 
   assert.match(statusLine.textContent, /run out of storage/);
 });
 
+// A failed items write in the apply must not leave app.js's module-scope
+// `items` ahead of storage. app.js saves from that array, so a stale synced
+// record held only in memory renders now, disappears on reload, and is written
+// by the next local save of ANY item — outside the sync path. Not data loss,
+// but memory and storage disagree (plan 2026-10-20 Task 2, adjudication I4/I5).
+// setItem is restored BEFORE the follow-up add, so it is the add's own save
+// that would persist the stale record.
+function refuseItemsWrites({ after = 0 } = {}) {
+  const realSet = localStorage.setItem.bind(localStorage);
+  let seen = 0;
+  let refused = 0;
+  localStorage.setItem = (k, v) => {
+    if (k === 'plaenicke.items') {
+      seen += 1;
+      if (seen > after) {
+        refused += 1;
+        const e = new Error('full');
+        e.name = 'QuotaExceededError';
+        throw e;
+      }
+    }
+    return realSet(k, v);
+  };
+  return { refused: () => refused, restore: () => { localStorage.setItem = realSet; } };
+}
+
+test('a sync whose items write runs out of storage leaves no unsaved synced record for the next add to persist', async () => {
+  installFakeLocalStorage();
+  const { addItems } = await import('../js/app.js');
+  const { encKey } = await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  seed([record({ id: 'kept-local', title: 'Kept local', date: '2099-06-01' })]);
+  const blob = await encryptBlob(encKey, state({
+    items: [record({ id: 'pulled-unsaved', title: 'Pulled unsaved', date: '2099-06-02' })],
+  }));
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    requests.push(method);
+    if (method === 'GET') return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 3, blob }) });
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 4 }) });
+  };
+  const timers = installManualTimers();
+  let quota = null;
+  try {
+    quota = refuseItemsWrites();
+    saveSyncState({ ...loadSyncState(), lastError: null }); // so the wait below sees THIS sync's failure
+    try {
+      for (const fn of globalThis.window._listeners.online) fn();
+      await drainUntil(() => loadSyncState().lastError === 'QuotaError');
+      await drain();
+    } finally {
+      quota.restore();
+    }
+    assert.ok(quota.refused() > 0, 'fixture check: the apply reached the items write');
+    assert.equal(loadSyncState().lastError, 'QuotaError', 'fixture check: the apply failed on quota');
+    assert.deepEqual(requests, ['GET'], 'fixture check: nothing was pushed');
+    assert.deepEqual(loadItems().map((i) => i.id), ['kept-local'], 'fixture check: storage never took the pulled record');
+    // Storage has room again; the user adds something by hand.
+    addItems([{ title: 'Typed after', date: '2099-06-03', type: 'event' }]);
+  } finally {
+    timers.restore(); // the add's 2 s sync timer is never fired
+    globalThis.fetch = originalFetch;
+  }
+  const stored = loadItems();
+  assert.ok(stored.some((i) => i.title === 'Typed after'), 'fixture check: the add itself was saved');
+  assert.ok(!stored.some((i) => i.id === 'pulled-unsaved'),
+    'the add must not persist a synced record the failed apply never saved');
+  assert.deepEqual(stored.map((i) => i.id).sort(), ['kept-local', stored.find((i) => i.title === 'Typed after').id].sort());
+  assert.doesNotMatch(allText(itemList()), /Pulled unsaved/, 'the list must not show a record storage does not hold');
+  assert.match(allText(itemList()), /Kept local/, 'fixture check: the list rendered');
+  seed([]);
+});
+
+// Same failure arriving on the CAS retry: the first apply saved, the PUT got a
+// 409 whose blob carries a record from another device, and the RETRY's apply
+// is the one whose items write fails.
+test('a 409 retry whose apply runs out of storage leaves no unsaved synced record for the next add to persist', async () => {
+  installFakeLocalStorage();
+  const { addItems } = await import('../js/app.js');
+  const { encKey } = await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  // local-only makes the first apply's state differ from the server's, so a PUT goes out.
+  seed([record({ id: 'local-only', title: 'Local only', date: '2099-07-01' })]);
+  const first = await encryptBlob(encKey, state({
+    items: [record({ id: 'pulled-first', title: 'Pulled first', date: '2099-07-02' })],
+  }));
+  const conflict = await encryptBlob(encKey, state({
+    items: [
+      record({ id: 'pulled-first', title: 'Pulled first', date: '2099-07-02' }),
+      record({ id: 'pulled-on-retry', title: 'Pulled on retry', date: '2099-07-03' }),
+    ],
+  }));
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    requests.push(method);
+    if (method === 'GET') return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 3, blob: first }) });
+    return Promise.resolve({ ok: false, status: 409, json: async () => ({ version: 4, blob: conflict }) });
+  };
+  const timers = installManualTimers();
+  let quota = null;
+  try {
+    quota = refuseItemsWrites({ after: 1 }); // the first apply's write lands; the retry's is refused
+    saveSyncState({ ...loadSyncState(), lastError: null }); // so the wait below sees THIS sync's failure
+    try {
+      for (const fn of globalThis.window._listeners.online) fn();
+      await drainUntil(() => loadSyncState().lastError === 'QuotaError');
+      await drain();
+    } finally {
+      quota.restore();
+    }
+    assert.deepEqual(requests, ['GET', 'PUT'], 'fixture check: the first apply saved and pushed, and got a 409');
+    assert.equal(quota.refused(), 1, 'fixture check: only the retry apply\'s items write was refused');
+    assert.equal(loadSyncState().lastError, 'QuotaError', 'fixture check: the retry apply failed on quota');
+    assert.deepEqual(loadItems().map((i) => i.id).sort(), ['local-only', 'pulled-first'],
+      'fixture check: storage holds the first apply and not the retry');
+    addItems([{ title: 'Typed after retry', date: '2099-07-04', type: 'event' }]);
+  } finally {
+    timers.restore();
+    globalThis.fetch = originalFetch;
+  }
+  const stored = loadItems();
+  assert.ok(stored.some((i) => i.title === 'Typed after retry'), 'fixture check: the add itself was saved');
+  assert.ok(!stored.some((i) => i.id === 'pulled-on-retry'),
+    'the add must not persist a record the failed retry apply never saved');
+  assert.ok(stored.some((i) => i.id === 'pulled-first'), 'the first apply\'s saved record stays');
+  assert.doesNotMatch(allText(itemList()), /Pulled on retry/, 'the list must not show a record storage does not hold');
+  seed([]);
+});
+
 test('runSync records a lastError and lights the indicator when syncOnce itself rejects', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
@@ -1082,6 +1240,62 @@ test('runSync still settles when recording a crash itself throws', async () => {
   }
   assert.equal(full, true, 'fixture check: the sync reached the write');
   assert.equal(outcome, 'settled', 'a failure while recording a failure must not escape runSync');
+});
+
+// applySyncedState's three writes run saveItems → applyRemoteFeeds →
+// saveTombstones, and the order is load-bearing (see the comment there). A
+// review found every reorder passed the suite; two tests now pin it.
+//
+// This one pins feeds BEFORE tombstones: saving tombstones before
+// applyRemoteFeeds lets removeFeed re-stamp a feed tombstone pulled from the
+// other device with THIS device's clock. It does not see where saveItems is.
+test('a pulled feed tombstone keeps its original deletedAt through applySyncedState', async () => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  saveFeeds([{ id: 'order-feed', url: 'https://example.com/order.ics', name: 'Order', color: 'var(--feed-palette-1)', hidden: false, updatedAt: '2026-07-01T00:00:00.000Z' }]);
+  saveTombstones([]);
+  const pulled = { id: 'order-feed', kind: 'feed', deletedAt: '2026-08-05T00:00:00.000Z' };
+  applySyncedState(state({ feeds: [], tombstones: [pulled] }));
+  assert.deepEqual(loadFeeds().map((f) => f.id), [], 'fixture check: the pulled tombstone removed the feed');
+  assert.deepEqual(loadTombstones().filter((x) => x.id === 'order-feed'), [pulled],
+    'the stored tombstone must keep the other device\'s deletedAt, not be re-stamped here');
+  seed([]);
+});
+
+// This one pins items FIRST: a failed items save (QuotaError) must leave the
+// apply having written nothing, so the feeds and tombstones written after it
+// are never ahead of the items they were merged with. Fails with saveItems
+// moved after applyRemoteFeeds (the feed is already gone) or after
+// saveTombstones (both are already written).
+test('an apply whose items write runs out of storage writes no feeds and no tombstones', async () => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  seed([]);
+  saveFeeds([{ id: 'first-feed', url: 'https://example.com/first.ics', name: 'First', color: 'var(--feed-palette-1)', hidden: false, updatedAt: '2026-07-01T00:00:00.000Z' }]);
+  saveTombstones([]);
+  const feedsBefore = loadFeeds();
+  const tombstonesBefore = loadTombstones();
+  const pulled = { id: 'first-feed', kind: 'feed', deletedAt: '2026-08-05T00:00:00.000Z' };
+  const quota = refuseItemsWrites();
+  let thrown = null;
+  try {
+    applySyncedState(state({
+      items: [record({ id: 'first-item', title: 'First item', date: '2099-06-05' })],
+      feeds: [],
+      tombstones: [pulled],
+    }));
+  } catch (e) {
+    thrown = e;
+  } finally {
+    quota.restore();
+  }
+  assert.ok(quota.refused() > 0, 'fixture check: the apply reached the items write');
+  assert.equal(thrown && thrown.name, 'QuotaError', 'fixture check: the failed save surfaced');
+  assert.deepEqual(loadFeeds(), feedsBefore, 'a failed items save must not have removed the feed');
+  assert.deepEqual(loadTombstones(), tombstonesBefore, 'a failed items save must not have written a tombstone');
+  saveFeeds([]);
+  saveTombstones([]);
+  seed([]);
 });
 
 test('runSync does not proceed into its try/finally while adoption is pending', async () => {
@@ -1831,7 +2045,8 @@ test('wiring: addItems schedules a debounced sync that pushes the capture', asyn
     assert.deepEqual(net.requests, [], 'the push is debounced');
     assert.equal(timers.live(2000), 1, 'adding an item arms the 2 s sync timer');
     timers.fire(2000);
-    await drain();
+    await drainUntil(() => net.requests.length >= 2);
+    await drain(); // so a late extra request still fails the exact match below
   } finally {
     timers.restore();
     net.restore();
@@ -1856,7 +2071,8 @@ test('wiring: a committed delete schedules a debounced sync that pushes the tomb
     assert.deepEqual(net.requests, [], 'the push is debounced');
     assert.equal(timers.live(2000), 1, 'committing a delete arms the 2 s sync timer');
     timers.fire(2000);
-    await drain();
+    await drainUntil(() => net.requests.length >= 2);
+    await drain(); // so a late extra request still fails the exact match below
   } finally {
     timers.restore();
     net.restore();
@@ -1882,18 +2098,25 @@ test('wiring: a trigger during a sync waits for it, then runs once it settles', 
   let afterFirst;
   try {
     for (const fn of globalThis.window._listeners.online) fn();
-    await drain();
+    await drainUntil(() => net.requests.length >= 1);
     assert.deepEqual(net.requests, ['GET'], 'fixture check: the first sync is in flight');
     for (const fn of globalThis.window._listeners.online) fn();
     await drain();
-    assert.deepEqual(net.requests, ['GET'], 'a trigger during a sync must not start a second, concurrent one');
+    // sync.js's queue alone keeps this true, guard or no guard.
+    assert.deepEqual(net.requests, ['GET'], 'no second request goes out while the first sync is in flight');
     assert.equal(timers.live(2000), 0, 'and nothing is re-armed while the first is still running');
     releaseGet();
+    const gets = () => net.requests.filter((m) => m === 'GET').length;
+    await drainUntil(() => timers.live(2000) === 1 || gets() >= 2);
     await drain();
+    // Only app.js's syncInFlight guard makes this hold: without it the second
+    // trigger's runSync queues its own syncOnce behind the first, which reads
+    // again the moment the first settles instead of waiting for the timer.
+    assert.equal(gets(), 1, 'a trigger during a sync must not start a second sync of its own');
     afterFirst = [...net.requests];
     assert.equal(timers.live(2000), 1, 'the trigger that arrived mid-sync is re-armed once the first settles');
     timers.fire(2000);
-    await drain();
+    await drainUntil(() => net.requests.length > afterFirst.length);
   } finally {
     if (releaseGet) releaseGet();
     timers.restore();
@@ -4870,4 +5093,557 @@ test('slow sync write: a pending adoption outranks the slow line', async (t) => 
     }
     t.mock.timers.reset();
   }
+});
+
+// --- smart add: only the latest Add applies (fixes-3 Task 1, I3) ------------
+//
+// parseViaWorker now gives up after SMART_ADD_TIMEOUT_MS, so a request the
+// user has moved past can still settle up to a minute later. Before handleAdd
+// tracked which request is latest, that late settle overwrote the newer
+// outcome: a manual add's "Added." became "Smart add is unavailable", and an
+// older smart add's items were added after a newer one's. Manual timers: the
+// smart-add deadline and addItems' 2 s sync timer must not touch app.js's
+// module-scope syncTimer through MockTimers (see installManualTimers).
+function smartAddFetch(respond) {
+  const posts = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    if ((opts.method || 'GET') === 'POST' && !String(url).includes('/data')) {
+      posts.push(JSON.parse(opts.body).text);
+      return respond(posts.length);
+    }
+    return originalFetch(url, opts);
+  };
+  return { posts, restore: () => { globalThis.fetch = originalFetch; } };
+}
+const smartReply = (items) => ({
+  ok: true, status: 200, headers: {}, json: async () => ({ items, needsReview: false }), text: async () => '',
+});
+function typeIntoAddBox(text, date = '') {
+  const doc = globalThis.document;
+  doc.getElementById('entry-text').value = text;
+  doc.getElementById('entry-date').value = date;
+  doc.getElementById('entry-time').value = '';
+  doc.getElementById('entry-end').value = '';
+}
+
+test('smart add: a request that times out after a newer manual add leaves "Added." alone', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const { SMART_ADD_TIMEOUT_MS } = await import('../js/smartadd.js');
+  seed([]);
+  const doc = globalThis.document;
+  const net = smartAddFetch(() => new Promise(() => {})); // the Worker never answers
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('lunch with sam tomorrow');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.deepEqual(net.posts, ['lunch with sam tomorrow'], 'fixture check: the smart add reached the Worker stub');
+    assert.equal(messageText(), 'Thinking…');
+
+    typeIntoAddBox('Manual dinner', '2099-03-04');
+    click(doc.getElementById('add-btn'));
+    assert.equal(messageText(), 'Added.', 'fixture check: the manual add landed');
+
+    assert.equal(timers.live(SMART_ADD_TIMEOUT_MS), 1, 'fixture check: the smart add is still waiting');
+    timers.fire(SMART_ADD_TIMEOUT_MS);
+    await settle();
+    assert.equal(messageText(), 'Added.', 'a superseded request must not overwrite the newer outcome');
+    assert.deepEqual(loadItems().map((it) => it.title), ['Manual dinner']);
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+test('smart add: two requests that settle out of order — only the latest applies', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('first thing on may 1');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    typeIntoAddBox('second thing on may 2');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.equal(held.length, 2, 'fixture check: both requests are in flight');
+
+    held[1](smartReply([{ title: 'Second thing', date: '2099-05-02', type: 'task' }]));
+    await settle();
+    assert.equal(messageText(), 'Added.');
+    assert.deepEqual(loadItems().map((it) => it.title), ['Second thing'], 'fixture check: the latest request applied');
+
+    // Preview-shaped (two items), so "must not open a preview" below can fail.
+    held[0](smartReply([
+      { title: 'First thing', date: '2099-05-01', type: 'task' },
+      { title: 'First other thing', date: '2099-05-01', type: 'task' },
+    ]));
+    await settle();
+    assert.deepEqual(loadItems().map((it) => it.title), ['Second thing'], 'a superseded result must not be added');
+    assert.equal(messageText(), 'Added.');
+    assert.equal(doc.getElementById('preview').children.length, 0, 'and must not open a preview');
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+// --- smart add: a request changes only the message it set (review sweep) ---
+//
+// addGeneration decides whether a request may still ADD; whether it may
+// still change the MESSAGE is separate. A current request whose "Thinking…"
+// another action has since replaced (the Ideas box's "Kept.", say) still adds
+// its items but leaves that newer message alone.
+const smartFail = () => Promise.reject(new TypeError('offline'));
+const previewReply = (items) => ({
+  ok: true, status: 200, headers: {}, json: async () => ({ items, needsReview: true }), text: async () => '',
+});
+
+test('smart add: a superseded error arriving after a newer smart success leaves "Added." alone', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve, reject) => { held.push({ resolve, reject }); }));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('older thing on may 3');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    typeIntoAddBox('newer thing on may 4');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.equal(held.length, 2, 'fixture check: both requests are in flight');
+    held[1].resolve(smartReply([{ title: 'Newer thing', date: '2099-05-04', type: 'task' }]));
+    await settle();
+    assert.equal(messageText(), 'Added.', 'fixture check: the newer request applied');
+    held[0].reject(new TypeError('offline'));
+    await settle();
+    assert.equal(messageText(), 'Added.', 'a superseded error must not overwrite the newer success');
+    assert.deepEqual(loadItems().map((it) => it.title), ['Newer thing']);
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+async function smartAddThenKeepIdea(text) {
+  const doc = globalThis.document;
+  typeIntoAddBox(text);
+  click(doc.getElementById('add-btn'));
+  await settle();
+  assert.equal(messageText(), 'Thinking…', 'fixture check: the smart add is waiting');
+  ideaText().value = 'An idea meanwhile';
+  click(ideaAdd());
+  assert.equal(messageText(), 'Kept.', 'fixture check: the Ideas box replaced the message');
+}
+
+test('smart add: a current success after the Ideas box said "Kept." adds its items and leaves "Kept."', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    await smartAddThenKeepIdea('dentist on may 5');
+    held[0](smartReply([{ title: 'Dentist', date: '2099-05-05', type: 'event' }]));
+    await settle();
+    assert.deepEqual(loadItems().map((it) => it.title).sort(), ['An idea meanwhile', 'Dentist'],
+      'the Ideas box must not cancel the pending smart add\'s items');
+    assert.equal(messageText(), 'Kept.', 'a late result must not overwrite a newer message');
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+test('smart add: a current error after the Ideas box said "Kept." leaves "Kept."', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve, reject) => { held.push(reject); }));
+  const timers = installManualTimers();
+  try {
+    await smartAddThenKeepIdea('dentist on may 6');
+    held[0](new TypeError('offline'));
+    await settle();
+    assert.equal(messageText(), 'Kept.', 'a late error must not overwrite a newer message');
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+test('smart add: a current preview after the Ideas box said "Kept." still opens, and leaves "Kept."', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    await smartAddThenKeepIdea('two things on may 7');
+    held[0](previewReply([
+      { title: 'Thing one', date: '2099-05-07', type: 'task' },
+      { title: 'Thing two', date: '2099-05-07', type: 'task' },
+    ]));
+    await settle();
+    assert.equal(doc.getElementById('preview').hidden, false, 'the current request still offers its preview');
+    assert.equal(messageText(), 'Kept.', 'and leaves the newer message alone');
+  } finally {
+    doc.getElementById('preview').hidden = true;
+    doc.getElementById('preview').innerHTML = '';
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+// The one exception, chosen here: a failed SAVE of the smart add's items is
+// still shown, because nothing else tells the user their capture was lost.
+test('smart add: a current result whose save fails still says so after "Kept."', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  let quota = null;
+  try {
+    await smartAddThenKeepIdea('dentist on may 8');
+    quota = refuseItemsWrites();
+    held[0](smartReply([{ title: 'Dentist', date: '2099-05-08', type: 'event' }]));
+    await settle();
+    assert.ok(quota.refused() > 0, 'fixture check: the add reached the items write');
+    assert.match(messageText(), /quota|storage/i, 'a save failure must not be hidden behind "Kept."');
+  } finally {
+    if (quota) quota.restore();
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+test('smart add: a direct result clears the text box only if it still holds the text sent', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('dentist on may 9');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    doc.getElementById('entry-text').value = 'something typed meanwhile';
+    held[0](smartReply([{ title: 'Dentist', date: '2099-05-09', type: 'event' }]));
+    await settle();
+    assert.deepEqual(loadItems().map((it) => it.title), ['Dentist'], 'fixture check: the result applied');
+    assert.equal(doc.getElementById('entry-text').value, 'something typed meanwhile',
+      'text typed while waiting must not be wiped');
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+test('smart add: a direct result still clears the text box when it holds the text sent', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const net = smartAddFetch(() => Promise.resolve(smartReply([{ title: 'Dentist', date: '2099-05-10', type: 'event' }])));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('  dentist on may 10  ');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.equal(messageText(), 'Added.');
+    assert.equal(doc.getElementById('entry-text').value, '', 'the sent text is cleared');
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+test('smart add: a preview confirm clears the text box only if it still holds the text sent', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const net = smartAddFetch(() => Promise.resolve(previewReply([
+    { title: 'Thing one', date: '2099-05-11', type: 'task' },
+    { title: 'Thing two', date: '2099-05-11', type: 'task' },
+  ])));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('two things on may 11');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    const preview = doc.getElementById('preview');
+    assert.equal(preview.hidden, false, 'fixture check: the preview opened');
+    doc.getElementById('entry-text').value = 'something typed meanwhile';
+    const addAll = preview.querySelector('.preview-actions').children[0];
+    assert.equal(addAll.textContent, 'Add all', 'fixture check: the confirm button');
+    click(addAll);
+    assert.deepEqual(loadItems().map((it) => it.title).sort(), ['Thing one', 'Thing two'], 'fixture check: the confirm added');
+    assert.equal(doc.getElementById('entry-text').value, 'something typed meanwhile',
+      'text typed while reviewing must not be wiped');
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+for (const [label, prepare, refusal] of [
+  ['a time with no date', (doc) => { doc.getElementById('entry-time').value = '09:00'; }, /Add a date to use that time/],
+  ['an empty box', (doc) => { doc.getElementById('entry-text').value = '   '; }, /Type something first/],
+]) {
+  test(`smart add: an Add refused for ${label} does not cancel the pending smart add`, async () => {
+    installFakeLocalStorage();
+    await import('../js/app.js');
+    seed([]);
+    const doc = globalThis.document;
+    const held = [];
+    const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+    const timers = installManualTimers();
+    try {
+      typeIntoAddBox('dentist on may 12');
+      click(doc.getElementById('add-btn'));
+      await settle();
+      typeIntoAddBox('');
+      prepare(doc);
+      click(doc.getElementById('add-btn'));
+      assert.match(messageText(), refusal, 'fixture check: the second Add was refused');
+      doc.getElementById('entry-time').value = '';
+      held[0](smartReply([{ title: 'Dentist', date: '2099-05-12', type: 'event' }]));
+      await settle();
+      assert.deepEqual(loadItems().map((it) => it.title), ['Dentist'], 'a refused Add must not supersede the pending one');
+      assert.equal(held.length, 1, 'fixture check: the refused Add sent nothing');
+    } finally {
+      timers.restore();
+      net.restore();
+    }
+    seed([]);
+  });
+}
+
+test('smart add: a new smart add hides and clears an earlier request\'s open preview', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const held = [];
+  const net = smartAddFetch((n) => (n === 1
+    ? Promise.resolve(previewReply([
+      { title: 'Old one', date: '2099-05-13', type: 'task' },
+      { title: 'Old two', date: '2099-05-13', type: 'task' },
+    ]))
+    : new Promise((resolve) => { held.push(resolve); })));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('two old things on may 13');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    const preview = doc.getElementById('preview');
+    assert.equal(preview.hidden, false, 'fixture check: the first preview opened');
+    assert.ok(preview.children.length > 0, 'fixture check: with content');
+    typeIntoAddBox('something new on may 14');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.equal(preview.hidden, true, 'the stale preview is hidden');
+    assert.equal(preview.children.length, 0, 'and cleared, so it cannot be confirmed');
+  } finally {
+    for (const r of held) r(smartReply([]));
+    await settle();
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+test('smart add: a second Add of the same text while the first is pending sends nothing', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('dentist on may 15');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    typeIntoAddBox('  dentist on may 15 ');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.deepEqual(net.posts, ['dentist on may 15'], 'no second paid request for the same text');
+    held[0](smartReply([{ title: 'Dentist', date: '2099-05-15', type: 'event' }]));
+    await settle();
+    assert.deepEqual(loadItems().map((it) => it.title), ['Dentist'], 'the first request still applies');
+    assert.equal(messageText(), 'Added.');
+    typeIntoAddBox('dentist on may 15');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.equal(net.posts.length, 2, 'once settled, the same text can be sent again');
+    held[1](smartReply([]));
+    await settle();
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+// The same-text guard must lift once its request is over, however it ended,
+// or the user cannot retry the exact words after a failure.
+test('smart add: after an error the same text can be sent again', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const net = smartAddFetch((n) => (n === 1 ? Promise.reject(new TypeError('offline')) : Promise.resolve(smartReply([]))));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('dentist on may 17');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.match(messageText(), /unavailable/, 'fixture check: the first request failed');
+    typeIntoAddBox('dentist on may 17');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.equal(net.posts.length, 2, 'a failed request must not block re-sending the same text');
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+test('smart add: after a newer manual add the same text can be sent again', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('gym on may 18');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    typeIntoAddBox('Manual note', '2099-05-18');
+    click(doc.getElementById('add-btn'));
+    assert.equal(messageText(), 'Added.', 'fixture check: the manual add superseded the request');
+    typeIntoAddBox('gym on may 18');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.equal(net.posts.length, 2, 'a superseded request must not block re-sending its text');
+    for (const r of held) r(smartReply([]));
+    await settle();
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+// A manual Add the app refuses (a date but no title) starts nothing, so it
+// must not cancel the smart add still in flight.
+test('smart add: a refused manual add leaves the pending smart add alone', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('lunch on may 20');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    typeIntoAddBox('', '2099-05-20');
+    click(doc.getElementById('add-btn'));
+    assert.match(messageText(), /type a title and pick a date/, 'fixture check: the manual add was refused');
+    held[0](smartReply([{ title: 'Lunch', date: '2099-05-20', type: 'event' }]));
+    await settle();
+    assert.deepEqual(loadItems().map((it) => it.title), ['Lunch'], 'the smart add still lands');
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+test('smart add: a manual add closes an open preview from an earlier smart add', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const net = smartAddFetch(() => Promise.resolve(smartReply([
+    { title: 'Read ch 1', date: '2099-05-21', type: 'task' },
+    { title: 'Read ch 2', date: '2099-05-22', type: 'task' },
+  ])));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('read ch 1 and 2');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.equal(doc.getElementById('preview').hidden, false, 'fixture check: the preview is open');
+    typeIntoAddBox('Manual entry', '2099-05-23');
+    click(doc.getElementById('add-btn'));
+    assert.equal(messageText(), 'Added.', 'fixture check: the manual add landed');
+    assert.equal(doc.getElementById('preview').hidden, true, 'the stale preview must not stay confirmable');
+    assert.equal(doc.getElementById('preview').children.length, 0);
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+// With the message guarded by messageToken, this is what still needs the
+// manual add to bump addGeneration: the older smart add's ITEMS.
+test('smart add: a success arriving after a newer manual add adds nothing', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('lunch with sam on may 16');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    typeIntoAddBox('Manual supper', '2099-05-16');
+    click(doc.getElementById('add-btn'));
+    assert.equal(messageText(), 'Added.', 'fixture check: the manual add landed');
+    held[0](smartReply([{ title: 'Lunch with Sam', date: '2099-05-16', type: 'event' }]));
+    await settle();
+    assert.deepEqual(loadItems().map((it) => it.title), ['Manual supper'], 'a superseded smart add must not add its items');
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
 });

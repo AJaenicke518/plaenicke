@@ -4,6 +4,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "smoke:worker": "node scripts/smoke-worker.mjs"
   }
 }
