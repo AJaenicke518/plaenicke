@@ -350,3 +350,45 @@ test('.visually-hidden hides from sight only', () => {
 test('the external sheet has room after its last line', () => {
   assert.equal(declOf('.sheet-external', 'padding-bottom'), 'calc(16px + env(safe-area-inset-bottom))');
 });
+
+// --- home-screen stage 2: the overdue-start colour (spec § 2.3, § 5) --------
+// Two themes, two surfaces each. The contrast is COMPUTED from the declared
+// values, so a later tweak that makes the orange unreadable fails here
+// rather than on the phone. Red/orange distinguishability is not computable
+// this way and stays on the on-device checklist.
+function luminance(hex) {
+  const m = /^#([0-9a-f]{6})$/i.exec(hex || '');
+  assert.ok(m, `cannot read a #rrggbb colour from ${JSON.stringify(hex)}`);
+  const [r, g, b] = [0, 2, 4].map((i) => parseInt(m[1].slice(i, i + 2), 16) / 255)
+    .map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+function contrast(a, b) {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+test('--overdue-start is the spec\'s orange in both themes', () => {
+  assert.equal(declOf(':root', '--overdue-start'), '#9c5418');
+  assert.equal(declOf('[data-theme="dark"]', '--overdue-start'), '#e39a52');
+});
+
+for (const theme of [':root', '[data-theme="dark"]']) {
+  test(`${theme}: --overdue-start reads at WCAG AA (4.5:1) on --bg and on --card`, () => {
+    const fg = declOf(theme, '--overdue-start');
+    for (const surface of ['--bg', '--card']) {
+      const ratio = contrast(fg, declOf(theme, surface));
+      assert.ok(ratio >= 4.5, `${theme} ${surface}: ${ratio.toFixed(2)} < 4.5`);
+    }
+  });
+  test(`${theme}: --overdue-start is not --danger`, () => {
+    assert.notEqual(declOf(theme, '--overdue-start').toLowerCase(), declOf(theme, '--danger').toLowerCase());
+  });
+}
+
+test('contrast() reproduces the spec\'s computed ratios (fixture check on the helper)', () => {
+  assert.equal(contrast('#9c5418', '#f4f1ea').toFixed(2), '5.04');
+  assert.equal(contrast('#9c5418', '#fffdf8').toFixed(2), '5.59');
+  assert.equal(contrast('#e39a52', '#14161a').toFixed(2), '7.77');
+  assert.equal(contrast('#e39a52', '#1e2126').toFixed(2), '6.93');
+});

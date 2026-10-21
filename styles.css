@@ -7,6 +7,10 @@
   --accent: #8a5a3b;        /* leather brown */
   --accent-ink: #fffdf8;    /* text on accent */
   --danger: #b04a3a;
+  /* A passed START date's age on Today's Overdue (home-screen spec § 2.3);
+     --danger stays the passed-deadline red. Light: 5.04 on --bg, 5.59 on
+     --card (tests/styles.test.js computes them). */
+  --overdue-start: #9c5418;
   --line: #e0d8c8;
   --chip-bg: #efe9dc;
   --chip-ink: #6b6152;
@@ -46,6 +50,8 @@
   --accent: #8fa7c8;
   --accent-ink: #14161a;
   --danger: #e06c5e;
+  /* Dark: 7.77 on --bg, 6.93 on --card. */
+  --overdue-start: #e39a52;
   --line: #33373f;
   --chip-bg: #262a31;
   --chip-ink: #a6acb8;
