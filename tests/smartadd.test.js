@@ -1,12 +1,12 @@
+// parseViaWorker calls fetch, so this file must never reach the production
+// Worker: every fetch a test has not stubbed rejects the way an offline device
+// does. It is the FIRST import so it is in place before any module below is
+// evaluated (tests/offline-fetch.js). Tests that stub fetch restore it in finally.
+import './offline-fetch.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { decideFlow, parseViaWorker, SMART_ADD_TIMEOUT_MS } from '../js/smartadd.js';
 import { WORKER_URL } from '../js/config.js';
-
-// parseViaWorker calls fetch, so this file must never reach the production
-// Worker: every fetch a test has not stubbed rejects the way an offline device
-// does. Tests that stub fetch restore it in finally.
-globalThis.fetch = () => Promise.reject(new TypeError('network blocked in tests'));
 
 test('the default fetch in this file is offline, not the production Worker', async () => {
   await assert.rejects(globalThis.fetch(WORKER_URL), /network blocked in tests/);

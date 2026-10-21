@@ -1,23 +1,20 @@
 // smoke-worker.test.js — the PURE parts of scripts/smoke-worker.mjs.
 //
 // The script itself POSTs to the production Worker and every call spends
-// Anthropic credits. Nothing here may reach it. The offline fetch below is
-// installed BEFORE the script is imported, so even a module-scope fetch in the
-// script (there must be none) would be caught and counted, not sent.
-let fetchCalls = 0;
-globalThis.fetch = () => {
-  fetchCalls += 1;
-  return Promise.reject(new TypeError('network blocked in tests'));
-};
-
+// Anthropic credits. Nothing here may reach it. The offline fetch is the FIRST
+// import, so it is installed before any other module in this file's graph is
+// evaluated: even a module-scope fetch in the script or anything it imports
+// (there must be none) is caught and counted, not sent.
+import { offlineFetchCalls } from './offline-fetch.js';
 import { mkdtempSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 const smoke = await import('../scripts/smoke-worker.mjs');
-const fetchesDuringImport = fetchCalls;
+const fetchesDuringImport = offlineFetchCalls();
 const {
   PHRASES, EXPECTED_ORIGIN, checkResult, runSmoke, formatTable, isMain, MAIN_FETCH,
 } = smoke;
@@ -36,16 +33,41 @@ test('importing the script makes zero fetches and does not run main', () => {
 });
 
 test('the default fetch in this file is offline, not the production Worker', async () => {
-  const before = fetchCalls;
+  const before = offlineFetchCalls();
   await assert.rejects(globalThis.fetch(WORKER_URL), /network blocked in tests/);
-  assert.equal(fetchCalls, before + 1);
+  assert.equal(offlineFetchCalls(), before + 1);
+});
+
+// node --test runs each file in a child with NODE_TEST_CONTEXT set, and
+// argv[1] there is the file itself — so `node --test scripts/smoke-worker.mjs`
+// would otherwise call production. These run with the variable set or unset
+// on purpose, and put it back afterwards.
+function withTestContext(value, fn) {
+  const had = Object.prototype.hasOwnProperty.call(process.env, 'NODE_TEST_CONTEXT');
+  const prev = process.env.NODE_TEST_CONTEXT;
+  if (value === undefined) delete process.env.NODE_TEST_CONTEXT;
+  else process.env.NODE_TEST_CONTEXT = value;
+  try {
+    return fn();
+  } finally {
+    if (had) process.env.NODE_TEST_CONTEXT = prev;
+    else delete process.env.NODE_TEST_CONTEXT;
+  }
+}
+const SCRIPT_PATH = fileURLToPath(new URL('../scripts/smoke-worker.mjs', import.meta.url));
+
+test('isMain is false under a node --test child, even when argv[1] is the script', () => {
+  withTestContext('child-v8', () => {
+    assert.equal(isMain(SCRIPT_PATH), false);
+  });
 });
 
 test('isMain is true only when argv[1] is the script itself', () => {
-  const scriptPath = new URL('../scripts/smoke-worker.mjs', import.meta.url).pathname;
-  assert.equal(isMain(scriptPath), true);
-  assert.equal(isMain(new URL(import.meta.url).pathname), false);
-  assert.equal(isMain(undefined), false);
+  withTestContext(undefined, () => {
+    assert.equal(isMain(SCRIPT_PATH), true);
+    assert.equal(isMain(fileURLToPath(import.meta.url)), false);
+    assert.equal(isMain(undefined), false);
+  });
 });
 
 // Run through a symlink, import.meta.url is the real path while argv[1] is
@@ -53,9 +75,11 @@ test('isMain is true only when argv[1] is the script itself', () => {
 test('isMain is true when argv[1] is a symlink to the script', () => {
   const dir = mkdtempSync(join(tmpdir(), 'smoke-link-'));
   const link = join(dir, 'smoke-worker.mjs');
-  symlinkSync(new URL('../scripts/smoke-worker.mjs', import.meta.url).pathname, link);
+  symlinkSync(SCRIPT_PATH, link);
   try {
-    assert.equal(isMain(link), true);
+    withTestContext(undefined, () => {
+      assert.equal(isMain(link), true);
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

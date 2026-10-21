@@ -11,7 +11,10 @@
 // (`*.test.*`, `*-test.*`, `*_test.*`, `test-*.*`, `test.*`, anything under a
 // `test/` directory). This file is outside all of them today. Renaming it to
 // `test-*.mjs` (or any of those shapes) or moving it under `test/` would make
-// every `npm test` call production and spend credits. tests/smoke-worker.test.js
+// every `npm test` call production and spend credits. `node --test
+// scripts/smoke-worker.mjs` named directly would too, since argv[1] in that
+// child IS the script — so isMain() is false whenever NODE_TEST_CONTEXT is set
+// (node --test sets it in every child it runs). tests/smoke-worker.test.js
 // imports it with an offline fetch installed and asserts the import makes zero
 // fetches; keep everything that touches the network inside main().
 //
@@ -150,8 +153,9 @@ export function formatTable(results) {
 
 // Compared by real path: through a symlink, import.meta.url is the target
 // while argv[1] is the link, and a plain comparison exited 0 having run
-// nothing.
+// nothing. Never true inside a node --test child (NODE_TEST_CONTEXT set).
 export function isMain(argv1 = process.argv[1]) {
+  if (process.env.NODE_TEST_CONTEXT) return false;
   if (!argv1) return false;
   let real;
   try { real = realpathSync(argv1); } catch { return false; }

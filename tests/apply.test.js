@@ -1,3 +1,7 @@
+// The offline fetch is the FIRST import, so it is installed before anything
+// below — app.js included — is evaluated (tests/offline-fetch.js): every fetch
+// a test has not stubbed rejects the way an offline device does.
+import './offline-fetch.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -16,10 +20,6 @@ import { bytesToBase64url, TOKEN_BYTES, encryptBlob } from '../js/crypto.js';
 import { SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID, SLOW_WRITE_MS } from '../js/linkui.js';
 import { addDays, startOfWeek, weekLabel } from '../js/timegrid.js';
 import { formatDayLabel } from '../js/freshness.js';
-
-// Installed before anything imports app.js: every fetch that a test has not
-// stubbed rejects the way an offline device does.
-globalThis.fetch = () => Promise.reject(new TypeError('network blocked in tests'));
 
 // This file must never reach the production Worker. Tests that need a server
 // stub globalThis.fetch and restore it afterwards, but app.js also schedules
@@ -887,12 +887,28 @@ async function drain() {
 // Poll for a POSITIVE wait instead of a fixed tick count: syncOnce hashes the
 // token through WebCrypto, which completes on the thread pool as a macrotask,
 // so 50 setImmediates was not always enough under load (measured: 1 failure
-// in 7 full runs of the wiring tests). Bounded by wall time; setImmediate and
-// Date are never replaced by installManualTimers, so this works inside one.
-async function drainUntil(pred, ms = 2000) {
+// in 7 full runs of the wiring tests). Bounded by wall time AND by a poll
+// count, so a test that mocks Date (freezing Date.now) still ends; setImmediate
+// and Date are never replaced by installManualTimers, so this works inside one.
+async function drainUntil(pred, ms = 2000, maxPolls = 200000) {
   const end = Date.now() + ms;
-  while (!pred() && Date.now() < end) await new Promise((resolve) => { setImmediate(resolve); });
+  for (let i = 0; !pred() && Date.now() < end && i < maxPolls; i += 1) {
+    await new Promise((resolve) => { setImmediate(resolve); });
+  }
 }
+
+// A mocked Date (t.mock.timers with apis: ['Date']) freezes Date.now(), and
+// the wall-time bound alone then never ends the loop.
+test('drainUntil gives up even when Date is frozen', { timeout: 10000 }, async (t) => {
+  t.mock.timers.enable({ apis: ['Date'] });
+  try {
+    let polls = 0;
+    await drainUntil(() => { polls += 1; return false; });
+    assert.ok(polls > 1, 'fixture check: it polled');
+  } finally {
+    t.mock.timers.reset();
+  }
+});
 
 test('runSync gives up on an account read that never answers, and reports it as offline', async () => {
   installFakeLocalStorage();
@@ -1055,8 +1071,10 @@ test('a sync whose items write runs out of storage leaves no unsaved synced reco
   let quota = null;
   try {
     quota = refuseItemsWrites();
+    saveSyncState({ ...loadSyncState(), lastError: null }); // so the wait below sees THIS sync's failure
     try {
       for (const fn of globalThis.window._listeners.online) fn();
+      await drainUntil(() => loadSyncState().lastError === 'QuotaError');
       await drain();
     } finally {
       quota.restore();
@@ -1112,8 +1130,10 @@ test('a 409 retry whose apply runs out of storage leaves no unsaved synced recor
   let quota = null;
   try {
     quota = refuseItemsWrites({ after: 1 }); // the first apply's write lands; the retry's is refused
+    saveSyncState({ ...loadSyncState(), lastError: null }); // so the wait below sees THIS sync's failure
     try {
       for (const fn of globalThis.window._listeners.online) fn();
+      await drainUntil(() => loadSyncState().lastError === 'QuotaError');
       await drain();
     } finally {
       quota.restore();
@@ -2026,6 +2046,7 @@ test('wiring: addItems schedules a debounced sync that pushes the capture', asyn
     assert.equal(timers.live(2000), 1, 'adding an item arms the 2 s sync timer');
     timers.fire(2000);
     await drainUntil(() => net.requests.length >= 2);
+    await drain(); // so a late extra request still fails the exact match below
   } finally {
     timers.restore();
     net.restore();
@@ -2051,6 +2072,7 @@ test('wiring: a committed delete schedules a debounced sync that pushes the tomb
     assert.equal(timers.live(2000), 1, 'committing a delete arms the 2 s sync timer');
     timers.fire(2000);
     await drainUntil(() => net.requests.length >= 2);
+    await drain(); // so a late extra request still fails the exact match below
   } finally {
     timers.restore();
     net.restore();
@@ -2080,10 +2102,17 @@ test('wiring: a trigger during a sync waits for it, then runs once it settles', 
     assert.deepEqual(net.requests, ['GET'], 'fixture check: the first sync is in flight');
     for (const fn of globalThis.window._listeners.online) fn();
     await drain();
-    assert.deepEqual(net.requests, ['GET'], 'a trigger during a sync must not start a second, concurrent one');
+    // sync.js's queue alone keeps this true, guard or no guard.
+    assert.deepEqual(net.requests, ['GET'], 'no second request goes out while the first sync is in flight');
     assert.equal(timers.live(2000), 0, 'and nothing is re-armed while the first is still running');
     releaseGet();
-    await drainUntil(() => timers.live(2000) === 1);
+    const gets = () => net.requests.filter((m) => m === 'GET').length;
+    await drainUntil(() => timers.live(2000) === 1 || gets() >= 2);
+    await drain();
+    // Only app.js's syncInFlight guard makes this hold: without it the second
+    // trigger's runSync queues its own syncOnce behind the first, which reads
+    // again the moment the first settles instead of waiting for the timer.
+    assert.equal(gets(), 1, 'a trigger during a sync must not start a second sync of its own');
     afterFirst = [...net.requests];
     assert.equal(timers.live(2000), 1, 'the trigger that arrived mid-sync is re-armed once the first settles');
     timers.fire(2000);
