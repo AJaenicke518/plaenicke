@@ -2,172 +2,165 @@
 
 **Status:** PROPOSAL — not approved. Sections marked "Decided" are Alex's decisions; sections marked "Claude's call — confirm" are recommendations awaiting his yes/edit. No implementation until he approves the written spec.
 
-Code facts cite file:line on `main` @ 10607b6.
+Code facts cite file:line on `main` @ 8b4e819 (f2ff20d plus the voice-spike commits, which add only `voice-test.html`). Revised after a devil's-advocate review.
 
 ## 0. Scope: three sub-projects
 
-1. **Home screen + bottom tab bar + capture button + the visual foundation it needs.** Designed in full here.
-2. **3-day view.** Not designed here. This doc only leaves a slot for it (§ 4).
-3. **Visibility controls** (hide a calendar in Settings; per-series "show on calendar" / "show in events list" in the event sheet; per-device). Not designed here. This doc only fixes the seam it plugs into (§ 2.4).
+1. **Home screen, tab bar, capture button, visual foundation.** Designed here.
+2. **3-day view.** § 4 leaves a slot.
+3. **Visibility controls** (hide a calendar; per-series switches; per-device). § 2.4 fixes its seam and that seam's limit.
 
 ## 1. Intent and success criteria
 
-**Decided (what Alex said):** "calm, uncluttered; refine through use (ship small, iterate)"; in a hurry, open the app, tap the mic, say it (his words as recorded on `capture-placement.html`); classes swamp the events list, so repeating events appear only on their own day.
+**Decided (what Alex said):** "calm, uncluttered; refine through use (ship small, iterate)"; in a hurry, open the app, tap the mic, say it (as recorded on `capture-placement.html`); and, on his classes: "i see every single one of my classes for the next 3 months and it overwhelms my list of events" (punchlist, 2026-10-19). Hence: repeating events appear only on their own day.
 
-**Assumed, not said (Claude's call — confirm):** the home screen answers two questions, "what must I do?" and "what's on today?", in that order. That is why to-dos come before events.
-
-**Success criteria (Claude's call — confirm):** on a typical day (2 classes, 1–2 to-dos) Today fits an iPhone screen without scrolling; one tap starts listening and one more adds, with no wait; a weekly class never shows under Next 7 days; no item appears twice; every tap shows feedback on touch-down.
+**Success criteria (Claude's call — confirm):** on a typical day (2 classes, 1–2 to-dos) Today fits an iPhone screen without scrolling; one tap starts listening and one more adds, with no wait; a weekly class never shows under Next 7 days (given § 2.4's precondition); no item appears twice; every tap shows feedback on touch-down.
 
 ## 2. Home screen (Today tab)
 
 ### 2.1 Layout — Decided
-Layout A, stacked sections in this order: **Overdue → To do today → Today's events → Next 7 days**. Settings is a gear on Today.
+Layout A, stacked: **Overdue → To do today → Today's events → Next 7 days**. Settings is a gear on Today.
 
 ### 2.2 Header — Claude's call — confirm
-- "Today", with the date under it, and the gear (the existing `#settings-btn`, `index.html:30`) on the right.
-- The `plaenicke` h1 is replaced by each tab's own title. The gear appears only on Today.
-- `#sync-indicator` and `#updated-stamp` stay in the app shell on every tab. They are unchanged, including the load-time paint that CLAUDE.md calls load-bearing.
+"Today" with the date under it, and the gear (`#settings-btn`, `index.html:31`) on the right, on Today only. The `plaenicke` h1 is replaced by each tab's title. `#sync-indicator` and `#updated-stamp` stay in the shell, unchanged (including the load-bearing load-time paint).
 
 ### 2.3 What goes in each section — Claude's call — confirm (the order is Decided)
-All of the sections are built by one pure function, `buildToday(ownItems, instances, todayISO, nowMinutes)`, in a new `js/today.js`.
+One pure function in a new `js/today.js` builds every section, called as `buildToday(liveItems(), instancesForRange(feeds, feedCache, today, today+7, deviceTz), todayISO, nowMinutes)`. Not from `visibleItems` (`app.js:130-134`, every own item for every date), and no `todoItems()` on top (already in `liveItems()`).
 
 | Section | Own items | Feed instances | Order | Cap |
 |---|---|---|---|---|
-| Overdue | `isTodo(it) && it.date < today` (`isTodo` already excludes done, `items.js:67`). Shows the age: "2d" in `--danger` | none (feeds have no `type` or `done`, `feeds.js:487-498`) | oldest first | 5, then "+N more" → To-do tab |
-| To do today | type ∈ TODO_TYPES (`items.js:62`) and `date === today`. Done ones stay, struck through and greyed, so a tick can be undone | none | `sortItemsByDate`; done last | 8, then "+N more" → To-do tab |
-| Today's events | type `event` or `general` and `date === today` | every instance dated today, repeating or not | `sortItemsByDate` (untimed first) | none |
-| Next 7 days | not done, scheduled (`isScheduled`, `items.js:58`), date in (today, today+7] | only **one-off** instances (§ 2.4), date in (today, today+7] | grouped by day ("Thu", "Fri"); empty days hidden | 3 per day, then "+N more" → that day in Day view |
+| Overdue | `isTodo(it) && it.type !== 'start' && it.date < today` (`isTodo` excludes done, `items.js:67`); age "2d" in `--danger` (question 9) | none (no `type`/`done`, `feeds.js:487-498`) | oldest first | 5, "+N more" → To-do |
+| To do today | type in TODO_TYPES (`items.js:62`), date today; done ones stay struck through so a tick can be undone | none | `sortItemsByDate`; done last | 8, "+N more" → To-do |
+| Today's events | type `event`/`general`, date today | every instance dated today | `sortItemsByDate` (untimed first) | none |
+| Next 7 days | not done, `isScheduled` (`items.js:58`), date in (today, today+7] | **one-off** instances only (§ 2.4) | by day ("Thu"); empty days hidden | 3 per day, "+N more" → that Day |
 
-- Ideas never appear (`isScheduled`). Own items are single-day.
-- **Relative time** only on the next timed event today: "in 42 min" (<60 min), "in 2 h 10 min" (≤12 h), "now" between its start and end. **Past** timed events (end, or start if no end, before now) are greyed. While Today and the page are visible, Today alone re-renders every 60 s; the interval is cleared on hide.
-- Row tap → existing item sheet; checkbox → existing `setDone` (`app.js:352`).
+- Ideas never appear. Own items are single-day.
+- **Relative time** only on the next timed event today: "in 42 min" (<60 min), "in 2 h 10 min" (≤12 h), "now" during it. Past timed events are greyed at render time.
+- **The 60 s tick updates only the relative-time text node** and never rebuilds the list. It runs while Today and the page are visible. Greying and "which event is next" refresh on the next ordinary render (resume, add, sync).
+- Row tap → item sheet; checkbox → `setDone` (`app.js:352`).
 
-**Empty and light days.** A section with no rows is not drawn, including its header. If Overdue, To do today and Today's events are all empty, the screen shows one line: "Nothing due today. Next: Stats quiz · Thu." "Next" is the earliest of two things: the earliest own not-done scheduled item after today, at any distance, and the earliest one-off feed instance within 30 days. If neither exists, it shows "Nothing coming up."
+**Empty days.** A section with no rows is not drawn. If the first three are all empty, one line: "Nothing due today. Next: Stats quiz · Thu." — the earlier of the next own not-done scheduled item (any distance) and the next one-off feed instance within 30 days (a 30-day `instancesForRange` call made only then). Else "Nothing coming up."
+
+**No duplicates, by construction.** `sectionOf(item, today)` gives each own item one section or none. A multi-day all-day event emits one instance per day (`ics.js:1131-1134`); Next 7 days de-duplicates one-offs by `${feedId}:${uid}` (first day only; dropped if shown today). A test asserts every `id` appears at most once.
 
 ### 2.4 "Repeating", concretely — Claude's call — confirm (the rule itself is Decided)
-**Facts:** a ParsedEvent keeps `rrule` (string or `null`) and `recurrenceId` (`ics.js:1009-1012`); emitted instances carry only `{uid, title, date, time, endTime}` (`ics.js:1127`) plus `id, createdAt, feedId, feedColor, external` (`feeds.js:487-498`). Overrides share the master's UID (`ics.js:1293-1296`). **No instance says whether it repeats.**
+**Facts.** A ParsedEvent keeps `rrule` and `recurrenceId` (`ics.js:1009-1012`); instances carry only `{uid, title, date, time, endTime}` (`ics.js:1128`) plus feed fields, so none says whether it repeats. Overrides share the master's UID (`ics.js:1293-1296`).
 
-**Definition.** A series is identified by `(feedId, uid)`. The series repeats if **any** ParsedEvent in that feed's cache with that `uid` has `rrule !== null` or `recurrenceId !== null`.
+**Definition.** A series is `(feedId, uid)`. It repeats if an event with that `uid` in that feed's cache has an `rrule` with `FREQ=DAILY` or `FREQ=WEEKLY` (question 7). Its overrides belong to it. An override whose master is missing from the feed (expanded alone, `ics.js:1293-1296`) has no `FREQ` and counts as a one-off.
 
-**New field:** one boolean, `recurring`, set in `instancesForRange` from a per-feed `seriesUids` set built from `entry.events`. `ics.js` is unchanged (avoids churn in `tests/ics.test.js`'s 142 deep-equality asserts). Instances are never stored (`feeds.js:249`) and never pass through `makeItem`: no migration, no whitelist change.
+**New field:** a boolean `recurring`, set in `instancesForRange` (`feeds.js:464`) from a per-feed set of repeating UIDs. `ics.js` is unchanged (spares `tests/ics.test.js`'s 142 deep-equality asserts). The cache keeps parsed events (`parseICS`, `feeds.js:249`); instances are built on demand, never stored, never pass through `makeItem`: no migration.
 
-**Known limit (unverified against Alex's real class feed):** a feed that publishes each class meeting as a separate VEVENT, each with its own UID, looks like one-offs and will show in Next 7 days. Sub-project 3's per-series switch is the remedy. Check his feed before building.
+**The rule cannot see a Canvas-shaped feed.** Canvas expands each series server-side into separate VEVENTs, each with its own UID, and never emits RRULE (`docs/superpowers/reviews/2026-07-28-v4-provider-format-notes.md`: "No RRULE, ever"). Every meeting then looks like a one-off and fills Next 7 days — the exact complaint.
 
-**Seam for sub-project 3:** Today's events + Next 7 days are "the events list"; sub-project 3 adds one predicate on `${feedId}:${uid}` in `buildToday`'s instance filter.
+**Alex's class feed is likely Google-shaped — likely, unverified.** "LMU Classes" is a Google calendar where he created six recurring courses (punchlist, 2026-08-28); Google's ICS normally carries a recurring event as one VEVENT with an RRULE. Nobody has read his feed.
 
-### 2.5 The "today" data rule and no-duplicates — Claude's call — confirm
-- **Do not build Today from `visibleItems(today, today)` and stop there.** It returns every own item for every date (`app.js:130-134`; code audit § 2). Today calls `visibleItems(today, today+7)` once; `buildToday` separates instances (`external: true`) from own items and date-filters own items itself.
-- **Never add `todoItems()` on top.** `visibleItems` already contains the to-dos (research § 3 trap).
-- **No duplicates, by construction:**
-  - A classifier `sectionOf(item, today)` returns exactly one section, or none, for each own item.
-  - Each instance goes to Today's events (when its date is today) or to Next 7 days, never both.
-  - A multi-day all-day event emits one instance per day (`ics.js:1131-1134`). Inside Next 7 days, one-off instances are de-duplicated by `${feedId}:${uid}`, so each shows on its first day only, and one already shown today is dropped.
-  - A test asserts that every `id` appears at most once in `buildToday`'s output.
+**Precondition for stage 3a: classify his real feed.** Stage 1 adds a read-only line to each Settings feed row — "142 events: 6 repeat (RRULE), 136 single" — from a pure, tested `feedShape(entry.events)` over the cache (no network, no URL). Alex reads it for LMU Classes and reports. 3a starts after that; if the feed is Canvas-shaped, 3a waits for question 8.
+
+**Seam for sub-project 3, and its limit.** Today's events + Next 7 days are "the events list"; sub-project 3 adds one predicate to `buildToday`'s instance filter. A switch keyed on `${feedId}:${uid}` hides a Google or iCloud series whole, but **cannot hide a Canvas-shaped class**: each meeting has its own UID, so it hides one meeting. That spec must pick another key for such feeds, or rely on whole-calendar hide.
 
 ## 3. Capture button — the gesture is Decided; the details are Claude's call — confirm
 
 **Decided:** big mic button bottom-right. Tap = start listening, a text box grows out of the button, live words appear; tap again = stop and add. Tap the text box = type instead (listening stops). No double-tap.
 
+**The top add box stays (reversed from the first draft; question 1).** The round button is voice-first. The top box (`#entry-text`, date/time row, `#add-btn`, `#preview`) stays as it is: typing there never starts the mic, and its date row stays the offline path smart add's failure message points to (`app.js:267`). Its small `#mic-btn` and `dictate()` retire in stage 4, leaving one mic.
+
+**Two message lines.** `#message` stays in the shell's top box. It carries messages unrelated to capture: Ideas ("Kept."), a failed tick, a failed delete commit, other-device notices, Undo refused, "can't be edited here" (`app.js:322, 465-639`). The capture box gets its **own** `#capture-message` (`role="status"`) and `#capture-preview`. `handleAdd` (`app.js:249-290`) keeps its logic but takes a target `{field, dateInputs | null, say, previewEl}`; each box passes its own. The capture box has no date row, so its failure text reads "Smart add is unavailable — use the box at the top with a date to add it."
+
+**The field is a new textarea that grows.**
+
 **Interaction:**
-1. **Tap the mic.** The box opens; a new `voice.js` `listen()` starts recognition with `continuous = true`, `interimResults = true`. The read-only field shows all finals plus the current interim, rebuilt from `e.results` on each `onresult`. The button shows a stop square (no pulsing).
-2. **Tap the button while listening.** Take the text currently shown (finals + interim), set `committed`, detach `onresult`/`onend`/`onerror`, call `stop()`, then Add (step 5). **Never wait for a final event** — the spike found none arrives (`textAfterStop=null`) and `onend` may not fire. Empty text: the box stays open with "Didn't catch anything — type it, or tap the mic."
-3. **Tap the text box while listening.** Stop as in step 2 without adding; clear `readOnly` and focus the field inside the same tap so iOS raises the keyboard. The text is kept.
-4. **Recognition ends on its own.** Text kept, box switches to typing mode: "Stopped listening — tap Add." **Nothing is added without a tap.**
-5. **Add** (box's Add button, or step 2) is the existing `handleAdd` (`app.js:249-290`), logic unchanged: chosen date → manual add; else smart add → `decideFlow` → direct `addItems` or `renderPreview`. All paths end in `addItems` (`app.js:207`), so `normalizeIdea` + `makeItem` still apply. Success closes the box; a preview renders inside it and scrolls internally.
-6. **×** closes and clears. No backdrop, no tap-outside-to-close.
+1. **Tap the round button (box closed).** The box opens. `voice.js`'s new `listen()` creates a **new `SpeechRecognition` per listen** (`continuous`, `interimResults`). At start the field's text is snapshotted as a **prefix**; each `onresult` shows prefix + all finals + current interim, rebuilt from `e.results`. The button shows a stop square (no pulsing).
+2. **Tap it while listening.** **Stop-and-detach:** take the text shown, set `committed`, detach `onresult`/`onend`/`onerror`, call `stop()`, then `abort()`. Then Add (step 6). **Never wait for a final event** — the spike found none arrives (`textAfterStop=null`) and `onend` may not fire. Empty text: "Didn't catch anything — type it, or tap the mic."
+3. **Tap the text box while listening.** Stop-and-detach without adding; clear `readOnly` and focus inside the same tap so iOS raises the keyboard. Text kept.
+4. **Stop and keep, no tap needed:** on `visibilitychange` → hidden, on opening an item sheet, on opening Settings. Nothing is added.
+5. **Recognition ends on its own.** Text kept; typing mode; "Stopped listening — tap Add." **Nothing is added without a tap.** In typing mode the round button shows the mic; tapping it listens again and appends (step 1's prefix).
+6. **Add** (the round button while listening, or the box's Add). **Every Add path runs stop-and-detach first**, then sets an `adding` latch. While set, the round button and Add are disabled, the message reads "Thinking…", and **Cancel** replaces Add. The latch clears when `handleAdd` settles (added, failed, or preview shown). Success closes the box; a preview renders in `#capture-preview` and scrolls inside the box.
+7. **Cancel during "Thinking…"** (deferred here from the smart-add timeout work). Clears the latch, keeps the text: "Cancelled — nothing was added." The late reply is discarded by the supersede guard on `punchlist-fixes-3` (0131165). The request is not aborted, so it may still spend credit; aborting it is a Later item.
+8. **A new capture closes any open preview.** A listen or an Add from either box closes an open preview in **both** containers ("Preview closed — nothing was added from it"). A preview's confirm also checks its request is still the newest and refuses otherwise. So while a preview is open the round button stays enabled: a tap closes the preview and listens. A stale preview cannot be confirmed after a newer request.
+9. **×** closes and clears (stop-and-detach first). No backdrop, no tap-outside-to-close.
 
-**Voice unsupported or refused** (each case tells the user; none fails silently):
-- No `SpeechRecognition` (`voice.js:7`): the tap opens the box in typing mode and focuses the field. The message reads "Voice isn't available here — type instead."
-- `service-not-allowed` (Safari tab, per the spike) or `not-allowed`: same behaviour. The message reads "Voice works in the home-screen app — type instead." For the rest of the session, later taps go straight to typing.
-- `no-speech`, `audio-capture`, `network`: the box stays in typing mode with "Didn't catch that — try again or type it."
+**Voice unsupported or refused** (each case tells the user):
+- No `SpeechRecognition` (`voice.js:7`): known inside the tap, so typing mode opens with the field focused. "Voice isn't available here — type instead."
+- Refusals (`service-not-allowed`, `not-allowed`) arrive **asynchronously**, after the tap. **No auto-focus:** the message carries a "Type instead" button that focuses the field within its own tap. `navigator.standalone` picks the wording — Safari tab: "Voice works in the home-screen app."; home-screen app: "Microphone permission is off — Settings → plaenicke." Later taps that session go straight to typing.
+- `no-speech`, `audio-capture`, `network`: typing mode, "Didn't catch that — try again or type it."
 
-**Keyboard.** The box is placed by the `followVisualViewport` approach (`itemsheet.js:69-90`). That function moves into a shared `js/viewport.js` and both callers use it. A new module means updating `ASSETS` and bumping `CACHE`.
-
-**The old top add box is removed — Claude's call — confirm.** Two add boxes contradict "calm" and his modified option C (the box comes out of the button). Its ids (`#entry-text`, `#entry-date`, `#entry-time`, `#entry-end`, `#add-btn`, `#message`, `#preview`) **move into the capture box unchanged**, so `els` binding (`app.js:33-41`) and `apply.test.js`'s mount-every-id hold. The date/time row sits behind a small "Date" toggle: it must stay, because it is the offline path smart add's failure message points to (`app.js:266`; wording updated). `#mic-btn` and `dictate()` are retired. **Cost:** typing without voice is two taps (question 1).
-
-The capture button shows on every tab. It is hidden while Settings or the item sheet is open. The Ideas tab keeps its own offline box (`index.html:113-117`).
+**Keyboard and placement.** `followVisualViewport` (`itemsheet.js:69-90`) moves into a shared `js/viewport.js` that places the box. The button shows on every tab except while Settings or the item sheet is open. Ideas keeps its own box (`index.html:113-117`).
 
 ## 4. Tab bar and navigation
 
 **Decided:** tabs Today | Calendar | To-do | Ideas. Calendar has a Day / 3-day / Week / Month switcher. Tapping a day opens it.
 
 **Claude's call — confirm:**
-- The List view is retired. Today plus Calendar replace it, and retiring it removes the 367-day expansion (code audit § 3).
-- **Calendar** opens on its last-used sub-view, kept in memory, Day by default.
-  - The existing arrows and `openDay` (`app.js:846`) work as they do now. Tapping a Month cell or Week column opens Day.
-  - **The 3-day segment is not shown until sub-project 2 ships** (no dead buttons). The switcher is built as a 4-slot segmented control, so adding it changes no layout.
-- Tapping Today while already on Today scrolls to the top instantly.
-- - **Geometry:** bar fixed at the bottom, 56 px + `padding-bottom: env(safe-area-inset-bottom)` (`viewport-fit=cover` already set, `index.html:5`). Body bottom padding becomes `56px + 72px + inset`. The toast moves from `bottom: 16px + inset` (`styles.css:606`, over the bar) to `56px + 12px + inset` with `right: 88px` to clear the capture button (56 px round, `right: 16px`, `bottom: 56px + 16px + inset`).
-- **Layers:** content 0 < tab bar 5 < capture button 6 < capture box 8 < settings backdrop 10 < item sheet 15 < toast 20. The existing 10/15/20 are unchanged (`styles.css:351,614,625`).
+- **List retires last, after Alex has used Today** (stage 3d, question 4). That removes the 367-day feed expansion, the biggest render cost (code audit § 3).
+- **Calendar** opens on its last-used sub-view (Day by default); arrows and `openDay` (`app.js:846`) work as now.
+- **3-day stays hidden until sub-project 2 ships;** the switcher has 4 slots, so adding it changes no layout.
+- **`focusOpener` (`app.js:599-606`)** learns Today's list in 3b and drops `els.listView` in 3d.
+- **Geometry:** bar fixed at the bottom, 56 px + `env(safe-area-inset-bottom)`; body bottom padding `56px + 72px + inset`. The toast moves from `bottom: 16px + inset` (`styles.css:606`) to `56px + 12px + inset`, `right: 88px`, clearing the capture button (56 px, `right: 16px`, `bottom: 56px + 16px + inset`). The narrower toast must still fit its text and Undo.
+- **Layers:** content 0 < tab bar 5 < capture button 6 < capture box 8 < settings backdrop 10 < item sheet 15 < toast 20 (existing 10/15/20 unchanged, `styles.css:351,614,625`).
 
 ## 5. Visual foundation — Claude's call — confirm
 
-**Kept:** the cream, paper and leather tokens and the dark theme (`styles.css:2-72`). The `--feed-palette-N` names are not renamed, because stored colours reference them (`palette.js:13-16`). Every new token is defined in both themes and checked in both on the device.
+**Kept:** the cream/paper/leather tokens, the dark theme (`styles.css:2-72`) and `--feed-palette-N` names (`palette.js:13-16`). New tokens are defined in both themes.
 
-**Tokens** (from research § 3 Phase 3):
-- **Type:** 4 sizes (today 11): 13 px labels/times (labels uppercase, +0.06em, `--muted`), 16 px rows and **every input**, 20 px tab titles, 28 px the Today heading. Georgia for titles; `system-ui` with tabular numerals for times, labels, buttons.
-- **Spacing:** 4 / 8 / 12 / 16 / 24 / 32.
-- **Radii:** 8 (controls), 14 (capture box, sheets), 50% (capture button).
-- **One accent,** `--accent` (leather). It is used only for today/now, the active tab, the capture button and the next event's relative time. `--danger` is used only for the overdue age.
+**Everywhere (stage 2):**
+- **Spacing** 4 / 8 / 12 / 16 / 24 / 32. **Radii** 8 (controls), 14 (capture box, sheets), 50% (capture button).
+- **One accent,** `--accent`: today/now, the active tab, the capture button, the next event's relative time. `--danger` only for the overdue age.
+- **16 px on every input.**
+- **Press state:** one delegated `pointerdown` listener adds `.pressed` to the nearest `button, [data-press]`; `pointerup`, `pointercancel`, `pointerleave` and a `pointermove` beyond 10 px (a scroll) remove it. If it still flashes as a scroll starts, add it after a short delay instead — device-check which. Rows get `--chip-bg`, buttons opacity 0.7, the capture button `scale(.94)`; `touch-action: manipulation` on `html`. A class, not `:active`, which can stick during an iOS scroll (WebKit 255277, 221366).
 
-**Rows, not cards.** Today's rows are full-width with a 1 px `--line` hairline between them and a minimum height of 44 px. Shadows appear only on floating layers (the capture box, sheets, the toast).
+**New screens only** (Today, tab bar, capture box): type scale 13 px labels/times (uppercase, +0.06em, `--muted`), 16 px rows, 20 px tab titles, 28 px the Today heading; Georgia for titles, `system-ui` with tabular numerals elsewhere. **Month and Week keep their compact sizes.** Rows, not cards: full width, 1 px `--line` hairline, at least 44 px. Shadows only on the capture box, sheets and toast.
 
-**Press state on touch-down:** one delegated `pointerdown` listener adds `.pressed` to the nearest `button, [data-press]`; `pointerup`/`pointercancel`/`pointerleave` remove it. Rows get `--chip-bg`, buttons opacity 0.7, the capture button `scale(.94)`. `touch-action: manipulation` on `html`; `-webkit-tap-highlight-color: transparent`. A class, not `:active`: iOS `:active` needs touch listeners and can stick during a scroll (WebKit 255277, 221366).
+**Motion:** 200 ms ease-out (capture box 250 ms), `transform`/`opacity` only. Nothing else animates. Under `prefers-reduced-motion` the box only fades.
 
-**Motion:** 200 ms ease-out default, 250 ms for the capture box; only `transform`/`opacity`. **Nothing animates** on ticks, tab switches, adds, calendar arrows or re-renders. Under `prefers-reduced-motion: reduce` movement is instant and the box only fades.
+**Box growing from the button.** An **outer** wrapper is positioned by `viewport.js`; an **inner** panel animates (scale from 0.2 plus opacity, `transform-origin` at the button's corner), so positioning and animation never share a `transform`. Closing reverses the path, **except with the keyboard up**: the button is covered, so the box fades out instead. Not View Transitions: their async update may move `focus()` outside the tap, so iOS might not raise the keyboard — **speculative**.
 
-**Box growing from the button.**
-A CSS transform: `transform-origin` at the button's corner, scale from 0.2 plus opacity, same path back on close. **This departs from View Transitions on purpose:** `startViewTransition` runs its update asynchronously, and a `focus()` outside the tap may stop iOS raising the keyboard (step 3 and the unsupported case both focus) — **speculative**, untested. A transform explains the same motion without that risk. View Transitions stay available later, feature-detected, for the item sheet.
+**No haptics:** Safari has no Vibration API; feedback that only sometimes fires is worse than none.
 
-**No haptics.** Safari has no Vibration API; the iOS 18 `<input switch>` trick is undocumented and its status on newer iOS is unclear (smooth-feel research). Feedback that only sometimes fires is worse than none.
+## 6. Errors, and what must not change — Claude's call — confirm
 
-## 6. Performance: render only the visible view — Claude's call — confirm
+- **Feed URLs are never rendered or logged.** Today rows, the sheet and the stage-1 readout show the calendar name only (`app.js:536-554`).
+- **Sync is untouched** (`sync.js`, `merge.js`, `schemaVersion`, ownership, visibility gate).
+- **Calendar visibility writes** re-read `loadFeeds()` just before saving (as `settings.js:219-225`), never app.js's snapshot, which can tombstone a feed and lose its URL.
+- **No new item fields;** any that appears goes in `makeItem`'s 13-key whitelist (`items.js:28-45`).
+- **Service worker:** new modules into `ASSETS`, `CACHE` bumped, `serviceworker.test.js` re-pinned (incl. stale `CACHE_ON_MAIN`).
+- **Smart add can hang on "Thinking…" on `main`** (`smartadd.js:17`). A 60 s timeout is landing on `punchlist-fixes-3` (393f98e, 0131165, 70a7e81), unreleased. Stage 4 depends on it.
 
-**Now:** `render()` (`app.js:816-819`) rebuilds all six views, including List's 367-day feed expansion. It is called from 16 sites, including every tab switch, resume, sync settle and storage event. Whether this is slow on the phone is **not measured**.
-
-**Change:** `render()` still runs `refreshForToday()` first, then renders only the active view (Today, the active Calendar sub-view, To-do or Ideas). `showView` already renders after switching (`app.js:837`), so a view is fresh when it appears. Today expands feeds over 8 days (30 only for the empty-day "Next"). No memo cache until a measurement asks for one.
-
-**Risk:** anything that reads a **hidden** view's DOM after a change sees stale content. Some `tests/apply.test.js` assertions likely do (**unverified count**); they switch to the view first — a test change, not a behaviour change. Day's auto-scroll (`dayview.js:116`) cannot act while hidden today either; verify on device.
-
-This ships as its own stage so a regression is attributable.
-
-## 7. Errors, and what must not change — Claude's call — confirm
-
-- **Feed URLs are never rendered or logged.** Today rows and the sheet get the calendar name only (`app.js:536-554`).
-- **Sync is untouched:** `sync.js`, `merge.js`, `schemaVersion`, the ownership rules, and the visibility gate.
-- **Calendar visibility writes (sub-project 3, or any chip):** they go through a `feeds.js` writer that re-reads `loadFeeds()` immediately before saving, as `settings.js:219-225` does. They never save app.js's snapshot (research § 3 trap: a stale snapshot can tombstone a feed and lose its URL for good).
-- **No new item fields.** If one appears, it goes in `makeItem`'s 13-key whitelist (`items.js:28-45`).
-- **Service worker:** the new modules (`today.js`, `viewport.js`, `tabs.js` if split out) go into `ASSETS`. `CACHE` is bumped. `serviceworker.test.js` gets a re-pin, including the stale `CACHE_ON_MAIN` (code audit § 6).
-- **Smart add can hang on "Thinking…".** `smartadd.js` has no timeout (`smartadd.js:17`). Branch `punchlist-fixes-3` adds one. Stage 4 depends on it landing first.
-- **The type list is not touched.**
-
-## 8. Testing — Claude's call — confirm
+## 7. Testing — Claude's call — confirm
 
 TDD per the existing harness: `npm test`; never `node --test tests/`.
 
-- `tests/today.test.js` (pure): overdue boundaries (yesterday / today / done), done-today kept, ideas excluded, recurring hidden from Next 7 days but shown today, override counts as recurring, multi-day one-off shown once, caps, empty-day "Next", and **every id at most once** — mutation-checked.
-- `tests/feeds.test.js`: `recurring` from RRULE, from RECURRENCE-ID only, absent; update the shape asserts at `feeds.test.js:477-541`.
-- `tests/voice.test.js` (fake `SpeechRecognition`): stop commits shown text with no final event; a late `onresult` is ignored; an unprompted `onend` adds nothing; `service-not-allowed` and unsupported open typing mode with the message.
-- `tests/apply.test.js` (fake DOM, mount new ids): only the active view renders; tab switching; capture → `handleAdd` paths; moved ids not duplicated.
-- `tests/styles.test.js`: 16 px inputs everywhere, toast above the bar, z-index order, reduced-motion rule, `touch-action`.
+- `tests/today.test.js` (pure): overdue boundaries (incl. done, `start`); done-today kept; ideas excluded; weekly series hidden from Next 7 days, shown today; its overrides count; yearly/monthly series and master-less overrides act as one-offs; multi-day one-off shown once; caps; empty-day "Next"; **every id at most once** — mutation-checked.
+- `tests/feeds.test.js`: `recurring` true for `DAILY`/`WEEKLY`, false for `YEARLY`/`MONTHLY`/no RRULE; `feedShape` counts; update shape asserts at `feeds.test.js:477-541`.
+- `tests/voice.test.js` (fake `SpeechRecognition`): new instance per listen; stop commits shown text with no final event; detach → `stop()` → `abort()`; late `onresult` ignored; unprompted `onend` adds nothing; prefix + finals + interim; hidden page stops and keeps; refusals show the right message and never call `focus()`.
+- `tests/apply.test.js` (fake DOM): tabs; the `adding` latch; Cancel discards a late reply; a stale preview cannot be confirmed; capture messages go to `#capture-message`, others to `#message`; the 60 s tick changes only the time text.
+- `tests/styles.test.js`: 16 px inputs, toast position, z-index order, reduced motion, `touch-action`.
 
-**On-device checklist for Alex** (iPhone home-screen app): a typical day fits without scrolling; mic → live words → stop adds at once; tap the box while listening → keyboard, words kept; box above the keyboard with Add reachable; a Safari tab shows the typing message; toast clears bar and button; bar clears the home indicator; press feedback instant and not stuck after scrolling; dark mode; classes absent from Next 7 days (checks § 2.4's assumption).
+**On-device checklist** (iPhone home-screen app): typical day fits; mic → live words → stop adds at once; **mic → stop → mic again**; **background while listening** (text kept, nothing added); **open a row while listening**; tap the box while listening → keyboard, words kept; box above the keyboard, Add reachable; × with the keyboard up fades; Safari tab shows the home-screen message; mic permission off shows the Settings message; toast clears bar and button and fits Undo; bar clears the home indicator; press feedback instant, no flash on scroll start, never stuck; dark mode; classes absent from Next 7 days.
 
-## 9. Build stages — Claude's call — confirm
+## 8. Build stages — Claude's call — confirm
 
 Each stage ships on its own. Merging to `main` is the deploy.
 
-1. **Render only the visible view.** No visual change; perf groundwork; isolated risk.
-2. **Visual foundation:** tokens, press state, 16 px inputs, motion rules. Applied to the existing screens.
-3. **Today tab + tab bar + Calendar switcher (Day/Week/Month)**, the `recurring` field, and List retired. Toast and body padding are re-placed. The old top add box stays during this stage.
-4. **Capture button and box.** The top box's ids move in, `listen()`, and `viewport.js`. Needs the smart-add timeout first.
-5. Then sub-project 2 (3-day view), then sub-project 3 (visibility controls), each with its own spec.
+1. **Feed-shape readout in Settings** (§ 2.4). Alex reports LMU Classes' numbers.
+2. **Foundation:** tokens (spacing, colour, radii), press state, 16 px inputs everywhere. Existing type sizes kept.
+3. **Today, in four steps:**
+   - **3a** `recurring` + `buildToday`: pure, tested, no UI. **Precondition:** stage 1's numbers.
+   - **3b** a Today tab beside the existing view buttons; nothing removed.
+   - **3c** tab bar + Calendar switcher (Day/Week/Month); toast and padding re-placed; List still reachable.
+   - **3d** List retired, only after Alex has used Today and answered question 4.
+4. **Capture button and box**, `listen()`, `viewport.js`. Needs the smart-add timeout released.
+5. Then sub-project 2 (3-day view), then sub-project 3 (visibility), each with its own spec.
 
-## 10. Open questions for Alex (taste calls)
+**Later / open items:** measure render cost on the phone (`render()`, `app.js:816-819`, rebuilds every view; never measured) before any "render only the visible view" work. Check whether `fetchWithTimeout` can take a caller's abort signal (§ 3 step 7).
 
-1. **Remove the old add box at the top?** Typing would become "tap the mic button, tap the box". *Recommend yes:* one place to add.
-2. **Ticking a to-do on Today:** stays struck through until tomorrow (so you can untick), or disappears at once? *Recommend: stays struck through* (overdue ones disappear, because they are no longer overdue).
+## 9. Open questions for Alex (taste calls)
+
+1. **Keep the add box at the top, with the round button for voice?** *Recommend yes:* typing never starts the mic, and the date row (the offline path) stays. Cost: two places to add.
+2. **Ticking a to-do on Today:** stays struck through until tomorrow (so you can untick), or disappears at once? *Recommend: stays* (overdue ones leave, since they are no longer overdue).
 3. **Next 7 days:** at most 3 items per day before "+N more"? *Recommend 3.*
-4. **Retire the List view?** Today and Calendar cover it. *Recommend yes.*
-5. **Show "3-day" in the switcher, greyed, before it exists?** *Recommend: hide it until it works.*
-6. **"In 42 min":** only on the next event, and only up to 12 hours ahead? *Recommend yes.*
+4. **Retire the List view?** Cost: List is the only view of all your own items on every date, past ones included, and the only per-row Delete outside the Day grid. *Recommend: decide after a week of Today.*
+5. **Show "3-day" greyed before it exists?** *Recommend: hide it until it works.*
+6. **"In 42 min":** only on the next event, up to 12 hours ahead? *Recommend yes.*
+7. **Do yearly and monthly series (holidays, birthdays, bills) count as "repeating"?** If yes they vanish from Next 7 days. *Recommend: only daily and weekly count;* yearly and monthly show like one-offs.
+8. **If your class feed turns out Canvas-shaped** (no RRULE), may the app guess a series — same title, weekday and time for 3 or more weeks → repeating? This is a **guessing fallback**, can be wrong both ways, and needs your explicit yes. Without it, those classes stay in Next 7 days until sub-project 3.
+9. **Overdue:** should `start` and `milestone` items count, and should very old ones drop off? *Recommend: `start` excluded, `milestone` counts; no age limit, capped at 5 with "+N more".*
