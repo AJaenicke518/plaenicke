@@ -154,8 +154,12 @@ export function formatTable(results) {
 // Compared by real path: through a symlink, import.meta.url is the target
 // while argv[1] is the link, and a plain comparison exited 0 having run
 // nothing. Never true inside a node --test child (NODE_TEST_CONTEXT set).
-export function isMain(argv1 = process.argv[1]) {
+// Never true inside the test runner: node --test children carry
+// NODE_TEST_CONTEXT, and --experimental-test-isolation=none runs files inside
+// the --test process itself, where only its own flags give it away.
+export function isMain(argv1 = process.argv[1], execArgv = process.execArgv) {
   if (process.env.NODE_TEST_CONTEXT) return false;
+  if (execArgv.some((a) => a === '--test' || a.startsWith('--test-') || a.startsWith('--experimental-test'))) return false;
   if (!argv1) return false;
   let real;
   try { real = realpathSync(argv1); } catch { return false; }

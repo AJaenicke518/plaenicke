@@ -62,11 +62,21 @@ test('isMain is false under a node --test child, even when argv[1] is the script
   });
 });
 
+// --experimental-test-isolation=none runs test files inside the `node --test`
+// process itself: NODE_TEST_CONTEXT is unset there and argv[1] is the file,
+// so only the --test flag on the process gives it away.
+test('isMain is false in a process started with --test, even without NODE_TEST_CONTEXT', () => {
+  withTestContext(undefined, () => {
+    assert.equal(isMain(SCRIPT_PATH, ['--test']), false);
+    assert.equal(isMain(SCRIPT_PATH, ['--test', '--experimental-test-isolation=none']), false);
+  });
+});
+
 test('isMain is true only when argv[1] is the script itself', () => {
   withTestContext(undefined, () => {
-    assert.equal(isMain(SCRIPT_PATH), true);
-    assert.equal(isMain(fileURLToPath(import.meta.url)), false);
-    assert.equal(isMain(undefined), false);
+    assert.equal(isMain(SCRIPT_PATH, []), true);
+    assert.equal(isMain(fileURLToPath(import.meta.url), []), false);
+    assert.equal(isMain(undefined, []), false);
   });
 });
 
@@ -78,7 +88,7 @@ test('isMain is true when argv[1] is a symlink to the script', () => {
   symlinkSync(SCRIPT_PATH, link);
   try {
     withTestContext(undefined, () => {
-      assert.equal(isMain(link), true);
+      assert.equal(isMain(link, []), true);
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
