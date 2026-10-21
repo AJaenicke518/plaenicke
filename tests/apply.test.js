@@ -884,6 +884,15 @@ function panelStatusLine() {
 async function drain() {
   for (let i = 0; i < 50; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
 }
+// Poll for a POSITIVE wait instead of a fixed tick count: syncOnce hashes the
+// token through WebCrypto, which completes on the thread pool as a macrotask,
+// so 50 setImmediates was not always enough under load (measured: 1 failure
+// in 7 full runs of the wiring tests). Bounded by wall time; setImmediate and
+// Date are never replaced by installManualTimers, so this works inside one.
+async function drainUntil(pred, ms = 2000) {
+  const end = Date.now() + ms;
+  while (!pred() && Date.now() < end) await new Promise((resolve) => { setImmediate(resolve); });
+}
 
 test('runSync gives up on an account read that never answers, and reports it as offline', async () => {
   installFakeLocalStorage();
@@ -1978,7 +1987,7 @@ test('wiring: addItems schedules a debounced sync that pushes the capture', asyn
     assert.deepEqual(net.requests, [], 'the push is debounced');
     assert.equal(timers.live(2000), 1, 'adding an item arms the 2 s sync timer');
     timers.fire(2000);
-    await drain();
+    await drainUntil(() => net.requests.length >= 2);
   } finally {
     timers.restore();
     net.restore();
@@ -2003,7 +2012,7 @@ test('wiring: a committed delete schedules a debounced sync that pushes the tomb
     assert.deepEqual(net.requests, [], 'the push is debounced');
     assert.equal(timers.live(2000), 1, 'committing a delete arms the 2 s sync timer');
     timers.fire(2000);
-    await drain();
+    await drainUntil(() => net.requests.length >= 2);
   } finally {
     timers.restore();
     net.restore();
@@ -2029,18 +2038,18 @@ test('wiring: a trigger during a sync waits for it, then runs once it settles', 
   let afterFirst;
   try {
     for (const fn of globalThis.window._listeners.online) fn();
-    await drain();
+    await drainUntil(() => net.requests.length >= 1);
     assert.deepEqual(net.requests, ['GET'], 'fixture check: the first sync is in flight');
     for (const fn of globalThis.window._listeners.online) fn();
     await drain();
     assert.deepEqual(net.requests, ['GET'], 'a trigger during a sync must not start a second, concurrent one');
     assert.equal(timers.live(2000), 0, 'and nothing is re-armed while the first is still running');
     releaseGet();
-    await drain();
+    await drainUntil(() => timers.live(2000) === 1);
     afterFirst = [...net.requests];
     assert.equal(timers.live(2000), 1, 'the trigger that arrived mid-sync is re-armed once the first settles');
     timers.fire(2000);
-    await drain();
+    await drainUntil(() => net.requests.length > afterFirst.length);
   } finally {
     if (releaseGet) releaseGet();
     timers.restore();
