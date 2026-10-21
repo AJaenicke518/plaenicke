@@ -43,3 +43,28 @@ test('a body read with json() disarms the timer once it settles', async (t) => {
     globalThis.fetch = originalFetch;
   }
 });
+
+// Smart add passes its own budget (js/smartadd.js SMART_ADD_TIMEOUT_MS). The
+// third argument is optional: every existing caller passes two and keeps 60 s.
+test('an explicit budget is honoured: aborted at that budget, not before', async (t) => {
+  let signal = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, init) => { signal = init.signal; return new Promise(() => {}); };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const pending = fetchWithTimeout('https://example.com/x', {}, 1000);
+    let rejected = null;
+    pending.catch((err) => { rejected = err; });
+    t.mock.timers.tick(999);
+    await Promise.resolve();
+    assert.equal(signal.aborted, false, 'not aborted before the budget');
+    t.mock.timers.tick(1);
+    await Promise.resolve();
+    assert.equal(signal.aborted, true, 'aborted at the budget');
+    await assert.rejects(pending, /timeout/);
+    assert.ok(rejected);
+  } finally {
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+});

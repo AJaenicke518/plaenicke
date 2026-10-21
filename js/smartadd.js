@@ -1,6 +1,16 @@
 // smartadd.js — the single spot that turns text into items (now via Claude).
 import { WORKER_URL } from './config.js';
 import { toISO } from './dateparse.js';
+import { fetchWithTimeout } from './fetchtimeout.js';
+
+// How long smart add waits for the Worker before giving up (app.js then says
+// "Smart add is unavailable — pick a date below and tap Add to add it
+// manually."). Its own constant, not fetchtimeout.js's FETCH_TIMEOUT_MS: the
+// two budgets guard different things (a calendar download vs. one Claude
+// reply) and should be tuned separately. 60 s is a backstop, not a measured
+// number — there is no latency data yet, and the Worker's max_tokens of 4096
+// allows a long legitimate reply.
+export const SMART_ADD_TIMEOUT_MS = 60000;
 
 // Pure: decide whether to add directly or show a preview.
 export function decideFlow(result) {
@@ -10,19 +20,33 @@ export function decideFlow(result) {
 }
 
 // Browser: call the Worker. Sends the user's LOCAL date so relative dates
-// resolve in their timezone. Throws Error with a code-ish message on failure.
+// resolve in their timezone. Throws Error with a code-ish message on failure:
+//   'unreachable' — the request failed, or no complete answer arrived within
+//                   SMART_ADD_TIMEOUT_MS (headers and body, end to end);
+//   'too_long'    — 413;
+//   'server'      — any other non-ok status, or a 200 whose body is not JSON.
+//
+// THE BODY IS ALWAYS READ, even on an error status: fetchWithTimeout disarms
+// its deadline only when a body read settles, so throwing straight from the
+// status would leave the timer to abort a finished request a minute later.
 export async function parseViaWorker(text) {
   let res;
   try {
-    res = await fetch(WORKER_URL, {
+    res = await fetchWithTimeout(WORKER_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text, today: toISO(new Date()) }),
-    });
+    }, SMART_ADD_TIMEOUT_MS);
   } catch {
     throw new Error('unreachable');
   }
-  if (res.status === 413) throw new Error('too_long');
-  if (!res.ok) throw new Error('server');
-  return res.json();
+  if (!res.ok) {
+    await res.text().catch(() => {});
+    throw new Error(res.status === 413 ? 'too_long' : 'server');
+  }
+  try {
+    return await res.json();
+  } catch (err) {
+    throw new Error(err instanceof SyntaxError ? 'server' : 'unreachable');
+  }
 }
