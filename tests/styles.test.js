@@ -494,3 +494,29 @@ test('no existing rule reads the new type scale yet', () => {
   assert.doesNotMatch(body, /var\(--(text-label|text-row|text-title|text-hero|label-tracking|sans)\)/,
     'stage 3 is the first consumer; Month, Week and Day never are');
 });
+
+// --- home-screen stage 2: press state (spec § 5) ----------------------------
+test('every tap skips the double-tap-zoom wait', () => {
+  assert.equal(declOf('html', 'touch-action'), 'manipulation');
+});
+
+test('pressed buttons dim and pressed rows take the chip background', () => {
+  assert.equal(declOf('button.pressed', 'opacity'), '0.7');
+  assert.equal(declOf('[data-press].pressed', 'background'), 'var(--chip-bg)');
+});
+
+test('the grey iOS tap highlight is off exactly where .pressed replaces it', () => {
+  assert.equal(declOf('button', '-webkit-tap-highlight-color'), 'transparent');
+  assert.equal(declOf('[data-press]', '-webkit-tap-highlight-color'), 'transparent');
+  assert.equal(declOf('html', '-webkit-tap-highlight-color'), null, 'links and checkboxes keep the native highlight');
+});
+
+// Feedback on touch-down means instantly. And stage 2 adds no motion at all,
+// so nothing needs a prefers-reduced-motion override yet: stage 4's capture
+// box is the first animation, and it must add that override and change this.
+test('press state is instant, and the stylesheet declares no motion yet', () => {
+  assert.equal(declOf('button.pressed', 'transition'), null);
+  assert.equal(declOf('[data-press].pressed', 'transition'), null);
+  assert.doesNotMatch(css, /(^|[;{\s])(transition|animation)(-[a-z-]+)?\s*:/);
+  assert.doesNotMatch(css, /@keyframes/);
+});

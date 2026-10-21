@@ -100,6 +100,9 @@
 /* ---------- base ---------- */
 * { box-sizing: border-box; }
 
+/* No double-tap-to-zoom delay on any tap (home-screen spec § 5). */
+html { touch-action: manipulation; }
+
 /* Read by screen readers, not shown (the toast's live region, #toast-live).
    Never display: none — that hides it from screen readers too. */
 .visually-hidden {
@@ -203,6 +206,16 @@ button {
 }
 
 .message { color: var(--muted); min-height: 1.2em; margin: 8px 0 0; }
+
+/* ---------- press state (home-screen spec § 5) ---------- */
+/* js/press.js adds .pressed on pointerdown and removes it on pointerup,
+   pointercancel, pointerleave or a move past 10px (a scroll). A class, not
+   :active, which can stick during an iOS scroll (WebKit 255277, 221366).
+   Instant on purpose: no transition. The grey iOS tap highlight is turned off
+   only where .pressed replaces it; links and checkboxes keep it. */
+button, [data-press] { -webkit-tap-highlight-color: transparent; }
+button.pressed { opacity: 0.7; }
+[data-press].pressed { background: var(--chip-bg); }
 
 /* ---------- view toggle ---------- */
 .view-toggle { display: flex; gap: 6px; margin-bottom: 12px; }

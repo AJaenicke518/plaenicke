@@ -29,6 +29,7 @@ import { merge } from './merge.js';
 import { renderSyncStatus, syncWriteStarted, syncWriteSettled } from './linkui.js';
 import { WORKER_URL } from './config.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
+import { installPress } from './press.js';
 
 const els = {
   text: document.getElementById('entry-text'),
@@ -1239,6 +1240,10 @@ function stampFromFeeds() {
   if (times.length === 0) return; // nothing fetched yet: keep what is shown
   els.updatedStamp.textContent = `Updated ${clockLabel(new Date(Math.min(...times)))}`;
 }
+
+// Touch-down feedback on every button and [data-press] row (home-screen spec
+// § 5, js/press.js). Once, for the page's lifetime: never uninstalled.
+installPress(document);
 
 document.addEventListener('visibilitychange', () => {
   // Going to the background (Critical C1): iOS may kill the app without
