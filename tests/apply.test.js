@@ -4871,3 +4871,100 @@ test('slow sync write: a pending adoption outranks the slow line', async (t) => 
     t.mock.timers.reset();
   }
 });
+
+// --- smart add: only the latest Add applies (fixes-3 Task 1, I3) ------------
+//
+// parseViaWorker now gives up after SMART_ADD_TIMEOUT_MS, so a request the
+// user has moved past can still settle up to a minute later. Before handleAdd
+// tracked which request is latest, that late settle overwrote the newer
+// outcome: a manual add's "Added." became "Smart add is unavailable", and an
+// older smart add's items were added after a newer one's. Manual timers: the
+// smart-add deadline and addItems' 2 s sync timer must not touch app.js's
+// module-scope syncTimer through MockTimers (see installManualTimers).
+function smartAddFetch(respond) {
+  const posts = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    if ((opts.method || 'GET') === 'POST' && !String(url).includes('/data')) {
+      posts.push(JSON.parse(opts.body).text);
+      return respond(posts.length);
+    }
+    return originalFetch(url, opts);
+  };
+  return { posts, restore: () => { globalThis.fetch = originalFetch; } };
+}
+const smartReply = (items) => ({
+  ok: true, status: 200, headers: {}, json: async () => ({ items, needsReview: false }), text: async () => '',
+});
+function typeIntoAddBox(text, date = '') {
+  const doc = globalThis.document;
+  doc.getElementById('entry-text').value = text;
+  doc.getElementById('entry-date').value = date;
+  doc.getElementById('entry-time').value = '';
+  doc.getElementById('entry-end').value = '';
+}
+
+test('smart add: a request that times out after a newer manual add leaves "Added." alone', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const { SMART_ADD_TIMEOUT_MS } = await import('../js/smartadd.js');
+  seed([]);
+  const doc = globalThis.document;
+  const net = smartAddFetch(() => new Promise(() => {})); // the Worker never answers
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('lunch with sam tomorrow');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.deepEqual(net.posts, ['lunch with sam tomorrow'], 'fixture check: the smart add reached the Worker stub');
+    assert.equal(messageText(), 'Thinking…');
+
+    typeIntoAddBox('Manual dinner', '2099-03-04');
+    click(doc.getElementById('add-btn'));
+    assert.equal(messageText(), 'Added.', 'fixture check: the manual add landed');
+
+    assert.equal(timers.live(SMART_ADD_TIMEOUT_MS), 1, 'fixture check: the smart add is still waiting');
+    timers.fire(SMART_ADD_TIMEOUT_MS);
+    await settle();
+    assert.equal(messageText(), 'Added.', 'a superseded request must not overwrite the newer outcome');
+    assert.deepEqual(loadItems().map((it) => it.title), ['Manual dinner']);
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+test('smart add: two requests that settle out of order — only the latest applies', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('first thing on may 1');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    typeIntoAddBox('second thing on may 2');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.equal(held.length, 2, 'fixture check: both requests are in flight');
+
+    held[1](smartReply([{ title: 'Second thing', date: '2099-05-02', type: 'task' }]));
+    await settle();
+    assert.equal(messageText(), 'Added.');
+    assert.deepEqual(loadItems().map((it) => it.title), ['Second thing'], 'fixture check: the latest request applied');
+
+    held[0](smartReply([{ title: 'First thing', date: '2099-05-01', type: 'task' }]));
+    await settle();
+    assert.deepEqual(loadItems().map((it) => it.title), ['Second thing'], 'a superseded result must not be added');
+    assert.equal(messageText(), 'Added.');
+    assert.equal(doc.getElementById('preview').children.length, 0, 'and must not open a preview');
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});

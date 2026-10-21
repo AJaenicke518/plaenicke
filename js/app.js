@@ -246,7 +246,15 @@ function handleManualAdd() {
   setMessage('Added.');
 }
 
+// Which Add is the latest. parseViaWorker can take up to SMART_ADD_TIMEOUT_MS
+// to settle, and by then the user may have added manually or started another
+// smart add; a result or error from a superseded request is dropped, or it
+// would overwrite the newer outcome ("Added." → "unavailable") or add items
+// the user has moved past. Bumped by EVERY Add, manual ones included.
+let addGeneration = 0;
+
 async function handleAdd() {
+  const generation = ++addGeneration;
   if (els.time.value && !els.date.value) {
     setMessage('Add a date to use that time, or clear the time to use smart add.');
     return;
@@ -263,10 +271,12 @@ async function handleAdd() {
   try {
     result = await parseViaWorker(raw);
   } catch (e) {
+    if (generation !== addGeneration) return;
     if (e.message === 'too_long') setMessage('That was a lot at once — try adding fewer items in one go.');
     else setMessage('Smart add is unavailable — pick a date below and tap Add to add it manually.');
     return;
   }
+  if (generation !== addGeneration) return;
 
   const flow = decideFlow(result);
   if (flow === 'empty') { setMessage("I couldn't find anything to add — try rephrasing."); return; }
