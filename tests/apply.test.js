@@ -1213,6 +1213,24 @@ test('runSync still settles when recording a crash itself throws', async () => {
   assert.equal(outcome, 'settled', 'a failure while recording a failure must not escape runSync');
 });
 
+// applySyncedState's three writes run saveItems → applyRemoteFeeds →
+// saveTombstones, and the order is load-bearing (see the comment there):
+// saving tombstones before applyRemoteFeeds lets removeFeed re-stamp a feed
+// tombstone pulled from the other device with THIS device's clock. Nothing
+// pinned the order until a review found every reorder passed the suite.
+test('a pulled feed tombstone keeps its original deletedAt through applySyncedState', async () => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  saveFeeds([{ id: 'order-feed', url: 'https://example.com/order.ics', name: 'Order', color: 'var(--feed-palette-1)', hidden: false, updatedAt: '2026-07-01T00:00:00.000Z' }]);
+  saveTombstones([]);
+  const pulled = { id: 'order-feed', kind: 'feed', deletedAt: '2026-08-05T00:00:00.000Z' };
+  applySyncedState(state({ feeds: [], tombstones: [pulled] }));
+  assert.deepEqual(loadFeeds().map((f) => f.id), [], 'fixture check: the pulled tombstone removed the feed');
+  assert.deepEqual(loadTombstones().filter((x) => x.id === 'order-feed'), [pulled],
+    'the stored tombstone must keep the other device\'s deletedAt, not be re-stamped here');
+  seed([]);
+});
+
 test('runSync does not proceed into its try/finally while adoption is pending', async () => {
   installFakeLocalStorage();
   await import('../js/app.js'); // cached after the first test; online listener already registered
