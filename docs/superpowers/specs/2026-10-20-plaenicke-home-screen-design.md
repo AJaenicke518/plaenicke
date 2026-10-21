@@ -1,6 +1,6 @@
 # plaenicke — home screen design
 
-**Status:** PROPOSAL — all open questions answered by Alex (2026-10-21). Awaiting his review of the written spec; no implementation until he approves it.
+**Status:** APPROVED by Alex, 2026-10-21. Implementation plan for stages 1–2: `docs/superpowers/plans/2026-10-21-plaenicke-home-stage1-2.md`.
 
 Sections marked "Decided" are Alex's decisions; sections marked "Claude's call — confirm" are recommendations awaiting his yes/edit. His 2026-10-21 answers are listed in § 9 and applied throughout.
 
@@ -177,3 +177,5 @@ No open questions remain. Each answer is applied in the section named.
 9. **Everything past its date is overdue, `start` included:** "just say everything is past due i want to feel like i am behind so i cant procrastinate." Deadlines (`due`, `milestone`, `task`) in red, start dates in orange; never ideas, done items, events or feed instances. (§ 2.3, § 5)
 
 **Confirmed by Alex, 2026-10-21** (the five "Claude's call — confirm" items, now Decided): past events are never overdue ("i dont want past events included"); the `--overdue-start` orange as specified (check on the phone in both modes); List as a Calendar-switcher segment; the "Repeats weekly (guessed)" label; relative time only within 12 hours of the next event.
+
+**Open risk for stage 3a (found while planning, 2026-10-21; speculative):** if a Canvas-shaped feed gives a weekly assignment the same title, weekday and time every week, the heuristic would group it as a series, and the repeating rule would then keep that DEADLINE out of Next 7 days — the opposite of "see everything I have to do". Resolve in the stage 3a plan, using the stage 1 readout of Alex's real feeds (e.g. never group events whose title marks a deadline, or treat a guessed series' instances as one-offs in Next 7 days when the feed also carries deadlines).
