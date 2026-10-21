@@ -5151,11 +5151,360 @@ test('smart add: two requests that settle out of order — only the latest appli
     assert.equal(messageText(), 'Added.');
     assert.deepEqual(loadItems().map((it) => it.title), ['Second thing'], 'fixture check: the latest request applied');
 
-    held[0](smartReply([{ title: 'First thing', date: '2099-05-01', type: 'task' }]));
+    // Preview-shaped (two items), so "must not open a preview" below can fail.
+    held[0](smartReply([
+      { title: 'First thing', date: '2099-05-01', type: 'task' },
+      { title: 'First other thing', date: '2099-05-01', type: 'task' },
+    ]));
     await settle();
     assert.deepEqual(loadItems().map((it) => it.title), ['Second thing'], 'a superseded result must not be added');
     assert.equal(messageText(), 'Added.');
     assert.equal(doc.getElementById('preview').children.length, 0, 'and must not open a preview');
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+// --- smart add: a request changes only the message it set (review sweep) ---
+//
+// addGeneration decides whether a request may still ADD; whether it may
+// still change the MESSAGE is separate. A current request whose "Thinking…"
+// another action has since replaced (the Ideas box's "Kept.", say) still adds
+// its items but leaves that newer message alone.
+const smartFail = () => Promise.reject(new TypeError('offline'));
+const previewReply = (items) => ({
+  ok: true, status: 200, headers: {}, json: async () => ({ items, needsReview: true }), text: async () => '',
+});
+
+test('smart add: a superseded error arriving after a newer smart success leaves "Added." alone', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve, reject) => { held.push({ resolve, reject }); }));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('older thing on may 3');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    typeIntoAddBox('newer thing on may 4');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.equal(held.length, 2, 'fixture check: both requests are in flight');
+    held[1].resolve(smartReply([{ title: 'Newer thing', date: '2099-05-04', type: 'task' }]));
+    await settle();
+    assert.equal(messageText(), 'Added.', 'fixture check: the newer request applied');
+    held[0].reject(new TypeError('offline'));
+    await settle();
+    assert.equal(messageText(), 'Added.', 'a superseded error must not overwrite the newer success');
+    assert.deepEqual(loadItems().map((it) => it.title), ['Newer thing']);
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+async function smartAddThenKeepIdea(text) {
+  const doc = globalThis.document;
+  typeIntoAddBox(text);
+  click(doc.getElementById('add-btn'));
+  await settle();
+  assert.equal(messageText(), 'Thinking…', 'fixture check: the smart add is waiting');
+  ideaText().value = 'An idea meanwhile';
+  click(ideaAdd());
+  assert.equal(messageText(), 'Kept.', 'fixture check: the Ideas box replaced the message');
+}
+
+test('smart add: a current success after the Ideas box said "Kept." adds its items and leaves "Kept."', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    await smartAddThenKeepIdea('dentist on may 5');
+    held[0](smartReply([{ title: 'Dentist', date: '2099-05-05', type: 'event' }]));
+    await settle();
+    assert.deepEqual(loadItems().map((it) => it.title).sort(), ['An idea meanwhile', 'Dentist'],
+      'the Ideas box must not cancel the pending smart add\'s items');
+    assert.equal(messageText(), 'Kept.', 'a late result must not overwrite a newer message');
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+test('smart add: a current error after the Ideas box said "Kept." leaves "Kept."', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve, reject) => { held.push(reject); }));
+  const timers = installManualTimers();
+  try {
+    await smartAddThenKeepIdea('dentist on may 6');
+    held[0](new TypeError('offline'));
+    await settle();
+    assert.equal(messageText(), 'Kept.', 'a late error must not overwrite a newer message');
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+test('smart add: a current preview after the Ideas box said "Kept." still opens, and leaves "Kept."', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    await smartAddThenKeepIdea('two things on may 7');
+    held[0](previewReply([
+      { title: 'Thing one', date: '2099-05-07', type: 'task' },
+      { title: 'Thing two', date: '2099-05-07', type: 'task' },
+    ]));
+    await settle();
+    assert.equal(doc.getElementById('preview').hidden, false, 'the current request still offers its preview');
+    assert.equal(messageText(), 'Kept.', 'and leaves the newer message alone');
+  } finally {
+    doc.getElementById('preview').hidden = true;
+    doc.getElementById('preview').innerHTML = '';
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+// The one exception, chosen here: a failed SAVE of the smart add's items is
+// still shown, because nothing else tells the user their capture was lost.
+test('smart add: a current result whose save fails still says so after "Kept."', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  let quota = null;
+  try {
+    await smartAddThenKeepIdea('dentist on may 8');
+    quota = refuseItemsWrites();
+    held[0](smartReply([{ title: 'Dentist', date: '2099-05-08', type: 'event' }]));
+    await settle();
+    assert.ok(quota.refused() > 0, 'fixture check: the add reached the items write');
+    assert.match(messageText(), /quota|storage/i, 'a save failure must not be hidden behind "Kept."');
+  } finally {
+    if (quota) quota.restore();
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+test('smart add: a direct result clears the text box only if it still holds the text sent', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('dentist on may 9');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    doc.getElementById('entry-text').value = 'something typed meanwhile';
+    held[0](smartReply([{ title: 'Dentist', date: '2099-05-09', type: 'event' }]));
+    await settle();
+    assert.deepEqual(loadItems().map((it) => it.title), ['Dentist'], 'fixture check: the result applied');
+    assert.equal(doc.getElementById('entry-text').value, 'something typed meanwhile',
+      'text typed while waiting must not be wiped');
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+test('smart add: a direct result still clears the text box when it holds the text sent', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const net = smartAddFetch(() => Promise.resolve(smartReply([{ title: 'Dentist', date: '2099-05-10', type: 'event' }])));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('  dentist on may 10  ');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.equal(messageText(), 'Added.');
+    assert.equal(doc.getElementById('entry-text').value, '', 'the sent text is cleared');
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+test('smart add: a preview confirm clears the text box only if it still holds the text sent', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const net = smartAddFetch(() => Promise.resolve(previewReply([
+    { title: 'Thing one', date: '2099-05-11', type: 'task' },
+    { title: 'Thing two', date: '2099-05-11', type: 'task' },
+  ])));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('two things on may 11');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    const preview = doc.getElementById('preview');
+    assert.equal(preview.hidden, false, 'fixture check: the preview opened');
+    doc.getElementById('entry-text').value = 'something typed meanwhile';
+    const addAll = preview.querySelector('.preview-actions').children[0];
+    assert.equal(addAll.textContent, 'Add all', 'fixture check: the confirm button');
+    click(addAll);
+    assert.deepEqual(loadItems().map((it) => it.title).sort(), ['Thing one', 'Thing two'], 'fixture check: the confirm added');
+    assert.equal(doc.getElementById('entry-text').value, 'something typed meanwhile',
+      'text typed while reviewing must not be wiped');
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+for (const [label, prepare, refusal] of [
+  ['a time with no date', (doc) => { doc.getElementById('entry-time').value = '09:00'; }, /Add a date to use that time/],
+  ['an empty box', (doc) => { doc.getElementById('entry-text').value = '   '; }, /Type something first/],
+]) {
+  test(`smart add: an Add refused for ${label} does not cancel the pending smart add`, async () => {
+    installFakeLocalStorage();
+    await import('../js/app.js');
+    seed([]);
+    const doc = globalThis.document;
+    const held = [];
+    const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+    const timers = installManualTimers();
+    try {
+      typeIntoAddBox('dentist on may 12');
+      click(doc.getElementById('add-btn'));
+      await settle();
+      typeIntoAddBox('');
+      prepare(doc);
+      click(doc.getElementById('add-btn'));
+      assert.match(messageText(), refusal, 'fixture check: the second Add was refused');
+      doc.getElementById('entry-time').value = '';
+      held[0](smartReply([{ title: 'Dentist', date: '2099-05-12', type: 'event' }]));
+      await settle();
+      assert.deepEqual(loadItems().map((it) => it.title), ['Dentist'], 'a refused Add must not supersede the pending one');
+      assert.equal(held.length, 1, 'fixture check: the refused Add sent nothing');
+    } finally {
+      timers.restore();
+      net.restore();
+    }
+    seed([]);
+  });
+}
+
+test('smart add: a new smart add hides and clears an earlier request\'s open preview', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const held = [];
+  const net = smartAddFetch((n) => (n === 1
+    ? Promise.resolve(previewReply([
+      { title: 'Old one', date: '2099-05-13', type: 'task' },
+      { title: 'Old two', date: '2099-05-13', type: 'task' },
+    ]))
+    : new Promise((resolve) => { held.push(resolve); })));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('two old things on may 13');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    const preview = doc.getElementById('preview');
+    assert.equal(preview.hidden, false, 'fixture check: the first preview opened');
+    assert.ok(preview.children.length > 0, 'fixture check: with content');
+    typeIntoAddBox('something new on may 14');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.equal(preview.hidden, true, 'the stale preview is hidden');
+    assert.equal(preview.children.length, 0, 'and cleared, so it cannot be confirmed');
+  } finally {
+    for (const r of held) r(smartReply([]));
+    await settle();
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+test('smart add: a second Add of the same text while the first is pending sends nothing', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('dentist on may 15');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    typeIntoAddBox('  dentist on may 15 ');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.deepEqual(net.posts, ['dentist on may 15'], 'no second paid request for the same text');
+    held[0](smartReply([{ title: 'Dentist', date: '2099-05-15', type: 'event' }]));
+    await settle();
+    assert.deepEqual(loadItems().map((it) => it.title), ['Dentist'], 'the first request still applies');
+    assert.equal(messageText(), 'Added.');
+    typeIntoAddBox('dentist on may 15');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.equal(net.posts.length, 2, 'once settled, the same text can be sent again');
+    held[1](smartReply([]));
+    await settle();
+  } finally {
+    timers.restore();
+    net.restore();
+  }
+  seed([]);
+});
+
+// With the message guarded by messageToken, this is what still needs the
+// manual add to bump addGeneration: the older smart add's ITEMS.
+test('smart add: a success arriving after a newer manual add adds nothing', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('lunch with sam on may 16');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    typeIntoAddBox('Manual supper', '2099-05-16');
+    click(doc.getElementById('add-btn'));
+    assert.equal(messageText(), 'Added.', 'fixture check: the manual add landed');
+    held[0](smartReply([{ title: 'Lunch with Sam', date: '2099-05-16', type: 'event' }]));
+    await settle();
+    assert.deepEqual(loadItems().map((it) => it.title), ['Manual supper'], 'a superseded smart add must not add its items');
   } finally {
     timers.restore();
     net.restore();

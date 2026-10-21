@@ -24,7 +24,8 @@ export function decideFlow(result) {
 //   'unreachable' — the request failed, or no complete answer arrived within
 //                   SMART_ADD_TIMEOUT_MS (headers and body, end to end);
 //   'too_long'    — 413;
-//   'server'      — any other non-ok status, or a 200 whose body is not JSON.
+//   'server'      — any other non-ok status, or a 200 whose body is not JSON
+//                   or not an object with an `items` array.
 //
 // THE BODY IS ALWAYS READ, even on an error status: fetchWithTimeout disarms
 // its deadline only when a body read settles, so throwing straight from the
@@ -47,9 +48,16 @@ export async function parseViaWorker(text) {
     res.text().catch(() => {});
     throw new Error(res.status === 413 ? 'too_long' : 'server');
   }
+  let body;
   try {
-    return await res.json();
+    body = await res.json();
   } catch (err) {
-    throw new Error(err instanceof SyntaxError ? 'server' : 'unreachable');
+    // By name, not instanceof: WebKit rejects a malformed body with a
+    // DOMException named 'SyntaxError', which is no SyntaxError instance.
+    throw new Error(err && err.name === 'SyntaxError' ? 'server' : 'unreachable');
   }
+  // A 200 that is not { items: [...] } (null, say) would otherwise reach
+  // decideFlow, whose TypeError left "Thinking…" up for good.
+  if (!body || typeof body !== 'object' || !Array.isArray(body.items)) throw new Error('server');
+  return body;
 }

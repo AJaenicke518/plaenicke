@@ -25,7 +25,14 @@
 // globalThis.fetch is honoured.
 export const FETCH_TIMEOUT_MS = 60000;
 
+//
+// A budget that is not a positive finite number throws a TypeError at once:
+// setTimeout reads one as 0–1 ms (or never, for Infinity), so a typo would
+// abort every request instantly or never. Only an omitted budget defaults.
 export function fetchWithTimeout(url, init = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new TypeError(`fetchWithTimeout: timeoutMs must be a positive finite number, got ${String(timeoutMs)}`);
+  }
   const ac = new AbortController();
   let timer;
   const timedOut = new Promise((_, reject) => {

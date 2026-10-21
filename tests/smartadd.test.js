@@ -196,3 +196,53 @@ test('parseViaWorker: a 200 whose body is not JSON → server', async (t) => {
     net.restore();
   }
 });
+
+// WebKit's res.json() rejects a malformed body with a DOMException named
+// 'SyntaxError', which is not an instance of SyntaxError. It is still the
+// server's fault, not the network's.
+test('parseViaWorker: a JSON parse failure raised as a DOMException SyntaxError → server', async (t) => {
+  const net = stubFetch(async () => response(200, { json: async () => { throw new DOMException('x', 'SyntaxError'); } }));
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    await assert.rejects(parseViaWorker('x'), { message: 'server' });
+  } finally {
+    t.mock.timers.reset();
+    net.restore();
+  }
+});
+
+// A 200 whose JSON is not { items: [...] } used to resolve, and decideFlow's
+// `result.items` then threw a TypeError inside handleAdd, leaving "Thinking…"
+// up for good.
+for (const [label, body] of [['null', null], ['an array', []], ['a number', 3], ['no items', { needsReview: false }], ['items not an array', { items: 'x' }]]) {
+  test(`parseViaWorker: a 200 whose JSON is ${label} → server`, async (t) => {
+    const net = stubFetch(async () => response(200, { json: async () => body }));
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      await assert.rejects(parseViaWorker('x'), { message: 'server' });
+    } finally {
+      t.mock.timers.reset();
+      net.restore();
+    }
+  });
+}
+
+// The error path drains its body without awaiting it. A body that stalls must
+// still be aborted at the budget, not left open for good.
+for (const status of [413, 500]) {
+  test(`parseViaWorker: a ${status} whose body stalls is aborted at the budget`, async (t) => {
+    const net = stubFetch(async () => response(status, { text: () => new Promise(() => {}) }));
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      await assert.rejects(parseViaWorker('x'), { message: status === 413 ? 'too_long' : 'server' });
+      await flush();
+      t.mock.timers.tick(SMART_ADD_TIMEOUT_MS - 1);
+      assert.equal(net.calls[0].init.signal.aborted, false, 'not aborted before the budget');
+      t.mock.timers.tick(1);
+      assert.equal(net.calls[0].init.signal.aborted, true, 'the stalled body is aborted at the budget');
+    } finally {
+      t.mock.timers.reset();
+      net.restore();
+    }
+  });
+}
