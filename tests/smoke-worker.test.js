@@ -10,18 +10,22 @@ globalThis.fetch = () => {
   return Promise.reject(new TypeError('network blocked in tests'));
 };
 
+import { mkdtempSync, symlinkSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 const smoke = await import('../scripts/smoke-worker.mjs');
 const fetchesDuringImport = fetchCalls;
 const {
-  PHRASES, EXPECTED_ORIGIN, checkResult, runSmoke, formatTable, isMain,
+  PHRASES, EXPECTED_ORIGIN, checkResult, runSmoke, formatTable, isMain, MAIN_FETCH,
 } = smoke;
 
 import { ITEM_TYPES } from '../worker/src/prompt.js';
 import { ALLOWED_ORIGIN } from '../worker/src/cors.js';
 import { WORKER_URL } from '../js/config.js';
+import { fetchWithTimeout } from '../js/fetchtimeout.js';
 
 const TODAY = '2026-10-20';
 
@@ -42,6 +46,29 @@ test('isMain is true only when argv[1] is the script itself', () => {
   assert.equal(isMain(scriptPath), true);
   assert.equal(isMain(new URL(import.meta.url).pathname), false);
   assert.equal(isMain(undefined), false);
+});
+
+// Run through a symlink, import.meta.url is the real path while argv[1] is
+// the link, so a plain comparison made the script exit 0 having done nothing.
+test('isMain is true when argv[1] is a symlink to the script', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'smoke-link-'));
+  const link = join(dir, 'smoke-worker.mjs');
+  symlinkSync(new URL('../scripts/smoke-worker.mjs', import.meta.url).pathname, link);
+  try {
+    assert.equal(isMain(link), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a real run puts a deadline on every request', () => {
+  assert.equal(MAIN_FETCH, fetchWithTimeout);
+});
+
+test('the milestone phrase also accepts task (the prompt prefers task when either reading fits)', () => {
+  const m = PHRASES.find((p) => p.type === 'milestone');
+  assert.ok(m.accept.includes('task'));
+  assert.ok(!m.accept.includes('event'));
 });
 
 test('the expected origin is the app origin the Worker allows', () => {

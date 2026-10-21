@@ -34,7 +34,9 @@
 //
 // Phrases come from worker/src/prompt.js's own instruction examples, on the
 // unambiguous side. A phrase on a real boundary in that text accepts a set.
+import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { fetchWithTimeout } from '../js/fetchtimeout.js';
 import { WORKER_URL } from '../js/config.js';
 import { toISO } from '../js/dateparse.js';
 
@@ -53,7 +55,9 @@ export const PHRASES = Object.freeze([
   { type: 'start', accept: ['start', 'task'], text: 'start working on the physics paper Monday' },
   // "milestone" for a draft/checkpoint/partial step. Boundary: a dated draft
   // also reads as a deadline.
-  { type: 'milestone', accept: ['milestone', 'due'], text: 'first draft of the physics paper Wednesday' },
+  // The prompt also prefers 'task' whenever a note reads either way, and
+  // writing a draft is something to DO.
+  { type: 'milestone', accept: ['milestone', 'due', 'task'], text: 'first draft of the physics paper Wednesday' },
   // The prompt's own example: "look into housing utilities" ... is a "task".
   { type: 'task', accept: ['task'], text: 'look into housing utilities' },
   // "idea for the app: …". No date or time words, so it is not on the
@@ -144,15 +148,24 @@ export function formatTable(results) {
   return [line(head), ...rows.map(line), '', `${passed}/${results.length} passed`].join('\n');
 }
 
+// Compared by real path: through a symlink, import.meta.url is the target
+// while argv[1] is the link, and a plain comparison exited 0 having run
+// nothing.
 export function isMain(argv1 = process.argv[1]) {
   if (!argv1) return false;
-  return import.meta.url === pathToFileURL(argv1).href;
+  let real;
+  try { real = realpathSync(argv1); } catch { return false; }
+  return import.meta.url === pathToFileURL(real).href;
 }
+
+// A real run's fetch: the shared deadline, so one stalled request cannot hang
+// the script until Ctrl-C.
+export const MAIN_FETCH = fetchWithTimeout;
 
 async function main() {
   const today = toISO(new Date());
   console.log(`smoke:worker -> ${WORKER_URL} (today ${today}; ${PHRASES.length} Claude calls)`);
-  const results = await runSmoke({ fetchImpl: fetch, url: WORKER_URL, today });
+  const results = await runSmoke({ fetchImpl: MAIN_FETCH, url: WORKER_URL, today });
   console.log(formatTable(results));
   process.exitCode = results.every((r) => r.pass) ? 0 : 1;
 }
