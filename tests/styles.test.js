@@ -464,3 +464,33 @@ test('no rule that targets a form control sets a font-size under 16px', () => {
   assert.ok(seen >= 10, `fixture check: the scan found only ${seen} control rules`);
   assert.deepEqual(offenders, []);
 });
+
+// --- home-screen stage 2: the type scale is for NEW screens only (spec § 5) --
+test('the new screens\' type scale is defined', () => {
+  assert.equal(declOf(':root', '--text-label'), '13px');
+  assert.equal(declOf(':root', '--text-row'), '16px');
+  assert.equal(declOf(':root', '--text-title'), '20px');
+  assert.equal(declOf(':root', '--text-hero'), '28px');
+  assert.equal(declOf(':root', '--label-tracking'), '0.06em');
+  assert.equal(declOf(':root', '--sans'), 'system-ui, -apple-system, sans-serif');
+});
+
+// Month, Week and Day keep their compact sizes. Pinned at their values on
+// main (d7b3b30) so a "consistency" pass that moves them onto the new scale
+// fails here: a 13px label in a 72px month cell or a 22px Day block clips.
+const CALENDAR_SIZES = {
+  '.cal-head': '0.75rem', '.cal-cell': '0.72rem',
+  '.week-head': '0.7rem', '.week-head b': '0.85rem', '.week-more': '0.65rem',
+  '.day-hour': '0.7rem', '.day-block': '0.75rem', '.day-pin': '0.75rem',
+};
+for (const [sel, size] of Object.entries(CALENDAR_SIZES)) {
+  test(`${sel} keeps its compact font-size (${size})`, () => {
+    assert.equal(declOf(sel, 'font-size'), size);
+  });
+}
+
+test('no existing rule reads the new type scale yet', () => {
+  const body = css.replace(/:root\s*\{[^}]*\}/, '');
+  assert.doesNotMatch(body, /var\(--(text-label|text-row|text-title|text-hero|label-tracking|sans)\)/,
+    'stage 3 is the first consumer; Month, Week and Day never are');
+});

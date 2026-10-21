@@ -48,6 +48,15 @@
   --radius-control: 8px;
   --radius-sheet: 14px;
   --radius-round: 50%;
+  /* Type scale for the NEW screens only — Today, the tab bar, the capture box
+     (spec § 5). Month, Week and Day keep their compact sizes and never read
+     these; tests/styles.test.js pins theirs. */
+  --text-label: 13px;
+  --text-row: 16px;
+  --text-title: 20px;
+  --text-hero: 28px;
+  --label-tracking: 0.06em;
+  --sans: system-ui, -apple-system, sans-serif;
 }
 
 [data-theme="dark"] {
