@@ -41,7 +41,10 @@ export async function parseViaWorker(text) {
     throw new Error('unreachable');
   }
   if (!res.ok) {
-    await res.text().catch(() => {});
+    // Drained, not awaited: the status already decides the error, and a
+    // stalled body must not hold the message back. Draining lets
+    // fetchWithTimeout disarm once the body settles.
+    res.text().catch(() => {});
     throw new Error(res.status === 413 ? 'too_long' : 'server');
   }
   try {

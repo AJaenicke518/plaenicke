@@ -87,8 +87,25 @@ test('parseViaWorker: 413 → too_long, and the body is read so no deadline stay
   try {
     await assert.rejects(parseViaWorker('x'), { message: 'too_long' });
     assert.equal(bodyRead, true, 'the error body is read before throwing');
+    await new Promise((r) => setImmediate(r)); // let the drained body settle
     t.mock.timers.tick(SMART_ADD_TIMEOUT_MS);
     assert.equal(net.calls[0].init.signal.aborted, false, 'the 413 path must disarm the deadline');
+  } finally {
+    t.mock.timers.reset();
+    net.restore();
+  }
+});
+
+// The error is decided by the status line alone; its body is only drained so
+// fetchWithTimeout can disarm. A stalled error body must not delay the message.
+test('parseViaWorker: a 413 whose body stalls still rejects at once', async (t) => {
+  const net = stubFetch(async () => response(413, { text: () => new Promise(() => {}) }));
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let outcome = 'pending';
+    parseViaWorker('x').then(() => { outcome = 'resolved'; }, (e) => { outcome = e.message; });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(outcome, 'too_long', 'no tick of the deadline was needed');
   } finally {
     t.mock.timers.reset();
     net.restore();
@@ -102,6 +119,7 @@ test('parseViaWorker: 500 → server, and the body is read so no deadline stays 
   try {
     await assert.rejects(parseViaWorker('x'), { message: 'server' });
     assert.equal(bodyRead, true, 'the error body is read before throwing');
+    await new Promise((r) => setImmediate(r)); // let the drained body settle
     t.mock.timers.tick(SMART_ADD_TIMEOUT_MS);
     assert.equal(net.calls[0].init.signal.aborted, false, 'the 500 path must disarm the deadline');
   } finally {
