@@ -426,3 +426,41 @@ for (const sel of CONTROL_RULES) {
 test('the item sheet uses the sheet radius on its top corners', () => {
   assert.equal(declOf('.sheet', 'border-radius'), 'var(--radius-sheet) var(--radius-sheet) 0 0');
 });
+
+// --- home-screen stage 2: 16px on every input (spec § 5) --------------------
+// Under 16px, iOS Safari zooms the whole page when the field takes focus.
+// Two checks: every known control rule resolves to >= 16px, and NO rule
+// anywhere that targets a form control declares a smaller font-size — so a
+// control added later with a small size fails here without being listed.
+// (The item sheet's three are pinned by the edit-items tests above.)
+const INPUT_RULES = [
+  '#entry-text', '#entry-date', '#entry-time', '#entry-end', '.idea-add textarea',
+  '.feed-add input', '.link-ui input', '.preview-row input', '.preview-row select',
+];
+for (const sel of INPUT_RULES) {
+  test(`${sel} is at least 16px`, () => {
+    assert.ok(ruleExists(sel), `no rule for ${sel}`);
+    const fs = declOf(sel, 'font-size');
+    assert.ok(fs !== null, `${sel} declares no font-size`);
+    assert.ok(px(fs) >= 16, `expected ${sel} font-size >= 16px, got ${fs}`);
+  });
+}
+
+const CONTROL_SELECTOR = /(^|[\s>+~])(input|select|textarea)\b|#entry-|#idea-text|\.link-(code|token)-/;
+test('no rule that targets a form control sets a font-size under 16px', () => {
+  const offenders = [];
+  let seen = 0;
+  for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+    const selectors = sel.split(',').map((x) => x.trim().replace(/\s+/g, ' '));
+    if (!selectors.some((s) => CONTROL_SELECTOR.test(s))) continue;
+    seen += 1;
+    for (const decl of body.split(';')) {
+      const i = decl.indexOf(':');
+      if (i < 0 || decl.slice(0, i).trim().toLowerCase() !== 'font-size') continue;
+      const value = decl.slice(i + 1).trim();
+      if (px(value) < 16) offenders.push(`${sel.trim()}: ${value}`);
+    }
+  }
+  assert.ok(seen >= 10, `fixture check: the scan found only ${seen} control rules`);
+  assert.deepEqual(offenders, []);
+});
