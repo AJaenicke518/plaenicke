@@ -13,7 +13,7 @@
 // persists the feeds half of it.
 
 import { WORKER_URL } from './config.js';
-import { parseICS, expandEvents, parseDuration } from './ics.js';
+import { parseICS, expandEvents, parseDuration, icsDateToLocal } from './ics.js';
 import { nowISO } from './dateparse.js';
 import { FEED_PALETTE } from './palette.js';
 import { nextStamp } from './merge.js';
@@ -423,6 +423,119 @@ export function feedStatus(feed, cacheEntry, now = new Date()) {
   }
 
   return parts.join(', ');
+}
+
+// ---------------------------------------------------------------------------
+// feedShape — what kind of repeating events a feed's cache holds (spec § 2.4)
+// ---------------------------------------------------------------------------
+
+// Only these count as repeating (spec § 2.4, Decided, question 7). A MONTHLY
+// or YEARLY series behaves as a one-off and stays in Next 7 days.
+export const REPEATING_FREQS = new Set(['DAILY', 'WEEKLY']);
+// The heuristic's threshold: same title, weekday and start time on this many
+// distinct weeks or more (spec § 2.4).
+export const GUESS_MIN_WEEKS = 3;
+
+// freqOf: the FREQ value of a stored RRULE string, upper-cased, or null.
+// ics.js stores the raw RRULE value (`ev.rrule`, already validated by
+// parseRRule, which upper-cases both the key and the value before checking
+// them), so 'freq=weekly' and 'INTERVAL=2;FREQ=WEEKLY' are both stored as
+// written and both mean WEEKLY.
+function freqOf(rrule) {
+  if (typeof rrule !== 'string') return null;
+  for (const segment of rrule.split(';')) {
+    const eq = segment.indexOf('=');
+    if (eq > 0 && segment.slice(0, eq).toUpperCase() === 'FREQ') return segment.slice(eq + 1).toUpperCase();
+  }
+  return null;
+}
+
+// feedShape: counts over one feed's cached ParsedEvents (`entry.events`).
+// Pure: no storage, no network, no URL. `targetTz` is the device zone, the
+// same one instancesForRange expands in: the heuristic's weekday and start
+// time are read in it, so a Canvas class at 10:00 local stays one series
+// across a DST change even though its UTC time moves by an hour.
+//
+//   method 'rule'       — the feed has at least one RRULE (any FREQ). The
+//                         heuristic never runs on it (spec § 2.4).
+//     repeatingSeries   masters with FREQ=DAILY or FREQ=WEEKLY
+//     repeatingChanged  RECURRENCE-ID overrides whose master is one of those
+//     otherRuleEvents   MONTHLY/YEARLY masters and their overrides (one-offs)
+//     single            everything else, master-less overrides included
+//   method 'heuristic'  — no RRULE anywhere in the cache.
+//     guessedSeries     (title, weekday, start time) groups on >= 3 weeks
+//     inGuessedSeries   events in those groups
+//     single            everything else, untimed (all-day) events included
+//
+// The counts always sum to `total`.
+export function feedShape(events, targetTz) {
+  const shape = {
+    total: events.length,
+    method: events.some((ev) => typeof ev.rrule === 'string') ? 'rule' : 'heuristic',
+    repeatingSeries: 0,
+    repeatingChanged: 0,
+    otherRuleEvents: 0,
+    guessedSeries: 0,
+    inGuessedSeries: 0,
+    single: 0,
+  };
+
+  if (shape.method === 'rule') {
+    // A series is (feedId, uid); this is one feed, so the uid alone.
+    const freqByUid = new Map();
+    for (const ev of events) {
+      if (!ev.recurrenceId && typeof ev.rrule === 'string') freqByUid.set(ev.uid, freqOf(ev.rrule));
+    }
+    for (const ev of events) {
+      const freq = freqByUid.get(ev.uid);
+      const isMaster = !ev.recurrenceId && typeof ev.rrule === 'string';
+      if (freq === undefined) shape.single += 1;
+      else if (!REPEATING_FREQS.has(freq)) shape.otherRuleEvents += 1;
+      else if (isMaster) shape.repeatingSeries += 1;
+      else shape.repeatingChanged += 1;
+    }
+    return shape;
+  }
+
+  const groups = new Map();
+  for (const ev of events) {
+    if (ev.form === 'DATE') { shape.single += 1; continue; }
+    const params = ev.dtstart.tzid ? { TZID: ev.dtstart.tzid } : {};
+    const { date, time } = icsDateToLocal(ev.dtstart.value, params, targetTz);
+    const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
+    const key = JSON.stringify([ev.title, weekday, time]);
+    let group = groups.get(key);
+    if (!group) { group = { dates: new Set(), count: 0 }; groups.set(key, group); }
+    group.dates.add(date);
+    group.count += 1;
+  }
+  for (const group of groups.values()) {
+    if (group.dates.size >= GUESS_MIN_WEEKS) {
+      shape.guessedSeries += 1;
+      shape.inGuessedSeries += group.count;
+    } else {
+      shape.single += group.count;
+    }
+  }
+  return shape;
+}
+
+// describeFeedShape: the Settings line for one feed (spec § 2.4). Names the
+// calendar's method in words; never carries a URL (it has none to carry).
+export function describeFeedShape(shape) {
+  if (shape.total === 0) return 'No events to classify.';
+  const events = `${shape.total} event${shape.total === 1 ? '' : 's'}`;
+  if (shape.method === 'rule') {
+    const parts = [`${shape.repeatingSeries} repeat (RRULE)`];
+    if (shape.repeatingChanged > 0) {
+      parts.push(`${shape.repeatingChanged} changed instance${shape.repeatingChanged === 1 ? '' : 's'}`);
+    }
+    if (shape.otherRuleEvents > 0) parts.push(`${shape.otherRuleEvents} yearly/monthly (shown as one-offs)`);
+    parts.push(`${shape.single} single`);
+    return `${events}: ${parts.join(', ')}. Uses the rule.`;
+  }
+  return `${events}: no RRULE — ${shape.inGuessedSeries} in ${shape.guessedSeries} guessed series, `
+    + `${shape.single} single. Uses the heuristic.`;
 }
 
 // ---------------------------------------------------------------------------

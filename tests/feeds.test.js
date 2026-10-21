@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   syncFeed, syncStale, feedStatus, instancesForRange, removeFeed,
-  webcalToHttps, inferName, applyRemoteFeeds,
+  webcalToHttps, inferName, applyRemoteFeeds, feedShape, describeFeedShape,
 } from '../js/feeds.js';
 import {
   loadFeeds, saveFeeds, loadFeedCache, saveFeedCache, loadTombstones,
@@ -888,4 +888,197 @@ test('inferName: unknown host falls back to Calendar', () => {
 
 test('inferName: unparseable URL falls back to Calendar', () => {
   assert.equal(inferName('not a url'), 'Calendar');
+});
+
+// --- feedShape (home-screen spec § 2.4, stage 1) -----------------------------
+//
+// A read-only classification of one feed's cache: which method stage 3a would
+// use for it (the RRULE, or the Canvas heuristic) and what each counts. Alex
+// reads its Settings line for LMU Classes before 3a starts.
+
+// A ParsedEvent as parseICS stores it (ics.js buildParsedEvent).
+function pe({ uid, title = uid, form = 'UTC', value, tzid = null, rrule = null, recurrenceId = null }) {
+  return {
+    uid, title, form, dtstart: { value, tzid }, dtend: null, duration: null,
+    rrule, exdates: [], recurrenceId,
+  };
+}
+
+// '2026-08-24' + n weeks -> 'YYYYMMDD'
+function weeksAfter(firstISO, n) {
+  const d = new Date(`${firstISO}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 7 * n);
+  return d.toISOString().slice(0, 10).replace(/-/g, '');
+}
+
+// `weeks` separate VEVENTs, one per week, each with its own UID and no RRULE:
+// the Canvas shape (provider-format notes: "No RRULE, ever").
+function canvasWeekly(title, firstISO, weeks, hhmm, tzid = 'America/Los_Angeles') {
+  const out = [];
+  for (let i = 0; i < weeks; i += 1) {
+    out.push(pe({
+      uid: `${title}-${i}`, title, form: 'TZID', tzid, value: `${weeksAfter(firstISO, i)}T${hhmm}00`,
+    }));
+  }
+  return out;
+}
+
+const sumOf = (s) => s.repeatingSeries + s.repeatingChanged + s.otherRuleEvents + s.inGuessedSeries + s.single;
+
+test('feedShape: an empty cache has nothing to classify, and says so', () => {
+  const shape = feedShape([], 'UTC');
+  assert.deepEqual(shape, {
+    total: 0, method: 'heuristic', repeatingSeries: 0, repeatingChanged: 0, otherRuleEvents: 0,
+    guessedSeries: 0, inGuessedSeries: 0, single: 0,
+  });
+  assert.equal(describeFeedShape(shape), 'No events to classify.');
+});
+
+test('feedShape: a rule feed reads as the spec\'s example line', () => {
+  const events = [];
+  for (let i = 0; i < 6; i += 1) {
+    events.push(pe({ uid: `course-${i}`, value: '20260824T170000Z', rrule: 'FREQ=WEEKLY;BYDAY=MO,WE' }));
+  }
+  for (let i = 0; i < 136; i += 1) events.push(pe({ uid: `one-${i}`, value: '20260901T170000Z' }));
+  const shape = feedShape(events, 'UTC');
+  assert.equal(shape.method, 'rule');
+  assert.equal(shape.repeatingSeries, 6);
+  assert.equal(shape.single, 136);
+  assert.equal(describeFeedShape(shape), '142 events: 6 repeat (RRULE), 136 single. Uses the rule.');
+});
+
+test('feedShape: only FREQ=DAILY and FREQ=WEEKLY repeat, however the RRULE is written', () => {
+  const events = [
+    pe({ uid: 'w-lower', value: '20260824T170000Z', rrule: 'freq=weekly' }),
+    pe({ uid: 'w-second', value: '20260824T170000Z', rrule: 'INTERVAL=2;FREQ=WEEKLY' }),
+    pe({ uid: 'd', value: '20260824T170000Z', rrule: 'FREQ=DAILY;COUNT=5' }),
+    pe({ uid: 'y', value: '20260824T170000Z', rrule: 'FREQ=YEARLY' }),
+    pe({ uid: 'm', value: '20260824T170000Z', rrule: 'FREQ=MONTHLY;BYMONTHDAY=1' }),
+  ];
+  const shape = feedShape(events, 'UTC');
+  assert.equal(shape.repeatingSeries, 3, 'lower-case, not-first and DAILY all count');
+  assert.equal(shape.otherRuleEvents, 2, 'YEARLY and MONTHLY are one-offs (spec § 2.4, question 7)');
+  assert.equal(shape.single, 0);
+  assert.equal(describeFeedShape(shape),
+    '5 events: 3 repeat (RRULE), 2 yearly/monthly (shown as one-offs), 0 single. Uses the rule.');
+});
+
+test('feedShape: overrides belong to their series; a master-less override is single', () => {
+  const rid = (value) => ({ value, tzid: null });
+  const events = [
+    pe({ uid: 'class', value: '20260824T170000Z', rrule: 'FREQ=WEEKLY' }),
+    pe({ uid: 'class', value: '20260901T180000Z', recurrenceId: rid('20260831T170000Z') }),
+    pe({ uid: 'class', value: '20260908T180000Z', recurrenceId: rid('20260907T170000Z') }),
+    pe({ uid: 'bday', value: '20260824', form: 'DATE', rrule: 'FREQ=YEARLY' }),
+    pe({ uid: 'bday', value: '20260825', form: 'DATE', recurrenceId: rid('20260824') }),
+    pe({ uid: 'orphan', value: '20260910T170000Z', recurrenceId: rid('20260910T170000Z') }),
+  ];
+  const shape = feedShape(events, 'UTC');
+  assert.equal(shape.repeatingSeries, 1);
+  assert.equal(shape.repeatingChanged, 2);
+  assert.equal(shape.otherRuleEvents, 2, 'a yearly override is a yearly one-off too');
+  assert.equal(shape.single, 1, 'expanded alone (ics.js), it has no FREQ');
+  assert.equal(describeFeedShape(shape),
+    '6 events: 1 repeat (RRULE), 2 changed instances, 2 yearly/monthly (shown as one-offs), 1 single. Uses the rule.');
+});
+
+test('feedShape: one RRULE of any FREQ switches the heuristic off for the whole feed', () => {
+  const events = [
+    ...canvasWeekly('Stats 101', '2026-08-24', 5, '1000'),
+    pe({ uid: 'bday', value: '20260824', form: 'DATE', rrule: 'FREQ=YEARLY' }),
+  ];
+  const shape = feedShape(events, 'America/Los_Angeles');
+  assert.equal(shape.method, 'rule');
+  assert.equal(shape.guessedSeries, 0, 'its RRULE-less events stay one-offs, never guessed');
+  assert.equal(shape.single, 5);
+  assert.equal(shape.otherRuleEvents, 1);
+});
+
+test('feedShape: a Canvas-shaped feed reads as the spec\'s heuristic example line', () => {
+  const tz = 'America/Los_Angeles';
+  const events = [
+    ...canvasWeekly('Stats 101', '2026-08-24', 20, '1000'),
+    ...canvasWeekly('Stats 101', '2026-08-26', 20, '1000'),
+    ...canvasWeekly('Physics', '2026-08-25', 20, '0900'),
+    ...canvasWeekly('Physics lab', '2026-08-27', 20, '1400'),
+    ...canvasWeekly('Writing', '2026-08-28', 20, '1100'),
+    ...canvasWeekly('Seminar', '2026-08-24', 18, '1500'),
+  ];
+  for (let i = 0; i < 18; i += 1) events.push(pe({ uid: `quiz-${i}`, title: `Quiz ${i}`, value: '20260903T170000Z' }));
+  const shape = feedShape(events, tz);
+  assert.equal(shape.method, 'heuristic');
+  assert.equal(shape.guessedSeries, 6, 'Stats on Monday and on Wednesday are two series');
+  assert.equal(shape.inGuessedSeries, 118);
+  assert.equal(shape.single, 18);
+  assert.equal(describeFeedShape(shape),
+    '136 events: no RRULE — 118 in 6 guessed series, 18 single. Uses the heuristic.');
+});
+
+test('feedShape: the heuristic needs 3 distinct weeks, not 3 events', () => {
+  const twoWeeks = canvasWeekly('Stats 101', '2026-08-24', 2, '1000');
+  const doubled = [...twoWeeks, ...twoWeeks.map((ev) => ({ ...ev, uid: `${ev.uid}-copy` }))];
+  const shape = feedShape(doubled, 'America/Los_Angeles');
+  assert.equal(shape.guessedSeries, 0, 'four events on two dates is two weeks');
+  assert.equal(shape.single, 4);
+  const three = feedShape(canvasWeekly('Stats 101', '2026-08-24', 3, '1000'), 'America/Los_Angeles');
+  assert.equal(three.guessedSeries, 1, 'three weeks is a series');
+  assert.equal(three.inGuessedSeries, 3);
+});
+
+test('feedShape: the heuristic groups on title, weekday and start time — all three', () => {
+  const tz = 'America/Los_Angeles';
+  const base = canvasWeekly('Stats 101', '2026-08-24', 2, '1000');
+  const cases = [
+    ['another title', canvasWeekly('Stats 102', '2026-09-07', 1, '1000')],
+    ['another weekday', canvasWeekly('Stats 101', '2026-09-08', 1, '1000')],
+    ['another time', canvasWeekly('Stats 101', '2026-09-07', 1, '1100')],
+  ];
+  for (const [label, third] of cases) {
+    const shape = feedShape([...base, ...third.map((ev) => ({ ...ev, uid: `${ev.uid}-x` }))], tz);
+    assert.equal(shape.guessedSeries, 0, `${label}: no 3-week group`);
+    assert.equal(shape.single, 3, label);
+  }
+});
+
+test('feedShape: an untimed event has no start time, so it is never guessed', () => {
+  const events = [0, 1, 2, 3].map((i) => pe({
+    uid: `reading-${i}`, title: 'Reading response', form: 'DATE', value: weeksAfter('2026-08-28', i),
+  }));
+  const shape = feedShape(events, 'UTC');
+  assert.equal(shape.guessedSeries, 0);
+  assert.equal(shape.single, 4);
+});
+
+// Canvas writes every time in UTC (`DTSTART:...Z`, provider-format notes). A
+// 10:00 Pacific class is 17:00Z until 1 Nov 2026 and 18:00Z after it. Read in
+// UTC that is two series with a gap; read in the device zone it is one.
+test('feedShape: a UTC-stamped weekly class stays one series across the DST change', () => {
+  const events = [];
+  for (let i = 0; i < 12; i += 1) {
+    const day = weeksAfter('2026-09-21', i); // Mondays, 21 Sep .. 7 Dec
+    const hour = day < '20261101' ? '17' : '18';
+    events.push(pe({ uid: `stats-${i}`, title: 'Stats 101', value: `${day}T${hour}0000Z` }));
+  }
+  const local = feedShape(events, 'America/Los_Angeles');
+  assert.equal(local.guessedSeries, 1, 'one class, one series');
+  assert.equal(local.inGuessedSeries, 12);
+  const utc = feedShape(events, 'UTC');
+  assert.equal(utc.guessedSeries, 2, 'fixture check: the zone is what joins them');
+});
+
+test('feedShape: every event is counted exactly once', () => {
+  const fixtures = [
+    [...canvasWeekly('A', '2026-08-24', 4, '1000'), pe({ uid: 'x', value: '20260901', form: 'DATE' })],
+    [pe({ uid: 'w', value: '20260824T170000Z', rrule: 'FREQ=WEEKLY' }), pe({ uid: 'o', value: '20260824T170000Z' })],
+  ];
+  for (const events of fixtures) {
+    const shape = feedShape(events, 'America/Los_Angeles');
+    assert.equal(sumOf(shape), shape.total);
+    assert.equal(shape.total, events.length);
+  }
+});
+
+test('describeFeedShape: one event is singular', () => {
+  assert.equal(describeFeedShape(feedShape([pe({ uid: 'o', value: '20260824T170000Z' })], 'UTC')),
+    '1 event: no RRULE — 0 in 0 guessed series, 1 single. Uses the heuristic.');
 });
