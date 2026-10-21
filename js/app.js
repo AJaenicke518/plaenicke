@@ -992,8 +992,12 @@ export function applySyncedState(state) {
   // the server held, which live storage never had. Re-pruning here dropped
   // it and pushed the deletion away (js/merge.js, prune()).
   const written = merge(live, state, new Date(), { keepRemoteTombstones: true });
+  // Save BEFORE assigning, as addItems does: app.js saves from `items`, so a
+  // failed write (QuotaError) that had already replaced it would render
+  // records storage does not hold and have the next save of ANY item persist
+  // them outside the sync path.
+  saveItems(written.items);
   items = written.items;
-  saveItems(items);
   // applyRemoteFeeds requires the COMPLETE merged feed list (written.feeds,
   // never a delta) — it deletes+tombstones every local feed absent from its
   // argument, and a partial list would propagate a deletion of every other

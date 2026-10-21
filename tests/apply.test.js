@@ -999,6 +999,135 @@ test('a sync whose apply runs out of storage on plaenicke.items reads as out of 
   assert.match(statusLine.textContent, /run out of storage/);
 });
 
+// A failed items write in the apply must not leave app.js's module-scope
+// `items` ahead of storage. app.js saves from that array, so a stale synced
+// record held only in memory renders now, disappears on reload, and is written
+// by the next local save of ANY item — outside the sync path. Not data loss,
+// but memory and storage disagree (plan 2026-10-20 Task 2, adjudication I4/I5).
+// setItem is restored BEFORE the follow-up add, so it is the add's own save
+// that would persist the stale record.
+function refuseItemsWrites({ after = 0 } = {}) {
+  const realSet = localStorage.setItem.bind(localStorage);
+  let seen = 0;
+  let refused = 0;
+  localStorage.setItem = (k, v) => {
+    if (k === 'plaenicke.items') {
+      seen += 1;
+      if (seen > after) {
+        refused += 1;
+        const e = new Error('full');
+        e.name = 'QuotaExceededError';
+        throw e;
+      }
+    }
+    return realSet(k, v);
+  };
+  return { refused: () => refused, restore: () => { localStorage.setItem = realSet; } };
+}
+
+test('a sync whose items write runs out of storage leaves no unsaved synced record for the next add to persist', async () => {
+  installFakeLocalStorage();
+  const { addItems } = await import('../js/app.js');
+  const { encKey } = await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  seed([record({ id: 'kept-local', title: 'Kept local', date: '2099-06-01' })]);
+  const blob = await encryptBlob(encKey, state({
+    items: [record({ id: 'pulled-unsaved', title: 'Pulled unsaved', date: '2099-06-02' })],
+  }));
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    requests.push(method);
+    if (method === 'GET') return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 3, blob }) });
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 4 }) });
+  };
+  const timers = installManualTimers();
+  let quota = null;
+  try {
+    quota = refuseItemsWrites();
+    try {
+      for (const fn of globalThis.window._listeners.online) fn();
+      await drain();
+    } finally {
+      quota.restore();
+    }
+    assert.ok(quota.refused() > 0, 'fixture check: the apply reached the items write');
+    assert.equal(loadSyncState().lastError, 'QuotaError', 'fixture check: the apply failed on quota');
+    assert.deepEqual(requests, ['GET'], 'fixture check: nothing was pushed');
+    assert.deepEqual(loadItems().map((i) => i.id), ['kept-local'], 'fixture check: storage never took the pulled record');
+    // Storage has room again; the user adds something by hand.
+    addItems([{ title: 'Typed after', date: '2099-06-03', type: 'event' }]);
+  } finally {
+    timers.restore(); // the add's 2 s sync timer is never fired
+    globalThis.fetch = originalFetch;
+  }
+  const stored = loadItems();
+  assert.ok(stored.some((i) => i.title === 'Typed after'), 'fixture check: the add itself was saved');
+  assert.ok(!stored.some((i) => i.id === 'pulled-unsaved'),
+    'the add must not persist a synced record the failed apply never saved');
+  assert.deepEqual(stored.map((i) => i.id).sort(), ['kept-local', stored.find((i) => i.title === 'Typed after').id].sort());
+  assert.doesNotMatch(allText(itemList()), /Pulled unsaved/, 'the list must not show a record storage does not hold');
+  assert.match(allText(itemList()), /Kept local/, 'fixture check: the list rendered');
+  seed([]);
+});
+
+// Same failure arriving on the CAS retry: the first apply saved, the PUT got a
+// 409 whose blob carries a record from another device, and the RETRY's apply
+// is the one whose items write fails.
+test('a 409 retry whose apply runs out of storage leaves no unsaved synced record for the next add to persist', async () => {
+  installFakeLocalStorage();
+  const { addItems } = await import('../js/app.js');
+  const { encKey } = await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  // local-only makes the first apply's state differ from the server's, so a PUT goes out.
+  seed([record({ id: 'local-only', title: 'Local only', date: '2099-07-01' })]);
+  const first = await encryptBlob(encKey, state({
+    items: [record({ id: 'pulled-first', title: 'Pulled first', date: '2099-07-02' })],
+  }));
+  const conflict = await encryptBlob(encKey, state({
+    items: [
+      record({ id: 'pulled-first', title: 'Pulled first', date: '2099-07-02' }),
+      record({ id: 'pulled-on-retry', title: 'Pulled on retry', date: '2099-07-03' }),
+    ],
+  }));
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    requests.push(method);
+    if (method === 'GET') return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 3, blob: first }) });
+    return Promise.resolve({ ok: false, status: 409, json: async () => ({ version: 4, blob: conflict }) });
+  };
+  const timers = installManualTimers();
+  let quota = null;
+  try {
+    quota = refuseItemsWrites({ after: 1 }); // the first apply's write lands; the retry's is refused
+    try {
+      for (const fn of globalThis.window._listeners.online) fn();
+      await drain();
+    } finally {
+      quota.restore();
+    }
+    assert.deepEqual(requests, ['GET', 'PUT'], 'fixture check: the first apply saved and pushed, and got a 409');
+    assert.equal(quota.refused(), 1, 'fixture check: only the retry apply\'s items write was refused');
+    assert.equal(loadSyncState().lastError, 'QuotaError', 'fixture check: the retry apply failed on quota');
+    assert.deepEqual(loadItems().map((i) => i.id).sort(), ['local-only', 'pulled-first'],
+      'fixture check: storage holds the first apply and not the retry');
+    addItems([{ title: 'Typed after retry', date: '2099-07-04', type: 'event' }]);
+  } finally {
+    timers.restore();
+    globalThis.fetch = originalFetch;
+  }
+  const stored = loadItems();
+  assert.ok(stored.some((i) => i.title === 'Typed after retry'), 'fixture check: the add itself was saved');
+  assert.ok(!stored.some((i) => i.id === 'pulled-on-retry'),
+    'the add must not persist a record the failed retry apply never saved');
+  assert.ok(stored.some((i) => i.id === 'pulled-first'), 'the first apply\'s saved record stays');
+  assert.doesNotMatch(allText(itemList()), /Pulled on retry/, 'the list must not show a record storage does not hold');
+  seed([]);
+});
+
 test('runSync records a lastError and lights the indicator when syncOnce itself rejects', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
