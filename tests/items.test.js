@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  makeItem, sortItemsByDate, isScheduled, isTodo, isIdea, sortIdeasNewestFirst,
+  makeItem, sortItemsByDate, isScheduled, isTodo, isTodoType, isIdea, sortIdeasNewestFirst,
 } from '../js/items.js';
 
 test('makeItem builds an item with type and tags, trims title', () => {
@@ -274,4 +274,14 @@ test('sortIdeasNewestFirst is newest-first, deterministic, and does not mutate i
   assert.deepEqual(sortIdeasNewestFirst(tied).map((i) => i.id), ['a', 'm', 'z']);
   assert.deepEqual(sortIdeasNewestFirst([...tied].reverse()).map((i) => i.id), ['a', 'm', 'z'],
     'the answer must not depend on input order');
+});
+
+// Today's "To do today" keeps a ticked to-do until tomorrow (home-screen spec
+// § 2.3), so it asks the type question without isTodo's `done` half.
+test('isTodoType is the four to-do types, done or not', () => {
+  for (const type of ['due', 'start', 'milestone', 'task']) {
+    assert.equal(isTodoType({ type, done: false }), true, type);
+    assert.equal(isTodoType({ type, done: true }), true, `${type}, done`);
+  }
+  for (const type of ['event', 'general', 'idea', undefined]) assert.equal(isTodoType({ type }), false, String(type));
 });
