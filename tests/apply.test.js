@@ -6115,3 +6115,30 @@ test('Today: a tick on a new day re-renders the page instead of counting down to
   }
   resume();
 });
+
+// Final fixes 2, C1: with a visible calendar, stampUpdated paints nothing, so
+// a tick on a new day left "Updated 11:30 PM" up after midnight, reading as
+// this morning's. The new-day branch repaints from the feeds too, as
+// onFeedsChanged does, and the fetch time now names its day.
+test('Today: a tick on a new day repaints the stamp from the visible calendars', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 23, 50).getTime() });
+  try {
+    seed([]);
+    seedFeedsWithCache([sdFeed('ff2-c1')], { 'ff2-c1': cacheAt(new Date(2026, 9, 21, 23, 30)) });
+    click(globalThis.document.getElementById('show-today'));
+    stampEl().textContent = 'Updated 11:30 PM';
+    const tick = todayInterval();
+    t.mock.timers.tick(15 * 60 * 1000); // 2026-10-22 00:05
+    tick.fn();
+    assert.equal(stampEl().textContent, 'Updated Yesterday, 11:30 PM');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+  unseedFeeds();
+  resume();
+});

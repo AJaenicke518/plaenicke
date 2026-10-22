@@ -908,11 +908,13 @@ let todayTick = null;
 // midnight the kept event may be yesterday's: a tick on a new day renders the
 // whole app instead — render(), not renderToday(): refreshForToday, inside
 // render, catches the other pages' cursors up — and repaints the "Updated"
-// stamp, as every other full render does (final review A4).
+// stamp (final review A4). Both stamp painters run, the pair onFeedsChanged
+// uses: with a visible calendar stampUpdated paints nothing, and a fetch time
+// from before midnight must now name its day (final fixes 2, C1).
 function tickToday() {
   if (toISO(new Date()) !== todayRenderedFor) {
     render();
-    stampUpdated();
+    stampUpdated(); stampFromFeeds();
     return;
   }
   if (!todayRelative) return;
