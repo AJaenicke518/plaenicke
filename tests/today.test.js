@@ -326,7 +326,9 @@ test('buildToday: with nothing overdue, due or on today, one line names the next
   const calls = [];
   const lookahead = () => { calls.push(1); return [inst('phys', '2026-10-23', { recurring: true }), inst('club', '2026-10-29', { title: 'Club' })]; };
   const t = buildToday([own('quiz', { type: 'event', date: '2026-10-30', title: 'Stats quiz' })], [], TODAY, at(8, 0), lookahead);
-  assert.equal(t.emptyLine, 'Nothing due today. Next: Club · Thu, Oct 29.', 'the earlier of the two; a repeating class is skipped');
+  // Final review A5 (2026-10-22): the "Next" line names the first upcoming
+  // thing, a repeating class included (it stays out of Next 7 days itself).
+  assert.equal(t.emptyLine, 'Nothing due today. Next: i-phys · Fri.', 'the earliest of the three; a repeating class counts');
   assert.equal(calls.length, 1);
   const own2 = buildToday([own('quiz', { type: 'event', date: '2026-10-23', title: 'Stats quiz' })], [], TODAY, at(8, 0), lookahead);
   assert.equal(own2.emptyLine, 'Nothing due today. Next: Stats quiz · Fri.');
@@ -484,7 +486,8 @@ test('Review Focus: after the DST change the class keeps its 10:00, and a "no cl
 test('Review Focus: a cancelled class (EXDATE) is simply not on its day', () => {
   const t = todayFromIcs('2026-11-05', at(8, 0));
   assert.deepEqual(t.events, []);
-  assert.equal(t.emptyLine, 'Nothing coming up.', 'no one-off in the next 30 days, and the classes are not "next"');
+  assert.equal(t.emptyLine, 'Nothing due today. Next: PHYS 2100 · Tue.',
+    'the next class names the next thing (final review A5): Tue 10 Nov, after the cancelled Thu 5 Nov');
 });
 
 test('Review Focus: the DST week moves neither the Next 7 days edge nor an overdue age', () => {
@@ -571,4 +574,15 @@ test('A1: a uid with an event outside every guessed group is not guessed — the
   assert.equal(shape.inGuessedSeries, 0);
   assert.equal(shape.guessedSeries, 0);
   assert.equal(shape.single, 4);
+});
+
+// Final review A5 (2026-10-22), the reviewer's case: a day with nothing of
+// one's own and only a weekly class ahead names that class, not "Nothing
+// coming up." The class still stays out of Next 7 days.
+test('A5: with only a weekly class starting tomorrow, the "Next" line names it', () => {
+  const t = todayFromText([vevent('gym@x', 'Gym', [
+    ldt('20261022', '0700'), 'DTEND;TZID=America/Los_Angeles:20261022T080000', 'RRULE:FREQ=WEEKLY',
+  ])]);
+  assert.deepEqual(t.next, [], 'a repeating series is never under Next 7 days');
+  assert.equal(t.emptyLine, 'Nothing due today. Next: Gym · Tomorrow.');
 });

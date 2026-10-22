@@ -1496,7 +1496,7 @@ Plant each in `js/today.js`, run `node --test tests/today.test.js`, restore:
 | `tone: item.type === 'start' ? 'start' : 'deadline'` → `tone: 'deadline'` | `an overdue age is in days, red for a deadline and orange for a start` |
 | `overdue` → `overdueSorted.map(…)` (ticked not last) | `a to-do ticked today stays in Overdue, after the undone ones…` |
 | call `lookahead()` before the empty-sections check | `with nothing overdue…`, `the 30-day look-ahead runs only when…`, `a day with only classes…` |
-| look-ahead filter drops `inst.recurring === false &&` | `with nothing overdue…`, `Review Focus: a cancelled class (EXDATE) is simply not on its day` |
+| ~~look-ahead filter drops `inst.recurring === false &&`~~ *(2026-10-22, final review A5: the exclusion is gone — repeating instances are look-ahead candidates. The mutant is now the reverse:)* look-ahead filter adds `inst.recurring === false &&` | `with nothing overdue…`, `Review Focus: a cancelled class (EXDATE) is simply not on its day`, `A5: with only a weekly class starting tomorrow, the "Next" line names it` |
 | look-ahead filter drops `&& inst.date <= lookEnd` | `the "Next" line skips done items, ideas and anything past 30 days` |
 | empty-line condition adds `&& next.length === 0` | `with nothing overdue…`, `the 30-day look-ahead runs only when…` |
 | delete the `recurring` flag guard | `buildToday: refuses input it cannot place, loudly` |
