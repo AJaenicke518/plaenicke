@@ -4,7 +4,7 @@ import {
 } from './storage.js';
 import { followToday, formatDayLabel } from './freshness.js';
 import {
-  makeItem, sortItemsByDate, isScheduled, isTodo, isIdea, sortIdeasNewestFirst,
+  makeItem, sortItemsByDate, isScheduled, isTodo, isTodoType, isIdea, sortIdeasNewestFirst,
 } from './items.js';
 import { normalizeIdea } from './ideas.js';
 import { renderTodoView } from './todoview.js';
@@ -30,7 +30,7 @@ import { renderSyncStatus, syncWriteStarted, syncWriteSettled } from './linkui.j
 import { WORKER_URL } from './config.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
 import { installPress } from './press.js';
-import { buildToday, relativeLabel, NEXT_DAYS, LOOKAHEAD_DAYS } from './today.js';
+import { buildToday, relativeLabel, NEXT_DAYS, LOOKAHEAD_DAYS, tickedToday } from './today.js';
 import { renderTodayView } from './todayview.js';
 
 const els = {
@@ -150,7 +150,17 @@ function visibleItems(start, end) {
 // § 3.3). External feed instances carry no `type`, so they would fail both
 // predicates by ACCIDENT rather than by design — and a feed that ever grew a
 // type-shaped field would start populating the To-do page.
-function todoItems() { return sortItemsByDate(liveItems().filter(isTodo)); }
+//
+// Every undone to-do, soonest first; then, last, every to-do ticked TODAY,
+// soonest first, so a tick can be undone until tomorrow (Alex, 2026-10-22:
+// "i also want to see the crossed out version in the to do tab as well").
+// "Ticked today" is Today's own rule, imported, not restated. A to-do ticked
+// on an earlier day does not show.
+function todoItems(todayISO) {
+  const live = liveItems();
+  const tickedTodayTodo = (it) => isTodoType(it) && it.done === true && tickedToday(it, todayISO);
+  return [...sortItemsByDate(live.filter(isTodo)), ...sortItemsByDate(live.filter(tickedTodayTodo))];
+}
 
 function ideaItems() { return sortIdeasNewestFirst(liveItems().filter(isIdea)); }
 
@@ -674,27 +684,35 @@ function focusOpener(id) {
   if (opener) opener.focus({ preventScroll: true });
 }
 
-// A tick on Today keeps keyboard focus (final fixes 2, C4). The tick
-// re-renders every page, so the box that had focus is gone; when it did have
-// focus, the NEW box in the row for the same item is focused, found as
-// focusOpener finds an opener: by the open button's data-item-id. To-do is
-// left as it is.
-function todayCheckOwner(box) {
-  if (!box || !box.classList || !box.classList.contains('today-check')) return null;
-  const row = box.parentNode && box.parentNode.parentNode; // label.today-tick, then the row
-  if (!row) return null;
-  const opener = [...row.querySelectorAll('button')].find((b) => b.classList.contains('today-open'));
+// A tick keeps keyboard focus (final fixes 2, C4), on Today and, since a
+// to-do ticked today stays on the To-do page too (2026-10-22), on To-do. The
+// tick re-renders every page, so the box that had focus is gone; when it did
+// have focus, the NEW box in the row for the same item is focused. The row is
+// found by its class, and the item by the open button's data-item-id, as
+// focusOpener finds an opener. One function serves both pages.
+function rowOf(el, rowClass) {
+  let n = el;
+  while (n && !(n.classList && n.classList.contains(rowClass))) n = n.parentNode;
+  return n;
+}
+
+function rowItemId(row) {
+  const opener = [...row.querySelectorAll('button')].find((b) => b.getAttribute('data-item-id') !== null);
   return opener ? opener.getAttribute('data-item-id') : null;
 }
 
-function handleTodayToggleDone(id, done) {
-  const hadFocus = todayCheckOwner(document.activeElement) === id;
-  handleToggleDone(id, done);
-  if (!hadFocus) return;
-  const opener = [...els.todayBody.querySelectorAll('button')]
-    .find((b) => b.classList.contains('today-open') && b.getAttribute('data-item-id') === id);
-  const box = opener && opener.parentNode.querySelector('.today-check');
-  if (box) box.focus({ preventScroll: true });
+function toggleDoneKeepingFocus(container, rowClass) {
+  return (id, done) => {
+    const active = document.activeElement;
+    const row = active && active.type === 'checkbox' ? rowOf(active, rowClass) : null;
+    const hadFocus = !!row && rowItemId(row) === id;
+    handleToggleDone(id, done);
+    if (!hadFocus) return;
+    const opener = [...container.querySelectorAll('button')].find((b) => b.getAttribute('data-item-id') === id);
+    const newRow = opener && rowOf(opener, rowClass);
+    const box = newRow && newRow.querySelector('input');
+    if (box) box.focus({ preventScroll: true });
+  };
 }
 
 function handleToggleDone(id, done) {
@@ -883,8 +901,10 @@ function renderDay() {
 }
 
 function renderTodos() {
-  renderTodoView(els.todoList, todoItems(), {
-    todayISO: toISO(new Date()), onOpen: openItem, onDelete: requestDelete, onToggleDone: handleToggleDone,
+  const todayISO = toISO(new Date());
+  renderTodoView(els.todoList, todoItems(todayISO), {
+    todayISO, onOpen: openItem, onDelete: requestDelete,
+    onToggleDone: toggleDoneKeepingFocus(els.todoList, 'todo-row'),
   });
 }
 
@@ -915,7 +935,7 @@ function renderToday() {
     () => instancesForRange(feeds, feedCache, addDays(todayISO, 1), addDays(todayISO, LOOKAHEAD_DAYS), deviceTz),
   );
   todayRenderedFor = todayISO;
-  todayRelative = renderTodayView(els.todayBody, today, { onOpen: openItem, onToggleDone: handleTodayToggleDone }).relative;
+  todayRelative = renderTodayView(els.todayBody, today, { onOpen: openItem, onToggleDone: toggleDoneKeepingFocus(els.todayBody, 'today-row') }).relative;
 }
 
 // THE 60 s TICK (spec § 2.3) updates that one text node and never rebuilds

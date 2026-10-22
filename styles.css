@@ -729,6 +729,11 @@ button[data-press].pressed { opacity: 1; }
 }
 #todo-list li.empty, #idea-list li.empty { color: var(--muted); justify-content: center; }
 .todo-main, .idea-main { flex: 1 1 auto; min-width: 0; }
+/* A to-do ticked today stays on the page until tomorrow (Alex, 2026-10-22),
+   drawn as Today draws it: struck through, never dimmed. This undoes the
+   global .done opacity above. The title is the .item-open button. */
+.todo-row.done { opacity: 1; }
+.todo-row.done .item-open { text-decoration: line-through; }
 /* A 20px box inside a 44x44 <label class="todo-tick"> (final fixes 2, C8), as
    on Today: the label is the box's hit area. Not [data-press] (js/todoview.js). */
 .todo-tick {
@@ -767,9 +772,10 @@ button[data-press].pressed { opacity: 1; }
 
 /* ---------- Phase 0: freshness stamp ---------- */
 /* Quiet on purpose: it answers "is this current?" at a glance and should not
-   compete with the title. The header's last item, at its right edge: the
-   settings gear moved to the Today page, so no margin spaces it from one. */
-.stamp { color: var(--muted); font-size: 0.75rem; margin-left: auto; }
+   compete with the title. Its auto left margin pushes it and the settings
+   gear, the header's last item, to the right edge; its right margin is the
+   small gap before the gear (spec § 2.2, amended 2026-10-22). */
+.stamp { color: var(--muted); font-size: 0.75rem; margin-left: auto; margin-right: var(--space-2); }
 
 /* ---------- toast (deleted / undo) ---------- */
 /* Above .settings-backdrop (z-index 10) so an Undo raised while a panel is

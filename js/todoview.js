@@ -40,8 +40,9 @@ export function renderTodoView(container, todos, { todayISO, onOpen, onDelete, o
     box.type = 'checkbox';
     box.checked = it.done === true;
     // The row's own text is the label; without this the control is an
-    // unnamed checkbox in the accessibility tree.
-    box.setAttribute('aria-label', `Mark "${it.title}" done`);
+    // unnamed checkbox in the accessibility tree. It says what a tap will do,
+    // as Today's does (final review A10): a to-do ticked today is listed too.
+    box.setAttribute('aria-label', `Mark "${it.title}" ${box.checked ? 'not done' : 'done'}`);
     // Report what the CONTROL now holds, never a hard-coded true: hard-coding
     // it would make unticking silently re-complete the item.
     box.addEventListener('change', () => onToggleDone(it.id, box.checked === true));
