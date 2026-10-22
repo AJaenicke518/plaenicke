@@ -30,7 +30,7 @@ import { renderSyncStatus, syncWriteStarted, syncWriteSettled } from './linkui.j
 import { WORKER_URL } from './config.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
 import { installPress } from './press.js';
-import { buildToday, NEXT_DAYS, LOOKAHEAD_DAYS } from './today.js';
+import { buildToday, relativeLabel, NEXT_DAYS, LOOKAHEAD_DAYS } from './today.js';
 import { renderTodayView } from './todayview.js';
 
 const els = {
@@ -866,6 +866,10 @@ function renderIdeas() {
 // so a delete waiting for its Undo is already gone; feed instances are
 // expanded for today .. today + 7, and the 30-day look-ahead for the "Next"
 // line only when buildToday asks for it. One clock reading for the whole page.
+//
+// todayRelative is the one "in N" label on the page and its event, kept for
+// the 60 s tick below.
+let todayRelative = null;
 const minutesNow = (d) => d.getHours() * 60 + d.getMinutes();
 
 function renderToday() {
@@ -879,7 +883,30 @@ function renderToday() {
     minutesNow(now),
     () => instancesForRange(feeds, feedCache, addDays(todayISO, 1), addDays(todayISO, LOOKAHEAD_DAYS), deviceTz),
   );
-  renderTodayView(els.todayBody, today, { onOpen: openItem, onToggleDone: handleToggleDone });
+  todayRelative = renderTodayView(els.todayBody, today, { onOpen: openItem, onToggleDone: handleToggleDone }).relative;
+}
+
+// THE 60 s TICK (spec § 2.3) updates that one text node and never rebuilds
+// the page. Greying, and which event is next, change on the next ordinary
+// render (resume, add, sync); an event that has ended leaves an empty label
+// until then. It runs only while Today AND the page are visible:
+// syncTodayTick is called wherever either can change (load, showView,
+// visibilitychange).
+const TODAY_TICK_MS = 60 * 1000;
+let todayTick = null;
+
+function tickToday() {
+  if (!todayRelative) return;
+  todayRelative.node.textContent = relativeLabel(todayRelative.item, minutesNow(new Date())) || '';
+}
+
+function syncTodayTick() {
+  const wanted = !els.todayView.hidden && document.visibilityState !== 'hidden';
+  if (wanted && todayTick === null) todayTick = setInterval(tickToday, TODAY_TICK_MS);
+  if (!wanted && todayTick !== null) {
+    clearInterval(todayTick);
+    todayTick = null;
+  }
 }
 
 // Every page is re-rendered on every change, so a to-do ticked on the To-do
@@ -910,6 +937,7 @@ function showView(which) {
     b.setAttribute('aria-pressed', String(name === which));
   }
   render();
+  syncTodayTick();
 }
 
 // A SPECIFIC day was chosen, so catch up with the clock BEFORE setting the
@@ -951,6 +979,7 @@ els.prevWeek.addEventListener('click', () => stepFrom(viewWeekStart, (v) => { vi
 els.nextWeek.addEventListener('click', () => stepFrom(viewWeekStart, (v) => { viewWeekStart = addDays(v, 7); }));
 
 render();
+syncTodayTick();
 noteLaunch();
 stampUpdated();
 
@@ -1284,11 +1313,13 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
     if (activeToast) activeToast.dismiss();
     for (const id of [...pendingDeletes]) commitDelete(id);
+    syncTodayTick();
     return;
   }
   if (document.visibilityState !== 'visible') return;
   noteLaunch();
   render(); // refreshForToday runs first, inside render
+  syncTodayTick();
   stampUpdated();
   // Honours syncStale's 30-minute threshold, so a quick app switch does not
   // refetch every calendar.

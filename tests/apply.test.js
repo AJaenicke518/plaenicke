@@ -21,6 +21,26 @@ import { SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID, SLOW_WRITE_MS } from '../js/linku
 import { addDays, startOfWeek, weekLabel } from '../js/timegrid.js';
 import { formatDayLabel } from '../js/freshness.js';
 
+// INTERVALS ARE RECORDED, NEVER SCHEDULED, in this file. app.js's Today tick
+// is a 60 s setInterval (home-screen spec § 2.3), armed while Today is shown,
+// and every page here is "shown" at load (the fake DOM ignores index.html's
+// `hidden`). A real interval left running keeps this file's process alive
+// after its last test: measured on Node 22.18, with a last test that leaves
+// Today showing, `node --test tests/apply.test.js` never exits. Installed
+// before app.js is imported (the first test), and no test here mocks
+// setInterval, so app.js only ever sees these. A test runs one by calling
+// its `fn`.
+const intervals = new Map();
+let intervalSeq = 0;
+globalThis.setInterval = (fn, ms) => {
+  intervalSeq += 1;
+  const id = `interval-${intervalSeq}`;
+  intervals.set(id, { fn, ms });
+  return id;
+};
+globalThis.clearInterval = (id) => { intervals.delete(id); };
+const liveIntervals = (ms) => [...intervals.values()].filter((i) => i.ms === ms);
+
 // This file must never reach the production Worker. Tests that need a server
 // stub globalThis.fetch and restore it afterwards, but app.js also schedules
 // syncs on real timers that fire after a test has restored fetch, so that is
@@ -5815,4 +5835,82 @@ test('Today: a calendar event is shown by its title; the calendar\'s link never 
   } finally {
     unseedFeeds();
   }
+});
+
+// --- the 60 s tick (spec § 2.3) ----------------------------------------------
+// It updates the one "in N" text node and never rebuilds the list. It runs
+// only while Today and the page are both visible.
+
+test('Today: the tick runs only while Today and the page are both visible, and never twice', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const doc = globalThis.document;
+  try {
+    click(doc.getElementById('show-day'));
+    assert.equal(liveIntervals(60000).length, 0);
+    click(doc.getElementById('show-today'));
+    assert.equal(liveIntervals(60000).length, 1);
+    click(doc.getElementById('show-today'));
+    assert.equal(liveIntervals(60000).length, 1, 'tapping Today again arms no second one');
+    click(doc.getElementById('show-week'));
+    assert.equal(liveIntervals(60000).length, 0, 'leaving Today stops it');
+    click(doc.getElementById('show-today'));
+    doc.visibilityState = 'hidden';
+    resume();
+    assert.equal(liveIntervals(60000).length, 0, 'a hidden page does not tick');
+    doc.visibilityState = 'visible';
+    resume();
+    assert.equal(liveIntervals(60000).length, 1, 'and starts again on return');
+  } finally {
+    doc.visibilityState = 'visible';
+    if (restore) click(restore);
+  }
+});
+
+test('Today: the tick changes the "in N" text, and no other node', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const nodesOf = (root) => {
+    const out = [];
+    const walk = (n) => { for (const c of n.children) { out.push(c); walk(c); } };
+    walk(root);
+    return out;
+  };
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
+  try {
+    seed([
+      record({ id: 'td-rel', type: 'event', title: 'td Lecture', date: '2026-10-21', time: '10:00', endTime: '11:00' }),
+      record({ id: 'td-rel-gym', type: 'event', title: 'td Gym', date: '2026-10-21', time: '08:00', endTime: '09:00' }),
+      record({ id: 'td-rel-task', type: 'task', title: 'td Pay rent', date: '2026-10-21' }),
+    ]);
+    click(globalThis.document.getElementById('show-today'));
+    const before = nodesOf(todayBody());
+    const texts = before.map((n) => n.textContent);
+    const rel = before.find((n) => n._classes.has('today-rel'));
+    assert.equal(rel.textContent, 'in 42 min', 'fixture check');
+    const [tick] = liveIntervals(60000);
+    assert.ok(tick, 'fixture check: Today is ticking');
+    t.mock.timers.tick(12 * 60 * 1000); // 09:30
+    tick.fn();
+    assert.equal(rel.textContent, 'in 30 min');
+    const after = nodesOf(todayBody());
+    assert.equal(after.length, before.length, 'nothing added or removed');
+    after.forEach((n, i) => {
+      assert.equal(n, before[i], 'the same nodes: nothing was rebuilt');
+      if (n !== rel) assert.equal(n.textContent, texts[i], 'and no other text changed');
+    });
+    t.mock.timers.tick(30 * 60 * 1000); // 10:00
+    tick.fn();
+    assert.equal(rel.textContent, 'now');
+    t.mock.timers.tick(60 * 60 * 1000); // 11:00
+    tick.fn();
+    assert.equal(rel.textContent, '', 'over: the label empties; the next render greys the row');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+  resume();
 });
