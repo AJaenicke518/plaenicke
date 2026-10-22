@@ -5914,3 +5914,44 @@ test('Today: the tick changes the "in N" text, and no other node', async (t) => 
   }
   resume();
 });
+
+// Review fix (Task 8): relativeLabel reads minutes of the day only, so a tick
+// after midnight with no render in between would count down to YESTERDAY's
+// event (23:55 read at 12:00 the next day is "in 11 h 55 min"). A tick on a
+// new day re-renders instead.
+test('Today: a tick on a new day re-renders the page instead of counting down to yesterday', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const allNodes = (root) => {
+    const out = [];
+    const walk = (n) => { for (const c of n.children) { out.push(c); walk(c); } };
+    walk(root);
+    return out;
+  };
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 23, 50).getTime() });
+  try {
+    seed([
+      record({ id: 'td-mid', type: 'event', title: 'td Late call', date: '2026-10-21', time: '23:55', endTime: '23:59' }),
+    ]);
+    click(globalThis.document.getElementById('show-today'));
+    const rel = allNodes(todayBody()).find((n) => n._classes.has('today-rel'));
+    assert.equal(rel.textContent, 'in 5 min', 'fixture check');
+    assert.equal(labelText('today-date'), 'Wednesday, October 21', 'fixture check');
+    const [tick] = liveIntervals(60000);
+    assert.ok(tick, 'fixture check: Today is ticking');
+    t.mock.timers.tick((12 * 60 + 10) * 60 * 1000); // 2026-10-22 12:00
+    tick.fn();
+    assert.notEqual(rel.textContent, 'in 11 h 55 min', 'no countdown to yesterday\'s event');
+    for (const n of allNodes(todayBody())) {
+      if (n._classes.has('today-rel')) assert.notEqual(n.textContent, 'in 11 h 55 min');
+    }
+    assert.equal(labelText('today-date'), 'Thursday, October 22', 'Today now shows the new day');
+    assert.ok(!allText(todayBody()).includes('td Late call'), 'yesterday\'s event is no longer under Today');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+  resume();
+});

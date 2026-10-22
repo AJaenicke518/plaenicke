@@ -868,8 +868,9 @@ function renderIdeas() {
 // line only when buildToday asks for it. One clock reading for the whole page.
 //
 // todayRelative is the one "in N" label on the page and its event, kept for
-// the 60 s tick below.
+// the 60 s tick below; todayRenderedFor is the day that render was for.
 let todayRelative = null;
+let todayRenderedFor = null;
 const minutesNow = (d) => d.getHours() * 60 + d.getMinutes();
 
 function renderToday() {
@@ -883,6 +884,7 @@ function renderToday() {
     minutesNow(now),
     () => instancesForRange(feeds, feedCache, addDays(todayISO, 1), addDays(todayISO, LOOKAHEAD_DAYS), deviceTz),
   );
+  todayRenderedFor = todayISO;
   todayRelative = renderTodayView(els.todayBody, today, { onOpen: openItem, onToggleDone: handleToggleDone }).relative;
 }
 
@@ -895,7 +897,14 @@ function renderToday() {
 const TODAY_TICK_MS = 60 * 1000;
 let todayTick = null;
 
+// relativeLabel reads minutes of the day only, never the date, so after
+// midnight the kept event may be yesterday's: a tick on a new day renders the
+// whole app (refreshForToday catches the cursors up) instead.
 function tickToday() {
+  if (toISO(new Date()) !== todayRenderedFor) {
+    render();
+    return;
+  }
   if (!todayRelative) return;
   todayRelative.node.textContent = relativeLabel(todayRelative.item, minutesNow(new Date())) || '';
 }
