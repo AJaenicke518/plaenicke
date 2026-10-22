@@ -103,7 +103,7 @@ test('each To-do row carries a real unchecked checkbox', () => {
   renderTodoView(el, [todo('a')], { todayISO: TODAY, onOpen() {}, onDelete() {}, onToggleDone() {} });
   const boxes = findAll(el, 'INPUT').filter((i) => i.type === 'checkbox');
   assert.equal(boxes.length, 1);
-  assert.equal(boxes[0].checked, false, 'the page only lists items that are NOT done');
+  assert.equal(boxes[0].checked, false, 'an undone item renders unticked');
   assert.match(boxes[0].getAttribute('aria-label') || '', /t-a/,
     'a bare checkbox with no label is unusable with a screen reader');
 });
@@ -130,7 +130,7 @@ test('the checkbox reports the control state, not a hard-coded true', () => {
   const calls = [];
   renderTodoView(el, [todo('a', { done: true })], { todayISO: TODAY, onOpen() {}, onDelete() {}, onToggleDone: (id, d) => calls.push([id, d]) });
   const box = findAll(el, 'INPUT').filter((i) => i.type === 'checkbox')[0];
-  assert.equal(box.checked, true, 'a done item, were it ever shown, must render ticked');
+  assert.equal(box.checked, true, 'a done item (ticked today) renders ticked');
   box.checked = false;
   box.fire('change');
   assert.deepEqual(calls, [['a', false]]);
@@ -160,6 +160,16 @@ test('each To-do checkbox is wrapped in its own todo-tick label, a sibling of th
   }
 });
 
+// As Today's (final review A10): the label says what a tap will do.
+test('the To-do checkbox aria-label follows the box: done when unchecked, not done when checked', () => {
+  const el = host();
+  renderTodoView(el, [todo('a', { title: 'Open one' }), todo('b', { title: 'Ticked one', done: true })],
+    { todayISO: TODAY, onOpen() {}, onDelete() {}, onToggleDone() {} });
+  const boxes = findAll(el, 'INPUT').filter((i) => i.type === 'checkbox');
+  assert.equal(boxes[0].getAttribute('aria-label'), 'Mark "Open one" done');
+  assert.equal(boxes[1].getAttribute('aria-label'), 'Mark "Ticked one" not done');
+});
+
 test('Delete on a To-do row calls onDelete with that id', () => {
   const el = host();
   const deleted = [];
@@ -173,6 +183,16 @@ test('the To-do view says so when there is nothing to do', () => {
   renderTodoView(el, [], { todayISO: TODAY, onOpen() {}, onDelete() {}, onToggleDone() {} });
   assert.equal(rows(el).length, 0);
   assert.match(allText(el), /\S/, 'an empty page must say something rather than look broken');
+});
+
+// 2026-10-22: a to-do ticked today is a row like any other; a page holding
+// only that row is not empty.
+test('a To-do page whose only row is ticked today shows the row and no empty message', () => {
+  const el = host();
+  renderTodoView(el, [todo('a', { done: true })], { todayISO: TODAY, onOpen() {}, onDelete() {}, onToggleDone() {} });
+  assert.equal(rows(el).length, 1);
+  assert.equal(el.children.filter((li) => li._classes.has('empty')).length, 0, 'no empty-message row');
+  assert.match(allText(el), /t-a/);
 });
 
 test('a re-render replaces the previous rows rather than appending to them', () => {

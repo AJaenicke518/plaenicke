@@ -650,6 +650,15 @@ test('a ticked Today row is struck through, not dimmed', () => {
   assert.equal(declOf('.today-row.done .today-text', 'text-decoration'), 'line-through');
 });
 
+// Alex, 2026-10-22: a to-do ticked today stays on the To-do page until
+// tomorrow, drawn as Today draws it: struck through, not dimmed. The title is
+// the .item-open button ("<day> — <title>").
+test('a ticked To-do row is struck through, not dimmed', () => {
+  assert.equal(declOf('.done', 'opacity'), '0.55', 'fixture check: the global rule it overrides');
+  assert.equal(declOf('.todo-row.done', 'opacity'), '1');
+  assert.equal(declOf('.todo-row.done .item-open', 'text-decoration'), 'line-through');
+});
+
 // Final review A7: the meta spans squeezed the title. "Repeats weekly
 // (guessed)" takes its own line under the title; time and "in N" stay on the
 // title line. The open button pads itself so a two-line title clears the
@@ -674,11 +683,14 @@ test('the settings gear (.icon-btn) is at least 44x44', () => {
   assert.equal(declOf('.icon-btn', 'min-height'), '44px');
 });
 
-// Final review A12: the gear left the header, so the stamp is its last item
-// and the right margin that spaced it from the gear is gone.
-test('the Updated stamp keeps no right margin for a gear that left the header', () => {
+// Alex, 2026-10-22: the gear is back in the shell header, top right on every
+// page (spec § 2.2 amendment). index.html puts it last (apply.test.js); the
+// header is a flex row, and the stamp's auto left margin pushes the stamp and
+// the gear to the right edge, with a small gap between them.
+test('the header puts the stamp and then the gear at its right edge', () => {
+  assert.equal(declOf('header', 'display'), 'flex');
   assert.equal(declOf('.stamp', 'margin-left'), 'auto');
-  assert.equal(declOf('.stamp', 'margin-right'), null);
+  assert.equal(declOf('.stamp', 'margin-right'), 'var(--space-2)', 'a small gap before the gear');
 });
 
 test('a pressed Today row is tinted, not dimmed like a pressed button', () => {

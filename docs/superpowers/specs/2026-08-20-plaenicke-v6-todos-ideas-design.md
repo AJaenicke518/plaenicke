@@ -69,6 +69,8 @@ The unifying constraint: **do this without re-deriving sync correctness.** V5's 
 
 A completed to-do leaves the To-do page but **stays on the calendar** — it still happened that day. Style it as completed; `itemTypeClass` (`js/calendar.js:53`) is the documented home for that class rule and this is the only V6 change that lands there.
 
+**Amended 2026-10-22 (Alex, after using the live app: "in to do when i click it it says i finished it and i like the way it looks in the today screen but i also want to see the crossed out version in the to do tab as well"):** a to-do ticked *today* no longer leaves the To-do page at once. It stays, checked and struck through (not dimmed), after every undone to-do, until tomorrow, by the home-screen spec's rule for Today: done, and `updatedAt` on today's local date (`tickedToday` in `js/today.js`, exported and reused). A to-do ticked on an earlier day still leaves the page. The To-do row in the table above therefore reads: undone to-dos, then to-dos ticked today.
+
 The To-do and Ideas pages read `items` directly, **not** `visibleItems()` — external feed instances carry no `type`, so they would fail the predicates by accident rather than by design.
 
 **Superseded 2026-10-20:** manual add now creates `type: 'event'` (owner decision). Original text: **Accepted gap:** manual add hard-codes `type: 'general'` (`js/app.js:143`), which is not on the To-do predicate. Manual add is the offline fallback, used only when Alex picks a date himself. Rejected alternatives: a control on the add box (unnecessary given voice), and treating every `general` item as a to-do (would put birthdays on the to-do list).

@@ -676,7 +676,7 @@ test('the To-do page lists open to-dos, and nothing else', async () => {
   for (const t of ['Renew the passport', 'Physics essay', 'Start the essay', 'First draft']) {
     assert.match(text, new RegExp(t), `${t} is actionable and belongs on the To-do page`);
   }
-  assert.doesNotMatch(text, /Already finished/, 'a completed to-do leaves the To-do page');
+  assert.doesNotMatch(text, /Already finished/, 'a to-do completed on an earlier day leaves the To-do page');
   assert.doesNotMatch(text, /Dentist appointment/, 'an appointment is not a to-do');
   assert.doesNotMatch(text, /Someones birthday/, 'a general item is not a to-do — birthdays are not chores');
   assert.doesNotMatch(text, /Rework the shelves/, 'an idea is not a to-do');
@@ -788,7 +788,10 @@ test('ticking a to-do writes done to storage and re-renders both pages', async (
   const stored = loadItems();
   assert.equal(stored.find((i) => i.id === 'task1').done, true, 'the tick must reach storage');
   assert.equal(stored.find((i) => i.id === 'task2').done, false, 'and must not touch its neighbour');
-  assert.doesNotMatch(allText(todoList()), /Renew the passport/, 'the completed item leaves the To-do page');
+  // Alex, 2026-10-22: a to-do ticked today stays on the To-do page, struck
+  // through, until tomorrow (was: it left the page at once).
+  const ticked = checkboxFor(todoList(), 'Renew the passport');
+  assert.ok(ticked && ticked.checked, 'the ticked item stays on the To-do page, checked, until tomorrow');
   assert.match(allText(itemList()), /Renew the passport/, 'and stays on the calendar');
 });
 
@@ -5766,13 +5769,83 @@ test('app.js installs the press listeners on the document, once each', async () 
 // Ids are prefixed `td-`. Each test puts the page it found back, and leaves
 // no items or calendars behind.
 
-test('Today: the gear is on the Today page, and nowhere else', () => {
+// Alex, 2026-10-22 (spec § 2.2 amendment): "i want the settings to continue
+// to be on the top right at all times because when i exit the today tab the
+// settings disappears." The gear is the shell header's last item, on every
+// page, and no longer on Today.
+test('the gear is the shell header\'s last item, and not on the Today page', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  assert.equal(html.match(/id="settings-btn"/g).length, 1, 'exactly one gear');
+  const header = html.match(/<header>[\s\S]*?<\/header>/);
+  assert.ok(header, 'fixture check: index.html has a shell <header>');
+  assert.match(header[0], /<button id="settings-btn"[^>]*>[^<]*<\/button>\s*<\/header>$/,
+    'the gear is the header\'s last child, so it sits at the right edge');
   const today = html.match(/<section id="today-view"[\s\S]*?<\/section>/);
   assert.ok(today, 'fixture check: index.html has a Today section');
-  assert.match(today[0], /<button id="settings-btn"/);
-  assert.equal(html.match(/id="settings-btn"/g).length, 1);
-  assert.doesNotMatch(html.match(/<header>[\s\S]*?<\/header>/)[0], /settings-btn/, 'the shell header no longer holds it');
+  assert.doesNotMatch(today[0], /settings-btn/, 'the Today page no longer holds the gear');
+});
+
+// The ids of the elements that contain #`id` in `html`, outermost first, or
+// null when there is no such id. The fake DOM mounts every id flat under
+// <body> (tests/fake-dom.js), so it cannot say what holds the gear; index.html
+// can. app.js shows and hides pages only through elements it finds by id, so
+// an ancestor with an id is the only kind a page switch can hide.
+const VOID_TAGS = new Set(['meta', 'link', 'input', 'br', 'img', 'hr', 'source', 'area', 'base', 'col', 'embed', 'track', 'wbr']);
+function ancestorIdsIn(html, id) {
+  const body = html.replace(/<!--[\s\S]*?-->/g, '').replace(/<(script|style)\b[\s\S]*?<\/\1>/g, '');
+  const stack = [];
+  for (const m of body.matchAll(/<(\/?)([a-zA-Z][a-zA-Z0-9-]*)([^>]*)>/g)) {
+    const [, closing, rawTag, attrs] = m;
+    const tag = rawTag.toLowerCase();
+    if (closing) {
+      const at = stack.map((e) => e.tag).lastIndexOf(tag);
+      if (at < 0) throw new Error(`index.html: </${tag}> closes nothing`);
+      stack.length = at;
+      continue;
+    }
+    const own = attrs.match(/\bid="([^"]+)"/);
+    if (own && own[1] === id) return stack.map((e) => e.id).filter(Boolean);
+    if (!VOID_TAGS.has(tag) && !attrs.trimEnd().endsWith('/')) stack.push({ tag, id: own ? own[1] : null });
+  }
+  return null;
+}
+
+// Every page the nav shows, with the section that shows it.
+const SHELL_PAGES = [
+  ['Today', 'show-today', 'today-view'], ['Day', 'show-day', 'day-view'],
+  ['Week', 'show-week', 'week-view'], ['Month', 'show-month', 'calendar-view'],
+  ['List', 'show-list', 'list-view'], ['To-do', 'show-todo', 'todo-view'],
+  ['Ideas', 'show-ideas', 'ideas-view'],
+];
+
+test('the gear: on every page nothing holding it is hidden, and it opens Settings', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const holders = ancestorIdsIn(html, 'settings-btn');
+  assert.ok(holders, 'fixture check: index.html has #settings-btn');
+  const doc = globalThis.document;
+  const settingsBtn = doc.getElementById('settings-btn');
+  const settingsHost = doc.getElementById('settings-host');
+  if (settingsHost.childElementCount) click(settingsBtn); // left open by an earlier test
+  const restore = visiblePageButton();
+  try {
+    for (const [name, buttonId, sectionId] of SHELL_PAGES) {
+      click(doc.getElementById(buttonId));
+      assert.equal(doc.getElementById(sectionId).hidden, false, `fixture check: ${name} is showing`);
+      assert.notEqual(settingsBtn.hidden, true, `${name}: the gear itself is not hidden`);
+      for (const holder of holders) {
+        assert.notEqual(doc.getElementById(holder).hidden, true, `${name}: #${holder}, which holds the gear, is hidden`);
+      }
+      click(settingsBtn);
+      assert.ok(settingsHost.childElementCount > 0, `${name}: the gear opens Settings`);
+      click(settingsBtn);
+      assert.equal(settingsHost.childElementCount, 0, `fixture check: ${name}: the gear closes Settings`);
+    }
+  } finally {
+    if (settingsHost.childElementCount) click(settingsBtn);
+    if (restore) click(restore);
+  }
 });
 
 test('Today: the page names the day and lists live items in their sections', async (t) => {
@@ -5883,9 +5956,95 @@ test('Today: a tick on Today is saved, and the row stays, struck through, until 
     const again = checkboxFor(todayBody(), 'td Water plants');
     assert.ok(again && again.checked, 'still on Today, ticked');
     assert.ok(todayRowOf(again)._classes.has('done'));
-    assert.doesNotMatch(allText(todoList()), /td Water plants/, 'while the To-do page drops it');
+    // Alex, 2026-10-22: the To-do page keeps it too, by the same rule (was:
+    // 'while the To-do page drops it').
+    const onTodo = checkboxFor(todoList(), 'td Water plants');
+    assert.ok(onTodo && onTodo.checked, 'and the To-do page keeps it, ticked');
   } finally {
     if (restore) click(restore);
+  }
+  seed([]);
+});
+
+// Alex, 2026-10-22: "i also want to see the crossed out version in the to do
+// tab as well". The To-do page uses Today's rule (js/today.js tickedToday): a
+// to-do ticked today stays, checked and struck through, after every undone
+// one, until tomorrow. One ticked on an earlier day does not show.
+test('To-do page: a to-do ticked today stays, checked and done, after the undone ones, and unticks back into date order', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
+  const rowTexts = () => todoList().children.map((li) => allText(li));
+  const rowOf = (title) => todoList().children.find((li) => allText(li).includes(title));
+  try {
+    seed([
+      record({ id: 'tt-later', type: 'task', title: 'tt Later task', date: '2026-10-25' }),
+      record({ id: 'tt-today', type: 'task', title: 'tt Today task', date: '2026-10-21' }),
+      record({
+        id: 'tt-old', type: 'task', title: 'tt Ticked yesterday', date: '2026-10-20', done: true,
+        updatedAt: new Date(2026, 9, 20, 12, 0).toISOString(),
+      }),
+      // Done today but not a to-do type: typeChangePatch keeps `done`, so an
+      // event or idea can carry it. Neither belongs on the To-do page.
+      record({
+        id: 'tt-ev', type: 'event', title: 'tt Done event', date: '2026-10-21', done: true,
+        updatedAt: new Date(2026, 9, 21, 8, 0).toISOString(),
+      }),
+      record({
+        id: 'tt-idea', type: 'idea', title: 'tt Done idea', date: '2026-10-21', done: true,
+        updatedAt: new Date(2026, 9, 21, 8, 0).toISOString(),
+      }),
+    ]);
+    assert.doesNotMatch(allText(todoList()), /tt Done event/, 'a done event ticked today is not a to-do');
+    assert.doesNotMatch(allText(todoList()), /tt Done idea/, 'a done idea ticked today is not a to-do');
+    assert.equal(rowTexts().length, 2, 'fixture check: the two undone ones only');
+    assert.match(rowTexts()[0], /tt Today task/, 'fixture check: date order');
+
+    const box = checkboxFor(todoList(), 'tt Today task');
+    box.checked = true;
+    fire(box, 'change');
+    assert.equal(storedById('tt-today').done, true, 'the tick reached storage');
+    const ticked = checkboxFor(todoList(), 'tt Today task');
+    assert.ok(ticked, 'still on the To-do page after the tick');
+    assert.equal(ticked.checked, true);
+    assert.ok(rowOf('tt Today task')._classes.has('done'), 'struck through');
+    assert.equal(rowTexts().length, 2, 'the done-yesterday item is still absent');
+    assert.match(rowTexts()[0], /tt Later task/, 'the undone one is now first');
+    assert.match(rowTexts()[1], /tt Today task/, 'the ticked one after it');
+    assert.doesNotMatch(allText(todoList()), /tt Ticked yesterday/, 'a to-do ticked on an earlier day does not show');
+
+    ticked.checked = false;
+    fire(ticked, 'change');
+    assert.equal(storedById('tt-today').done, false, 'the untick reached storage');
+    const unticked = checkboxFor(todoList(), 'tt Today task');
+    assert.ok(unticked && unticked.checked === false);
+    assert.equal(rowOf('tt Today task')._classes.has('done'), false);
+    assert.equal(rowTexts().length, 2, 'the unticked item is listed once, not in both groups');
+    assert.match(rowTexts()[0], /tt Today task/, 'back in date order, first');
+    assert.match(rowTexts()[1], /tt Later task/);
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+  }
+});
+
+// The done group reads liveItems(), as the undone group does: a ticked to-do
+// deleted from the To-do page is gone at once, while its Undo is pending.
+test('To-do page: a to-do ticked today and then deleted leaves the page before the Undo expires', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'tt-del', type: 'task', title: 'tt Tick then delete', date: localISO(new Date()) })]);
+  enableMockTimers(t, { apis: ['setTimeout'] });
+  try {
+    const box = checkboxFor(todoList(), 'tt Tick then delete');
+    box.checked = true;
+    fire(box, 'change');
+    assert.ok(checkboxFor(todoList(), 'tt Tick then delete'), 'fixture check: ticked, and still listed');
+    click(deleteControlFor(todoList(), 'tt Tick then delete'));
+    assert.ok(toastHost().querySelector('.toast-undo'), 'fixture check: the Undo is still pending');
+    assert.doesNotMatch(allText(todoList()), /tt Tick then delete/, 'a pending delete is already gone from the To-do page');
+  } finally {
+    await resetMockTimers(t);
   }
   seed([]);
 });
@@ -6266,7 +6425,37 @@ test('Today: a tick from a box without focus moves no focus', async () => {
   seed([]);
 });
 
-test('To-do: a tick leaves focus alone (C4 is Today only)', async () => {
+// 2026-10-22: a ticked to-do now stays on the To-do page until tomorrow, so
+// a To-do tick keeps focus the way Today's does, through the same function
+// (was: 'To-do: a tick leaves focus alone (C4 is Today only)').
+test('To-do: a tick from a focused box puts focus on the re-rendered box in the same row', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const doc = globalThis.document;
+  seed([
+    record({ id: 'ff2-c4-todo', type: 'task', title: 'ff2 To-do focus', date: '2099-01-01' }),
+    record({ id: 'ff2-c4-other', type: 'task', title: 'ff2 To-do other', date: '2099-02-01' }),
+  ]);
+  try {
+    click(doc.getElementById('show-todo'));
+    const box = checkboxFor(todoList(), 'ff2 To-do focus');
+    box.focus();
+    doc.lastFocusOptions = undefined;
+    box.checked = true;
+    fire(box, 'change');
+    const again = checkboxFor(todoList(), 'ff2 To-do focus');
+    assert.notEqual(again, box, 'fixture check: the tick re-rendered the row');
+    assert.equal(doc.activeElement, again, 'focus is on the new box in the same row');
+    assert.deepEqual(doc.lastFocusOptions, { preventScroll: true });
+  } finally {
+    doc.activeElement = null;
+    if (restore) click(restore);
+  }
+  seed([]);
+});
+
+test('To-do: a tick from a box without focus moves no focus', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
   const restore = visiblePageButton();
@@ -6274,11 +6463,12 @@ test('To-do: a tick leaves focus alone (C4 is Today only)', async () => {
   seed([record({ id: 'ff2-c4-todo', type: 'task', title: 'ff2 To-do focus', date: '2099-01-01' })]);
   try {
     click(doc.getElementById('show-todo'));
+    const elsewhere = doc.getElementById('entry-text');
+    elsewhere.focus();
     const box = checkboxFor(todoList(), 'ff2 To-do focus');
-    box.focus();
     box.checked = true;
     fire(box, 'change');
-    assert.equal(doc.activeElement, box, 'nothing was focused');
+    assert.equal(doc.activeElement, elsewhere, 'focus stays where it was');
   } finally {
     doc.activeElement = null;
     if (restore) click(restore);

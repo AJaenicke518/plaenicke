@@ -28,6 +28,9 @@
          this app rather than reloading it, so "is this current?" is a real
          question; js/app.js repaints this on load and on every resume. -->
     <span id="updated-stamp" class="stamp"></span>
+    <!-- Settings, top right on every page (spec § 2.2, amended 2026-10-22):
+         the header's last item. -->
+    <button id="settings-btn" class="icon-btn" type="button" aria-label="Settings">&#9881;</button>
   </header>
 
   <!-- The app-shell sync indicator (V6 spec § 9 step 0). A broken sync is
@@ -72,15 +75,14 @@
   </nav>
 
   <!-- Today (home-screen spec § 2): js/today.js decides what is on it and
-       js/todayview.js draws it into #today-body. Settings opens from the gear
-       here, on Today only (spec § 2.2). -->
+       js/todayview.js draws it into #today-body. The Settings gear is in
+       the shell header, not here (spec § 2.2, amended 2026-10-22). -->
   <section id="today-view">
     <div class="today-head">
       <div>
         <h2 class="today-title">Today</h2>
         <p id="today-date" class="today-date"></p>
       </div>
-      <button id="settings-btn" class="icon-btn" type="button" aria-label="Settings">&#9881;</button>
     </div>
     <div id="today-body"></div>
   </section>

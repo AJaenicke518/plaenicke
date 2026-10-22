@@ -26,6 +26,8 @@ Layout A, stacked: **Overdue → To do today → Today's events → Next 7 days*
 ### 2.2 Header — Claude's call — confirm
 "Today" with the date under it, and the gear (`#settings-btn`, `index.html:31`) on the right, on Today only. The `plaenicke` h1 is replaced by each tab's title. `#sync-indicator` and `#updated-stamp` stay in the shell, unchanged (including the load-bearing load-time paint).
 
+**Amended 2026-10-22 (Alex, after using the live Today page on his phone: "the today page is correct. however note. i want the settings to continue to be on the top right at all times because when i exit the today tab the settings disappears."):** the gear is not on Today. It lives in the shell header, as its last item, top right on every page; the stamp sits just left of it. Today keeps its heading and date.
+
 ### 2.3 What goes in each section — Claude's call — confirm (the order, no caps, overdue and done-stays are Decided)
 One pure function in a new `js/today.js` builds every section, called as `buildToday(liveItems(), instancesForRange(feeds, feedCache, today, today+7, deviceTz), todayISO, nowMinutes)`. Not from `visibleItems` (`app.js:130-134`, every own item for every date), and no `todoItems()` on top (already in `liveItems()`).
 
