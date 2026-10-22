@@ -894,6 +894,13 @@ function renderToday() {
 // until then. It runs only while Today AND the page are visible:
 // syncTodayTick is called wherever either can change (load, showView,
 // visibilitychange).
+//
+// It lands on the minute (final review A3): arming first sets a timeout to
+// the next minute boundary, whose callback ticks and then starts the 60 s
+// interval. `todayTick` is the one handle, in either phase —
+// { kind: 'align' | 'interval', id } or null — so clearing works in both and
+// there are never two. tests/apply.test.js recognises the timeout by its
+// callback's name, startTodayTick: keep it.
 const TODAY_TICK_MS = 60 * 1000;
 let todayTick = null;
 
@@ -909,11 +916,19 @@ function tickToday() {
   todayRelative.node.textContent = relativeLabel(todayRelative.item, minutesNow(new Date())) || '';
 }
 
+function startTodayTick() {
+  tickToday();
+  todayTick = { kind: 'interval', id: setInterval(tickToday, TODAY_TICK_MS) };
+}
+
 function syncTodayTick() {
   const wanted = !els.todayView.hidden && document.visibilityState !== 'hidden';
-  if (wanted && todayTick === null) todayTick = setInterval(tickToday, TODAY_TICK_MS);
+  if (wanted && todayTick === null) {
+    todayTick = { kind: 'align', id: setTimeout(startTodayTick, TODAY_TICK_MS - (Date.now() % TODAY_TICK_MS)) };
+  }
   if (!wanted && todayTick !== null) {
-    clearInterval(todayTick);
+    if (todayTick.kind === 'align') clearTimeout(todayTick.id);
+    else clearInterval(todayTick.id);
     todayTick = null;
   }
 }
