@@ -24,8 +24,10 @@
 <body>
   <header>
     <!-- The tab's title (home-screen spec § 2.2), set by js/app.js's
-         showView. Hidden on Today, whose own heading names the day. -->
-    <h1 id="tab-title" class="tab-title" hidden>Today</h1>
+         showView. On Today it is visually hidden, never removed: Today's own
+         heading names the day on screen, and this h1 still names the page
+         for assistive tech (final review B3). -->
+    <h1 id="tab-title" class="tab-title visually-hidden">Today</h1>
     <!-- When the screen was last brought up to date (Phase 0). iOS resumes
          this app rather than reloading it, so "is this current?" is a real
          question; js/app.js repaints this on load and on every resume. -->

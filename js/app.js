@@ -974,8 +974,10 @@ function showView(which) {
   for (const [name, b] of Object.entries(tabs)) mark(b, name === tab);
   for (const [name, b] of Object.entries(segments)) mark(b, name === which);
   els.calSwitch.hidden = tab !== 'calendar';
+  // Out of sight on Today, never out of the accessibility tree (final review
+  // B3); the header keeps its height either way (styles.css).
   els.tabTitle.textContent = TAB_TITLES[tab];
-  els.tabTitle.hidden = tab === 'today';
+  els.tabTitle.classList.toggle('visually-hidden', tab === 'today');
   render();
   syncTodayTick();
 }

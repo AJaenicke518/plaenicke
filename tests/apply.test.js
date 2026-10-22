@@ -6214,7 +6214,10 @@ test('tabs: tapping a day in Month or Week opens Day inside Calendar', async () 
   }
 });
 
-test('tabs: the shell title names the tab; on Today the Today heading stands alone', async () => {
+// Final review B3 (2026-10-22): on Today the title is visually hidden, not
+// removed — the page keeps an h1 named "Today" for assistive tech, and the
+// header keeps its height (styles.css) so the add box does not jump.
+test('tabs: the shell title names the tab; on Today it is "Today", visually hidden but still read', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
   const doc = globalThis.document;
@@ -6224,14 +6227,23 @@ test('tabs: the shell title names the tab; on Today the Today heading stands alo
     for (const [tab, text] of [['tab-calendar', 'Calendar'], ['tab-todo', 'To-do'], ['tab-ideas', 'Ideas']]) {
       click(doc.getElementById(tab));
       assert.equal(title.hidden, false, tab);
+      assert.equal(title._classes.has('visually-hidden'), false, tab);
       assert.equal(title.textContent, text, tab);
     }
     click(doc.getElementById('tab-today'));
-    assert.equal(title.hidden, true);
+    assert.equal(title.hidden, false, 'never removed from the accessibility tree');
+    assert.equal(title._classes.has('visually-hidden'), true, 'only out of sight');
+    assert.equal(title.textContent, 'Today');
+    click(doc.getElementById('tab-todo'));
+    assert.equal(title._classes.has('visually-hidden'), false, 'and back in sight on the next tab');
   } finally {
     if (restore) click(restore);
   }
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-  assert.match(html, /<h1 id="tab-title"[^>]*hidden/, 'hidden at load, when Today is showing');
+  const tag = html.match(/<h1 id="tab-title"[^>]*>([^<]*)<\/h1>/);
+  assert.ok(tag, 'fixture check: index.html has the tab title');
+  assert.doesNotMatch(tag[0], /\shidden/, 'not hidden at load');
+  assert.match(tag[0], /class="[^"]*\bvisually-hidden\b/, 'visually hidden at load, when Today is showing');
+  assert.equal(tag[1], 'Today');
   assert.doesNotMatch(html, />plaenicke<\/h1>/, 'the plaenicke h1 is replaced by the tab titles');
 });

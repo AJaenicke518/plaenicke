@@ -718,6 +718,18 @@ test('a toast message wraps and stops at two lines; Undo keeps its size', () => 
   assert.equal(declOf('.toast-undo', 'flex-shrink'), '0');
 });
 
+// Final review B3: on Today the tab title is visually hidden, not removed,
+// so the header would lose its height and the add box would jump by it. The
+// header keeps the height the title gives it on every other tab: one line of
+// --text-title at the body's line-height, plus the h1's 16px margins.
+test('the header keeps the tab title\'s height on every tab', () => {
+  assert.equal(declOf(':root', '--text-title'), '20px', 'fixture check');
+  assert.equal(lineHeightOf('body'), 1.5, 'fixture check');
+  assert.equal(declOf('header h1', 'margin-top'), '16px', 'fixture check');
+  assert.equal(declOf('header h1', 'margin-bottom'), '16px', 'fixture check');
+  assert.equal(declOf('header', 'min-height'), `${20 * 1.5 + 16 + 16}px`);
+});
+
 // .cal-switch sets display: flex, which beats the `hidden` attribute's
 // display: none. Without this rule the switcher would show on every tab.
 test('a hidden switcher is not displayed', () => {

@@ -141,7 +141,12 @@ body {
   line-height: 1.5;
 }
 
-header { display: flex; justify-content: space-between; align-items: center; }
+/* A stable height (final review B3): the tab title is visually hidden on
+   Today, which takes it out of the flow. Without this the header shrank by
+   the title's height there and the add box jumped between tabs. 62px is one
+   line of --text-title (20px) at the body's 1.5 line-height plus the h1's
+   16px margins (tests/styles.test.js derives it). */
+header { display: flex; justify-content: space-between; align-items: center; min-height: 62px; }
 header h1 { font-size: 1.7rem; font-style: italic; font-weight: 700; margin: 16px 0; }
 
 /* 44px: Apple's minimum touch target (final review A9). The settings gear is
