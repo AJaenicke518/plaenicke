@@ -35,9 +35,39 @@ const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8')
 // counts: `padding: 0` after `padding-bottom: 12px` resets the bottom.
 // The first version of these helpers took the last LONGHAND only, so a later
 // shorthand that undid it read as the longhand still being in force.
+// Every style rule as { sel, body }, in source order. An at-rule's block
+// (@media) is opened and its rules read as if they stood outside it (final
+// fixes 2, C7): the old regex read `@media (…) { .x { … } }` as one rule whose
+// selector was the prelude, so nothing inside an @media was ever checked.
+// Braces that do not balance throw rather than yield a partial parse.
+function rulesOf(source) {
+  const out = [];
+  let depth = 0;
+  let start = 0;
+  let prelude = '';
+  let bodyStart = 0;
+  for (let i = 0; i < source.length; i += 1) {
+    if (source[i] === '{') {
+      if (depth === 0) { prelude = source.slice(start, i).trim(); bodyStart = i + 1; }
+      depth += 1;
+    } else if (source[i] === '}') {
+      depth -= 1;
+      if (depth < 0) throw new Error(`unbalanced braces at ${i}`);
+      if (depth === 0) {
+        const body = source.slice(bodyStart, i);
+        if (prelude.startsWith('@')) out.push(...rulesOf(body));
+        else out.push({ sel: prelude, body });
+        start = i + 1;
+      }
+    }
+  }
+  if (depth !== 0) throw new Error('unbalanced braces at end of source');
+  return out;
+}
+
 function declsOf(selector, source = css) {
   const out = [];
-  for (const [, sel, body] of source.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+  for (const { sel, body } of rulesOf(source)) {
     const selectors = sel.split(',').map((x) => x.trim().replace(/\s+/g, ' '));
     if (!selectors.includes(selector)) continue;
     for (const decl of body.split(';')) {
@@ -109,6 +139,17 @@ test('declOf reads the winning declaration, shorthands included (S-11)', () => {
     'a font shorthand after the size cannot be read as a size; the test must fail, not pass');
   assert.throws(() => declOf('.a', 'padding', '.a { padding: 0; padding-top: 4px; }'), /partly overridden/);
   assert.equal(lineHeightOf('.x'), null);
+});
+
+// Final fixes 2, C7: the rule regex read `@media (…) { .x { … } }` as ONE
+// rule whose selector is the @media prelude, so a declaration inside any
+// @media block was invisible to every test that reads declarations.
+test('the rule parser reads rules inside @media blocks (C7)', () => {
+  const src = '.b { color: blue; } @media (prefers-color-scheme: dark) { .a { color: red; } .b { color: green; } }';
+  assert.equal(declOf('.a', 'color', src), 'red', 'a rule inside @media is seen');
+  assert.equal(declOf('.b', 'color', src), 'green', 'in source order with the rules outside it');
+  assert.deepEqual(rulesOf(src).map((r) => r.sel), ['.b', '.a', '.b'], 'the @media prelude is not a selector');
+  assert.throws(() => rulesOf('.a { color: red;'), /unbalanced/, 'a parse it cannot finish fails the test');
 });
 
 test('body sets a readable line-height', () => {
@@ -638,7 +679,7 @@ test('no rule styles Today through an id', () => {
 
 test('every Today colour is a theme token, so dark mode follows', () => {
   let seen = 0;
-  for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+  for (const { sel, body } of rulesOf(css)) {
     if (!/\.today-/.test(sel)) continue;
     for (const decl of body.split(';')) {
       const i = decl.indexOf(':');
