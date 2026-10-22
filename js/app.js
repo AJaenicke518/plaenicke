@@ -419,8 +419,11 @@ function setDone(id, done) {
     items[idx] = before;
     throw e;
   }
-  render();
+  // The save succeeded, so the push is scheduled BEFORE the render (final
+  // fixes 2, C9): a render that throws must not leave a saved tick unsent. Its
+  // error still reaches the caller.
   scheduleSync();
+  render();
 }
 
 // editItem — the sheet's Save (edit-items Task 4c). Returns { ok, error }.
@@ -671,6 +674,29 @@ function focusOpener(id) {
   if (opener) opener.focus({ preventScroll: true });
 }
 
+// A tick on Today keeps keyboard focus (final fixes 2, C4). The tick
+// re-renders every page, so the box that had focus is gone; when it did have
+// focus, the NEW box in the row for the same item is focused, found as
+// focusOpener finds an opener: by the open button's data-item-id. To-do is
+// left as it is.
+function todayCheckOwner(box) {
+  if (!box || !box.classList || !box.classList.contains('today-check')) return null;
+  const row = box.parentNode && box.parentNode.parentNode; // label.today-tick, then the row
+  if (!row) return null;
+  const opener = [...row.querySelectorAll('button')].find((b) => b.classList.contains('today-open'));
+  return opener ? opener.getAttribute('data-item-id') : null;
+}
+
+function handleTodayToggleDone(id, done) {
+  const hadFocus = todayCheckOwner(document.activeElement) === id;
+  handleToggleDone(id, done);
+  if (!hadFocus) return;
+  const opener = [...els.todayBody.querySelectorAll('button')]
+    .find((b) => b.classList.contains('today-open') && b.getAttribute('data-item-id') === id);
+  const box = opener && opener.parentNode.querySelector('.today-check');
+  if (box) box.focus({ preventScroll: true });
+}
+
 function handleToggleDone(id, done) {
   try {
     setDone(id, done);
@@ -889,7 +915,7 @@ function renderToday() {
     () => instancesForRange(feeds, feedCache, addDays(todayISO, 1), addDays(todayISO, LOOKAHEAD_DAYS), deviceTz),
   );
   todayRenderedFor = todayISO;
-  todayRelative = renderTodayView(els.todayBody, today, { onOpen: openItem, onToggleDone: handleToggleDone }).relative;
+  todayRelative = renderTodayView(els.todayBody, today, { onOpen: openItem, onToggleDone: handleTodayToggleDone }).relative;
 }
 
 // THE 60 s TICK (spec § 2.3) updates that one text node and never rebuilds
@@ -912,20 +938,24 @@ let todayTick = null;
 // midnight the kept event may be yesterday's: a tick on a new day renders the
 // whole app instead — render(), not renderToday(): refreshForToday, inside
 // render, catches the other pages' cursors up — and repaints the "Updated"
-// stamp, as every other full render does (final review A4).
+// stamp (final review A4). Both stamp painters run, the pair onFeedsChanged
+// uses: with a visible calendar stampUpdated paints nothing, and a fetch time
+// from before midnight must now name its day (final fixes 2, C1).
 function tickToday() {
   if (toISO(new Date()) !== todayRenderedFor) {
     render();
-    stampUpdated();
+    stampUpdated(); stampFromFeeds();
     return;
   }
   if (!todayRelative) return;
   todayRelative.node.textContent = relativeLabel(todayRelative.item, minutesNow(new Date())) || '';
 }
 
+// The interval is armed BEFORE the first tick (final fixes 2, C2): a first
+// tick that throws must not leave Today with no tick at all.
 function startTodayTick() {
-  tickToday();
   todayTick = { kind: 'interval', id: setInterval(tickToday, TODAY_TICK_MS) };
+  tickToday();
 }
 
 function syncTodayTick() {

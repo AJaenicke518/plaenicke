@@ -6247,3 +6247,173 @@ test('tabs: the shell title names the tab; on Today it is "Today", visually hidd
   assert.equal(tag[1], 'Today');
   assert.doesNotMatch(html, />plaenicke<\/h1>/, 'the plaenicke h1 is replaced by the tab titles');
 });
+
+// Final fixes 2, C1: with a visible calendar, stampUpdated paints nothing, so
+// a tick on a new day left "Updated 11:30 PM" up after midnight, reading as
+// this morning's. The new-day branch repaints from the feeds too, as
+// onFeedsChanged does, and the fetch time now names its day.
+test('Today: a tick on a new day repaints the stamp from the visible calendars', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 23, 50).getTime() });
+  try {
+    seed([]);
+    seedFeedsWithCache([sdFeed('ff2-c1')], { 'ff2-c1': cacheAt(new Date(2026, 9, 21, 23, 30)) });
+    click(globalThis.document.getElementById('tab-today'));
+    stampEl().textContent = 'Updated 11:30 PM';
+    const tick = todayInterval();
+    t.mock.timers.tick(15 * 60 * 1000); // 2026-10-22 00:05
+    tick.fn();
+    assert.equal(stampEl().textContent, 'Updated Yesterday, 11:30 PM');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+  unseedFeeds();
+  resume();
+});
+
+// Final fixes 2, C2: startTodayTick ticked BEFORE it armed the interval, so a
+// first tick that threw left no interval at all and Today never ticked again
+// until something re-armed it. The interval is armed first; the throw still
+// reaches the caller.
+test('Today: a first tick that throws still leaves the 60 s interval running', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const doc = globalThis.document;
+  const dateEl = doc.getElementById('today-date');
+  // Back to a plain data property, as the fake DOM's constructor makes it.
+  const unbreak = () => { delete dateEl.textContent; dateEl.textContent = ''; };
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 23, 59, 30).getTime() });
+  try {
+    seed([]);
+    click(doc.getElementById('show-week'));
+    click(doc.getElementById('tab-today'));
+    assert.equal(liveAligns().length, 1, 'fixture check: waiting for the minute');
+    t.mock.timers.tick(30 * 1000); // 2026-10-22 00:00: the tick renders the new day
+    Object.defineProperty(dateEl, 'textContent', { configurable: true, get: () => '', set: () => { throw new Error('ff2-c2 render failed'); } });
+    assert.throws(() => fireTodayAlign(), /ff2-c2 render failed/, 'the error is not swallowed');
+    unbreak();
+    assert.equal(liveIntervals(60000).length, 1, 'the interval was armed anyway');
+    assert.equal(todayTicks(), 1, 'and only once');
+  } finally {
+    unbreak();
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+// Final fixes 2, C9: setDone's render() ran after the save and before
+// scheduleSync, outside the save's try. A render that threw after a
+// successful save left the tick saved but never pushed. The sync is scheduled
+// once the save succeeds; the render's error still reaches the caller.
+test('a tick whose render throws after the save still schedules its sync, and the error is not swallowed', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  seed([record({ id: 'ff2-c9', type: 'task', title: 'ff2 render throws', date: '2099-01-01' })]);
+  const dateEl = globalThis.document.getElementById('today-date');
+  const unbreak = () => { delete dateEl.textContent; dateEl.textContent = ''; };
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts = {}) => {
+    requests.push({ url: String(url), method: (opts && opts.method) || 'GET' });
+    return { ok: true, status: 200, json: async () => ({ version: 0, blob: '' }), text: async () => '' };
+  };
+  enableMockTimers(t, { apis: ['setTimeout'] });
+  try {
+    const box = checkboxFor(todoList(), 'ff2 render throws');
+    box.checked = true;
+    Object.defineProperty(dateEl, 'textContent', { configurable: true, get: () => '', set: () => { throw new Error('ff2-c9 render failed'); } });
+    assert.throws(() => fire(box, 'change'), /ff2-c9 render failed/, 'the render error surfaces');
+    unbreak();
+    assert.equal(storedById('ff2-c9').done, true, 'fixture check: the save succeeded');
+    t.mock.timers.tick(2000);
+    for (let i = 0; i < 50; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+  } finally {
+    unbreak();
+    await resetMockTimers(t);
+    globalThis.fetch = originalFetch;
+  }
+  assert.ok(requests.some((r) => r.url.includes('/data') && r.method === 'PUT'),
+    'the saved tick must still be pushed');
+  clearMessage();
+  seed([]);
+});
+
+// Final fixes 2, C4: a tick re-renders every page, so the checkbox that had
+// focus is gone and keyboard focus fell to the page. After a tick on Today,
+// focus goes to the NEW box in the row for the same item, found the way
+// focusOpener finds an opener: by the open button's data-item-id.
+const ff2Today = () => [record({ id: 'ff2-c4', type: 'task', title: 'ff2 Focus me', date: localISO(new Date()) })];
+test('Today: a tick from a focused box puts focus on the re-rendered box in the same row', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const doc = globalThis.document;
+  seed(ff2Today());
+  try {
+    click(doc.getElementById('tab-today'));
+    const box = checkboxFor(todayBody(), 'ff2 Focus me');
+    box.focus();
+    doc.lastFocusOptions = undefined;
+    box.checked = true;
+    fire(box, 'change');
+    const again = checkboxFor(todayBody(), 'ff2 Focus me');
+    assert.notEqual(again, box, 'fixture check: the tick re-rendered the row');
+    assert.equal(doc.activeElement, again, 'focus is on the new box');
+    assert.ok(again._classes.has('today-check'));
+    assert.deepEqual(doc.lastFocusOptions, { preventScroll: true });
+  } finally {
+    doc.activeElement = null;
+    if (restore) click(restore);
+  }
+  seed([]);
+});
+
+test('Today: a tick from a box without focus moves no focus', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const doc = globalThis.document;
+  seed(ff2Today());
+  try {
+    click(doc.getElementById('tab-today'));
+    const elsewhere = doc.getElementById('entry-text');
+    elsewhere.focus();
+    const box = checkboxFor(todayBody(), 'ff2 Focus me');
+    box.checked = true;
+    fire(box, 'change');
+    assert.equal(doc.activeElement, elsewhere, 'focus stays where it was');
+  } finally {
+    doc.activeElement = null;
+    if (restore) click(restore);
+  }
+  seed([]);
+});
+
+test('To-do: a tick leaves focus alone (C4 is Today only)', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const doc = globalThis.document;
+  seed([record({ id: 'ff2-c4-todo', type: 'task', title: 'ff2 To-do focus', date: '2099-01-01' })]);
+  try {
+    click(doc.getElementById('tab-todo'));
+    const box = checkboxFor(todoList(), 'ff2 To-do focus');
+    box.focus();
+    box.checked = true;
+    fire(box, 'change');
+    assert.equal(doc.activeElement, box, 'nothing was focused');
+  } finally {
+    doc.activeElement = null;
+    if (restore) click(restore);
+  }
+  seed([]);
+});

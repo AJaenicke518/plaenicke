@@ -392,6 +392,9 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 .today-age.start { color: var(--overdue-start); }
 /* The one accent on the page: the next event's "in N". */
 .today-rel { color: var(--accent); }
+/* Empty until within 12 h (or once over): no flex gap after the time. The tick
+   fills the same node, so it shows again without a render. */
+.today-rel:empty { display: none; }
 .today-guess { font-style: italic; flex-basis: 100%; }
 .today-row.past .today-open { color: var(--muted); }
 /* Struck through only, never dimmed (spec § 2.3; final review A6): this
@@ -726,8 +729,16 @@ button[data-press].pressed { opacity: 1; }
 }
 #todo-list li.empty, #idea-list li.empty { color: var(--muted); justify-content: center; }
 .todo-main, .idea-main { flex: 1 1 auto; min-width: 0; }
-/* A 20px tap target is below the 44px minimum on a phone; the padding on the
-   row is what makes the whole left edge hittable. */
+/* A 20px box inside a 44x44 <label class="todo-tick"> (final fixes 2, C8), as
+   on Today: the label is the box's hit area. Not [data-press] (js/todoview.js). */
+.todo-tick {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-width: 44px;
+  min-height: 44px;
+}
 #todo-list input[type="checkbox"] { width: 20px; height: 20px; flex: 0 0 auto; margin: 0; }
 
 .idea-title { font-weight: 600; }

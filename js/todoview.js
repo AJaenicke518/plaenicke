@@ -45,6 +45,12 @@ export function renderTodoView(container, todos, { todayISO, onOpen, onDelete, o
     // Report what the CONTROL now holds, never a hard-coded true: hard-coding
     // it would make unticking silently re-complete the item.
     box.addEventListener('change', () => onToggleDone(it.id, box.checked === true));
+    // The label is the box's 44x44 hit area (styles.css .todo-tick; final
+    // fixes 2, C8), as Today's is. Not [data-press], and not inside the open
+    // button or anything else that listens for a click.
+    const tick = document.createElement('label');
+    tick.className = 'todo-tick';
+    tick.appendChild(box);
 
     const main = document.createElement('div');
     main.className = 'todo-main';
@@ -65,7 +71,7 @@ export function renderTodoView(container, todos, { todayISO, onOpen, onDelete, o
     del.textContent = 'Delete';
     del.addEventListener('click', () => onDelete(it.id));
 
-    li.append(box, main, del);
+    li.append(tick, main, del);
     container.appendChild(li);
   }
 }

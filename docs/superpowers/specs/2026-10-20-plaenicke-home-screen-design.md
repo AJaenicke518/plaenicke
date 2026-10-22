@@ -52,6 +52,8 @@ One pure function in a new `js/today.js` builds every section, called as `buildT
 
 **Definition.** A series is `(feedId, uid)`. It repeats if an event with that `uid` in that feed's cache has an `rrule` with `FREQ=DAILY` or `FREQ=WEEKLY`. Only these count (Decided, question 7): `FREQ=YEARLY` and `FREQ=MONTHLY` series behave as one-offs and stay in Next 7 days. Its overrides belong to it. An override whose master is missing from the feed (expanded alone, `ics.js:1293-1296`) has no `FREQ` and counts as a one-off.
 
+*2026-10-22:* a rule with `COUNT=1` has one occurrence, so it is a one-off whatever its `FREQ` (`seriesIndex` and the Settings line both).
+
 **New fields:** a boolean `recurring`, set in `instancesForRange` (`feeds.js:464`) from a per-feed set of repeating series, and a boolean `guessedSeries`, true only when that series came from the heuristic below. `ics.js` is unchanged (spares `tests/ics.test.js`'s 142 deep-equality asserts). The cache keeps parsed events (`parseICS`, `feeds.js:249`); instances are built on demand, never stored, never pass through `makeItem`: no migration.
 
 **The rule cannot see a Canvas-shaped feed.** Canvas expands each series server-side into separate VEVENTs, each with its own UID, and never emits RRULE (`docs/superpowers/reviews/2026-07-28-v4-provider-format-notes.md`: "No RRULE, ever"). Every meeting then looks like a one-off and fills Next 7 days — the exact complaint.
