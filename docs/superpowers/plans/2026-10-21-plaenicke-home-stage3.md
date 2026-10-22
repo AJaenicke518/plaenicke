@@ -26,9 +26,10 @@ Decisions this plan makes where the spec is silent or would not work as written 
 
 **Amendment 2026-10-22 (Alex's answers; brief: `docs/superpowers/plans/2026-10-22-plaenicke-home-stage3-autonomous-brief.md`):**
 
-- **A ticked overdue item stays in Overdue, struck through, until tomorrow** (Alex: "it should stay struck through until tomorrow"; overrides spec § 2.3 "A ticked overdue item leaves Overdue"). No item records when it was ticked, and § 6 forbids new item fields, so "ticked today" is read as **`updatedAt` falls on today's local date**: `handleToggleDone` bumps `updatedAt` on every tick. Known cost: any later write to a done overdue item (a note edit, on any device) shows it again, struck, for the rest of that local day; it can never hide an undone item. No readable `updatedAt` → not shown. In Overdue, undone rows come first (oldest first), then ticked ones (oldest first) — the "done last" rule To do today already has. A ticked overdue row keeps its age and colour and its checked checkbox, so unticking it on Today works exactly as in To do today. Tasks 3 and 4 below carry the code and the tests; Task 5/7/9 need no change (they draw `done` the same in every section).
+- **A ticked overdue item stays in Overdue, struck through, until tomorrow** (Alex: "it should stay struck through until tomorrow"; overrides spec § 2.3 "A ticked overdue item leaves Overdue"). No item records when it was ticked, and § 6 forbids new item fields, so "ticked today" is read as **`updatedAt` falls on today's local date**: `handleToggleDone` bumps `updatedAt` on every tick. Known cost: any later write to a done overdue item (a note edit, on any device) shows it again, struck, for the rest of that local day; it can never hide an undone item. No readable `updatedAt` → not shown. Under clock skew `nextStamp` can stamp a tick on a later local day (the row then leaves at once, or shows struck tomorrow); it can still never hide an undone item. In Overdue, undone rows come first (oldest first), then ticked ones (oldest first) — the "done last" rule To do today already has. A ticked overdue row keeps its age and colour and its checked checkbox, so unticking it on Today works exactly as in To do today. Tasks 3 and 4 below carry the code and the tests; Task 5/7/9 need no change (they draw `done` the same in every section).
 - **A "no class" one-off shows next to the class** — as planned. **Display formats approved** as planned.
-- **Test counts:** the amendment adds one test to Task 3 and one to Task 4. Every `Expected` total from Task 3 Step 4 on is therefore one higher (Task 3) or two higher (Task 4 onwards) than written; the `today.test.js` file counts likewise. A different difference is a finding, not noise.
+- **DA review of this amendment (2026-10-22), applied:** `tests/today.test.js` pins `process.env.TZ = 'America/Los_Angeles'` (node --test runs each file in its own process; the new tests need a zone west of UTC−6, and the `daysBetween` mutant needs a DST zone); spec § 2.3 carries the amendment so reviewers do not "fix" it back; Task 7 gains one `apply.test.js` test that ticks an overdue item through the app (below); Task 13 ships from the stacked branch `home-screen-3c` (rewritten below); subagents work in the main checkout on the named branch, never an isolated worktree (those are cut from `main`).
+- **Test counts:** the amendment adds one test to Task 3 and one to Task 4, and one more to `apply.test.js` in Task 7. Every `Expected` total from Task 3 Step 4 on is therefore one higher (Task 3) or two higher (Task 4 onwards) than written; the `today.test.js` file counts likewise; from Task 7 on, three higher (`apply.test.js` +1). A different difference is a finding, not noise.
 
 **Tech Stack:** Vanilla ES modules, no framework, no build step, no bundler; `node:test` + `node:assert/strict`; no new dependencies.
 
@@ -634,6 +635,13 @@ import {
   sectionOf, daysBetween, dayWord, relativeLabel, isPastEvent, NEXT_DAYS,
 } from '../js/today.js';
 
+// The "ticked today" tests turn UTC instants into local days, and the
+// daysBetween mutant needs a DST zone: pin Alex's zone instead of trusting the
+// machine's. node --test runs each file in its own process, and Node re-reads
+// TZ when it is assigned, so this reaches today.js's Date calls and no other
+// test file.
+process.env.TZ = 'America/Los_Angeles';
+
 // today.js is pure: every input is passed in, so every boundary is a plain
 // value here. TODAY is a Wednesday.
 const TODAY = '2026-10-21';
@@ -669,8 +677,8 @@ test('sectionOf: every to-do type past its date is overdue — start included; n
 // Amendment 2026-10-22, Alex: "it should stay struck through until tomorrow".
 // No field says when an item was ticked; a tick bumps updatedAt, so "ticked
 // today" is "updatedAt is on today's LOCAL date". 03:00Z on the 22nd is 20:00
-// on the 21st in America/Los_Angeles (the zone the suite runs in, as the DST
-// tests already assume), which pins local over UTC.
+// on the 21st in America/Los_Angeles (pinned at the top of this file), which
+// pins local over UTC.
 test('sectionOf: a to-do ticked today after its date stays in Overdue until tomorrow', () => {
   const ticked = (updatedAt) => own('a', { type: 'due', date: '2026-10-19', done: true, updatedAt });
   assert.equal(sectionOf(ticked('2026-10-21T19:00:00.000Z'), TODAY), 'overdue', 'ticked at noon today');
@@ -858,17 +866,17 @@ export function sectionOf(item, todayISO) {
 // item field (§ 6). handleToggleDone bumps updatedAt on every tick, so a done
 // item whose updatedAt is on today's LOCAL date was ticked today — or edited
 // today after being ticked, which shows it struck for the rest of the day
-// (the accepted cost). An unreadable updatedAt is no evidence: not today.
+// (the accepted cost). An unreadable updatedAt is no evidence: not today —
+// an invalid Date's toISO is 'NaN-NaN-NaN', which no todayISO equals.
 function tickedToday(item, todayISO) {
-  if (typeof item.updatedAt !== 'string' || item.updatedAt === '') return false;
-  const at = new Date(item.updatedAt);
-  return !Number.isNaN(at.getTime()) && toISO(at) === todayISO;
+  return typeof item.updatedAt === 'string' && toISO(new Date(item.updatedAt)) === todayISO;
 }
 
 // daysBetween: whole calendar days from one 'YYYY-MM-DD' to another, counted
 // on UTC midnights so a 23- or 25-hour DST day cannot change the answer.
-export function daysBetween(fromISO, toISO) {
-  return Math.round((utcOf(toISO) - utcOf(fromISO)) / DAY_MS);
+// (Its parameters are not named fromISO/toISO: `toISO` is imported.)
+export function daysBetween(fromDay, toDay) {
+  return Math.round((utcOf(toDay) - utcOf(fromDay)) / DAY_MS);
 }
 
 // dayWord: how Today names a coming day — "Tomorrow", then the weekday
@@ -955,7 +963,7 @@ Plant each, run `node --test tests/today.test.js tests/items.test.js`, restore:
 | overdue → `!done ? 'overdue' : null` (past events overdue) | `sectionOf: every to-do type past its date is overdue…` |
 | `if (isTodoType(item)) return 'todo';` → `return done ? null : 'todo';` | `sectionOf: a to-do ticked today stays in To do today…` |
 | `item.date <= addDays(todayISO, NEXT_DAYS)` → `<` | `sectionOf: a to-do is overdue the day after its date…` |
-| `daysBetween` body → `Math.floor((new Date(\`${toISO}T00:00\`) - new Date(\`${fromISO}T00:00\`)) / DAY_MS)` | `daysBetween counts calendar days…` (fails in a DST zone; the Mac runs `America/Los_Angeles`, where 7→9 Mar 2026 is 47 hours) |
+| `daysBetween` body → `Math.floor((new Date(\`${toDay}T00:00\`) - new Date(\`${fromDay}T00:00\`)) / DAY_MS)` | `daysBetween counts calendar days…` (fails in a DST zone; the Mac runs `America/Los_Angeles`, where 7→9 Mar 2026 is 47 hours) |
 | `ahead > RELATIVE_MAX_MIN` → `ahead >= RELATIVE_MAX_MIN` | `relativeLabel: exactly 12 h ahead is shown, a minute more is not` |
 | `nowMinutes < end` → `nowMinutes <= end` in `relativeLabel` | `relativeLabel: minutes under an hour…`, `relativeLabel: an event with no end is "now" only in its start minute…` |
 | `isPastEvent` → `if (!item.endTime) return false;` before the end check | `isPastEvent: over once its end has passed…` |
@@ -964,7 +972,7 @@ Plant each, run `node --test tests/today.test.js tests/items.test.js`, restore:
 | `!done \|\| tickedToday(item, todayISO)` → `!done` (ticked leaves at once) | `sectionOf: a to-do ticked today after its date stays in Overdue until tomorrow` |
 | `!done \|\| tickedToday(…)` → `true` (every done overdue stays) | `sectionOf: every to-do type past its date is overdue…`, `sectionOf: a to-do ticked today after its date stays…` |
 | `toISO(at) === todayISO` → `item.updatedAt.slice(0, 10) === todayISO` (UTC day) | `sectionOf: a to-do ticked today after its date stays…` |
-| delete the `Number.isNaN` check | `sectionOf: a to-do ticked today after its date stays…` (`toISO(Invalid Date)` is `'NaN-NaN-NaN'` — confirm the mutant fails; if it does not, the check is dead and the test must say so) |
+| delete `typeof item.updatedAt === 'string' &&` | `sectionOf: a to-do ticked today after its date stays…` (`new Date(null)` is 1 Jan 1970 — not today either; if this mutant survives, say so in the report: the guard is then explicit, not load-bearing) |
 
 - [ ] **Step 7: Commit**
 
@@ -2129,6 +2137,19 @@ test('Today: the page names the day and lists live items in their sections', asy
   resume();
 });
 
+// Amendment 2026-10-22 (DA I3) — WRITE THIS TEST in this task, next to the one
+// below: 'Today: an overdue to-do ticked on Today stays in Overdue, struck
+// through, below the undone ones, and unticks back above them'. Mock only Date
+// (t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() })
+// / reset() in finally, as the sweep-D tests do); seed an undone overdue `due`
+// dated 2026-10-15 and an undone overdue `task` dated 2026-10-19 (record(),
+// whose updatedAt is 2026-08-19); open Today; tick the older one through its
+// checkbox ('change'). Assert: storage has done === true; the row is still in
+// Overdue (the first today-section), checked, its li has class `done`, and it is
+// now AFTER the 2026-10-19 row; untick it: storage done === false and it is
+// back first. Mutation-check: in app.js setDone, keep `before.updatedAt`
+// instead of nextStamp(...) → this test fails (and so does the existing
+// "a tick moves updatedAt forward" test). Restore.
 test('Today: a tick on Today is saved, and the row stays, struck through, until tomorrow', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
@@ -2881,7 +2902,7 @@ Ask Alex to open the app twice (the network-first worker serves the new files on
 - LMU classes appear under Today's events on their own days and never under Next 7 days; an exam, a quiz or a "no class" day appears under Next 7 days on its day.
 - The next event shows "in N min" / "in N h N min" / "now", and it counts down over a few minutes without the list jumping.
 - An overdue deadline's age is red and an overdue start's age is orange; **the two are readable and tell apart in light and in dark mode** (punchlist carry-over 4). Also check that the next event's "in N" (the accent: leather brown in light mode) does not read as the orange start age — in Chrome's light-mode render the two browns look close.
-- Ticking a to-do on Today keeps the row, struck through — in To do today and in Overdue (it moves below the undone overdue rows); ticking it again unticks it. A tick does not flash the whole row; tapping a row's title flashes the row (tinted, not dimmed) and opens its sheet.
+- Ticking a to-do on Today keeps the row, struck through — in To do today and in Overdue (it moves below the undone overdue rows); ticking it again unticks it. With the app left open over midnight, yesterday's Today stays until the next render (reopen, sync or any write) — "until tomorrow" means until the first render tomorrow. A tick does not flash the whole row; tapping a row's title flashes the row (tinted, not dimmed) and opens its sheet.
 - Settings opens from the gear.
 - Dark mode: every Today colour follows the theme.
 
@@ -3489,7 +3510,7 @@ Run: `node --test tests/styles.test.js` → `# tests 98`, `# fail 0`, `# cancell
 
 - [ ] **Step 6: Browser check (Chrome, the throwaway way it was planned)**
 
-Serve the branch read-only on localhost (`python3 -m http.server 8765 --bind 127.0.0.1` from the repo root, in the background), open `http://127.0.0.1:8765/index.html` in an isolated Chrome context at 375×667 (mobile, touch), seed a few items through `localStorage.setItem('plaenicke.items', …)`, reload, and measure:
+Serve the branch read-only on localhost (`python3 -m http.server 8765 --bind 127.0.0.1` from the repo root, in the background), open `http://127.0.0.1:8765/index.html` in an isolated Chrome context at 375×667 (mobile, touch) — HARD REQUIREMENT: a fresh, isolated profile; first confirm `localStorage` holds no sync/link code for that origin, since a linked profile would push the seeded items to the real account — seed a few items through `localStorage.setItem('plaenicke.items', …)`, reload, and measure:
 
 - `#cal-switch` with a fifth `<button>3-day</button>` inserted after Day: `scrollWidth === clientWidth` (planned: 343 = 343, five 65 px segments). Remove the button.
 - `.tab-bar`'s rect: top 611, height 56 at 667 high.
@@ -3512,6 +3533,8 @@ Expected: `# tests 1431`, `# fail 0`, `# cancelled 0`.
 
 Merging to `main` deploys. Without an explicit yes from Alex in this conversation for this merge, stop after Step 1.
 
+**Branch amendment (2026-10-22, DA I4):** 3c lives on `home-screen-3c`, cut from Task 9's commit, so it lacks Task 10's v6-9 bump and any 3b phone-check fixes. Before Step 2, after Task 10 has shipped: `git checkout home-screen-3c && git merge --no-ff main` (expect `service-worker.js` CACHE → v6-9 and `CACHE_ON_MAIN` → v6-8 from main; resolve any conflict to main's values), then run the commit gate. Do Steps 3–7 on `home-screen-3c`. In Step 1's message and Step 8, every `home-screen-design` reads `home-screen-3c`.
+
 **Files:**
 - Modify: `service-worker.js:13` (`CACHE`)
 - Modify: `tests/serviceworker.test.js:48` (`CACHE_ON_MAIN`)
@@ -3522,7 +3545,7 @@ Merging to `main` deploys. Without an explicit yes from Alex in this conversatio
 
 - [ ] **Step 1: Ask Alex, and wait**
 
-Send: "Stage 3c (tab bar) is ready on `home-screen-design`: `npm test` 1431 pass, 0 fail, 0 cancelled. Visible changes: the row of view buttons is replaced by a bottom bar — Today | Calendar | To-do | Ideas; Calendar has Day / Week / Month / List at its top and reopens on the one you used last; the page title names the tab; the Undo toast sits above the bar, narrower, leaving the bottom-right corner free for the mic button (stage 4). Shipping bumps the cache to v6-10, merges into `main` and pushes — a production deploy. Go ahead?" Go on only after an explicit yes.
+Send: "Stage 3c (tab bar) is ready on `home-screen-3c`: `npm test` 1431 pass, 0 fail, 0 cancelled. Visible changes: the row of view buttons is replaced by a bottom bar — Today | Calendar | To-do | Ideas; Calendar has Day / Week / Month / List at its top and reopens on the one you used last; the page title names the tab; the Undo toast sits above the bar, narrower, leaving the bottom-right corner free for the mic button (stage 4). Shipping bumps the cache to v6-10, merges into `main` and pushes — a production deploy. Go ahead?" Go on only after an explicit yes.
 
 - [ ] **Step 2: Check that main has not moved**
 
@@ -3566,7 +3589,7 @@ npm test > "$TMPDIR/plaenicke-test.log" 2>&1; tail -8 "$TMPDIR/plaenicke-test.lo
 - [ ] **Step 8: Merge, re-test on main, push**
 
 ```bash
-git checkout main && git merge --no-ff home-screen-design -m "merge: home screen stage 3c — tab bar and Calendar switcher" -m "Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>" && npm test > "$TMPDIR/plaenicke-test.log" 2>&1; tail -8 "$TMPDIR/plaenicke-test.log"; grep -qx '# fail 0' "$TMPDIR/plaenicke-test.log" && grep -qx '# cancelled 0' "$TMPDIR/plaenicke-test.log" && git push origin main && git checkout home-screen-design
+git checkout main && git merge --no-ff home-screen-3c -m "merge: home screen stage 3c — tab bar and Calendar switcher" -m "Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>" && npm test > "$TMPDIR/plaenicke-test.log" 2>&1; tail -8 "$TMPDIR/plaenicke-test.log"; grep -qx '# fail 0' "$TMPDIR/plaenicke-test.log" && grep -qx '# cancelled 0' "$TMPDIR/plaenicke-test.log" && git push origin main && git checkout home-screen-3c
 ```
 
 Expected: `# tests 1431`, `# fail 0`, `# cancelled 0`, the push succeeds. If the gate fails on main, do not push.
