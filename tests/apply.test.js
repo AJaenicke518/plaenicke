@@ -5985,6 +5985,12 @@ test('tabs: the bar is Today | Calendar | To-do | Ideas, and Calendar\'s switche
 });
 
 test('tabs: Calendar opens on the view last used there, Day by default', async () => {
+  // The default is pinned at the source. app.js is imported once for this
+  // whole file and lastCalendarView is module state, so by the time this test
+  // runs an earlier one may already have picked a Calendar view: no click
+  // sequence here can observe the first-ever tap on Calendar.
+  const appSrc = readFileSync(new URL('../js/app.js', import.meta.url), 'utf8');
+  assert.match(appSrc, /^let lastCalendarView = 'day';$/m, 'Calendar opens on Day until another view is picked');
   installFakeLocalStorage();
   await import('../js/app.js');
   const doc = globalThis.document;
@@ -5999,6 +6005,30 @@ test('tabs: Calendar opens on the view last used there, Day by default', async (
     click(doc.getElementById('tab-calendar'));
     assert.equal(doc.getElementById('calendar-view').hidden, false, 'back on Month');
     assert.ok(doc.getElementById('show-month')._classes.has('active'));
+  } finally {
+    click(doc.getElementById('show-day'));
+    if (restore) click(restore);
+  }
+});
+
+// The NAV test above drives the four segments directly; this drives the
+// Calendar TAB, which picks its view from lastCalendarView, and checks the same
+// whole-page state. Week, so the expected view is not the default.
+test('tabs: tapping Calendar shows the last-used view with the full page state', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  try {
+    click(doc.getElementById('show-week'));
+    click(doc.getElementById('tab-todo'));
+    click(doc.getElementById('tab-calendar'));
+    for (const [, section] of NAV) {
+      assert.equal(doc.getElementById(section).hidden, section !== 'week-view', `#${section}`);
+    }
+    for (const t of TABS) assert.equal(doc.getElementById(t)._classes.has('active'), t === 'tab-calendar', `#${t}`);
+    for (const seg of SEGMENTS) assert.equal(doc.getElementById(seg)._classes.has('active'), seg === 'show-week', `#${seg}`);
+    assert.equal(doc.getElementById('cal-switch').hidden, false, 'the switcher');
   } finally {
     click(doc.getElementById('show-day'));
     if (restore) click(restore);
