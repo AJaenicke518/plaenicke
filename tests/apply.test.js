@@ -551,6 +551,7 @@ test('each nav button reveals exactly its own page, and marks itself active', as
   installFakeLocalStorage();
   await import('../js/app.js');
   const pages = [
+    ['show-today', 'today-view'],
     ['show-list', 'list-view'],
     ['show-month', 'calendar-view'],
     ['show-week', 'week-view'],
@@ -1350,12 +1351,15 @@ function resume() {
   for (const fn of globalThis.document._listeners.visibilitychange || []) fn();
 }
 
-test('index.html opens on the Day view, not the List', () => {
+// Home-screen stage 3b: the app opens on Today (it opened on Day before).
+test('index.html opens on Today', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-  assert.match(html, /<button id="show-day"[^>]*class="active"/, 'the Day button must be the active one on load');
-  assert.doesNotMatch(html, /<button id="show-list"[^>]*class="active"/, 'List must no longer be the default');
-  assert.match(html, /<section id="day-view"(?![^>]*hidden)[^>]*>/, 'the Day section must be visible on load');
-  assert.match(html, /<section id="list-view"[^>]*hidden/, 'the List section must start hidden');
+  assert.match(html, /<button id="show-today"[^>]*class="active"/, 'the Today button must be the active one on load');
+  assert.doesNotMatch(html, /<button id="show-(list|month|week|day|todo|ideas)"[^>]*class="active"/, 'and no other');
+  assert.match(html, /<section id="today-view"(?![^>]*hidden)[^>]*>/, 'the Today section must be visible on load');
+  for (const id of ['list-view', 'calendar-view', 'week-view', 'day-view', 'todo-view', 'ideas-view']) {
+    assert.match(html, new RegExp(`<section id="${id}"[^>]*hidden`), `#${id} must start hidden`);
+  }
 });
 
 test('resuming the next morning moves the Day view to the new today', async (t) => {
@@ -1491,11 +1495,13 @@ const dayBody = () => globalThis.document.getElementById('day-body');
 const messageText = () => globalThis.document.getElementById('message').textContent;
 
 // The .item-open control of the first row under `root` whose text mentions `title`.
+// allText, as a real button's textContent includes its children's: Today's
+// open button holds its title in a child span (js/todayview.js).
 function openControlFor(root, title) {
   const found = [];
   const walk = (el) => {
     for (const c of el.children) {
-      if (c.tagName === 'BUTTON' && c._classes.has('item-open') && (c.textContent || '').includes(title)) found.push(c);
+      if (c.tagName === 'BUTTON' && c._classes.has('item-open') && allText(c).includes(title)) found.push(c);
       walk(c);
     }
   };
@@ -3298,7 +3304,9 @@ test('sweep D: a tick that fails on quota is shown unticked again, with the erro
 // Ids are prefixed `sU-`. Every test that shows a toast ends with it resolved
 // and #toast-host empty.
 
+const todayBody = () => globalThis.document.getElementById('today-body');
 const PAGES = [
+  ['Today', 'show-today', 'today-view', () => todayBody()],
   ['List', 'show-list', 'list-view', () => itemList()],
   ['Day', 'show-day', 'day-view', () => dayBody()],
   ['To-do', 'show-todo', 'todo-view', () => todoList()],
@@ -3307,6 +3315,7 @@ const PAGES = [
 // The nav button of whichever page is showing, to put it back afterwards.
 function visiblePageButton() {
   for (const [buttonId, sectionId] of [
+    ['show-today', 'today-view'],
     ['show-list', 'list-view'], ['show-month', 'calendar-view'], ['show-week', 'week-view'],
     ['show-day', 'day-view'], ['show-todo', 'todo-view'], ['show-ideas', 'ideas-view'],
   ]) {
@@ -4210,12 +4219,12 @@ test('a11y: Week columns open their day from the keyboard', async () => {
 // The nav's selected page was shown only by a CSS class, which assistive tech
 // does not read. aria-pressed says it, in the markup at load (showView is not
 // run until a button is tapped) and after every tap.
-test('a11y: index.html marks the Day button pressed and every other nav button not', () => {
+test('a11y: index.html marks the Today button pressed and every other nav button not', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-  for (const id of ['show-list', 'show-month', 'show-week', 'show-day', 'show-todo', 'show-ideas']) {
+  for (const id of ['show-today', 'show-list', 'show-month', 'show-week', 'show-day', 'show-todo', 'show-ideas']) {
     const tag = html.match(new RegExp(`<button id="${id}"[^>]*>`));
     assert.ok(tag, `fixture check: #${id}`);
-    assert.match(tag[0], new RegExp(`aria-pressed="${id === 'show-day'}"`), `#${id}`);
+    assert.match(tag[0], new RegExp(`aria-pressed="${id === 'show-today'}"`), `#${id}`);
   }
 });
 
@@ -4223,7 +4232,7 @@ test('a11y: each nav button reports itself pressed, and only itself', async () =
   installFakeLocalStorage();
   await import('../js/app.js');
   const restore = visiblePageButton();
-  const ids = ['show-list', 'show-month', 'show-week', 'show-day', 'show-todo', 'show-ideas'];
+  const ids = ['show-today', 'show-list', 'show-month', 'show-week', 'show-day', 'show-todo', 'show-ideas'];
   try {
     for (const id of ids) {
       click(globalThis.document.getElementById(id));
@@ -5656,5 +5665,154 @@ test('app.js installs the press listeners on the document, once each', async () 
   const { PRESS_EVENTS } = await import('../js/press.js');
   for (const type of PRESS_EVENTS) {
     assert.equal((globalThis.document._listeners[type] || []).length, 1, type);
+  }
+});
+
+// =========================================================================
+// Home-screen stage 3b — the Today page, through the real app
+// =========================================================================
+//
+// Ids are prefixed `td-`. Each test puts the page it found back, and leaves
+// no items or calendars behind.
+
+test('Today: the gear is on the Today page, and nowhere else', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const today = html.match(/<section id="today-view"[\s\S]*?<\/section>/);
+  assert.ok(today, 'fixture check: index.html has a Today section');
+  assert.match(today[0], /<button id="settings-btn"/);
+  assert.equal(html.match(/id="settings-btn"/g).length, 1);
+  assert.doesNotMatch(html.match(/<header>[\s\S]*?<\/header>/)[0], /settings-btn/, 'the shell header no longer holds it');
+});
+
+test('Today: the page names the day and lists live items in their sections', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
+  try {
+    seed([
+      record({ id: 'td-late', type: 'due', title: 'td Essay', date: '2026-10-18' }),
+      record({ id: 'td-task', type: 'task', title: 'td Call bank', date: '2026-10-21' }),
+      record({ id: 'td-class', type: 'event', title: 'td Lecture', date: '2026-10-21', time: '10:00', endTime: '11:00' }),
+      record({ id: 'td-fri', type: 'event', title: 'td Dinner', date: '2026-10-23', time: '19:00' }),
+      record({ id: 'td-idea', type: 'idea', title: 'td Shelves', date: '2026-10-21' }),
+    ]);
+    click(globalThis.document.getElementById('show-today'));
+    assert.equal(globalThis.document.getElementById('today-view').hidden, false);
+    assert.equal(labelText('today-date'), 'Wednesday, October 21');
+    const text = allText(todayBody());
+    assert.match(text,
+      /Overdue[\s\S]*td Essay[\s\S]*To do today[\s\S]*td Call bank[\s\S]*Today's events[\s\S]*td Lecture[\s\S]*in 42 min[\s\S]*Next 7 days[\s\S]*Fri[\s\S]*td Dinner/);
+    assert.doesNotMatch(text, /td Shelves/, 'an idea is never on Today');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+// Amendment 2026-10-22 (DA I3): a ticked overdue to-do stays in Overdue,
+// struck through, until tomorrow — below the undone ones — and unticking it
+// puts it back above them. It stays because the tick moved its updatedAt to
+// today (js/today.js tickedToday), so this also pins setDone's nextStamp.
+test('Today: an overdue to-do ticked on Today stays in Overdue, struck through, below the undone ones, and unticks back above them', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
+  // The Overdue section is the first one on the page; its rows, in order.
+  const overdue = () => {
+    const section = todayBody().children[0];
+    assert.ok(section && section._classes.has('today-section'), 'fixture check: the first child is a section');
+    assert.equal(allText(section.children[0]), 'Overdue', 'fixture check: the first section is Overdue');
+    return section;
+  };
+  const rowTitles = () => overdue().children[1].children.map((li) => allText(li));
+  try {
+    seed([
+      record({ id: 'td-od-old', type: 'due', title: 'td Old essay', date: '2026-10-15' }),
+      record({ id: 'td-od-new', type: 'task', title: 'td Newer task', date: '2026-10-19' }),
+    ]);
+    click(globalThis.document.getElementById('show-today'));
+    assert.equal(rowTitles().length, 2, 'fixture check: both are overdue');
+    assert.match(rowTitles()[0], /td Old essay/, 'fixture check: oldest first');
+
+    const box = checkboxFor(overdue(), 'td Old essay');
+    assert.ok(box, 'fixture check: the row has a checkbox');
+    box.checked = true;
+    fire(box, 'change');
+    assert.equal(storedById('td-od-old').done, true, 'the tick reached storage');
+    const ticked = checkboxFor(overdue(), 'td Old essay');
+    assert.ok(ticked, 'still in Overdue after the tick');
+    assert.equal(ticked.checked, true);
+    assert.ok(ticked.parentNode._classes.has('done'), 'struck through');
+    assert.equal(rowTitles().length, 2);
+    assert.match(rowTitles()[0], /td Newer task/, 'the undone one is now first');
+    assert.match(rowTitles()[1], /td Old essay/, 'the ticked one below it');
+
+    ticked.checked = false;
+    fire(ticked, 'change');
+    assert.equal(storedById('td-od-old').done, false, 'the untick reached storage');
+    const unticked = checkboxFor(overdue(), 'td Old essay');
+    assert.ok(unticked && unticked.checked === false);
+    assert.equal(unticked.parentNode._classes.has('done'), false);
+    assert.match(rowTitles()[0], /td Old essay/, 'back first');
+    assert.match(rowTitles()[1], /td Newer task/);
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+});
+
+test('Today: a tick on Today is saved, and the row stays, struck through, until tomorrow', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  seed([record({ id: 'td-tick', type: 'task', title: 'td Water plants', date: localISO(new Date()) })]);
+  try {
+    click(globalThis.document.getElementById('show-today'));
+    const box = checkboxFor(todayBody(), 'td Water plants');
+    assert.ok(box, 'fixture check: the row has a checkbox');
+    box.checked = true;
+    fire(box, 'change');
+    assert.equal(storedById('td-tick').done, true, 'the tick reached storage');
+    const again = checkboxFor(todayBody(), 'td Water plants');
+    assert.ok(again && again.checked, 'still on Today, ticked');
+    assert.ok(again.parentNode._classes.has('done'));
+    assert.doesNotMatch(allText(todoList()), /td Water plants/, 'while the To-do page drops it');
+  } finally {
+    if (restore) click(restore);
+  }
+  seed([]);
+});
+
+test('Today: a delete waiting for its Undo is already gone from Today, and Undo brings it back', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'td-del', type: 'task', title: 'td Delete me', date: localISO(new Date()) })]);
+  enableMockTimers(t, { apis: ['setTimeout'] });
+  try {
+    assert.match(allText(todayBody()), /td Delete me/, 'fixture check');
+    click(deleteControlFor(todoList(), 'td Delete me'));
+    assert.doesNotMatch(allText(todayBody()), /td Delete me/);
+    click(toastHost().querySelector('.toast-undo'));
+    assert.match(allText(todayBody()), /td Delete me/);
+  } finally {
+    await resetMockTimers(t);
+  }
+  seed([]);
+});
+
+test('Today: a calendar event is shown by its title; the calendar\'s link never reaches the page', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seedFeed(sdFeed('td-feed', { url: 'https://calendar.google.com/calendar/ical/td-private-token/basic.ics' }));
+  try {
+    assert.match(allText(todayBody()), /Standup from the feed/, 'fixture check: the feed event is on Today');
+    assert.equal(stringsOf(todayBody()).some((x) => x.includes('td-private-token')), false);
+  } finally {
+    unseedFeeds();
   }
 });

@@ -30,6 +30,8 @@ import { renderSyncStatus, syncWriteStarted, syncWriteSettled } from './linkui.j
 import { WORKER_URL } from './config.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
 import { installPress } from './press.js';
+import { buildToday, NEXT_DAYS, LOOKAHEAD_DAYS } from './today.js';
+import { renderTodayView } from './todayview.js';
 
 const els = {
   text: document.getElementById('entry-text'),
@@ -76,6 +78,11 @@ const els = {
   ideaText: document.getElementById('idea-text'),
   ideaAdd: document.getElementById('idea-add'),
   updatedStamp: document.getElementById('updated-stamp'),
+  // Home-screen stage 3b — the Today page.
+  showToday: document.getElementById('show-today'),
+  todayView: document.getElementById('today-view'),
+  todayBody: document.getElementById('today-body'),
+  todayDate: document.getElementById('today-date'),
 };
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
@@ -646,7 +653,7 @@ function isGoogleHost(url) {
 // where the browser puts it.
 function focusOpener(id) {
   const pages = [
-    [els.listView, els.list], [els.dayView, els.dayBody],
+    [els.todayView, els.todayBody], [els.listView, els.list], [els.dayView, els.dayBody],
     [els.todoView, els.todoList], [els.ideasView, els.ideaList],
   ];
   const shown = pages.find(([section]) => !section.hidden);
@@ -855,6 +862,26 @@ function renderIdeas() {
   renderIdeasView(els.ideaList, ideaItems(), { onOpen: openItem, onDelete: requestDelete });
 }
 
+// The Today page (home-screen spec § 2.3). Own items come from liveItems(),
+// so a delete waiting for its Undo is already gone; feed instances are
+// expanded for today .. today + 7, and the 30-day look-ahead for the "Next"
+// line only when buildToday asks for it. One clock reading for the whole page.
+const minutesNow = (d) => d.getHours() * 60 + d.getMinutes();
+
+function renderToday() {
+  const now = new Date();
+  const todayISO = toISO(now);
+  els.todayDate.textContent = now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+  const today = buildToday(
+    liveItems(),
+    instancesForRange(feeds, feedCache, todayISO, addDays(todayISO, NEXT_DAYS), deviceTz),
+    todayISO,
+    minutesNow(now),
+    () => instancesForRange(feeds, feedCache, addDays(todayISO, 1), addDays(todayISO, LOOKAHEAD_DAYS), deviceTz),
+  );
+  renderTodayView(els.todayBody, today, { onOpen: openItem, onToggleDone: handleToggleDone });
+}
+
 // Every page is re-rendered on every change, so a to-do ticked on the To-do
 // page also leaves the calendar views correct with no second trigger.
 //
@@ -863,16 +890,16 @@ function renderIdeas() {
 // resume. It returns at once when the day has not changed.
 function render() {
   refreshForToday();
-  renderList(); renderCalendar(); renderWeek(); renderDay(); renderTodos(); renderIdeas();
+  renderToday(); renderList(); renderCalendar(); renderWeek(); renderDay(); renderTodos(); renderIdeas();
 }
 
 function showView(which) {
   const views = {
-    list: els.listView, month: els.calView, week: els.weekView, day: els.dayView,
+    today: els.todayView, list: els.listView, month: els.calView, week: els.weekView, day: els.dayView,
     todo: els.todoView, ideas: els.ideasView,
   };
   const buttons = {
-    list: els.showList, month: els.showMonth, week: els.showWeek, day: els.showDay,
+    today: els.showToday, list: els.showList, month: els.showMonth, week: els.showWeek, day: els.showDay,
     todo: els.showTodo, ideas: els.showIdeas,
   };
   for (const [name, el] of Object.entries(views)) el.hidden = name !== which;
@@ -901,6 +928,7 @@ function openDay(dateISO) {
 els.time.addEventListener('input', () => { els.end.hidden = !els.time.value; if (!els.time.value) els.end.value = ''; });
 els.add.addEventListener('click', handleAdd);
 els.text.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleAdd(); });
+els.showToday.addEventListener('click', () => showView('today'));
 els.showList.addEventListener('click', () => showView('list'));
 els.showMonth.addEventListener('click', () => showView('month'));
 els.showWeek.addEventListener('click', () => showView('week'));
