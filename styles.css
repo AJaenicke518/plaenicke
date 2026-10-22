@@ -123,9 +123,11 @@ body {
   background: var(--bg);
   color: var(--ink);
   padding: env(safe-area-inset-top) 16px 40px;
-  /* Room for the fixed .toast (edit-items Task 4b): without it the last row,
-     often the very item a delete offers to undo, sits under the toast. */
-  padding-bottom: calc(96px + env(safe-area-inset-bottom));
+  /* Room under the content for the fixed tab bar (56px) and the capture
+     button's row (72px, stage 4), above the home indicator (home-screen
+     spec § 4). The toast sits inside it, so the last row, often the very
+     item a delete offers to undo, is never under the toast. */
+  padding-bottom: calc(56px + 72px + env(safe-area-inset-bottom));
   /* There was no line-height rule at all before this, so everything ran at
      the browser default (~1.2) — tight for a serif read at arm's length.
      This is a readability change, NOT an attempt to fill the viewport: the
@@ -217,17 +219,43 @@ button, [data-press] { -webkit-tap-highlight-color: transparent; }
 button.pressed { opacity: 0.7; }
 [data-press].pressed { background: var(--chip-bg); }
 
-/* ---------- view toggle ---------- */
-.view-toggle { display: flex; gap: 6px; margin-bottom: 12px; }
-.view-toggle button {
+/* ---------- tab bar and Calendar's switcher (home-screen spec § 4) ---------- */
+/* Layers: content 0 < tab bar 5 < capture button 6 < capture box 8 (stage 4)
+   < settings 10 < item sheet 15 < toast 20. */
+.tab-bar {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  z-index: 5;
+  display: flex;
+  height: calc(56px + env(safe-area-inset-bottom));
+  padding-bottom: env(safe-area-inset-bottom);
+  background: var(--card);
+  border-top: 1px solid var(--line);
+}
+.tab-bar button {
   flex: 1;
+  min-height: 44px;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: var(--text-label);
+}
+.tab-bar button.active { color: var(--accent); font-weight: 600; }
+.tab-title { font-size: var(--text-title); font-style: normal; }
+.cal-switch { display: flex; gap: var(--space-1); margin-bottom: var(--space-3); }
+.cal-switch[hidden] { display: none; }
+.cal-switch button {
+  flex: 1;
+  padding: 8px 4px;
   background: var(--card);
   color: var(--ink);
   border: 1px solid var(--line);
-  padding: 8px 4px;
-  font-size: 0.9rem;
+  font-family: var(--sans);
+  font-size: var(--text-label);
 }
-.view-toggle button.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.cal-switch button.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 
 /* ---------- list (shared with day view's "Other tasks") ---------- */
 #item-list, .day-other-list { list-style: none; padding: 0; margin: 0; }
@@ -699,11 +727,12 @@ button[data-press].pressed { opacity: 1; }
 
 /* ---------- toast (deleted / undo) ---------- */
 /* Above .settings-backdrop (z-index 10) so an Undo raised while a panel is
-   open is still reachable; bottom inset clears the iPhone home indicator. */
+   open is still reachable. Above the tab bar, and clear of the capture
+   button's corner (56px wide at right: 16px, stage 4; spec § 4). */
 .toast {
   position: fixed;
-  left: 16px; right: 16px;
-  bottom: calc(16px + env(safe-area-inset-bottom));
+  left: 16px; right: 88px;
+  bottom: calc(56px + 12px + env(safe-area-inset-bottom));
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   background: var(--card);
   color: var(--ink);

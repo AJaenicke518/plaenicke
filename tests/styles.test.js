@@ -224,8 +224,10 @@ test('the sheet top bar is sticky, so Save stays reachable while the form scroll
 // .toast is position: fixed at the bottom. Without room under the content,
 // the final list row — often the very item whose delete it offers to undo —
 // sits under it with no way to scroll it clear.
-test('body leaves room at the bottom for the toast', () => {
-  assert.equal(declOf('body', 'padding-bottom'), 'calc(96px + env(safe-area-inset-bottom))');
+// Home-screen stage 3c (spec § 4): the bar (56px), the capture button's row
+// (72px, stage 4) and the home indicator.
+test('body leaves room at the bottom for the tab bar, the capture button and the toast', () => {
+  assert.equal(declOf('body', 'padding-bottom'), 'calc(56px + 72px + env(safe-area-inset-bottom))');
 });
 
 // --- Task 4a review O1, O2, O3 ----------------------------------------------
@@ -491,7 +493,7 @@ for (const [sel, size] of Object.entries(CALENDAR_SIZES)) {
 
 // Stage 3b is the first consumer. Every rule that reads the scale belongs to
 // a new screen (its selectors all name one); Month, Week and Day never do.
-const NEW_SCREEN = /\.today-/;
+const NEW_SCREEN = /\.(today-|tab-|cal-switch)/;
 test('only the new screens read the new type scale', () => {
   const readers = [];
   for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
@@ -602,4 +604,53 @@ test('every Today colour is a theme token, so dark mode follows', () => {
     }
   }
   assert.ok(seen >= 8, `fixture check: ${seen} colour declarations`);
+});
+
+// --- home-screen stage 3c: the tab bar and the switcher (spec § 4) ----------
+test('the tab bar is fixed at the bottom, 56px plus the home-indicator inset', () => {
+  assert.equal(declOf('.tab-bar', 'position'), 'fixed');
+  assert.equal(declOf('.tab-bar', 'bottom'), '0');
+  assert.equal(declOf('.tab-bar', 'left'), '0');
+  assert.equal(declOf('.tab-bar', 'right'), '0');
+  assert.equal(declOf('.tab-bar', 'height'), 'calc(56px + env(safe-area-inset-bottom))');
+  assert.equal(declOf('.tab-bar', 'padding-bottom'), 'env(safe-area-inset-bottom)');
+  assert.equal(declOf('.tab-bar', 'background'), 'var(--card)');
+  assert.equal(declOf('.tab-bar', 'border-top'), '1px solid var(--line)');
+});
+
+test('layers: tab bar 5 < settings 10 < item sheet 15 < toast 20 (spec § 4)', () => {
+  assert.equal(zIndexOf('.tab-bar'), 5);
+  assert.equal(zIndexOf('.settings-backdrop'), 10);
+  assert.equal(zIndexOf('.sheet-backdrop'), 15);
+  assert.equal(zIndexOf('.toast'), 20);
+});
+
+test('the toast sits above the tab bar and clears the capture button\'s corner', () => {
+  assert.equal(declOf('.toast', 'bottom'), 'calc(56px + 12px + env(safe-area-inset-bottom))');
+  assert.equal(declOf('.toast', 'right'), '88px');
+  assert.equal(declOf('.toast', 'left'), '16px');
+});
+
+test('a tab is a 44px target; the active one is in the accent', () => {
+  assert.ok(px(declOf('.tab-bar button', 'min-height')) >= 44);
+  assert.equal(declOf('.tab-bar button', 'font-size'), 'var(--text-label)');
+  assert.equal(declOf('.tab-bar button.active', 'color'), 'var(--accent)');
+});
+
+test('the tab title is 20px; Today\'s own heading stays 28px', () => {
+  assert.equal(declOf('.tab-title', 'font-size'), 'var(--text-title)');
+  assert.equal(declOf(':root', '--text-title'), '20px', 'fixture check');
+  assert.equal(declOf('.today-title', 'font-size'), 'var(--text-hero)');
+});
+
+// .cal-switch sets display: flex, which beats the `hidden` attribute's
+// display: none. Without this rule the switcher would show on every tab.
+test('a hidden switcher is not displayed', () => {
+  assert.equal(declOf('.cal-switch', 'display'), 'flex', 'fixture check');
+  assert.equal(declOf('.cal-switch[hidden]', 'display'), 'none');
+});
+
+test('the six-button view toggle is gone from the stylesheet', () => {
+  assert.equal(ruleExists('.view-toggle'), false);
+  assert.equal(ruleExists('.view-toggle button'), false);
 });
