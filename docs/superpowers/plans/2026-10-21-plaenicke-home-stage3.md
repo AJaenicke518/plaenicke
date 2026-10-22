@@ -24,6 +24,12 @@ Decisions this plan makes where the spec is silent or would not work as written 
 - **3c reserves the capture button's row now.** Body bottom padding is the spec's `56px + 72px + inset`, and the toast's `right: 88px`, although the button arrives in stage 4. Measured in Chrome at 375×667: the toast is 271 px wide and two lines (66 px) tall for `Deleted "Physics problem set 4"` with a 71 px Undo; Calendar's switcher with a fifth segment inserted is 343 of 343 px, five 65 px segments, so adding 3-day later changes no layout.
 - **3a is not released on its own.** It has no visible effect; it ships with 3b (Task 10).
 
+**Amendment 2026-10-22 (Alex's answers; brief: `docs/superpowers/plans/2026-10-22-plaenicke-home-stage3-autonomous-brief.md`):**
+
+- **A ticked overdue item stays in Overdue, struck through, until tomorrow** (Alex: "it should stay struck through until tomorrow"; overrides spec § 2.3 "A ticked overdue item leaves Overdue"). No item records when it was ticked, and § 6 forbids new item fields, so "ticked today" is read as **`updatedAt` falls on today's local date**: `handleToggleDone` bumps `updatedAt` on every tick. Known cost: any later write to a done overdue item (a note edit, on any device) shows it again, struck, for the rest of that local day; it can never hide an undone item. No readable `updatedAt` → not shown. In Overdue, undone rows come first (oldest first), then ticked ones (oldest first) — the "done last" rule To do today already has. A ticked overdue row keeps its age and colour and its checked checkbox, so unticking it on Today works exactly as in To do today. Tasks 3 and 4 below carry the code and the tests; Task 5/7/9 need no change (they draw `done` the same in every section).
+- **A "no class" one-off shows next to the class** — as planned. **Display formats approved** as planned.
+- **Test counts:** the amendment adds one test to Task 3 and one to Task 4. Every `Expected` total from Task 3 Step 4 on is therefore one higher (Task 3) or two higher (Task 4 onwards) than written; the `today.test.js` file counts likewise. A different difference is a finding, not noise.
+
 **Tech Stack:** Vanilla ES modules, no framework, no build step, no bundler; `node:test` + `node:assert/strict`; no new dependencies.
 
 **Spec:** `docs/superpowers/specs/2026-10-20-plaenicke-home-screen-design.md` (§ 2.1–2.4, § 4, § 5, § 6, § 7, § 8 stage 3, the end-of-doc confirmations, the Canvas-deadline risk and the stage 1 result).
@@ -657,7 +663,25 @@ test('sectionOf: every to-do type past its date is overdue — start included; n
     assert.equal(sectionOf(own('a', { type, date: '2026-10-19' }), TODAY), null, `${type}: past events are never overdue`);
   }
   assert.equal(sectionOf(own('a', { type: 'due', date: '2026-10-19', done: true }), TODAY), null,
-    'a ticked overdue item leaves Overdue');
+    'ticked on an earlier day (own() writes updatedAt 1 Oct): gone from Overdue');
+});
+
+// Amendment 2026-10-22, Alex: "it should stay struck through until tomorrow".
+// No field says when an item was ticked; a tick bumps updatedAt, so "ticked
+// today" is "updatedAt is on today's LOCAL date". 03:00Z on the 22nd is 20:00
+// on the 21st in America/Los_Angeles (the zone the suite runs in, as the DST
+// tests already assume), which pins local over UTC.
+test('sectionOf: a to-do ticked today after its date stays in Overdue until tomorrow', () => {
+  const ticked = (updatedAt) => own('a', { type: 'due', date: '2026-10-19', done: true, updatedAt });
+  assert.equal(sectionOf(ticked('2026-10-21T19:00:00.000Z'), TODAY), 'overdue', 'ticked at noon today');
+  assert.equal(sectionOf(ticked('2026-10-22T03:00:00.000Z'), TODAY), 'overdue', 'ticked at 20:00 today, already the 22nd in UTC');
+  assert.equal(sectionOf(ticked('2026-10-21T06:00:00.000Z'), TODAY), null, '23:00 yesterday local, though the 21st in UTC');
+  assert.equal(sectionOf(ticked('2026-10-20T19:00:00.000Z'), TODAY), null, 'ticked yesterday');
+  for (const updatedAt of [undefined, null, '', 'soon']) {
+    assert.equal(sectionOf(ticked(updatedAt), TODAY), null, `no readable updatedAt: ${JSON.stringify(updatedAt)}`);
+  }
+  assert.equal(sectionOf(own('e', { type: 'event', date: '2026-10-19', done: true, updatedAt: '2026-10-21T19:00:00.000Z' }), TODAY),
+    null, 'a past event is never overdue, ticked or not');
 });
 
 test('sectionOf: a to-do ticked today stays in To do today; a ticked future one leaves Next 7 days', () => {
@@ -787,6 +811,7 @@ Create `js/today.js`:
 import { isScheduled, isTodoType } from './items.js';
 import { addDays, minutesOf } from './timegrid.js';
 import { formatDayLabel } from './freshness.js';
+import { toISO } from './dateparse.js';
 
 // Next 7 days is (today, today + NEXT_DAYS].
 export const NEXT_DAYS = 7;
@@ -804,7 +829,9 @@ const WEEKDAY = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 'sh
 // sectionOf: the one section an OWN item belongs to on `todayISO`, or null.
 // One answer per item is what makes "no item twice" true by construction.
 //   'overdue' every to-do type (due, milestone, task, start) whose date has
-//             passed and that is not done — no age limit (Alex, question 9)
+//             passed and that is not done — no age limit (Alex, question 9) —
+//             or that was ticked today: it stays, struck through, until
+//             tomorrow (Alex, 2026-10-22; see tickedToday)
 //   'todo'    every to-do type dated today, done or not: a ticked one stays,
 //             struck through, until tomorrow (question 2)
 //   'events'  an event or general item dated today
@@ -816,12 +843,26 @@ export function sectionOf(item, todayISO) {
   if (!isScheduled(item)) return null;
   if (typeof item.date !== 'string' || !ISO_DAY.test(item.date)) return null;
   const done = item.done === true;
-  if (item.date < todayISO) return isTodoType(item) && !done ? 'overdue' : null;
+  if (item.date < todayISO) {
+    if (!isTodoType(item)) return null;
+    return !done || tickedToday(item, todayISO) ? 'overdue' : null;
+  }
   if (item.date === todayISO) {
     if (isTodoType(item)) return 'todo';
     return EVENT_TYPES.has(item.type) ? 'events' : null;
   }
   return item.date <= addDays(todayISO, NEXT_DAYS) && !done ? 'next' : null;
+}
+
+// tickedToday: no item records when it was ticked, and the spec allows no new
+// item field (§ 6). handleToggleDone bumps updatedAt on every tick, so a done
+// item whose updatedAt is on today's LOCAL date was ticked today — or edited
+// today after being ticked, which shows it struck for the rest of the day
+// (the accepted cost). An unreadable updatedAt is no evidence: not today.
+function tickedToday(item, todayISO) {
+  if (typeof item.updatedAt !== 'string' || item.updatedAt === '') return false;
+  const at = new Date(item.updatedAt);
+  return !Number.isNaN(at.getTime()) && toISO(at) === todayISO;
 }
 
 // daysBetween: whole calendar days from one 'YYYY-MM-DD' to another, counted
@@ -920,6 +961,10 @@ Plant each, run `node --test tests/today.test.js tests/items.test.js`, restore:
 | `isPastEvent` → `if (!item.endTime) return false;` before the end check | `isPastEvent: over once its end has passed…` |
 | `diff <= NEXT_DAYS` → `diff < NEXT_DAYS` in `dayWord` | `dayWord: Tomorrow, then the weekday up to a week out, then the date` |
 | `isTodoType` → `TODO_TYPES.has(it.type) && it.done !== true` | `isTodoType is the four to-do types, done or not`, `sectionOf: a to-do ticked today stays…` |
+| `!done \|\| tickedToday(item, todayISO)` → `!done` (ticked leaves at once) | `sectionOf: a to-do ticked today after its date stays in Overdue until tomorrow` |
+| `!done \|\| tickedToday(…)` → `true` (every done overdue stays) | `sectionOf: every to-do type past its date is overdue…`, `sectionOf: a to-do ticked today after its date stays…` |
+| `toISO(at) === todayISO` → `item.updatedAt.slice(0, 10) === todayISO` (UTC day) | `sectionOf: a to-do ticked today after its date stays…` |
+| delete the `Number.isNaN` check | `sectionOf: a to-do ticked today after its date stays…` (`toISO(Invalid Date)` is `'NaN-NaN-NaN'` — confirm the mutant fails; if it does not, the check is dead and the test must say so) |
 
 - [ ] **Step 7: Commit**
 
@@ -1022,6 +1067,19 @@ test('buildToday: an overdue age is in days, red for a deadline and orange for a
   assert.deepEqual(t.overdue.map((r) => [r.item.id, r.age, r.tone]), [
     ['d', '2d', 'deadline'], ['m', '2d', 'deadline'], ['k', '1d', 'deadline'], ['s', '1d', 'start'],
   ]);
+});
+
+test('buildToday: a to-do ticked today stays in Overdue, after the undone ones, with its age and tone', () => {
+  const t = buildToday([
+    own('tick', { type: 'start', date: '2026-10-10', done: true, updatedAt: '2026-10-21T19:00:00.000Z' }),
+    own('late', { type: 'due', date: '2026-10-19' }),
+    own('older', { type: 'task', date: '2026-10-12' }),
+    own('gone', { type: 'due', date: '2026-10-11', done: true, updatedAt: '2026-10-20T19:00:00.000Z' }),
+  ], [], TODAY, at(8, 0), none);
+  assert.deepEqual(t.overdue.map((r) => [r.item.id, r.age, r.tone]), [
+    ['older', '9d', 'deadline'], ['late', '2d', 'deadline'], ['tick', '11d', 'start'],
+  ], 'undone oldest first, then ticked; ticked yesterday is gone');
+  assert.equal(t.emptyLine, null);
 });
 
 test('buildToday: an overdue item from months ago is still overdue, with its whole age', () => {
@@ -1338,7 +1396,11 @@ export function buildToday(items, instances, todayISO, nowMinutes, lookahead) {
     if (section) own[section].push(item);
   }
 
-  const overdue = sortItemsByDate(own.overdue).map((item) => ({
+  // Undone first, then the ones ticked today (amendment 2026-10-22).
+  const overdueSorted = sortItemsByDate(own.overdue);
+  const overdue = [
+    ...overdueSorted.filter((it) => it.done !== true), ...overdueSorted.filter((it) => it.done === true),
+  ].map((item) => ({
     item,
     age: `${daysBetween(item.date, todayISO)}d`,
     tone: item.type === 'start' ? 'start' : 'deadline',
@@ -1424,6 +1486,7 @@ Plant each in `js/today.js`, run `node --test tests/today.test.js`, restore:
 | `events.find((row) => row.item.time && !row.past)` → `events.find((row) => row.item.time)` | `only the next timed event says "in N"; finished ones are greyed` |
 | `todo` → `todoSorted.map((item) => ({ item }))` (done not last) | `the four sections, each in the order the spec gives` |
 | `tone: item.type === 'start' ? 'start' : 'deadline'` → `tone: 'deadline'` | `an overdue age is in days, red for a deadline and orange for a start` |
+| `overdue` → `overdueSorted.map(…)` (ticked not last) | `a to-do ticked today stays in Overdue, after the undone ones…` |
 | call `lookahead()` before the empty-sections check | `with nothing overdue…`, `the 30-day look-ahead runs only when…`, `a day with only classes…` |
 | look-ahead filter drops `inst.recurring === false &&` | `with nothing overdue…`, `Review Focus: a cancelled class (EXDATE) is simply not on its day` |
 | look-ahead filter drops `&& inst.date <= lookEnd` | `the "Next" line skips done items, ideas and anything past 30 days` |
@@ -2818,7 +2881,7 @@ Ask Alex to open the app twice (the network-first worker serves the new files on
 - LMU classes appear under Today's events on their own days and never under Next 7 days; an exam, a quiz or a "no class" day appears under Next 7 days on its day.
 - The next event shows "in N min" / "in N h N min" / "now", and it counts down over a few minutes without the list jumping.
 - An overdue deadline's age is red and an overdue start's age is orange; **the two are readable and tell apart in light and in dark mode** (punchlist carry-over 4). Also check that the next event's "in N" (the accent: leather brown in light mode) does not read as the orange start age — in Chrome's light-mode render the two browns look close.
-- Ticking a to-do on Today keeps the row, struck through; ticking it again unticks it. A tick does not flash the whole row; tapping a row's title flashes the row (tinted, not dimmed) and opens its sheet.
+- Ticking a to-do on Today keeps the row, struck through — in To do today and in Overdue (it moves below the undone overdue rows); ticking it again unticks it. A tick does not flash the whole row; tapping a row's title flashes the row (tinted, not dimmed) and opens its sheet.
 - Settings opens from the gear.
 - Dark mode: every Today colour follows the theme.
 
@@ -3581,7 +3644,7 @@ Expected: `# tests 1431`. No merge is needed for a docs-only change; it goes out
 | § 2.4 heuristic only for a feed with no RRULE; same title + weekday + time on 3+ weeks; `guessedSeries`; Alex's approval (question 8) | 2 |
 | End notes: the Canvas-deadline risk, resolved in the 3a plan | 2 (no length → never guessed), tested on instances and on the Settings line |
 | § 2.3 one pure `buildToday` in `js/today.js`, from `liveItems()` and `instancesForRange(…, today, today+7, deviceTz)`, not `visibleItems` | 3, 4, 7 (fifth argument: see Architecture) |
-| § 2.3 Overdue: every to-do type incl. `start`, no age limit; never ideas, done, events, feed instances; red / orange; ticked leaves Overdue; oldest first | 3, 4, 5, 9 |
+| § 2.3 Overdue: every to-do type incl. `start`, no age limit; never ideas, done, events, feed instances; red / orange; ticked stays struck through until tomorrow (amendment 2026-10-22); oldest first, ticked last | 3, 4, 5, 9 |
 | § 2.3 To do today: done stays struck through until tomorrow; `sortItemsByDate`, done last | 3, 4, 5, 7, 9 |
 | § 2.3 Today's events: own `event`/`general` + every instance today; untimed first | 4 |
 | § 2.3 Next 7 days: not done, scheduled, (today, today+7]; one-off instances only; by day; empty days hidden; one-offs once by `${feedId}:${uid}`, dropped if shown today | 3, 4 |
@@ -3612,7 +3675,7 @@ Expected: `# tests 1431`. No merge is needed for a docs-only change; it goes out
 **Review Focus:** each of the five has a named test inside its owning task (Tasks 2, 3, 4).
 
 **Spec gaps found while planning (for Alex):**
-- **A ticked Overdue row vanishes with no way back on Today.** § 2.3 says "A ticked overdue item leaves Overdue", while question 2's reason for keeping ticked to-dos is "so a tick can be undone". This plan follows § 2.3: the item leaves Overdue and the To-do page; it can be unticked only from its day in Calendar. Alternatives: keep it struck through in Overdue until tomorrow, or show an Undo toast on a tick. Needs Alex's call.
+- ~~A ticked Overdue row vanishes with no way back on Today.~~ **Decided 2026-10-22: it stays struck through until tomorrow** (see the amendment at the top).
 - **"Nothing due today. Next: …" shows above Next 7 days even when Next 7 days has rows,** and may name the first of them. That is what § 2.3 says ("If the first three are all empty, one line"). Confirm.
 - **The `${feedId}:${uid}` "once" key drops a second occurrence of a monthly or yearly series (or one of its overrides) that falls in the same week.** § 2.3 names that key; only a monthly rule with several days a week can do it, and LMU Classes has none.
 - **A "no class" one-off on a class day shows next to the class.** Alex's calendar has no EXDATE for those days (stage 1), so the feed says both. Hiding the class would need a title rule or the visibility work of sub-project 3.
