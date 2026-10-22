@@ -567,31 +567,39 @@ function seed(records) {
 // the button hides every other section and never un-hides its own: a blank
 // page. Missing from `buttons`, the nav never shows which page you are on.
 // Both are invisible to any test that only inspects list contents.
-test('each nav button reveals exactly its own page, and marks itself active', async () => {
+// Home-screen stage 3c: four tabs, and Calendar's four segments. Each control
+// reveals exactly its own page; the active tab is the page's tab (Calendar
+// for its four), and the active segment is the page itself.
+const NAV = [
+  // [control, section, tab that is active]
+  ['tab-today', 'today-view', 'tab-today'],
+  ['show-day', 'day-view', 'tab-calendar'],
+  ['show-week', 'week-view', 'tab-calendar'],
+  ['show-month', 'calendar-view', 'tab-calendar'],
+  ['show-list', 'list-view', 'tab-calendar'],
+  ['tab-todo', 'todo-view', 'tab-todo'],
+  ['tab-ideas', 'ideas-view', 'tab-ideas'],
+];
+const TABS = ['tab-today', 'tab-calendar', 'tab-todo', 'tab-ideas'];
+const SEGMENTS = ['show-day', 'show-week', 'show-month', 'show-list'];
+
+test('each tab and each Calendar segment reveals exactly its own page, and marks itself active', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
-  const pages = [
-    ['show-today', 'today-view'],
-    ['show-list', 'list-view'],
-    ['show-month', 'calendar-view'],
-    ['show-week', 'week-view'],
-    ['show-day', 'day-view'],
-    ['show-todo', 'todo-view'],
-    ['show-ideas', 'ideas-view'],
-  ];
-  for (const [buttonId, sectionId] of pages) {
-    click(globalThis.document.getElementById(buttonId));
-    for (const [otherButton, otherSection] of pages) {
-      const section = globalThis.document.getElementById(otherSection);
-      const button = globalThis.document.getElementById(otherButton);
-      const isTarget = otherSection === sectionId;
-      assert.equal(section.hidden, !isTarget,
-        `after clicking #${buttonId}, #${otherSection} should be ${isTarget ? 'visible' : 'hidden'}`);
-      assert.equal(button._classes.has('active'), isTarget,
-        `after clicking #${buttonId}, #${otherButton} should${isTarget ? '' : ' not'} be active`);
+  const doc = globalThis.document;
+  for (const [control, sectionId, tab] of NAV) {
+    click(doc.getElementById(control));
+    for (const [, otherSection] of NAV) {
+      assert.equal(doc.getElementById(otherSection).hidden, otherSection !== sectionId,
+        `after #${control}, #${otherSection}`);
     }
+    for (const t of TABS) assert.equal(doc.getElementById(t)._classes.has('active'), t === tab, `after #${control}, #${t}`);
+    for (const seg of SEGMENTS) {
+      assert.equal(doc.getElementById(seg)._classes.has('active'), seg === control, `after #${control}, #${seg}`);
+    }
+    assert.equal(doc.getElementById('cal-switch').hidden, tab !== 'tab-calendar', `after #${control}, the switcher`);
   }
-  click(globalThis.document.getElementById('show-list')); // leave the default view selected
+  click(doc.getElementById('tab-today'));
 });
 
 test('the To-do page lists open to-dos, and nothing else', async () => {
@@ -1374,8 +1382,9 @@ function resume() {
 // Home-screen stage 3b: the app opens on Today (it opened on Day before).
 test('index.html opens on Today', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-  assert.match(html, /<button id="show-today"[^>]*class="active"/, 'the Today button must be the active one on load');
-  assert.doesNotMatch(html, /<button id="show-(list|month|week|day|todo|ideas)"[^>]*class="active"/, 'and no other');
+  assert.match(html, /<button id="tab-today"[^>]*class="active"/, 'the Today tab must be the active one on load');
+  assert.doesNotMatch(html, /<button id="(tab-calendar|tab-todo|tab-ideas|show-[a-z]+)"[^>]*class="active"/, 'and no other');
+  assert.match(html, /<div id="cal-switch"[^>]*hidden/, 'the Calendar switcher starts hidden');
   assert.match(html, /<section id="today-view"(?![^>]*hidden)[^>]*>/, 'the Today section must be visible on load');
   for (const id of ['list-view', 'calendar-view', 'week-view', 'day-view', 'todo-view', 'ideas-view']) {
     assert.match(html, new RegExp(`<section id="${id}"[^>]*hidden`), `#${id} must start hidden`);
@@ -3326,18 +3335,18 @@ test('sweep D: a tick that fails on quota is shown unticked again, with the erro
 
 const todayBody = () => globalThis.document.getElementById('today-body');
 const PAGES = [
-  ['Today', 'show-today', 'today-view', () => todayBody()],
+  ['Today', 'tab-today', 'today-view', () => todayBody()],
   ['List', 'show-list', 'list-view', () => itemList()],
   ['Day', 'show-day', 'day-view', () => dayBody()],
-  ['To-do', 'show-todo', 'todo-view', () => todoList()],
-  ['Ideas', 'show-ideas', 'ideas-view', () => ideaList()],
+  ['To-do', 'tab-todo', 'todo-view', () => todoList()],
+  ['Ideas', 'tab-ideas', 'ideas-view', () => ideaList()],
 ];
 // The nav button of whichever page is showing, to put it back afterwards.
 function visiblePageButton() {
   for (const [buttonId, sectionId] of [
-    ['show-today', 'today-view'],
+    ['tab-today', 'today-view'],
     ['show-list', 'list-view'], ['show-month', 'calendar-view'], ['show-week', 'week-view'],
-    ['show-day', 'day-view'], ['show-todo', 'todo-view'], ['show-ideas', 'ideas-view'],
+    ['show-day', 'day-view'], ['tab-todo', 'todo-view'], ['tab-ideas', 'ideas-view'],
   ]) {
     if (!globalThis.document.getElementById(sectionId).hidden) return globalThis.document.getElementById(buttonId);
   }
@@ -3549,7 +3558,7 @@ test('sF: an Undo across the idea line with a field changed since is refused who
   enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
     clearMessage();
-    click(globalThis.document.getElementById('show-ideas'));
+    click(globalThis.document.getElementById('tab-ideas'));
     click(openControlFor(ideaList(), 'Buy a boat'));
     sheetHost().querySelector('.sheet-type').value = 'task';
     click(sheetHost().querySelector('.sheet-save'));
@@ -3621,7 +3630,7 @@ test('sF: an Undo whose rebuild would change a skipped field is refused', async 
   enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
     clearMessage();
-    click(globalThis.document.getElementById('show-ideas'));
+    click(globalThis.document.getElementById('tab-ideas'));
     click(openControlFor(ideaList(), 'sF idea keep'));
     const mine = 'sF idea mine is the first sentence. Then enough further words to make this a long idea.';
     sheetHost().querySelector('.sheet-text').value = mine;
@@ -4239,26 +4248,25 @@ test('a11y: Week columns open their day from the keyboard', async () => {
 // The nav's selected page was shown only by a CSS class, which assistive tech
 // does not read. aria-pressed says it, in the markup at load (showView is not
 // run until a button is tapped) and after every tap.
-test('a11y: index.html marks the Today button pressed and every other nav button not', () => {
+test('a11y: index.html marks the Today tab pressed and every other tab and segment not', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-  for (const id of ['show-today', 'show-list', 'show-month', 'show-week', 'show-day', 'show-todo', 'show-ideas']) {
+  for (const id of [...TABS, ...SEGMENTS]) {
     const tag = html.match(new RegExp(`<button id="${id}"[^>]*>`));
     assert.ok(tag, `fixture check: #${id}`);
-    assert.match(tag[0], new RegExp(`aria-pressed="${id === 'show-today'}"`), `#${id}`);
+    assert.match(tag[0], new RegExp(`aria-pressed="${id === 'tab-today'}"`), `#${id}`);
   }
 });
 
-test('a11y: each nav button reports itself pressed, and only itself', async () => {
+test('a11y: each tab and segment reports itself pressed — a segment with Calendar, and nothing else', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
   const restore = visiblePageButton();
-  const ids = ['show-today', 'show-list', 'show-month', 'show-week', 'show-day', 'show-todo', 'show-ideas'];
   try {
-    for (const id of ids) {
-      click(globalThis.document.getElementById(id));
-      for (const other of ids) {
-        assert.equal(globalThis.document.getElementById(other).getAttribute('aria-pressed'), String(other === id),
-          `after #${id}, #${other}`);
+    for (const [control, , tab] of NAV) {
+      click(globalThis.document.getElementById(control));
+      for (const other of [...TABS, ...SEGMENTS]) {
+        assert.equal(globalThis.document.getElementById(other).getAttribute('aria-pressed'),
+          String(other === control || other === tab), `after #${control}, #${other}`);
       }
     }
   } finally {
@@ -5717,7 +5725,7 @@ test('Today: the page names the day and lists live items in their sections', asy
       record({ id: 'td-fri', type: 'event', title: 'td Dinner', date: '2026-10-23', time: '19:00' }),
       record({ id: 'td-idea', type: 'idea', title: 'td Shelves', date: '2026-10-21' }),
     ]);
-    click(globalThis.document.getElementById('show-today'));
+    click(globalThis.document.getElementById('tab-today'));
     assert.equal(globalThis.document.getElementById('today-view').hidden, false);
     assert.equal(labelText('today-date'), 'Wednesday, October 21');
     const text = allText(todayBody());
@@ -5754,7 +5762,7 @@ test('Today: an overdue to-do ticked on Today stays in Overdue, struck through, 
       record({ id: 'td-od-old', type: 'due', title: 'td Old essay', date: '2026-10-15' }),
       record({ id: 'td-od-new', type: 'task', title: 'td Newer task', date: '2026-10-19' }),
     ]);
-    click(globalThis.document.getElementById('show-today'));
+    click(globalThis.document.getElementById('tab-today'));
     assert.equal(rowTitles().length, 2, 'fixture check: both are overdue');
     assert.match(rowTitles()[0], /td Old essay/, 'fixture check: oldest first');
 
@@ -5792,7 +5800,7 @@ test('Today: a tick on Today is saved, and the row stays, struck through, until 
   const restore = visiblePageButton();
   seed([record({ id: 'td-tick', type: 'task', title: 'td Water plants', date: localISO(new Date()) })]);
   try {
-    click(globalThis.document.getElementById('show-today'));
+    click(globalThis.document.getElementById('tab-today'));
     const box = checkboxFor(todayBody(), 'td Water plants');
     assert.ok(box, 'fixture check: the row has a checkbox');
     box.checked = true;
@@ -5849,13 +5857,13 @@ test('Today: the tick runs only while Today and the page are both visible, and n
   try {
     click(doc.getElementById('show-day'));
     assert.equal(liveIntervals(60000).length, 0);
-    click(doc.getElementById('show-today'));
+    click(doc.getElementById('tab-today'));
     assert.equal(liveIntervals(60000).length, 1);
-    click(doc.getElementById('show-today'));
+    click(doc.getElementById('tab-today'));
     assert.equal(liveIntervals(60000).length, 1, 'tapping Today again arms no second one');
     click(doc.getElementById('show-week'));
     assert.equal(liveIntervals(60000).length, 0, 'leaving Today stops it');
-    click(doc.getElementById('show-today'));
+    click(doc.getElementById('tab-today'));
     doc.visibilityState = 'hidden';
     resume();
     assert.equal(liveIntervals(60000).length, 0, 'a hidden page does not tick');
@@ -5885,7 +5893,7 @@ test('Today: the tick changes the "in N" text, and no other node', async (t) => 
       record({ id: 'td-rel-gym', type: 'event', title: 'td Gym', date: '2026-10-21', time: '08:00', endTime: '09:00' }),
       record({ id: 'td-rel-task', type: 'task', title: 'td Pay rent', date: '2026-10-21' }),
     ]);
-    click(globalThis.document.getElementById('show-today'));
+    click(globalThis.document.getElementById('tab-today'));
     const before = nodesOf(todayBody());
     const texts = before.map((n) => n.textContent);
     const rel = before.find((n) => n._classes.has('today-rel'));
@@ -5934,7 +5942,7 @@ test('Today: a tick on a new day re-renders the page instead of counting down to
     seed([
       record({ id: 'td-mid', type: 'event', title: 'td Late call', date: '2026-10-21', time: '23:55', endTime: '23:59' }),
     ]);
-    click(globalThis.document.getElementById('show-today'));
+    click(globalThis.document.getElementById('tab-today'));
     const rel = allNodes(todayBody()).find((n) => n._classes.has('today-rel'));
     assert.equal(rel.textContent, 'in 5 min', 'fixture check');
     assert.equal(labelText('today-date'), 'Wednesday, October 21', 'fixture check');
@@ -5954,4 +5962,86 @@ test('Today: a tick on a new day re-renders the page instead of counting down to
     if (restore) click(restore);
   }
   resume();
+});
+
+// =========================================================================
+// Home-screen stage 3c — the tab bar and Calendar's switcher (spec § 4)
+// =========================================================================
+
+test('tabs: the bar is Today | Calendar | To-do | Ideas, and Calendar\'s switcher is Day / Week / Month / List', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const bar = html.match(/<nav class="tab-bar"[\s\S]*?<\/nav>/);
+  assert.ok(bar, 'fixture check: index.html has the tab bar');
+  assert.deepEqual([...bar[0].matchAll(/<button id="([^"]+)"[^>]*>([^<]*)</g)].map((m) => [m[1], m[2]]), [
+    ['tab-today', 'Today'], ['tab-calendar', 'Calendar'], ['tab-todo', 'To-do'], ['tab-ideas', 'Ideas'],
+  ]);
+  const sw = html.match(/<div id="cal-switch"[\s\S]*?<\/div>/);
+  assert.ok(sw, 'fixture check: index.html has the switcher');
+  assert.deepEqual([...sw[0].matchAll(/<button id="([^"]+)"[^>]*>([^<]*)</g)].map((m) => [m[1], m[2]]), [
+    ['show-day', 'Day'], ['show-week', 'Week'], ['show-month', 'Month'], ['show-list', 'List'],
+  ], 'List stays (question 4); 3-day is hidden until it is built (question 5)');
+  assert.doesNotMatch(html, /class="view-toggle"|id="show-(today|todo|ideas|3day)"|>3-day</i,
+    'the six view buttons are gone, and no 3-day control exists');
+});
+
+test('tabs: Calendar opens on the view last used there, Day by default', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  try {
+    click(doc.getElementById('show-day'));
+    click(doc.getElementById('tab-today'));
+    click(doc.getElementById('tab-calendar'));
+    assert.equal(doc.getElementById('day-view').hidden, false, 'Day');
+    click(doc.getElementById('show-month'));
+    click(doc.getElementById('tab-todo'));
+    click(doc.getElementById('tab-calendar'));
+    assert.equal(doc.getElementById('calendar-view').hidden, false, 'back on Month');
+    assert.ok(doc.getElementById('show-month')._classes.has('active'));
+  } finally {
+    click(doc.getElementById('show-day'));
+    if (restore) click(restore);
+  }
+});
+
+test('tabs: tapping a day in Month or Week opens Day inside Calendar', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  try {
+    click(doc.getElementById('show-week'));
+    click(doc.getElementById('week-grid').children[3]);
+    assert.equal(doc.getElementById('day-view').hidden, false);
+    assert.ok(doc.getElementById('tab-calendar')._classes.has('active'));
+    assert.ok(doc.getElementById('show-day')._classes.has('active'));
+    assert.equal(doc.getElementById('cal-switch').hidden, false);
+  } finally {
+    click(doc.getElementById('show-month'));
+    openDayForToday();
+    if (restore) click(restore);
+  }
+});
+
+test('tabs: the shell title names the tab; on Today the Today heading stands alone', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const title = doc.getElementById('tab-title');
+  const restore = visiblePageButton();
+  try {
+    for (const [tab, text] of [['tab-calendar', 'Calendar'], ['tab-todo', 'To-do'], ['tab-ideas', 'Ideas']]) {
+      click(doc.getElementById(tab));
+      assert.equal(title.hidden, false, tab);
+      assert.equal(title.textContent, text, tab);
+    }
+    click(doc.getElementById('tab-today'));
+    assert.equal(title.hidden, true);
+  } finally {
+    if (restore) click(restore);
+  }
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  assert.match(html, /<h1 id="tab-title"[^>]*hidden/, 'hidden at load, when Today is showing');
+  assert.doesNotMatch(html, />plaenicke<\/h1>/, 'the plaenicke h1 is replaced by the tab titles');
 });

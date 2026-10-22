@@ -69,8 +69,6 @@ const els = {
   prevDay: document.getElementById('prev-day'),
   nextDay: document.getElementById('next-day'),
   // V6 — the To-do and Ideas pages.
-  showTodo: document.getElementById('show-todo'),
-  showIdeas: document.getElementById('show-ideas'),
   todoView: document.getElementById('todo-view'),
   todoList: document.getElementById('todo-list'),
   ideasView: document.getElementById('ideas-view'),
@@ -79,10 +77,16 @@ const els = {
   ideaAdd: document.getElementById('idea-add'),
   updatedStamp: document.getElementById('updated-stamp'),
   // Home-screen stage 3b — the Today page.
-  showToday: document.getElementById('show-today'),
   todayView: document.getElementById('today-view'),
   todayBody: document.getElementById('today-body'),
   todayDate: document.getElementById('today-date'),
+  // Home-screen stage 3c — the tab bar, the tab title and Calendar's switcher.
+  tabToday: document.getElementById('tab-today'),
+  tabCalendar: document.getElementById('tab-calendar'),
+  tabTodo: document.getElementById('tab-todo'),
+  tabIdeas: document.getElementById('tab-ideas'),
+  tabTitle: document.getElementById('tab-title'),
+  calSwitch: document.getElementById('cal-switch'),
 };
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
@@ -929,22 +933,31 @@ function render() {
   renderToday(); renderList(); renderCalendar(); renderWeek(); renderDay(); renderTodos(); renderIdeas();
 }
 
+// The tab bar (home-screen spec § 4): Today | Calendar | To-do | Ideas.
+// Calendar holds four views, chosen by its switcher, and opens on the one
+// last used there (Day until another is picked; this session only).
+const CALENDAR_VIEWS = ['day', 'week', 'month', 'list'];
+const TAB_TITLES = { today: 'Today', calendar: 'Calendar', todo: 'To-do', ideas: 'Ideas' };
+let lastCalendarView = 'day';
+
 function showView(which) {
   const views = {
     today: els.todayView, list: els.listView, month: els.calView, week: els.weekView, day: els.dayView,
     todo: els.todoView, ideas: els.ideasView,
   };
-  const buttons = {
-    today: els.showToday, list: els.showList, month: els.showMonth, week: els.showWeek, day: els.showDay,
-    todo: els.showTodo, ideas: els.showIdeas,
-  };
+  const tabs = { today: els.tabToday, calendar: els.tabCalendar, todo: els.tabTodo, ideas: els.tabIdeas };
+  const segments = { day: els.showDay, week: els.showWeek, month: els.showMonth, list: els.showList };
+  const tab = CALENDAR_VIEWS.includes(which) ? 'calendar' : which;
+  if (tab === 'calendar') lastCalendarView = which;
   for (const [name, el] of Object.entries(views)) el.hidden = name !== which;
   // aria-pressed says which page is showing to assistive tech, which does not
   // read the class. index.html carries the load-time values.
-  for (const [name, b] of Object.entries(buttons)) {
-    b.classList.toggle('active', name === which);
-    b.setAttribute('aria-pressed', String(name === which));
-  }
+  const mark = (b, on) => { b.classList.toggle('active', on); b.setAttribute('aria-pressed', String(on)); };
+  for (const [name, b] of Object.entries(tabs)) mark(b, name === tab);
+  for (const [name, b] of Object.entries(segments)) mark(b, name === which);
+  els.calSwitch.hidden = tab !== 'calendar';
+  els.tabTitle.textContent = TAB_TITLES[tab];
+  els.tabTitle.hidden = tab === 'today';
   render();
   syncTodayTick();
 }
@@ -965,13 +978,14 @@ function openDay(dateISO) {
 els.time.addEventListener('input', () => { els.end.hidden = !els.time.value; if (!els.time.value) els.end.value = ''; });
 els.add.addEventListener('click', handleAdd);
 els.text.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleAdd(); });
-els.showToday.addEventListener('click', () => showView('today'));
+els.tabToday.addEventListener('click', () => showView('today'));
+els.tabCalendar.addEventListener('click', () => showView(lastCalendarView));
+els.tabTodo.addEventListener('click', () => showView('todo'));
+els.tabIdeas.addEventListener('click', () => showView('ideas'));
 els.showList.addEventListener('click', () => showView('list'));
 els.showMonth.addEventListener('click', () => showView('month'));
 els.showWeek.addEventListener('click', () => showView('week'));
 els.showDay.addEventListener('click', () => showView('day'));
-els.showTodo.addEventListener('click', () => showView('todo'));
-els.showIdeas.addEventListener('click', () => showView('ideas'));
 els.ideaAdd.addEventListener('click', handleIdeaAdd);
 // An arrow steps from what is ON SCREEN (batch-F review, Important 1). It
 // remembers the cursor the user can see, lets refreshForToday catch the OTHER

@@ -23,7 +23,9 @@
 </head>
 <body>
   <header>
-    <h1>plaenicke</h1>
+    <!-- The tab's title (home-screen spec § 2.2), set by js/app.js's
+         showView. Hidden on Today, whose own heading names the day. -->
+    <h1 id="tab-title" hidden>Today</h1>
     <!-- When the screen was last brought up to date (Phase 0). iOS resumes
          this app rather than reloading it, so "is this current?" is a real
          question; js/app.js repaints this on load and on every resume. -->
@@ -61,15 +63,15 @@
 
   <section id="preview" hidden></section>
 
-  <nav class="view-toggle">
-    <button id="show-today" type="button" class="active" aria-pressed="true">Today</button>
-    <button id="show-list" type="button" aria-pressed="false">List</button>
-    <button id="show-month" type="button" aria-pressed="false">Month</button>
-    <button id="show-week" type="button" aria-pressed="false">Week</button>
+  <!-- Calendar's switcher (spec § 4), shown on the Calendar tab only. List
+       stays (question 4); 3-day joins after Day once it is built
+       (question 5). -->
+  <div id="cal-switch" class="cal-switch" role="group" aria-label="Calendar view" hidden>
     <button id="show-day" type="button" aria-pressed="false">Day</button>
-    <button id="show-todo" type="button" aria-pressed="false">To-do</button>
-    <button id="show-ideas" type="button" aria-pressed="false">Ideas</button>
-  </nav>
+    <button id="show-week" type="button" aria-pressed="false">Week</button>
+    <button id="show-month" type="button" aria-pressed="false">Month</button>
+    <button id="show-list" type="button" aria-pressed="false">List</button>
+  </div>
 
   <!-- Today (home-screen spec § 2): js/today.js decides what is on it and
        js/todayview.js draws it into #today-body. Settings opens from the gear
@@ -131,6 +133,14 @@
     </div>
     <ul id="idea-list"></ul>
   </section>
+
+  <!-- The tab bar (spec § 4), fixed at the bottom. -->
+  <nav class="tab-bar" aria-label="Pages">
+    <button id="tab-today" type="button" class="active" aria-pressed="true">Today</button>
+    <button id="tab-calendar" type="button" aria-pressed="false">Calendar</button>
+    <button id="tab-todo" type="button" aria-pressed="false">To-do</button>
+    <button id="tab-ideas" type="button" aria-pressed="false">Ideas</button>
+  </nav>
 
   <div id="settings-host"></div>
   <!-- The item sheet (js/itemsheet.js) mounts here. -->
