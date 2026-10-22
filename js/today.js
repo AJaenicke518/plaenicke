@@ -99,7 +99,8 @@ export function isPastEvent(item, nowMinutes) {
   return nowMinutes >= end;
 }
 
-// The "Next" line looks this far ahead for a one-off feed instance (spec § 2.3).
+// The "Next" line looks this far ahead for a feed instance, one-off or
+// repeating (spec § 2.3; repeating since final review A5, 2026-10-22).
 export const LOOKAHEAD_DAYS = 30;
 
 // buildToday: every section of the Today screen (spec § 2.3), from
@@ -114,8 +115,9 @@ export const LOOKAHEAD_DAYS = 30;
 //   overdue    [{ item, age: '3d', tone: 'deadline' | 'start' }]  oldest first
 //   todo       [{ item }]   by time, untimed first; done ones last
 //   events     [{ item, past, relative }]   untimed first; `relative` ("in
-//              42 min", "now") on the next timed event only, `past` on every
-//              timed one that is over
+//              42 min", "now", or '' while over 12 h away) on the next timed
+//              event only, null on every other row; `past` on every timed
+//              one that is over
 //   next       [{ date, label, rows: [{ item }] }]  one entry per day that
 //              has rows; days without rows are left out
 //   emptyLine  the one line shown when Overdue, To do today and Today's
@@ -127,7 +129,8 @@ export const LOOKAHEAD_DAYS = 30;
 // day; those copies share a `spanKey`, which instancesForRange gives only to
 // a uid that is one plain event — other events that share a uid, such as
 // master-less overrides, each have their own). A repeating instance
-// (`recurring`) is never under Next 7 days. Instances, and the look-ahead's,
+// (`recurring`) is never under Next 7 days, though the empty line's "Next:"
+// may name one. Instances, and the look-ahead's,
 // must carry `recurring` and `spanKey`: an unstamped one throws.
 export function buildToday(items, instances, todayISO, nowMinutes, lookahead) {
   if (typeof todayISO !== 'string' || !ISO_DAY.test(todayISO)) throw new Error('buildToday requires todayISO');
@@ -161,7 +164,9 @@ export function buildToday(items, instances, todayISO, nowMinutes, lookahead) {
   const events = sortItemsByDate([...own.events, ...onToday])
     .map((item) => ({ item, past: isPastEvent(item, nowMinutes), relative: null }));
   const upcoming = events.find((row) => row.item.time && !row.past);
-  if (upcoming) upcoming.relative = relativeLabel(upcoming.item, nowMinutes);
+  // A string on the next timed event's row, '' while it is over 12 h away, so
+  // its label is drawn and the 60 s tick can fill it in (final review A2).
+  if (upcoming) upcoming.relative = relativeLabel(upcoming.item, nowMinutes) ?? '';
 
   const nextEnd = addDays(todayISO, NEXT_DAYS);
   const seen = new Set(onToday.map((inst) => inst.spanKey));
@@ -190,7 +195,10 @@ export function buildToday(items, instances, todayISO, nowMinutes, lookahead) {
     const candidates = [
       ...items.filter((it) => isScheduled(it) && it.done !== true
         && typeof it.date === 'string' && ISO_DAY.test(it.date) && it.date > todayISO),
-      ...ahead.filter((inst) => inst.recurring === false && inst.date > todayISO && inst.date <= lookEnd),
+      // Repeating instances count here (final review A5, 2026-10-22): the line
+      // names the first upcoming thing, class or not. They stay out of Next 7
+      // days above.
+      ...ahead.filter((inst) => inst.date > todayISO && inst.date <= lookEnd),
     ];
     const first = sortItemsByDate(candidates)[0];
     emptyLine = first

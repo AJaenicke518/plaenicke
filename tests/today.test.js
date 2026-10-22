@@ -4,7 +4,7 @@ import {
   sectionOf, daysBetween, dayWord, relativeLabel, isPastEvent, buildToday, NEXT_DAYS,
 } from '../js/today.js';
 import { parseICS } from '../js/ics.js';
-import { instancesForRange } from '../js/feeds.js';
+import { instancesForRange, feedShape } from '../js/feeds.js';
 import { addDays } from '../js/timegrid.js';
 
 // The "ticked today" tests turn UTC instants into local days, and the
@@ -299,6 +299,23 @@ test('buildToday: only the next timed event says "in N"; finished ones are greye
   assert.deepEqual(late.events.map((r) => r.relative), [null, null, null, null], 'nothing left today');
 });
 
+// Final review A2 (2026-10-22): the next timed event's row always carries a
+// `relative` string — '' while it is over 12 h away — so the page draws its
+// label and the 60 s tick can fill it in once it comes within 12 h. Every
+// other row's is null.
+test('buildToday: the next event over 12 h away still gets a relative label, empty; no other row does', () => {
+  const instances = [
+    inst('allday', TODAY, { title: 'Fair' }),
+    inst('gym', TODAY, { time: '07:00', endTime: '07:30' }),
+    inst('talk', TODAY, { time: '20:30', endTime: '21:30' }),
+    inst('late', TODAY, { time: '22:00' }),
+  ];
+  const t = buildToday([], instances, TODAY, at(8, 0), none);
+  assert.deepEqual(t.events.map((r) => [r.item.uid, r.relative]), [
+    ['allday', null], ['gym', null], ['talk', ''], ['late', null],
+  ]);
+});
+
 test('buildToday: own events take part in "next" and in greying too', () => {
   const t = buildToday([own('call', { type: 'event', time: '09:45', endTime: '10:00' })],
     [inst('lec', TODAY, { time: '11:00', endTime: '12:00' })], TODAY, at(9, 3), none);
@@ -309,7 +326,9 @@ test('buildToday: with nothing overdue, due or on today, one line names the next
   const calls = [];
   const lookahead = () => { calls.push(1); return [inst('phys', '2026-10-23', { recurring: true }), inst('club', '2026-10-29', { title: 'Club' })]; };
   const t = buildToday([own('quiz', { type: 'event', date: '2026-10-30', title: 'Stats quiz' })], [], TODAY, at(8, 0), lookahead);
-  assert.equal(t.emptyLine, 'Nothing due today. Next: Club · Thu, Oct 29.', 'the earlier of the two; a repeating class is skipped');
+  // Final review A5 (2026-10-22): the "Next" line names the first upcoming
+  // thing, a repeating class included (it stays out of Next 7 days itself).
+  assert.equal(t.emptyLine, 'Nothing due today. Next: i-phys · Fri.', 'the earliest of the three; a repeating class counts');
   assert.equal(calls.length, 1);
   const own2 = buildToday([own('quiz', { type: 'event', date: '2026-10-23', title: 'Stats quiz' })], [], TODAY, at(8, 0), lookahead);
   assert.equal(own2.emptyLine, 'Nothing due today. Next: Stats quiz · Fri.');
@@ -467,7 +486,8 @@ test('Review Focus: after the DST change the class keeps its 10:00, and a "no cl
 test('Review Focus: a cancelled class (EXDATE) is simply not on its day', () => {
   const t = todayFromIcs('2026-11-05', at(8, 0));
   assert.deepEqual(t.events, []);
-  assert.equal(t.emptyLine, 'Nothing coming up.', 'no one-off in the next 30 days, and the classes are not "next"');
+  assert.equal(t.emptyLine, 'Nothing due today. Next: PHYS 2100 · Tue.',
+    'the next class names the next thing (final review A5): Tue 10 Nov, after the cancelled Thu 5 Nov');
 });
 
 test('Review Focus: the DST week moves neither the Next 7 days edge nor an overdue age', () => {
@@ -527,4 +547,42 @@ test('spanKey: two one-offs with the same UID on different days both show under 
 test('spanKey: a multi-day all-day one-off from real ICS still shows once', () => {
   const t = todayFromText([vevent('trip@x', 'Trip', ['DTSTART;VALUE=DATE:20261023', 'DTEND;VALUE=DATE:20261026'])]);
   assert.deepEqual(t.next.map((d) => [d.label, titles(d.rows)]), [['Fri', ['Trip']]]);
+});
+
+// Final review A1 (2026-10-22): a no-RRULE feed whose master-less overrides
+// share UID:S1 — three on Thursdays at the same time (a guessed group) and one
+// moved to a Tuesday. A uid is guessed only when EVERY event with it is in a
+// guessed group, so the moved one is no part of a series: it shows under Next
+// 7 days with no "guessed" flag, and feedShape counts all four as single.
+test('A1: a uid with an event outside every guessed group is not guessed — the moved one shows', () => {
+  const seminar = (day, from, to) => vevent('S1', 'Seminar', [
+    `RECURRENCE-ID:${day}T${from}00Z`, `DTSTART:${day}T${from}00Z`, `DTEND:${day}T${to}00Z`,
+  ]);
+  const vevents = [
+    seminar('20261008', '1700', '1800'), seminar('20261015', '1700', '1800'),
+    seminar('20261022', '1700', '1800'), seminar('20261027', '2000', '2100'),
+  ];
+  const { events } = parseICS(['BEGIN:VCALENDAR', 'VERSION:2.0', ...vevents.flat(), 'END:VCALENDAR'].join('\r\n'));
+  const t = todayFromText(vevents);
+  const rows = t.next.flatMap((d) => d.rows.map((r) => [d.label, r.item.title, r.item.time, r.item.guessedSeries]));
+  assert.deepEqual(rows, [
+    ['Tomorrow', 'Seminar', '10:00', false],
+    ['Tue', 'Seminar', '13:00', false],
+  ]);
+  const shape = feedShape(events, LA);
+  assert.equal(shape.method, 'heuristic', 'fixture check: no RRULE');
+  assert.equal(shape.inGuessedSeries, 0);
+  assert.equal(shape.guessedSeries, 0);
+  assert.equal(shape.single, 4);
+});
+
+// Final review A5 (2026-10-22), the reviewer's case: a day with nothing of
+// one's own and only a weekly class ahead names that class, not "Nothing
+// coming up." The class still stays out of Next 7 days.
+test('A5: with only a weekly class starting tomorrow, the "Next" line names it', () => {
+  const t = todayFromText([vevent('gym@x', 'Gym', [
+    ldt('20261022', '0700'), 'DTEND;TZID=America/Los_Angeles:20261022T080000', 'RRULE:FREQ=WEEKLY',
+  ])]);
+  assert.deepEqual(t.next, [], 'a repeating series is never under Next 7 days');
+  assert.equal(t.emptyLine, 'Nothing due today. Next: Gym · Tomorrow.');
 });

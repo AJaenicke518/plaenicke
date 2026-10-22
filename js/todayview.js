@@ -8,7 +8,7 @@
 // THE PRESSABLE PART OF A ROW IS ITS OPEN BUTTON, never the <li>. press.js
 // presses the nearest `button, [data-press]` above a touch, so a checkbox
 // inside a pressable row would press the whole row on every tick. The
-// checkbox is the button's sibling. Rows are styled through classes only:
+// checkbox, in its <label class="today-tick">, is the button's sibling. Rows are styled through classes only:
 // an id selector would outrank `[data-press].pressed` (styles.css).
 import { itemTypeClass } from './calendar.js';
 import { formatTime, formatTimeRange } from './timegrid.js';
@@ -33,7 +33,9 @@ function timeText(item) {
 
 // renderTodayView(container, today, { onOpen, onToggleDone }) -> { relative }
 // `relative` is { node, item } for the one "in N" label (the next event), so
-// app.js's 60 s tick can update that text node and nothing else; or null.
+// app.js's 60 s tick can update that text node and nothing else; or null when
+// no timed event is still to come. The label is drawn even while it is empty
+// (the event over 12 h away).
 export function renderTodayView(container, today, { onOpen, onToggleDone } = {}) {
   // Required: a missing one would draw rows that do nothing on tap.
   if (typeof onOpen !== 'function') throw new Error('renderTodayView requires onOpen');
@@ -49,10 +51,15 @@ export function renderTodayView(container, today, { onOpen, onToggleDone } = {})
       const box = el('input', 'today-check');
       box.type = 'checkbox';
       box.checked = item.done === true;
-      box.setAttribute('aria-label', `Mark "${item.title}" done`);
+      // What a tap will do (final review A10).
+      box.setAttribute('aria-label', `Mark "${item.title}" ${box.checked ? 'not done' : 'done'}`);
       // What the control now holds, never a hard-coded true.
       box.addEventListener('change', () => onToggleDone(item.id, box.checked === true));
-      li.appendChild(box);
+      // The label is the box's 44x44 hit area (styles.css .today-tick; final
+      // review A8). Not [data-press], and not inside the open button.
+      const tick = el('label', 'today-tick');
+      tick.appendChild(box);
+      li.appendChild(tick);
     }
     const open = el('button', 'item-open today-open');
     open.type = 'button';
@@ -84,7 +91,8 @@ export function renderTodayView(container, today, { onOpen, onToggleDone } = {})
       if (key === 'todo' && timeText(r.item)) meta.push(el('span', 'today-time', timeText(r.item)));
       if (key === 'events') {
         meta.push(el('span', 'today-time', timeText(r.item) || 'All day'));
-        if (r.relative) {
+        // '' is drawn too: the event is over 12 h away and the tick fills it in.
+        if (r.relative !== null) {
           const rel = el('span', 'today-rel', r.relative);
           relative = { node: rel, item: r.item };
           meta.push(rel);

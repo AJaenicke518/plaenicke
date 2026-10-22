@@ -4,6 +4,13 @@ import { makeFakeDocument, allText, findAll, fire } from './fake-dom.js';
 import { buildToday } from '../js/today.js';
 import { renderTodayView } from '../js/todayview.js';
 
+// The overdue-ticked test turns a UTC updatedAt into a local day: pin Alex's
+// zone instead of trusting the machine's (in UTC-10 or UTC-11 its 08:00Z
+// stamp is the previous day; final review A11a). node --test runs each file
+// in its own process, and Node re-reads TZ when it is assigned, so this
+// reaches today.js's Date calls and no other test file.
+process.env.TZ = 'America/Los_Angeles';
+
 // todayview.js draws buildToday's result. Presentation only: the checkbox
 // reports up through onToggleDone and the title through onOpen; app.js
 // writes. The shared fake DOM is enough: nothing here looks anything up by id.
@@ -119,7 +126,44 @@ test('Today: a tick reports what the box now holds', () => {
   assert.equal(ticked.checked, true, 'a ticked to-do shows ticked');
   ticked.checked = false;
   fire(ticked, 'change');
-  assert.deepEqual(calls.toggle, [['bank', true], ['ticked', false]]);
+  // Final review A11d: twice with no re-render, so the box ends equal to
+  // item.done — a report derived from item.done instead of the box would
+  // repeat itself here.
+  bank.checked = false;
+  fire(bank, 'change');
+  assert.deepEqual(calls.toggle, [['bank', true], ['ticked', false], ['bank', false]]);
+});
+
+// Final review A10: the label says what a tap will do.
+test('Today: a ticked box is labelled "not done", an unticked one "done"', () => {
+  const { host } = draw(DAY, DAY_FEED);
+  assert.equal(findAll(rowOf(host, 'Water plants'), 'INPUT')[0].getAttribute('aria-label'), 'Mark "Water plants" not done');
+  assert.equal(findAll(rowOf(host, 'Call bank'), 'INPUT')[0].getAttribute('aria-label'), 'Mark "Call bank" done');
+});
+
+// Final review A8: a 20px box alone is a small target, and a near miss landed
+// on the open button. Each box sits in a <label class="today-tick">, sized in
+// styles.css to 44x44: the label is the box's hit area. It is a child of the
+// row, beside the open button — not pressable, not inside the button.
+test('Today: each checkbox is wrapped in its own today-tick label, a sibling of the open button', () => {
+  const { host } = draw(DAY, DAY_FEED);
+  const boxes = findAll(host, 'INPUT');
+  assert.equal(boxes.length, 4, 'fixture check');
+  for (const box of boxes) {
+    const label = box.parentNode;
+    assert.equal(label.tagName, 'LABEL');
+    assert.ok(label._classes.has('today-tick'));
+    assert.deepEqual(label.children, [box], 'the label holds the box only');
+    assert.equal(label.getAttribute('data-press'), null);
+    assert.ok(label.parentNode._classes.has('today-row'), 'a direct child of the row');
+    assert.ok(label.parentNode.children.some((c) => c._classes.has('today-open')), 'beside the open button');
+  }
+});
+
+// Final review A11e: a to-do due today at a time shows that time.
+test('Today: a to-do due today shows its time', () => {
+  const { host } = draw(DAY, DAY_FEED);
+  assert.deepEqual(byClass(rowOf(host, 'Call bank'), 'today-time').map((n) => n.textContent), ['9:00 AM']);
 });
 
 test('Today: only Overdue and To do today rows have a checkbox', () => {
@@ -159,6 +203,19 @@ test('Today: the next event\'s "in N" is one node, handed back for the 60 s tick
   const none = draw(DAY, DAY_FEED, at(23, 0));
   assert.equal(byClass(none.host, 'today-rel').length, 0);
   assert.equal(none.out.relative, null);
+});
+
+// Final review A2: an event over 12 h away has relative '' — its label is
+// drawn, empty, and handed back, so the 60 s tick can fill it in later.
+test('Today: an empty "in N" label is still drawn and handed back', () => {
+  const { host, out } = draw([], [inst('talk', TODAY, { time: '20:30', endTime: '21:30', title: 'Talk' })], at(8, 0));
+  const rels = byClass(host, 'today-rel');
+  assert.equal(rels.length, 1);
+  assert.equal(rels[0].textContent, '');
+  assert.ok(rowOf(host, 'Talk').children.some((c) => c === rels[0] || byClass(c, 'today-rel').includes(rels[0])),
+    'inside the Talk row');
+  assert.equal(out.relative.node, rels[0]);
+  assert.equal(out.relative.item.uid, 'talk');
 });
 
 test('Today: a finished event is greyed; one still to come is not', () => {

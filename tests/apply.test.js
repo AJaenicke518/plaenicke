@@ -1,3 +1,14 @@
+// Alex's zone, pinned, not the machine's (final review A11b). Several tests
+// here build local times (new Date(2026, 9, 21, 9, 18)) and check what app.js
+// derives from them; in a shell with TZ=UTC, a mutant reading UTC instead of
+// local time (getUTCHours for minutesNow, toISOString().slice(0, 10) for
+// today's date) agreed with the local reading and passed. node --test runs
+// each file in its own process, and Node re-reads TZ when it is assigned, so
+// this reaches only this file. Static imports are hoisted above this line,
+// but none of them reads the clock while loading; app.js is imported by the
+// tests, after this has run.
+process.env.TZ = 'America/Los_Angeles';
+
 // The offline fetch is the FIRST import, so it is installed before anything
 // below — app.js included — is evaluated (tests/offline-fetch.js): every fetch
 // a test has not stubbed rejects the way an offline device does.
@@ -40,6 +51,50 @@ globalThis.setInterval = (fn, ms) => {
 };
 globalThis.clearInterval = (id) => { intervals.delete(id); };
 const liveIntervals = (ms) => [...intervals.values()].filter((i) => i.ms === ms);
+
+// THE TICK'S FIRST TIMEOUT IS RECORDED THE SAME WAY (final review A3). app.js
+// arms the Today tick as a setTimeout to the next minute boundary whose
+// callback, `startTodayTick`, ticks and then starts the 60 s interval. That
+// one timeout is recognised by its callback's name and recorded here, never
+// scheduled: everywhere this file swaps setTimeout (enableMockTimers,
+// installManualTimers) routes it here too, so it can never sit in a mock
+// queue across reset() (CLAUDE.md's timer-id trap) or be fired by a fake that
+// fires by delay. A test runs it with fireTodayAlign(). If app.js renames the
+// callback, the "tick is armed" assertions below fail rather than a real
+// timer slipping through unseen.
+const alignTimeouts = new Map();
+let alignSeq = 0;
+const isTodayAlign = (fn) => typeof fn === 'function' && fn.name === 'startTodayTick';
+const isAlignHandle = (h) => typeof h === 'string' && h.startsWith('today-align-');
+function recordAlign(fn, ms) {
+  alignSeq += 1;
+  const id = `today-align-${alignSeq}`;
+  alignTimeouts.set(id, { fn, ms });
+  return id;
+}
+const unmockedSetTimeout = globalThis.setTimeout;
+const unmockedClearTimeout = globalThis.clearTimeout;
+globalThis.setTimeout = (fn, ms, ...args) => (isTodayAlign(fn) ? recordAlign(fn, ms) : unmockedSetTimeout(fn, ms, ...args));
+globalThis.clearTimeout = (h) => { if (isAlignHandle(h)) alignTimeouts.delete(h); else unmockedClearTimeout(h); };
+const liveAligns = () => [...alignTimeouts.values()];
+// Runs the one pending first timeout, as the clock reaching the minute would.
+function fireTodayAlign() {
+  const entries = [...alignTimeouts.entries()];
+  assert.equal(entries.length, 1, 'fixture check: one first timeout pending');
+  const [[id, { fn }]] = entries;
+  alignTimeouts.delete(id);
+  fn();
+}
+// How many Today tick handles are live, in either phase: never more than one.
+const todayTicks = () => liveAligns().length + liveIntervals(60000).length;
+// The running 60 s tick, firing the first timeout first if that is the phase.
+function todayInterval() {
+  assert.equal(todayTicks(), 1, 'fixture check: Today is ticking, once');
+  if (liveAligns().length === 1) fireTodayAlign();
+  const [tick] = liveIntervals(60000);
+  assert.ok(tick, 'fixture check: the 60 s interval is running');
+  return tick;
+}
 
 // This file must never reach the production Worker. Tests that need a server
 // stub globalThis.fetch and restore it afterwards, but app.js also schedules
@@ -115,11 +170,15 @@ function enableMockTimers(t, options) {
   const mockedSet = globalThis.setTimeout;
   const mockedClear = globalThis.clearTimeout;
   globalThis.setTimeout = (fn, ms, ...args) => {
+    if (isTodayAlign(fn)) return recordAlign(fn, ms); // recorded, never mocked (see alignTimeouts)
     const handle = mockedSet((...a) => { live.delete(handle); fn(...a); }, ms, ...args);
     live.set(handle, ms || 0);
     return handle;
   };
-  globalThis.clearTimeout = (handle) => { live.delete(handle); mockedClear(handle); };
+  globalThis.clearTimeout = (handle) => {
+    if (isAlignHandle(handle)) { alignTimeouts.delete(handle); return; }
+    live.delete(handle); mockedClear(handle);
+  };
   mockTimerTracker = { t, live };
 }
 
@@ -208,6 +267,12 @@ test('app.js paints the shell sync indicator at load, so a stuck adoption is vis
   assert.equal(shell.hidden, false,
     'a device sitting at adoptionPending syncs nothing at all — the app shell must say so without opening Settings');
   assert.match(shell.textContent, /\S/);
+  // The load-time syncTodayTick() (final review A11c): the app opens on Today,
+  // so the tick is armed before anything is clicked — in its first phase, a
+  // timeout to the next minute boundary.
+  assert.equal(liveAligns().length, 1, 'the Today tick is armed at load');
+  assert.ok(liveAligns()[0].ms > 0 && liveAligns()[0].ms <= 60000, `to the next minute: ${liveAligns()[0].ms} ms`);
+  assert.equal(liveIntervals(60000).length, 0, 'not yet the interval');
   // Phase 0 baseline: a cold load is an open, and it is logged. Asserted here
   // because this is the only test that sees app.js's module-scope code run.
   assert.equal(loadLaunches().length, 1, 'loading the app must record one launch');
@@ -2037,8 +2102,14 @@ function installManualTimers() {
   const realSet = globalThis.setTimeout;
   const realClear = globalThis.clearTimeout;
   const pending = [];
-  globalThis.setTimeout = (fn, ms) => { const h = { fn, ms, cancelled: false }; pending.push(h); return h; };
-  globalThis.clearTimeout = (h) => { if (h && pending.includes(h)) h.cancelled = true; };
+  globalThis.setTimeout = (fn, ms) => {
+    if (isTodayAlign(fn)) return recordAlign(fn, ms); // recorded, never pending here (see alignTimeouts)
+    const h = { fn, ms, cancelled: false }; pending.push(h); return h;
+  };
+  globalThis.clearTimeout = (h) => {
+    if (isAlignHandle(h)) { alignTimeouts.delete(h); return; }
+    if (h && pending.includes(h)) h.cancelled = true;
+  };
   return {
     // Runs, once, every live timer scheduled for exactly `ms`.
     fire(ms) {
@@ -5716,6 +5787,7 @@ test('Today: the page names the day and lists live items in their sections', asy
   installFakeLocalStorage();
   await import('../js/app.js');
   const restore = visiblePageButton();
+  // Date only, so the MockTimers timer-id trap (CLAUDE.md) does not apply to these Today tests; use enableMockTimers if setTimeout is ever added.
   t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
   try {
     seed([
@@ -5739,6 +5811,16 @@ test('Today: the page names the day and lists live items in their sections', asy
   }
   resume();
 });
+
+// The Today row a checkbox belongs to. The box sits in a <label
+// class="today-tick"> inside the row (final review A8), so it is not the
+// box's parent.
+function todayRowOf(box) {
+  let n = box.parentNode;
+  while (n && !n._classes.has('today-row')) n = n.parentNode;
+  assert.ok(n, 'fixture check: the box is inside a Today row');
+  return n;
+}
 
 // Amendment 2026-10-22 (DA I3): a ticked overdue to-do stays in Overdue,
 // struck through, until tomorrow — below the undone ones — and unticking it
@@ -5774,7 +5856,7 @@ test('Today: an overdue to-do ticked on Today stays in Overdue, struck through, 
     const ticked = checkboxFor(overdue(), 'td Old essay');
     assert.ok(ticked, 'still in Overdue after the tick');
     assert.equal(ticked.checked, true);
-    assert.ok(ticked.parentNode._classes.has('done'), 'struck through');
+    assert.ok(todayRowOf(ticked)._classes.has('done'), 'struck through');
     assert.equal(rowTitles().length, 2);
     assert.match(rowTitles()[0], /td Newer task/, 'the undone one is now first');
     assert.match(rowTitles()[1], /td Old essay/, 'the ticked one below it');
@@ -5784,7 +5866,7 @@ test('Today: an overdue to-do ticked on Today stays in Overdue, struck through, 
     assert.equal(storedById('td-od-old').done, false, 'the untick reached storage');
     const unticked = checkboxFor(overdue(), 'td Old essay');
     assert.ok(unticked && unticked.checked === false);
-    assert.equal(unticked.parentNode._classes.has('done'), false);
+    assert.equal(todayRowOf(unticked)._classes.has('done'), false);
     assert.match(rowTitles()[0], /td Old essay/, 'back first');
     assert.match(rowTitles()[1], /td Newer task/);
   } finally {
@@ -5808,7 +5890,7 @@ test('Today: a tick on Today is saved, and the row stays, struck through, until 
     assert.equal(storedById('td-tick').done, true, 'the tick reached storage');
     const again = checkboxFor(todayBody(), 'td Water plants');
     assert.ok(again && again.checked, 'still on Today, ticked');
-    assert.ok(again.parentNode._classes.has('done'));
+    assert.ok(todayRowOf(again)._classes.has('done'));
     assert.doesNotMatch(allText(todoList()), /td Water plants/, 'while the To-do page drops it');
   } finally {
     if (restore) click(restore);
@@ -5856,24 +5938,69 @@ test('Today: the tick runs only while Today and the page are both visible, and n
   const doc = globalThis.document;
   try {
     click(doc.getElementById('show-day'));
-    assert.equal(liveIntervals(60000).length, 0);
+    assert.equal(todayTicks(), 0);
     click(doc.getElementById('tab-today'));
-    assert.equal(liveIntervals(60000).length, 1);
+    assert.equal(liveAligns().length, 1, 'armed: first a timeout to the minute');
+    assert.equal(todayTicks(), 1);
     click(doc.getElementById('tab-today'));
-    assert.equal(liveIntervals(60000).length, 1, 'tapping Today again arms no second one');
+    assert.equal(todayTicks(), 1, 'tapping Today again arms no second one');
     click(doc.getElementById('show-week'));
-    assert.equal(liveIntervals(60000).length, 0, 'leaving Today stops it');
+    assert.equal(todayTicks(), 0, 'leaving Today stops it while it waits for the minute');
+    click(doc.getElementById('tab-today'));
+    fireTodayAlign();
+    assert.equal(liveAligns().length, 0);
+    assert.equal(liveIntervals(60000).length, 1, 'then the 60 s interval');
+    click(doc.getElementById('tab-today'));
+    assert.equal(todayTicks(), 1, 'tapping Today again arms no second one');
+    click(doc.getElementById('show-week'));
+    assert.equal(todayTicks(), 0, 'leaving Today stops the interval too');
     click(doc.getElementById('tab-today'));
     doc.visibilityState = 'hidden';
     resume();
-    assert.equal(liveIntervals(60000).length, 0, 'a hidden page does not tick');
+    assert.equal(todayTicks(), 0, 'a hidden page does not tick');
     doc.visibilityState = 'visible';
     resume();
-    assert.equal(liveIntervals(60000).length, 1, 'and starts again on return');
+    assert.equal(todayTicks(), 1, 'and starts again on return');
+    fireTodayAlign();
+    doc.visibilityState = 'hidden';
+    resume();
+    assert.equal(todayTicks(), 0, 'hiding the page stops the interval too');
+    doc.visibilityState = 'visible';
+    resume();
+    assert.equal(todayTicks(), 1);
   } finally {
     doc.visibilityState = 'visible';
     if (restore) click(restore);
   }
+});
+
+// Final review A3 (2026-10-22): the tick lands on the minute. Armed at
+// 09:18:20.500, it waits 39.5 s for 09:19:00, ticks, then runs every 60 s.
+test('Today: the tick is aligned to the minute: a first timeout to the boundary, which ticks, then the interval', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const doc = globalThis.document;
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18, 20, 500).getTime() });
+  try {
+    seed([record({ id: 'td-align', type: 'event', title: 'td Lecture', date: '2026-10-21', time: '10:00', endTime: '11:00' })]);
+    click(doc.getElementById('show-week'));
+    click(doc.getElementById('tab-today'));
+    assert.deepEqual(liveAligns().map((a) => a.ms), [39500], 'waits for 09:19:00');
+    assert.equal(liveIntervals(60000).length, 0, 'no interval before the boundary');
+    const rel = todayBody().querySelector('.today-rel');
+    assert.equal(rel.textContent, 'in 42 min', 'fixture check');
+    t.mock.timers.tick(39500); // 09:19:00.000
+    fireTodayAlign();
+    assert.equal(rel.textContent, 'in 41 min', 'the boundary ticks');
+    assert.equal(liveIntervals(60000).length, 1, 'and starts the 60 s interval');
+    assert.equal(todayTicks(), 1);
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+  resume();
 });
 
 test('Today: the tick changes the "in N" text, and no other node', async (t) => {
@@ -5898,8 +6025,7 @@ test('Today: the tick changes the "in N" text, and no other node', async (t) => 
     const texts = before.map((n) => n.textContent);
     const rel = before.find((n) => n._classes.has('today-rel'));
     assert.equal(rel.textContent, 'in 42 min', 'fixture check');
-    const [tick] = liveIntervals(60000);
-    assert.ok(tick, 'fixture check: Today is ticking');
+    const tick = todayInterval();
     t.mock.timers.tick(12 * 60 * 1000); // 09:30
     tick.fn();
     assert.equal(rel.textContent, 'in 30 min');
@@ -5915,6 +6041,32 @@ test('Today: the tick changes the "in N" text, and no other node', async (t) => 
     t.mock.timers.tick(60 * 60 * 1000); // 11:00
     tick.fn();
     assert.equal(rel.textContent, '', 'over: the label empties; the next render greys the row');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+// Final review A2 (2026-10-22): an event over 12 h away at render still gets
+// its (empty) label, so the tick shows "in N" once it is within 12 h without
+// waiting for another render.
+test('Today: an event over 12 h away shows no "in N" at first, and the tick shows it once within 12 h', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 8, 0).getTime() });
+  try {
+    seed([record({ id: 'td-far', type: 'event', title: 'td Talk', date: '2026-10-21', time: '20:30', endTime: '21:30' })]);
+    click(globalThis.document.getElementById('tab-today'));
+    const rel = todayBody().querySelector('.today-rel');
+    assert.ok(rel, 'the label is drawn');
+    assert.equal(rel.textContent, '', 'and empty: 12 h 30 min away');
+    const tick = todayInterval();
+    t.mock.timers.tick(31 * 60 * 1000); // 08:31
+    tick.fn();
+    assert.equal(rel.textContent, 'in 11 h 59 min');
   } finally {
     t.mock.timers.reset();
     seed([]);
@@ -5946,10 +6098,18 @@ test('Today: a tick on a new day re-renders the page instead of counting down to
     const rel = allNodes(todayBody()).find((n) => n._classes.has('today-rel'));
     assert.equal(rel.textContent, 'in 5 min', 'fixture check');
     assert.equal(labelText('today-date'), 'Wednesday, October 21', 'fixture check');
-    const [tick] = liveIntervals(60000);
-    assert.ok(tick, 'fixture check: Today is ticking');
+    assert.equal(labelText('day-label'), 'Wed, Oct 21', 'fixture check: the Day page is on the old today too');
+    const stamp = globalThis.document.getElementById('updated-stamp');
+    assert.equal(loadFeeds().filter((f) => !f.hidden).length, 0, 'fixture check: no visible calendar, so a render stamps');
+    stamp.textContent = 'stale stamp';
+    const tick = todayInterval();
     t.mock.timers.tick((12 * 60 + 10) * 60 * 1000); // 2026-10-22 12:00
     tick.fn();
+    // Final review A4 and A11g: the new day repaints the "Updated" stamp, and
+    // the whole app is rendered — render(), not renderToday(): refreshForToday
+    // catches the other pages' cursors up, so the Day page moves on too.
+    assert.equal(stamp.textContent, 'Updated 12:00 PM', 'the stamp is repainted on the new day');
+    assert.equal(labelText('day-label'), 'Thu, Oct 22', 'another page caught up with the new day');
     assert.notEqual(rel.textContent, 'in 11 h 55 min', 'no countdown to yesterday\'s event');
     for (const n of allNodes(todayBody())) {
       if (n._classes.has('today-rel')) assert.notEqual(n.textContent, 'in 11 h 55 min');
