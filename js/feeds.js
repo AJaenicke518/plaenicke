@@ -450,6 +450,28 @@ function freqOf(rrule) {
   return null;
 }
 
+// countIsOne: true when a stored RRULE string's COUNT is 1 (final fixes 2,
+// C5). Such a rule has exactly one occurrence: whatever its FREQ, it is a
+// one-off, not a repeating series. The value is read as parseRRule's
+// positiveInt reads it (digits only), so 'COUNT=01' is also 1.
+function countIsOne(rrule) {
+  for (const segment of rrule.split(';')) {
+    const eq = segment.indexOf('=');
+    if (eq > 0 && segment.slice(0, eq).toUpperCase() === 'COUNT') {
+      const v = segment.slice(eq + 1);
+      return /^\d+$/.test(v) && Number(v) === 1;
+    }
+  }
+  return false;
+}
+
+// repeatFreqOf: the FREQ a stored RRULE repeats with, for both feedShape and
+// seriesIndex — null when it has none, or when COUNT=1 makes it a one-off.
+function repeatFreqOf(rrule) {
+  if (typeof rrule !== 'string' || countIsOne(rrule)) return null;
+  return freqOf(rrule);
+}
+
 // The heuristic's grouping (spec § 2.4), shared by feedShape (the Settings
 // line) and seriesIndex (Today), so the two can never disagree.
 //
@@ -547,7 +569,10 @@ export function feedShape(events, targetTz) {
     // A series is (feedId, uid); this is one feed, so the uid alone.
     const freqByUid = new Map();
     for (const ev of events) {
-      if (!ev.recurrenceId && typeof ev.rrule === 'string') freqByUid.set(ev.uid, freqOf(ev.rrule));
+      // A COUNT=1 master is single, its overrides with it (C5).
+      if (!ev.recurrenceId && typeof ev.rrule === 'string' && repeatFreqOf(ev.rrule) !== null) {
+        freqByUid.set(ev.uid, repeatFreqOf(ev.rrule));
+      }
     }
     for (const ev of events) {
       const freq = freqByUid.get(ev.uid);
@@ -598,7 +623,8 @@ export function describeFeedShape(shape) {
 //              A RECURRENCE-ID override shares its master's uid, so it
 //              belongs to the series wherever it moved; a master-less
 //              override has no FREQ and is a one-off. MONTHLY and YEARLY
-//              series are one-offs (spec § 2.4, question 7).
+//              series are one-offs (spec § 2.4, question 7), and so is a
+//              rule with COUNT=1 (final fixes 2, C5).
 //   guessed    the subset of `repeating` the heuristic decided. Only a feed
 //              with no RRULE at all is guessed (Alex's approval, spec § 2.4,
 //              question 8); there a uid repeats only when every event with
@@ -613,7 +639,7 @@ export function seriesIndex(events, targetTz) {
   }
   const repeating = new Set();
   for (const ev of events) {
-    if (!ev.recurrenceId && REPEATING_FREQS.has(freqOf(ev.rrule))) repeating.add(ev.uid);
+    if (!ev.recurrenceId && REPEATING_FREQS.has(repeatFreqOf(ev.rrule))) repeating.add(ev.uid);
   }
   return { repeating, guessed: new Set() };
 }

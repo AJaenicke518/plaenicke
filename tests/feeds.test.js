@@ -8,6 +8,7 @@ import {
   loadFeeds, saveFeeds, loadFeedCache, saveFeedCache, loadTombstones,
 } from '../js/storage.js';
 import { isTodo, isIdea, isScheduled } from '../js/items.js';
+import { parseICS } from '../js/ics.js';
 import { merge, toWire, SCHEMA_VERSION } from '../js/merge.js';
 
 // --- fakes -------------------------------------------------------------
@@ -1135,6 +1136,28 @@ test('instancesForRange: only a DAILY or WEEKLY series is recurring; YEARLY, MON
     monthly: [[false, false]],
     once: [[false, false]],
   }, 'a rule-detected series is never labelled guessed');
+});
+
+// Final fixes 2, C5: a WEEKLY rule with COUNT=1 has exactly one occurrence.
+// It is a one-off, kept in Next 7 days, and the Settings line says single.
+// Parsed from real ICS, so the stored rrule text is what parseICS keeps.
+test('instancesForRange and feedShape: a DAILY or WEEKLY rule with COUNT=1 is a one-off', () => {
+  const { events } = parseICS(icsWith(
+    vevent({ uid: 'once-w', summary: 'Once weekly', dtstart: '20260824T170000Z', dtend: '20260824T180000Z', rrule: 'FREQ=WEEKLY;COUNT=1' }),
+    vevent({ uid: 'once-d', summary: 'Once daily', dtstart: '20260825T170000Z', dtend: '20260825T180000Z', rrule: 'count=1;freq=daily' }),
+    vevent({ uid: 'twice', summary: 'Twice', dtstart: '20260826T170000Z', dtend: '20260826T180000Z', rrule: 'FREQ=WEEKLY;COUNT=2' }),
+  ));
+  assert.equal(events.length, 3, 'fixture check: parseICS kept all three');
+  const flags = flagsByUid(instancesForRange([RFEED], cacheFor({ feedR: events }), '2026-08-24', '2026-09-06', 'UTC'));
+  assert.deepEqual(flags, {
+    'once-w': [[false, false]],
+    'once-d': [[false, false]],
+    twice: [[true, false], [true, false]],
+  });
+  const shape = feedShape(events, 'UTC');
+  assert.equal(shape.repeatingSeries, 1, 'only COUNT=2 repeats');
+  assert.equal(shape.single, 2, 'the COUNT=1 masters are single');
+  assert.equal(sumOf(shape), shape.total);
 });
 
 test('instancesForRange: an override belongs to its weekly series, wherever it moved; a master-less override is a one-off', () => {
