@@ -4,7 +4,7 @@ import {
   sectionOf, daysBetween, dayWord, relativeLabel, isPastEvent, buildToday, NEXT_DAYS,
 } from '../js/today.js';
 import { parseICS } from '../js/ics.js';
-import { instancesForRange } from '../js/feeds.js';
+import { instancesForRange, feedShape } from '../js/feeds.js';
 import { addDays } from '../js/timegrid.js';
 
 // The "ticked today" tests turn UTC instants into local days, and the
@@ -527,4 +527,31 @@ test('spanKey: two one-offs with the same UID on different days both show under 
 test('spanKey: a multi-day all-day one-off from real ICS still shows once', () => {
   const t = todayFromText([vevent('trip@x', 'Trip', ['DTSTART;VALUE=DATE:20261023', 'DTEND;VALUE=DATE:20261026'])]);
   assert.deepEqual(t.next.map((d) => [d.label, titles(d.rows)]), [['Fri', ['Trip']]]);
+});
+
+// Final review A1 (2026-10-22): a no-RRULE feed whose master-less overrides
+// share UID:S1 — three on Thursdays at the same time (a guessed group) and one
+// moved to a Tuesday. A uid is guessed only when EVERY event with it is in a
+// guessed group, so the moved one is no part of a series: it shows under Next
+// 7 days with no "guessed" flag, and feedShape counts all four as single.
+test('A1: a uid with an event outside every guessed group is not guessed — the moved one shows', () => {
+  const seminar = (day, from, to) => vevent('S1', 'Seminar', [
+    `RECURRENCE-ID:${day}T${from}00Z`, `DTSTART:${day}T${from}00Z`, `DTEND:${day}T${to}00Z`,
+  ]);
+  const vevents = [
+    seminar('20261008', '1700', '1800'), seminar('20261015', '1700', '1800'),
+    seminar('20261022', '1700', '1800'), seminar('20261027', '2000', '2100'),
+  ];
+  const { events } = parseICS(['BEGIN:VCALENDAR', 'VERSION:2.0', ...vevents.flat(), 'END:VCALENDAR'].join('\r\n'));
+  const t = todayFromText(vevents);
+  const rows = t.next.flatMap((d) => d.rows.map((r) => [d.label, r.item.title, r.item.time, r.item.guessedSeries]));
+  assert.deepEqual(rows, [
+    ['Tomorrow', 'Seminar', '10:00', false],
+    ['Tue', 'Seminar', '13:00', false],
+  ]);
+  const shape = feedShape(events, LA);
+  assert.equal(shape.method, 'heuristic', 'fixture check: no RRULE');
+  assert.equal(shape.inGuessedSeries, 0);
+  assert.equal(shape.guessedSeries, 0);
+  assert.equal(shape.single, 4);
 });

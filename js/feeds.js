@@ -495,6 +495,18 @@ function guessedGroups(events, targetTz) {
   return [...groups.values()].filter((group) => group.dates.size >= GUESS_MIN_WEEKS);
 }
 
+// guessedUids: the uids the heuristic may call repeating — those whose EVERY
+// event in the feed is in a guessed group. A uid with one event outside every
+// group (a meeting moved to another day, sharing the series' uid) is not a
+// guessed series at all: guessing it would hide that moved meeting from Next 7
+// days and label it "Repeats weekly (guessed)" (final review A1, 2026-10-22).
+function guessedUids(events, groups) {
+  const inGroup = new Set(groups.flatMap((group) => group.events));
+  const uids = new Set(groups.flatMap((group) => group.events.map((ev) => ev.uid)));
+  for (const ev of events) if (!inGroup.has(ev)) uids.delete(ev.uid);
+  return uids;
+}
+
 // The heuristic runs only on a feed with no RRULE of any FREQ (spec § 2.4).
 const usesRule = (events) => events.some((ev) => typeof ev.rrule === 'string');
 
@@ -512,7 +524,9 @@ const usesRule = (events) => events.some((ev) => typeof ev.rrule === 'string');
 //     single            everything else, master-less overrides included
 //   method 'heuristic'  — no RRULE anywhere in the cache.
 //     guessedSeries     (title, weekday, start time) groups on >= 3 weeks
-//     inGuessedSeries   events in those groups
+//                       that hold an event of a guessed uid
+//     inGuessedSeries   events whose uid is guessed: every event with that
+//                       uid is in a group (guessedUids, as seriesIndex)
 //     single            everything else: untimed (all-day) events and events
 //                       with no length (deadlines) included
 //
@@ -546,9 +560,13 @@ export function feedShape(events, targetTz) {
     return shape;
   }
 
+  // Counted the way seriesIndex decides (guessedUids): an event is in a
+  // guessed series only when its uid is guessed, and a group counts only when
+  // it holds such an event.
   const groups = guessedGroups(events, targetTz);
-  shape.guessedSeries = groups.length;
-  shape.inGuessedSeries = groups.reduce((n, group) => n + group.events.length, 0);
+  const uids = guessedUids(events, groups);
+  shape.guessedSeries = groups.filter((group) => group.events.some((ev) => uids.has(ev.uid))).length;
+  shape.inGuessedSeries = events.filter((ev) => uids.has(ev.uid)).length;
   shape.single = events.length - shape.inGuessedSeries;
   return shape;
 }
@@ -583,14 +601,14 @@ export function describeFeedShape(shape) {
 //              series are one-offs (spec § 2.4, question 7).
 //   guessed    the subset of `repeating` the heuristic decided. Only a feed
 //              with no RRULE at all is guessed (Alex's approval, spec § 2.4,
-//              question 8); there every member of a guessed group repeats.
+//              question 8); there a uid repeats only when every event with
+//              that uid is in a guessed group (guessedUids).
 // A series is (feedId, uid): instancesForRange calls this per feed, so the
 // same uid in another feed is another series. `targetTz` is the zone the
 // heuristic reads weekdays and start times in, as feedShape does.
 export function seriesIndex(events, targetTz) {
   if (!usesRule(events)) {
-    const guessed = new Set();
-    for (const group of guessedGroups(events, targetTz)) for (const ev of group.events) guessed.add(ev.uid);
+    const guessed = guessedUids(events, guessedGroups(events, targetTz));
     return { repeating: guessed, guessed };
   }
   const repeating = new Set();
