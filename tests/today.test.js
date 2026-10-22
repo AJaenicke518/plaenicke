@@ -299,6 +299,23 @@ test('buildToday: only the next timed event says "in N"; finished ones are greye
   assert.deepEqual(late.events.map((r) => r.relative), [null, null, null, null], 'nothing left today');
 });
 
+// Final review A2 (2026-10-22): the next timed event's row always carries a
+// `relative` string — '' while it is over 12 h away — so the page draws its
+// label and the 60 s tick can fill it in once it comes within 12 h. Every
+// other row's is null.
+test('buildToday: the next event over 12 h away still gets a relative label, empty; no other row does', () => {
+  const instances = [
+    inst('allday', TODAY, { title: 'Fair' }),
+    inst('gym', TODAY, { time: '07:00', endTime: '07:30' }),
+    inst('talk', TODAY, { time: '20:30', endTime: '21:30' }),
+    inst('late', TODAY, { time: '22:00' }),
+  ];
+  const t = buildToday([], instances, TODAY, at(8, 0), none);
+  assert.deepEqual(t.events.map((r) => [r.item.uid, r.relative]), [
+    ['allday', null], ['gym', null], ['talk', ''], ['late', null],
+  ]);
+});
+
 test('buildToday: own events take part in "next" and in greying too', () => {
   const t = buildToday([own('call', { type: 'event', time: '09:45', endTime: '10:00' })],
     [inst('lec', TODAY, { time: '11:00', endTime: '12:00' })], TODAY, at(9, 3), none);

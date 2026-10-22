@@ -33,7 +33,9 @@ function timeText(item) {
 
 // renderTodayView(container, today, { onOpen, onToggleDone }) -> { relative }
 // `relative` is { node, item } for the one "in N" label (the next event), so
-// app.js's 60 s tick can update that text node and nothing else; or null.
+// app.js's 60 s tick can update that text node and nothing else; or null when
+// no timed event is still to come. The label is drawn even while it is empty
+// (the event over 12 h away).
 export function renderTodayView(container, today, { onOpen, onToggleDone } = {}) {
   // Required: a missing one would draw rows that do nothing on tap.
   if (typeof onOpen !== 'function') throw new Error('renderTodayView requires onOpen');
@@ -84,7 +86,8 @@ export function renderTodayView(container, today, { onOpen, onToggleDone } = {})
       if (key === 'todo' && timeText(r.item)) meta.push(el('span', 'today-time', timeText(r.item)));
       if (key === 'events') {
         meta.push(el('span', 'today-time', timeText(r.item) || 'All day'));
-        if (r.relative) {
+        // '' is drawn too: the event is over 12 h away and the tick fills it in.
+        if (r.relative !== null) {
           const rel = el('span', 'today-rel', r.relative);
           relative = { node: rel, item: r.item };
           meta.push(rel);

@@ -161,6 +161,19 @@ test('Today: the next event\'s "in N" is one node, handed back for the 60 s tick
   assert.equal(none.out.relative, null);
 });
 
+// Final review A2: an event over 12 h away has relative '' — its label is
+// drawn, empty, and handed back, so the 60 s tick can fill it in later.
+test('Today: an empty "in N" label is still drawn and handed back', () => {
+  const { host, out } = draw([], [inst('talk', TODAY, { time: '20:30', endTime: '21:30', title: 'Talk' })], at(8, 0));
+  const rels = byClass(host, 'today-rel');
+  assert.equal(rels.length, 1);
+  assert.equal(rels[0].textContent, '');
+  assert.ok(rowOf(host, 'Talk').children.some((c) => c === rels[0] || byClass(c, 'today-rel').includes(rels[0])),
+    'inside the Talk row');
+  assert.equal(out.relative.node, rels[0]);
+  assert.equal(out.relative.item.uid, 'talk');
+});
+
 test('Today: a finished event is greyed; one still to come is not', () => {
   const { host } = draw(DAY, DAY_FEED, at(9, 18));
   assert.ok(rowOf(host, 'Gym')._classes.has('past'));

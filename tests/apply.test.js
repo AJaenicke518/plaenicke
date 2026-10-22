@@ -5915,6 +5915,33 @@ test('Today: the tick changes the "in N" text, and no other node', async (t) => 
   resume();
 });
 
+// Final review A2 (2026-10-22): an event over 12 h away at render still gets
+// its (empty) label, so the tick shows "in N" once it is within 12 h without
+// waiting for another render.
+test('Today: an event over 12 h away shows no "in N" at first, and the tick shows it once within 12 h', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 8, 0).getTime() });
+  try {
+    seed([record({ id: 'td-far', type: 'event', title: 'td Talk', date: '2026-10-21', time: '20:30', endTime: '21:30' })]);
+    click(globalThis.document.getElementById('show-today'));
+    const rel = todayBody().querySelector('.today-rel');
+    assert.ok(rel, 'the label is drawn');
+    assert.equal(rel.textContent, '', 'and empty: 12 h 30 min away');
+    const [tick] = liveIntervals(60000);
+    assert.ok(tick, 'fixture check: Today is ticking');
+    t.mock.timers.tick(31 * 60 * 1000); // 08:31
+    tick.fn();
+    assert.equal(rel.textContent, 'in 11 h 59 min');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+  resume();
+});
+
 // Review fix (Task 8): relativeLabel reads minutes of the day only, so a tick
 // after midnight with no render in between would count down to YESTERDAY's
 // event (23:55 read at 12:00 the next day is "in 11 h 55 min"). A tick on a

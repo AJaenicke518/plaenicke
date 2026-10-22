@@ -114,8 +114,9 @@ export const LOOKAHEAD_DAYS = 30;
 //   overdue    [{ item, age: '3d', tone: 'deadline' | 'start' }]  oldest first
 //   todo       [{ item }]   by time, untimed first; done ones last
 //   events     [{ item, past, relative }]   untimed first; `relative` ("in
-//              42 min", "now") on the next timed event only, `past` on every
-//              timed one that is over
+//              42 min", "now", or '' while over 12 h away) on the next timed
+//              event only, null on every other row; `past` on every timed
+//              one that is over
 //   next       [{ date, label, rows: [{ item }] }]  one entry per day that
 //              has rows; days without rows are left out
 //   emptyLine  the one line shown when Overdue, To do today and Today's
@@ -161,7 +162,9 @@ export function buildToday(items, instances, todayISO, nowMinutes, lookahead) {
   const events = sortItemsByDate([...own.events, ...onToday])
     .map((item) => ({ item, past: isPastEvent(item, nowMinutes), relative: null }));
   const upcoming = events.find((row) => row.item.time && !row.past);
-  if (upcoming) upcoming.relative = relativeLabel(upcoming.item, nowMinutes);
+  // A string on the next timed event's row, '' while it is over 12 h away, so
+  // its label is drawn and the 60 s tick can fill it in (final review A2).
+  if (upcoming) upcoming.relative = relativeLabel(upcoming.item, nowMinutes) ?? '';
 
   const nextEnd = addDays(todayISO, NEXT_DAYS);
   const seen = new Set(onToday.map((inst) => inst.spanKey));
