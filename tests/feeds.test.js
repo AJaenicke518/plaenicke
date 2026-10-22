@@ -897,9 +897,11 @@ test('inferName: unparseable URL falls back to Calendar', () => {
 // reads its Settings line for LMU Classes before 3a starts.
 
 // A ParsedEvent as parseICS stores it (ics.js buildParsedEvent).
-function pe({ uid, title = uid, form = 'UTC', value, tzid = null, rrule = null, recurrenceId = null }) {
+function pe({
+  uid, title = uid, form = 'UTC', value, tzid = null, rrule = null, recurrenceId = null, dtend = null, duration = null,
+}) {
   return {
-    uid, title, form, dtstart: { value, tzid }, dtend: null, duration: null,
+    uid, title, form, dtstart: { value, tzid }, dtend, duration,
     rrule, exdates: [], recurrenceId,
   };
 }
@@ -912,12 +914,14 @@ function weeksAfter(firstISO, n) {
 }
 
 // `weeks` separate VEVENTs, one per week, each with its own UID and no RRULE:
-// the Canvas shape (provider-format notes: "No RRULE, ever").
+// the Canvas shape (provider-format notes: "No RRULE, ever"). Each meeting
+// lasts 50 minutes: stage 3a's heuristic never groups an event with no length
+// (a Canvas deadline is DTSTART == DTEND).
 function canvasWeekly(title, firstISO, weeks, hhmm, tzid = 'America/Los_Angeles') {
   const out = [];
   for (let i = 0; i < weeks; i += 1) {
     out.push(pe({
-      uid: `${title}-${i}`, title, form: 'TZID', tzid, value: `${weeksAfter(firstISO, i)}T${hhmm}00`,
+      uid: `${title}-${i}`, title, form: 'TZID', tzid, value: `${weeksAfter(firstISO, i)}T${hhmm}00`, duration: 'PT50M',
     }));
   }
   return out;
@@ -1057,7 +1061,7 @@ test('feedShape: a UTC-stamped weekly class stays one series across the DST chan
   for (let i = 0; i < 12; i += 1) {
     const day = weeksAfter('2026-09-21', i); // Mondays, 21 Sep .. 7 Dec
     const hour = day < '20261101' ? '17' : '18';
-    events.push(pe({ uid: `stats-${i}`, title: 'Stats 101', value: `${day}T${hour}0000Z` }));
+    events.push(pe({ uid: `stats-${i}`, title: 'Stats 101', value: `${day}T${hour}0000Z`, duration: 'PT50M' }));
   }
   const local = feedShape(events, 'America/Los_Angeles');
   assert.equal(local.guessedSeries, 1, 'one class, one series');
@@ -1153,4 +1157,111 @@ test('instancesForRange: a series is per feed — the same uid in another feed i
     feedS: [pe({ uid: 'x', value: '20260825T170000Z' })],
   }), '2026-08-24', '2026-08-30', 'UTC');
   assert.deepEqual(out.map((i) => [i.feedId, i.recurring]), [['feedR', true], ['feedS', false]]);
+});
+
+// --- guessedSeries: the Canvas heuristic at render time (spec § 2.4) ---------
+//
+// A feed with no RRULE at all (the Canvas shape) has each meeting as its own
+// VEVENT. The same title, weekday and start time on 3+ distinct weeks is
+// guessed to be one weekly series. feedShape (the Settings line) and
+// instancesForRange (Today) read the same grouping, so they cannot disagree.
+//
+// THE CANVAS-DEADLINE RISK (spec, end notes): a weekly assignment with the
+// same title, weekday and time would be grouped, and the repeating rule would
+// then keep that DEADLINE out of Next 7 days. Canvas writes a timed assignment
+// as DTSTART == DTEND and an untimed one as an all-day DATE (provider-format
+// notes). So the heuristic groups only events with a length: a point in time
+// is never part of a guessed series.
+
+const TZ_LA = 'America/Los_Angeles';
+const guessIn = (events, start, end) => instancesForRange([RFEED], cacheFor({ feedR: events }), start, end, TZ_LA);
+
+test('instancesForRange: in a feed with no RRULE, a class on 3+ weeks is a guessed repeating series', () => {
+  const events = [
+    ...canvasWeekly('Stats 101', '2026-08-24', 4, '1000'),
+    pe({ uid: 'midterm', title: 'Midterm', form: 'TZID', tzid: TZ_LA, value: '20260916T100000', duration: 'PT2H' }),
+  ];
+  const out = guessIn(events, '2026-09-14', '2026-09-20');
+  assert.deepEqual(out.map((i) => [i.title, i.date, i.recurring, i.guessedSeries]), [
+    ['Stats 101', '2026-09-14', true, true],
+    ['Midterm', '2026-09-16', false, false],
+  ]);
+});
+
+test('instancesForRange: two weeks is not a series, so both meetings stay one-offs', () => {
+  const out = guessIn(canvasWeekly('Stats 101', '2026-08-24', 2, '1000'), '2026-08-24', '2026-09-06');
+  assert.deepEqual(out.map((i) => [i.recurring, i.guessedSeries]), [[false, false], [false, false]]);
+});
+
+test('instancesForRange: one RRULE anywhere in the feed switches the heuristic off for all of it', () => {
+  const events = [
+    ...canvasWeekly('Stats 101', '2026-08-24', 4, '1000'),
+    pe({ uid: 'bday', form: 'DATE', value: '20260301', rrule: 'FREQ=YEARLY' }),
+  ];
+  const stats = guessIn(events, '2026-09-14', '2026-09-14');
+  assert.equal(stats.length, 1, 'fixture check');
+  assert.equal(stats[0].recurring, false, 'its RRULE-less events stay one-offs, never guessed (spec § 2.4)');
+  assert.equal(stats[0].guessedSeries, false);
+});
+
+test('instancesForRange: a weekly deadline (DTSTART == DTEND, the Canvas assignment shape) is never guessed', () => {
+  const quiz = [0, 1, 2, 3].map((i) => {
+    const value = `${weeksAfter('2026-08-28', i)}T235900`;
+    return pe({ uid: `quiz-${i}`, title: 'Reading quiz', form: 'TZID', tzid: TZ_LA, value, dtend: { value, tzid: TZ_LA } });
+  });
+  const noEnd = [0, 1, 2, 3].map((i) => pe({
+    uid: `essay-${i}`, title: 'Weekly essay', form: 'TZID', tzid: TZ_LA, value: `${weeksAfter('2026-08-27', i)}T170000`,
+  }));
+  const out = guessIn([...quiz, ...noEnd], '2026-09-10', '2026-09-18');
+  assert.deepEqual(out.map((i) => [i.title, i.date, i.recurring]), [
+    ['Weekly essay', '2026-09-10', false],
+    ['Reading quiz', '2026-09-11', false],
+    ['Weekly essay', '2026-09-17', false],
+    ['Reading quiz', '2026-09-18', false],
+  ], 'every deadline stays a one-off, so Next 7 days shows it');
+  const shape = feedShape([...quiz, ...noEnd], TZ_LA);
+  assert.equal(shape.guessedSeries, 0, 'and the Settings line says the same');
+  assert.equal(shape.single, 8);
+});
+
+test('instancesForRange: a class written with DTEND after DTSTART is guessable, like one with a DURATION', () => {
+  const events = [0, 1, 2].map((i) => {
+    const day = weeksAfter('2026-08-25', i);
+    return pe({
+      uid: `lab-${i}`, title: 'Physics lab', form: 'TZID', tzid: TZ_LA, value: `${day}T140000`,
+      dtend: { value: `${day}T165000`, tzid: TZ_LA },
+    });
+  });
+  const out = guessIn(events, '2026-09-08', '2026-09-08');
+  assert.deepEqual(out.map((i) => [i.recurring, i.guessedSeries]), [[true, true]]);
+});
+
+// Four Monday meetings, two each side of 1 Nov 2026: in UTC that is two
+// 2-week groups (17:00Z, then 18:00Z), neither a series; in the device zone it
+// is one 4-week series at 10:00.
+test('instancesForRange: a guessed UTC-stamped class stays one series across the DST change', () => {
+  const events = [];
+  for (let i = 0; i < 4; i += 1) {
+    const day = weeksAfter('2026-10-19', i);
+    const hour = day < '20261101' ? '17' : '18';
+    events.push(pe({ uid: `stats-${i}`, title: 'Stats 101', value: `${day}T${hour}0000Z`, duration: 'PT50M' }));
+  }
+  const out = guessIn(events, '2026-10-26', '2026-11-08');
+  assert.deepEqual(out.map((i) => [i.date, i.time, i.recurring]), [
+    ['2026-10-26', '10:00', true],
+    ['2026-11-02', '10:00', true],
+  ]);
+});
+
+test('feedShape and instancesForRange agree on which events are in guessed series', () => {
+  const events = [
+    ...canvasWeekly('Stats 101', '2026-08-24', 5, '1000'),
+    ...canvasWeekly('Physics', '2026-08-25', 2, '0900'),
+    pe({ uid: 'due', title: 'Problem set', form: 'TZID', tzid: TZ_LA, value: '20260901T235900' }),
+  ];
+  const shape = feedShape(events, TZ_LA);
+  const out = guessIn(events, '2026-08-24', '2026-09-30');
+  assert.equal(out.length, events.length, 'fixture check: every event expanded once');
+  assert.equal(out.filter((i) => i.guessedSeries).length, shape.inGuessedSeries);
+  assert.equal(out.filter((i) => !i.recurring).length, shape.single);
 });

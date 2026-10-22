@@ -450,6 +450,54 @@ function freqOf(rrule) {
   return null;
 }
 
+// The heuristic's grouping (spec § 2.4), shared by feedShape (the Settings
+// line) and seriesIndex (Today), so the two can never disagree.
+//
+// guessKeyOf: an event's (title, weekday, start time) key in targetTz, and
+// its local date; or null when the event can never be guessed:
+//   - an untimed (all-day) event has no start time;
+//   - an event with no length — no DTEND or DURATION, or a DTEND that is not
+//     after DTSTART — is a point in time. That is how Canvas writes a timed
+//     assignment (DTSTART == DTEND; its untimed ones are all-day), so a
+//     weekly deadline is never folded into a series that Today would keep
+//     out of Next 7 days (the stage 3a "Canvas-deadline" risk in the spec).
+//     A class meeting has a length.
+const tzParams = (ref) => (ref.tzid ? { TZID: ref.tzid } : {});
+
+function guessKeyOf(ev, targetTz) {
+  if (ev.form === 'DATE') return null;
+  const start = icsDateToLocal(ev.dtstart.value, tzParams(ev.dtstart), targetTz);
+  let hasLength = false;
+  if (ev.dtend) {
+    const end = icsDateToLocal(ev.dtend.value, tzParams(ev.dtend), targetTz);
+    hasLength = `${end.date}T${end.time}` > `${start.date}T${start.time}`;
+  } else if (ev.duration) {
+    hasLength = parseDuration(ev.duration) > 0;
+  }
+  if (!hasLength) return null;
+  const weekday = new Date(`${start.date}T00:00:00Z`).getUTCDay();
+  return { key: JSON.stringify([ev.title, weekday, start.time]), date: start.date };
+}
+
+// guessedGroups: the groups of events on GUESS_MIN_WEEKS or more distinct
+// dates, each { dates: Set, events: [ParsedEvent] }. Only meaningful for a
+// feed with no RRULE; the callers check that first.
+function guessedGroups(events, targetTz) {
+  const groups = new Map();
+  for (const ev of events) {
+    const g = guessKeyOf(ev, targetTz);
+    if (!g) continue;
+    let group = groups.get(g.key);
+    if (!group) { group = { dates: new Set(), events: [] }; groups.set(g.key, group); }
+    group.dates.add(g.date);
+    group.events.push(ev);
+  }
+  return [...groups.values()].filter((group) => group.dates.size >= GUESS_MIN_WEEKS);
+}
+
+// The heuristic runs only on a feed with no RRULE of any FREQ (spec § 2.4).
+const usesRule = (events) => events.some((ev) => typeof ev.rrule === 'string');
+
 // feedShape: counts over one feed's cached ParsedEvents (`entry.events`).
 // Pure: no storage, no network, no URL. `targetTz` is the device zone, the
 // same one instancesForRange expands in: the heuristic's weekday and start
@@ -465,13 +513,14 @@ function freqOf(rrule) {
 //   method 'heuristic'  — no RRULE anywhere in the cache.
 //     guessedSeries     (title, weekday, start time) groups on >= 3 weeks
 //     inGuessedSeries   events in those groups
-//     single            everything else, untimed (all-day) events included
+//     single            everything else: untimed (all-day) events and events
+//                       with no length (deadlines) included
 //
 // The counts always sum to `total`.
 export function feedShape(events, targetTz) {
   const shape = {
     total: events.length,
-    method: events.some((ev) => typeof ev.rrule === 'string') ? 'rule' : 'heuristic',
+    method: usesRule(events) ? 'rule' : 'heuristic',
     repeatingSeries: 0,
     repeatingChanged: 0,
     otherRuleEvents: 0,
@@ -497,26 +546,10 @@ export function feedShape(events, targetTz) {
     return shape;
   }
 
-  const groups = new Map();
-  for (const ev of events) {
-    if (ev.form === 'DATE') { shape.single += 1; continue; }
-    const params = ev.dtstart.tzid ? { TZID: ev.dtstart.tzid } : {};
-    const { date, time } = icsDateToLocal(ev.dtstart.value, params, targetTz);
-    const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
-    const key = JSON.stringify([ev.title, weekday, time]);
-    let group = groups.get(key);
-    if (!group) { group = { dates: new Set(), count: 0 }; groups.set(key, group); }
-    group.dates.add(date);
-    group.count += 1;
-  }
-  for (const group of groups.values()) {
-    if (group.dates.size >= GUESS_MIN_WEEKS) {
-      shape.guessedSeries += 1;
-      shape.inGuessedSeries += group.count;
-    } else {
-      shape.single += group.count;
-    }
-  }
+  const groups = guessedGroups(events, targetTz);
+  shape.guessedSeries = groups.length;
+  shape.inGuessedSeries = groups.reduce((n, group) => n + group.events.length, 0);
+  shape.single = events.length - shape.inGuessedSeries;
   return shape;
 }
 
@@ -548,10 +581,18 @@ export function describeFeedShape(shape) {
 //              belongs to the series wherever it moved; a master-less
 //              override has no FREQ and is a one-off. MONTHLY and YEARLY
 //              series are one-offs (spec § 2.4, question 7).
-//   guessed    the subset of `repeating` the heuristic decided (empty for now)
+//   guessed    the subset of `repeating` the heuristic decided. Only a feed
+//              with no RRULE at all is guessed (Alex's approval, spec § 2.4,
+//              question 8); there every member of a guessed group repeats.
 // A series is (feedId, uid): instancesForRange calls this per feed, so the
-// same uid in another feed is another series.
-export function seriesIndex(events) {
+// same uid in another feed is another series. `targetTz` is the zone the
+// heuristic reads weekdays and start times in, as feedShape does.
+export function seriesIndex(events, targetTz) {
+  if (!usesRule(events)) {
+    const guessed = new Set();
+    for (const group of guessedGroups(events, targetTz)) for (const ev of group.events) guessed.add(ev.uid);
+    return { repeating: guessed, guessed };
+  }
   const repeating = new Set();
   for (const ev of events) {
     if (!ev.recurrenceId && REPEATING_FREQS.has(freqOf(ev.rrule))) repeating.add(ev.uid);
@@ -609,7 +650,7 @@ export function instancesForRange(feeds, cache, start, end, targetTz) {
     let series;
     try {
       expanded = expandEvents(entry.events, start, end, targetTz);
-      series = seriesIndex(entry.events);
+      series = seriesIndex(entry.events, targetTz);
     } catch (err) {
       // Skipping keeps one bad feed from blanking every other calendar, but a
       // silent skip is indistinguishable from an empty calendar. Log the error
