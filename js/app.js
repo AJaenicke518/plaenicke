@@ -670,6 +670,29 @@ function focusOpener(id) {
   if (opener) opener.focus({ preventScroll: true });
 }
 
+// A tick on Today keeps keyboard focus (final fixes 2, C4). The tick
+// re-renders every page, so the box that had focus is gone; when it did have
+// focus, the NEW box in the row for the same item is focused, found as
+// focusOpener finds an opener: by the open button's data-item-id. To-do is
+// left as it is.
+function todayCheckOwner(box) {
+  if (!box || !box.classList || !box.classList.contains('today-check')) return null;
+  const row = box.parentNode && box.parentNode.parentNode; // label.today-tick, then the row
+  if (!row) return null;
+  const opener = [...row.querySelectorAll('button')].find((b) => b.classList.contains('today-open'));
+  return opener ? opener.getAttribute('data-item-id') : null;
+}
+
+function handleTodayToggleDone(id, done) {
+  const hadFocus = todayCheckOwner(document.activeElement) === id;
+  handleToggleDone(id, done);
+  if (!hadFocus) return;
+  const opener = [...els.todayBody.querySelectorAll('button')]
+    .find((b) => b.classList.contains('today-open') && b.getAttribute('data-item-id') === id);
+  const box = opener && opener.parentNode.querySelector('.today-check');
+  if (box) box.focus({ preventScroll: true });
+}
+
 function handleToggleDone(id, done) {
   try {
     setDone(id, done);
@@ -888,7 +911,7 @@ function renderToday() {
     () => instancesForRange(feeds, feedCache, addDays(todayISO, 1), addDays(todayISO, LOOKAHEAD_DAYS), deviceTz),
   );
   todayRenderedFor = todayISO;
-  todayRelative = renderTodayView(els.todayBody, today, { onOpen: openItem, onToggleDone: handleToggleDone }).relative;
+  todayRelative = renderTodayView(els.todayBody, today, { onOpen: openItem, onToggleDone: handleTodayToggleDone }).relative;
 }
 
 // THE 60 s TICK (spec § 2.3) updates that one text node and never rebuilds

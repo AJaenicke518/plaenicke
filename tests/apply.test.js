@@ -6214,3 +6214,74 @@ test('a tick whose render throws after the save still schedules its sync, and th
   clearMessage();
   seed([]);
 });
+
+// Final fixes 2, C4: a tick re-renders every page, so the checkbox that had
+// focus is gone and keyboard focus fell to the page. After a tick on Today,
+// focus goes to the NEW box in the row for the same item, found the way
+// focusOpener finds an opener: by the open button's data-item-id.
+const ff2Today = () => [record({ id: 'ff2-c4', type: 'task', title: 'ff2 Focus me', date: localISO(new Date()) })];
+test('Today: a tick from a focused box puts focus on the re-rendered box in the same row', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const doc = globalThis.document;
+  seed(ff2Today());
+  try {
+    click(doc.getElementById('show-today'));
+    const box = checkboxFor(todayBody(), 'ff2 Focus me');
+    box.focus();
+    doc.lastFocusOptions = undefined;
+    box.checked = true;
+    fire(box, 'change');
+    const again = checkboxFor(todayBody(), 'ff2 Focus me');
+    assert.notEqual(again, box, 'fixture check: the tick re-rendered the row');
+    assert.equal(doc.activeElement, again, 'focus is on the new box');
+    assert.ok(again._classes.has('today-check'));
+    assert.deepEqual(doc.lastFocusOptions, { preventScroll: true });
+  } finally {
+    doc.activeElement = null;
+    if (restore) click(restore);
+  }
+  seed([]);
+});
+
+test('Today: a tick from a box without focus moves no focus', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const doc = globalThis.document;
+  seed(ff2Today());
+  try {
+    click(doc.getElementById('show-today'));
+    const elsewhere = doc.getElementById('entry-text');
+    elsewhere.focus();
+    const box = checkboxFor(todayBody(), 'ff2 Focus me');
+    box.checked = true;
+    fire(box, 'change');
+    assert.equal(doc.activeElement, elsewhere, 'focus stays where it was');
+  } finally {
+    doc.activeElement = null;
+    if (restore) click(restore);
+  }
+  seed([]);
+});
+
+test('To-do: a tick leaves focus alone (C4 is Today only)', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const doc = globalThis.document;
+  seed([record({ id: 'ff2-c4-todo', type: 'task', title: 'ff2 To-do focus', date: '2099-01-01' })]);
+  try {
+    click(doc.getElementById('show-todo'));
+    const box = checkboxFor(todoList(), 'ff2 To-do focus');
+    box.focus();
+    box.checked = true;
+    fire(box, 'change');
+    assert.equal(doc.activeElement, box, 'nothing was focused');
+  } finally {
+    doc.activeElement = null;
+    if (restore) click(restore);
+  }
+  seed([]);
+});
