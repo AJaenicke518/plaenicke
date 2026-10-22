@@ -520,3 +520,9 @@ test('press state is instant, and the stylesheet declares no motion yet', () => 
   assert.doesNotMatch(css, /(^|[;{\s])(transition|animation)(-[a-z-]+)?\s*:/);
   assert.doesNotMatch(css, /@keyframes/);
 });
+
+// --- home-screen stage 3b: the guessed-series line on the sheet (spec § 2.4) --
+test('the sheet\'s "Repeats weekly (guessed)" line reads like its other details', () => {
+  assert.equal(declOf('.sheet-repeat', 'color'), 'var(--muted)');
+  assert.equal(declOf('.sheet-repeat', 'margin'), '0 0 6px');
+});

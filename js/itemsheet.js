@@ -249,6 +249,9 @@ export function openItemSheet(host, item, {
     let when = formatDayLabel(item.date, today());
     if (item.time) when += ` · ${item.endTime ? formatTimeRange(item.time, item.endTime) : formatTime(item.time)}`;
     sheet.appendChild(el('p', 'sheet-when', when));
+    // A series the heuristic guessed says so, so a wrong grouping is visible
+    // (home-screen spec § 2.4). An RRULE series carries no label.
+    if (item.guessedSeries === true) sheet.appendChild(el('p', 'sheet-repeat', 'Repeats weekly (guessed)'));
     if (calendarName) sheet.appendChild(el('p', 'sheet-source', `From ${calendarName}`));
     if (googleDayUrl) {
       const a = el('a', 'sheet-google', 'Open in Google Calendar');
