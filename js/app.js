@@ -998,11 +998,19 @@ function showView(which) {
   const tab = CALENDAR_VIEWS.includes(which) ? 'calendar' : which;
   if (tab === 'calendar') lastCalendarView = which;
   for (const [name, el] of Object.entries(views)) el.hidden = name !== which;
-  // aria-pressed says which page is showing to assistive tech, which does not
-  // read the class. index.html carries the load-time values.
-  const mark = (b, on) => { b.classList.toggle('active', on); b.setAttribute('aria-pressed', String(on)); };
-  for (const [name, b] of Object.entries(tabs)) mark(b, name === tab);
-  for (const [name, b] of Object.entries(segments)) mark(b, name === which);
+  // The markup says which page is showing to assistive tech, which does not
+  // read the class; index.html carries the load-time values. A tab is
+  // navigation: the showing one is aria-current="page" and the others carry
+  // nothing (final fixes 2, D1). Calendar's segments are toggles: aria-pressed.
+  for (const [name, b] of Object.entries(tabs)) {
+    b.classList.toggle('active', name === tab);
+    if (name === tab) b.setAttribute('aria-current', 'page');
+    else b.removeAttribute('aria-current');
+  }
+  for (const [name, b] of Object.entries(segments)) {
+    b.classList.toggle('active', name === which);
+    b.setAttribute('aria-pressed', String(name === which));
+  }
   els.calSwitch.hidden = tab !== 'calendar';
   // Out of sight on Today, never out of the accessibility tree (final review
   // B3); the header keeps its height either way (styles.css).

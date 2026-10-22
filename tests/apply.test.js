@@ -4317,27 +4317,43 @@ test('a11y: Week columns open their day from the keyboard', async () => {
 });
 
 // The nav's selected page was shown only by a CSS class, which assistive tech
-// does not read. aria-pressed says it, in the markup at load (showView is not
-// run until a button is tapped) and after every tap.
-test('a11y: index.html marks the Today tab pressed and every other tab and segment not', () => {
+// does not read. The markup says it at load (showView is not run until a
+// button is tapped) and after every tap. A TAB is navigation, so the showing
+// one carries aria-current="page" and the others carry nothing (final fixes
+// 2, D1): aria-pressed announced them as toggle buttons. Calendar's switcher
+// segments are toggles, and keep aria-pressed.
+test('a11y: index.html marks the Today tab current, every other tab not, and every segment not pressed', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
   for (const id of [...TABS, ...SEGMENTS]) {
     const tag = html.match(new RegExp(`<button id="${id}"[^>]*>`));
     assert.ok(tag, `fixture check: #${id}`);
-    assert.match(tag[0], new RegExp(`aria-pressed="${id === 'tab-today'}"`), `#${id}`);
+    if (TABS.includes(id)) {
+      assert.doesNotMatch(tag[0], /aria-pressed/, `#${id}: a tab is not a toggle`);
+      if (id === 'tab-today') assert.match(tag[0], /\saria-current="page"/, `#${id}`);
+      else assert.doesNotMatch(tag[0], /aria-current/, `#${id}`);
+    } else {
+      assert.match(tag[0], /\saria-pressed="false"/, `#${id}`);
+      assert.doesNotMatch(tag[0], /aria-current/, `#${id}`);
+    }
   }
 });
 
-test('a11y: each tab and segment reports itself pressed — a segment with Calendar, and nothing else', async () => {
+test('a11y: the showing tab is the current page, and a segment reports itself pressed with Calendar; nothing else', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
   const restore = visiblePageButton();
   try {
     for (const [control, , tab] of NAV) {
       click(globalThis.document.getElementById(control));
-      for (const other of [...TABS, ...SEGMENTS]) {
-        assert.equal(globalThis.document.getElementById(other).getAttribute('aria-pressed'),
-          String(other === control || other === tab), `after #${control}, #${other}`);
+      for (const other of TABS) {
+        const el = globalThis.document.getElementById(other);
+        assert.equal(el.getAttribute('aria-current'), other === tab ? 'page' : null, `after #${control}, #${other}`);
+        assert.equal(el.getAttribute('aria-pressed'), null, `after #${control}, #${other}: not a toggle`);
+      }
+      for (const other of SEGMENTS) {
+        const el = globalThis.document.getElementById(other);
+        assert.equal(el.getAttribute('aria-pressed'), String(other === control), `after #${control}, #${other}`);
+        assert.equal(el.getAttribute('aria-current'), null, `after #${control}, #${other}`);
       }
     }
   } finally {
