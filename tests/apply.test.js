@@ -5792,6 +5792,16 @@ test('Today: the page names the day and lists live items in their sections', asy
   resume();
 });
 
+// The Today row a checkbox belongs to. The box sits in a <label
+// class="today-tick"> inside the row (final review A8), so it is not the
+// box's parent.
+function todayRowOf(box) {
+  let n = box.parentNode;
+  while (n && !n._classes.has('today-row')) n = n.parentNode;
+  assert.ok(n, 'fixture check: the box is inside a Today row');
+  return n;
+}
+
 // Amendment 2026-10-22 (DA I3): a ticked overdue to-do stays in Overdue,
 // struck through, until tomorrow — below the undone ones — and unticking it
 // puts it back above them. It stays because the tick moved its updatedAt to
@@ -5826,7 +5836,7 @@ test('Today: an overdue to-do ticked on Today stays in Overdue, struck through, 
     const ticked = checkboxFor(overdue(), 'td Old essay');
     assert.ok(ticked, 'still in Overdue after the tick');
     assert.equal(ticked.checked, true);
-    assert.ok(ticked.parentNode._classes.has('done'), 'struck through');
+    assert.ok(todayRowOf(ticked)._classes.has('done'), 'struck through');
     assert.equal(rowTitles().length, 2);
     assert.match(rowTitles()[0], /td Newer task/, 'the undone one is now first');
     assert.match(rowTitles()[1], /td Old essay/, 'the ticked one below it');
@@ -5836,7 +5846,7 @@ test('Today: an overdue to-do ticked on Today stays in Overdue, struck through, 
     assert.equal(storedById('td-od-old').done, false, 'the untick reached storage');
     const unticked = checkboxFor(overdue(), 'td Old essay');
     assert.ok(unticked && unticked.checked === false);
-    assert.equal(unticked.parentNode._classes.has('done'), false);
+    assert.equal(todayRowOf(unticked)._classes.has('done'), false);
     assert.match(rowTitles()[0], /td Old essay/, 'back first');
     assert.match(rowTitles()[1], /td Newer task/);
   } finally {
@@ -5860,7 +5870,7 @@ test('Today: a tick on Today is saved, and the row stays, struck through, until 
     assert.equal(storedById('td-tick').done, true, 'the tick reached storage');
     const again = checkboxFor(todayBody(), 'td Water plants');
     assert.ok(again && again.checked, 'still on Today, ticked');
-    assert.ok(again.parentNode._classes.has('done'));
+    assert.ok(todayRowOf(again)._classes.has('done'));
     assert.doesNotMatch(allText(todoList()), /td Water plants/, 'while the To-do page drops it');
   } finally {
     if (restore) click(restore);

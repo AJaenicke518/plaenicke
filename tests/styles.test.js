@@ -572,6 +572,17 @@ test('the next event\'s "in N" is in the accent; a finished event is greyed; a t
   assert.equal(declOf('.today-row.done .today-text', 'text-decoration'), 'line-through');
 });
 
+// Final review A8: the <label class="today-tick"> around each Today checkbox
+// is its hit area, at least 44x44, so a near miss no longer opens the sheet.
+test('the Today checkbox\'s label is a 44x44 hit area around the box', () => {
+  assert.equal(declOf('.today-tick', 'min-width'), '44px');
+  assert.equal(declOf('.today-tick', 'min-height'), '44px');
+  assert.equal(declOf('.today-tick', 'display'), 'flex');
+  assert.equal(declOf('.today-tick', 'align-items'), 'center');
+  assert.equal(declOf('.today-tick', 'justify-content'), 'center');
+  assert.equal(declOf('.today-tick', 'flex'), '0 0 auto', 'never squeezed by the title');
+});
+
 test('a pressed Today row is tinted, not dimmed like a pressed button', () => {
   assert.equal(declOf('button[data-press].pressed', 'opacity'), '1');
   assert.equal(declOf('[data-press].pressed', 'background'), 'var(--chip-bg)', 'fixture check: the tint');

@@ -119,7 +119,44 @@ test('Today: a tick reports what the box now holds', () => {
   assert.equal(ticked.checked, true, 'a ticked to-do shows ticked');
   ticked.checked = false;
   fire(ticked, 'change');
-  assert.deepEqual(calls.toggle, [['bank', true], ['ticked', false]]);
+  // Final review A11d: twice with no re-render, so the box ends equal to
+  // item.done — a report derived from item.done instead of the box would
+  // repeat itself here.
+  bank.checked = false;
+  fire(bank, 'change');
+  assert.deepEqual(calls.toggle, [['bank', true], ['ticked', false], ['bank', false]]);
+});
+
+// Final review A10: the label says what a tap will do.
+test('Today: a ticked box is labelled "not done", an unticked one "done"', () => {
+  const { host } = draw(DAY, DAY_FEED);
+  assert.equal(findAll(rowOf(host, 'Water plants'), 'INPUT')[0].getAttribute('aria-label'), 'Mark "Water plants" not done');
+  assert.equal(findAll(rowOf(host, 'Call bank'), 'INPUT')[0].getAttribute('aria-label'), 'Mark "Call bank" done');
+});
+
+// Final review A8: a 20px box alone is a small target, and a near miss landed
+// on the open button. Each box sits in a <label class="today-tick">, sized in
+// styles.css to 44x44: the label is the box's hit area. It is a child of the
+// row, beside the open button — not pressable, not inside the button.
+test('Today: each checkbox is wrapped in its own today-tick label, a sibling of the open button', () => {
+  const { host } = draw(DAY, DAY_FEED);
+  const boxes = findAll(host, 'INPUT');
+  assert.equal(boxes.length, 4, 'fixture check');
+  for (const box of boxes) {
+    const label = box.parentNode;
+    assert.equal(label.tagName, 'LABEL');
+    assert.ok(label._classes.has('today-tick'));
+    assert.deepEqual(label.children, [box], 'the label holds the box only');
+    assert.equal(label.getAttribute('data-press'), null);
+    assert.ok(label.parentNode._classes.has('today-row'), 'a direct child of the row');
+    assert.ok(label.parentNode.children.some((c) => c._classes.has('today-open')), 'beside the open button');
+  }
+});
+
+// Final review A11e: a to-do due today at a time shows that time.
+test('Today: a to-do due today shows its time', () => {
+  const { host } = draw(DAY, DAY_FEED);
+  assert.deepEqual(byClass(rowOf(host, 'Call bank'), 'today-time').map((n) => n.textContent), ['9:00 AM']);
 });
 
 test('Today: only Overdue and To do today rows have a checkbox', () => {

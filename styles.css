@@ -310,7 +310,17 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   border-bottom: 1px solid var(--line);
   border-left: 3px solid var(--type, var(--type-general));
 }
-/* 20px box; the row's padding and gap make the left edge the target. */
+/* A 20px box inside a 44x44 <label class="today-tick"> (final review A8):
+   the label is the box's hit area, so a tap near the box ticks it instead of
+   landing on the open button. Not [data-press] (js/todayview.js). */
+.today-tick {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-width: 44px;
+  min-height: 44px;
+}
 .today-check { width: 20px; height: 20px; flex: 0 0 auto; margin: 0; }
 .today-open {
   display: flex;
