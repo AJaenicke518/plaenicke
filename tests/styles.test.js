@@ -225,7 +225,9 @@ test('the sheet top bar is sticky, so Save stays reachable while the form scroll
 // the final list row — often the very item whose delete it offers to undo —
 // sits under it with no way to scroll it clear.
 // Home-screen stage 3c (spec § 4): the bar (56px), the capture button's row
-// (72px, stage 4) and the home indicator.
+// (72px, stage 4) and the home indicator. Final review B2: computed from
+// styles.css, the toast's top is 130-134px up, so it can still cover the
+// last 2-6px of the last row (see the comment on body's padding-bottom).
 test('body leaves room at the bottom for the tab bar, the capture button and the toast', () => {
   assert.equal(declOf('body', 'padding-bottom'), 'calc(56px + 72px + env(safe-area-inset-bottom))');
 });
@@ -691,6 +693,29 @@ test('the tab title is 20px; Today\'s own heading stays 28px', () => {
   assert.equal(declOf('.tab-title', 'font-size'), 'var(--text-title)');
   assert.equal(declOf(':root', '--text-title'), '20px', 'fixture check');
   assert.equal(declOf('.today-title', 'font-size'), 'var(--text-hero)');
+});
+
+// Final review B1: the switcher's buttons were ~37.5px tall. Height only:
+// each stays flex: 1 with the same side padding, so the four still share the
+// row's width as before.
+test('Calendar\'s switcher buttons are at least 44px tall, and still share the row equally', () => {
+  assert.ok(px(declOf('.cal-switch button', 'min-height')) >= 44);
+  assert.equal(declOf('.cal-switch button', 'flex'), '1');
+  assert.equal(declOf('.cal-switch button', 'padding-left'), '4px');
+  assert.equal(declOf('.cal-switch button', 'padding-right'), '4px');
+});
+
+// Final review B2: a long toast message pushed Undo off the toast and grew it
+// without bound. The message wraps anywhere and stops at two lines; Undo
+// never shrinks.
+test('a toast message wraps and stops at two lines; Undo keeps its size', () => {
+  assert.equal(declOf('.toast span', 'min-width'), '0');
+  assert.equal(declOf('.toast span', 'overflow-wrap'), 'anywhere');
+  assert.equal(declOf('.toast span', 'display'), '-webkit-box');
+  assert.equal(declOf('.toast span', '-webkit-line-clamp'), '2');
+  assert.equal(declOf('.toast span', '-webkit-box-orient'), 'vertical');
+  assert.equal(declOf('.toast span', 'overflow'), 'hidden');
+  assert.equal(declOf('.toast-undo', 'flex-shrink'), '0');
 });
 
 // .cal-switch sets display: flex, which beats the `hidden` attribute's

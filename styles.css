@@ -125,8 +125,12 @@ body {
   padding: env(safe-area-inset-top) 16px 40px;
   /* Room under the content for the fixed tab bar (56px) and the capture
      button's row (72px, stage 4), above the home indicator (home-screen
-     spec § 4). The toast sits inside it, so the last row, often the very
-     item a delete offers to undo, is never under the toast. */
+     spec § 4). The toast does NOT fit inside it (final review B2, computed
+     from this file, not measured): its bottom is 68px up (.toast) and it is
+     62px tall with a one-line message (44px Undo + 16px padding + 2px
+     border), 66px with two (2 x 24px lines), so its top is 130-134px up and
+     can cover the last 2-6px of the last row when the page is scrolled to
+     the end. */
   padding-bottom: calc(56px + 72px + env(safe-area-inset-bottom));
   /* There was no line-height rule at all before this, so everything ran at
      the browser default (~1.2) — tight for a serif read at arm's length.
@@ -250,8 +254,11 @@ button.pressed { opacity: 0.7; }
 .tab-title { font-size: var(--text-title); font-style: normal; }
 .cal-switch { display: flex; gap: var(--space-1); margin-bottom: var(--space-3); }
 .cal-switch[hidden] { display: none; }
+/* 44px: Apple's minimum touch target (final review B1). Height only: the
+   four still share the row's width as before. */
 .cal-switch button {
   flex: 1;
+  min-height: 44px;
   padding: 8px 4px;
   background: var(--card);
   color: var(--ink);
@@ -765,8 +772,20 @@ button[data-press].pressed { opacity: 1; }
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
   z-index: 20;
 }
-/* 44px: Apple's minimum touch target; this is the one control that undoes a delete. */
-.toast-undo { min-height: 44px; }
+/* The message (final review B2): it may shrink (min-width: 0), wraps even
+   inside a long word, and stops at two lines, so a long title can neither
+   push Undo off the toast nor grow the toast without bound. */
+.toast span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* 44px: Apple's minimum touch target; this is the one control that undoes a
+   delete. It never shrinks, so it stays whole beside any message. */
+.toast-undo { min-height: 44px; flex-shrink: 0; }
 
 /* ---------- item sheet (open / edit one item) ---------- */
 /* Above .settings-backdrop (10), below .toast (20): a Deleted/Saved toast
