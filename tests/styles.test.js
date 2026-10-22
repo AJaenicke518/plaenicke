@@ -613,6 +613,14 @@ test('the next event\'s "in N" is in the accent; a finished event is greyed; a t
   assert.equal(declOf('.today-row.done .today-text', 'text-decoration'), 'line-through');
 });
 
+// Final fixes 2, C3: an event over 12 h away keeps an EMPTY "in N" span (so
+// the tick can fill it, final review A2), and as a flex item it still took
+// the row's 8px gap after the time. Empty, it is not laid out at all; the
+// tick fills the node it kept, and :empty stops matching.
+test('an empty "in N" takes no space', () => {
+  assert.equal(declOf('.today-rel:empty', 'display'), 'none');
+});
+
 // Final review A8: the <label class="today-tick"> around each Today checkbox
 // is its hit area, at least 44x44, so a near miss no longer opens the sheet.
 test('the Today checkbox\'s label is a 44x44 hit area around the box', () => {
