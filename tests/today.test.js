@@ -157,7 +157,7 @@ const inst = (uid, date, o = {}) => {
   return {
     id: `feedR:${uid}:${date}:${time}`, uid, title: `i-${uid}`, date, time, endTime: null,
     createdAt: `${date}T${time || '00:00'}`, feedId: 'feedR', feedColor: '#00f', external: true,
-    recurring: false, guessedSeries: false, ...o,
+    recurring: false, guessedSeries: false, spanKey: `feedR:${uid}`, ...o,
   };
 };
 const none = () => [];
@@ -378,6 +378,18 @@ test('buildToday: refuses input it cannot place, loudly', () => {
   delete unstamped.recurring;
   assert.throws(() => buildToday([], [unstamped], TODAY, at(8, 0), none), /recurring/,
     'an instance instancesForRange did not stamp cannot be placed');
+  const noSpan = inst('x', TODAY);
+  delete noSpan.spanKey;
+  assert.throws(() => buildToday([], [noSpan], TODAY, at(8, 0), none), /spanKey/);
+  const emptySpan = inst('x', TODAY, { spanKey: '' });
+  assert.throws(() => buildToday([], [emptySpan], TODAY, at(8, 0), none), /spanKey/);
+  // The look-ahead's instances are held to the same rule (empty day, so it runs).
+  const lookNoRecurring = inst('y', '2026-10-25');
+  delete lookNoRecurring.recurring;
+  assert.throws(() => buildToday([], [], TODAY, at(8, 0), () => [lookNoRecurring]), /recurring/);
+  const lookNoSpan = inst('y', '2026-10-25');
+  delete lookNoSpan.spanKey;
+  assert.throws(() => buildToday([], [], TODAY, at(8, 0), () => [lookNoSpan]), /spanKey/);
 });
 
 // --- Review Focus: a real class calendar, end to end ---------------------------
@@ -475,4 +487,44 @@ test('Review Focus: no Today row carries the calendar link', () => {
   const json = JSON.stringify(t);
   assert.ok(t.events.length > 0, 'fixture check');
   assert.equal(json.includes('secret-token'), false);
+});
+
+// --- spanKey: different events sharing a uid are not one occurrence ----------
+
+const vevent = (uid, summary, extra) => ['BEGIN:VEVENT', `UID:${uid}`, `SUMMARY:${summary}`, ...extra, 'END:VEVENT'];
+const ldt = (day, hhmm) => `DTSTART;TZID=America/Los_Angeles:${day}T${hhmm}00`;
+function todayFromText(vevents, todayISO = '2026-10-21') {
+  const { events, skipped } = parseICS(['BEGIN:VCALENDAR', 'VERSION:2.0', ...vevents.flat(), 'END:VCALENDAR'].join('\r\n'));
+  assert.deepEqual(skipped, [], 'fixture check: every VEVENT parsed');
+  const cache = { lmu: { fetchedAt: '2026-10-20T00:00:00.000Z', events, skipped } };
+  return buildToday([], instancesForRange([CLASS_FEED], cache, todayISO, addDays(todayISO, NEXT_DAYS), LA),
+    todayISO, at(8, 0), () => instancesForRange([CLASS_FEED], cache, addDays(todayISO, 1), addDays(todayISO, 30), LA));
+}
+
+test('spanKey: master-less overrides sharing a uid are separate events — each shows', () => {
+  const override = (day, summary) => vevent('m@x', summary, [
+    `RECURRENCE-ID;TZID=America/Los_Angeles:${day}T090000`, ldt(day, '0900'), `DTEND;TZID=America/Los_Angeles:${day}T100000`,
+  ]);
+  const t = todayFromText([
+    override('20261021', 'Meet Today'), override('20261022', 'Meet Tomorrow'), override('20261026', 'Meet Monday'),
+  ]);
+  assert.deepEqual(titles(t.events), ['Meet Today 09:00']);
+  assert.deepEqual(t.next.map((d) => [d.label, titles(d.rows)]), [
+    ['Tomorrow', ['Meet Tomorrow 09:00']],
+    ['Mon', ['Meet Monday 09:00']],
+  ]);
+});
+
+test('spanKey: two one-offs with the same UID on different days both show under Next 7 days', () => {
+  const one = (day, summary) => vevent('dup@x', summary, [ldt(day, '1400'), `DTEND;TZID=America/Los_Angeles:${day}T150000`]);
+  const t = todayFromText([one('20261023', 'First'), one('20261026', 'Second')]);
+  assert.deepEqual(t.next.map((d) => [d.label, titles(d.rows)]), [
+    ['Fri', ['First 14:00']],
+    ['Mon', ['Second 14:00']],
+  ]);
+});
+
+test('spanKey: a multi-day all-day one-off from real ICS still shows once', () => {
+  const t = todayFromText([vevent('trip@x', 'Trip', ['DTSTART;VALUE=DATE:20261023', 'DTEND;VALUE=DATE:20261026'])]);
+  assert.deepEqual(t.next.map((d) => [d.label, titles(d.rows)]), [['Fri', ['Trip']]]);
 });

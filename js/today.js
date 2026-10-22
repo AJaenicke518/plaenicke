@@ -124,16 +124,18 @@ export const LOOKAHEAD_DAYS = 30;
 // item is in sectionOf's one section; a feed instance is under Today's events
 // on today, or under Next 7 days once — on its first day there, and not at
 // all if it is also on today (a multi-day one-off emits one instance per
-// day). A repeating instance (`recurring`) is never under Next 7 days.
+// day; those copies share a `spanKey`, which instancesForRange gives only to
+// a uid that is one plain event — other events that share a uid, such as
+// master-less overrides, each have their own). A repeating instance
+// (`recurring`) is never under Next 7 days. Instances, and the look-ahead's,
+// must carry `recurring` and `spanKey`: an unstamped one throws.
 export function buildToday(items, instances, todayISO, nowMinutes, lookahead) {
   if (typeof todayISO !== 'string' || !ISO_DAY.test(todayISO)) throw new Error('buildToday requires todayISO');
   if (!Number.isInteger(nowMinutes) || nowMinutes < 0 || nowMinutes > 1439) {
     throw new Error('buildToday requires nowMinutes, 0..1439');
   }
   if (typeof lookahead !== 'function') throw new Error('buildToday requires lookahead');
-  for (const inst of instances) {
-    if (typeof inst.recurring !== 'boolean') throw new Error('buildToday: an instance has no recurring flag');
-  }
+  for (const inst of instances) checkStamped(inst);
 
   const own = { overdue: [], todo: [], events: [], next: [] };
   for (const item of items) {
@@ -162,13 +164,12 @@ export function buildToday(items, instances, todayISO, nowMinutes, lookahead) {
   if (upcoming) upcoming.relative = relativeLabel(upcoming.item, nowMinutes);
 
   const nextEnd = addDays(todayISO, NEXT_DAYS);
-  const seen = new Set(onToday.map(seriesKey));
+  const seen = new Set(onToday.map((inst) => inst.spanKey));
   const nextInstances = [];
   for (const inst of sortItemsByDate(instances)) {
     if (inst.recurring || inst.date <= todayISO || inst.date > nextEnd) continue;
-    const key = seriesKey(inst);
-    if (seen.has(key)) continue;
-    seen.add(key);
+    if (seen.has(inst.spanKey)) continue;
+    seen.add(inst.spanKey);
     nextInstances.push(inst);
   }
   const next = [];
@@ -184,10 +185,12 @@ export function buildToday(items, instances, todayISO, nowMinutes, lookahead) {
   let emptyLine = null;
   if (overdue.length === 0 && todo.length === 0 && events.length === 0) {
     const lookEnd = addDays(todayISO, LOOKAHEAD_DAYS);
+    const ahead = lookahead();
+    for (const inst of ahead) checkStamped(inst);
     const candidates = [
       ...items.filter((it) => isScheduled(it) && it.done !== true
         && typeof it.date === 'string' && ISO_DAY.test(it.date) && it.date > todayISO),
-      ...lookahead().filter((inst) => inst.recurring === false && inst.date > todayISO && inst.date <= lookEnd),
+      ...ahead.filter((inst) => inst.recurring === false && inst.date > todayISO && inst.date <= lookEnd),
     ];
     const first = sortItemsByDate(candidates)[0];
     emptyLine = first
@@ -198,5 +201,8 @@ export function buildToday(items, instances, todayISO, nowMinutes, lookahead) {
   return { overdue, todo, events, next, emptyLine };
 }
 
-// A feed series, for Next 7 days' "once" rule (spec § 2.3).
-function seriesKey(inst) { return `${inst.feedId}:${inst.uid}`; }
+// An instance instancesForRange did not stamp cannot be placed (zero fallback).
+function checkStamped(inst) {
+  if (typeof inst.recurring !== 'boolean') throw new Error('buildToday: an instance has no recurring flag');
+  if (typeof inst.spanKey !== 'string' || inst.spanKey === '') throw new Error('buildToday: an instance has no spanKey');
+}

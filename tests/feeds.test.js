@@ -1111,8 +1111,9 @@ test('instancesForRange: every instance carries recurring and guessedSeries, bot
   for (const inst of out) {
     assert.deepEqual(Object.keys(inst).sort(), [
       'createdAt', 'date', 'endTime', 'external', 'feedColor', 'feedId', 'guessedSeries', 'id',
-      'recurring', 'time', 'title', 'uid',
+      'recurring', 'spanKey', 'time', 'title', 'uid',
     ]);
+    assert.equal(typeof inst.spanKey, 'string');
     assert.equal(typeof inst.recurring, 'boolean');
     assert.equal(typeof inst.guessedSeries, 'boolean');
   }
@@ -1264,4 +1265,32 @@ test('feedShape and instancesForRange agree on which events are in guessed serie
   assert.equal(out.length, events.length, 'fixture check: every event expanded once');
   assert.equal(out.filter((i) => i.guessedSeries).length, shape.inGuessedSeries);
   assert.equal(out.filter((i) => !i.recurring).length, shape.single);
+});
+
+// --- spanKey: which instances are the same occurrence (spec § 2.3, 2026-10-22) -
+//
+// One multi-day all-day event emits one instance per day, all with one uid.
+// But a uid can also be shared by DIFFERENT events: master-less overrides and
+// duplicate-UID one-offs. spanKey is `${feedId}:${uid}` only where the uid has
+// exactly one ParsedEvent without an rrule; every other instance is its own.
+
+test('instancesForRange: a plain one-off\'s per-day copies share one spanKey', () => {
+  const trip = pe({ uid: 'trip', value: '20260825', form: 'DATE', dtend: { value: '20260828', tzid: null } });
+  const out = instancesForRange([RFEED], cacheFor({ feedR: [trip] }), '2026-08-24', '2026-08-30', 'UTC');
+  assert.ok(out.length > 1, 'fixture check: several per-day instances');
+  for (const i of out) assert.equal(i.spanKey, 'feedR:trip');
+});
+
+test('instancesForRange: a uid shared by several events, or carrying a rule, gives each instance its own spanKey', () => {
+  const rid = (value) => ({ value, tzid: null });
+  const events = [
+    pe({ uid: 'dup', value: '20260825T170000Z' }),
+    pe({ uid: 'dup', value: '20260827T170000Z' }),
+    pe({ uid: 'orphan', value: '20260826T170000Z', recurrenceId: rid('20260826T170000Z') }),
+    pe({ uid: 'orphan', value: '20260828T170000Z', recurrenceId: rid('20260828T170000Z') }),
+    pe({ uid: 'w', value: '20260824T170000Z', rrule: 'FREQ=WEEKLY' }),
+  ];
+  const out = instancesForRange([RFEED], cacheFor({ feedR: events }), '2026-08-24', '2026-08-30', 'UTC');
+  assert.ok(out.length >= 5, 'fixture check');
+  for (const i of out) assert.equal(i.spanKey, i.id, `${i.uid} ${i.date}`);
 });

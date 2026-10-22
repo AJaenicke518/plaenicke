@@ -600,6 +600,19 @@ export function seriesIndex(events, targetTz) {
   return { repeating, guessed: new Set() };
 }
 
+// spanKeyUids: the uids whose same-uid instances can only be the per-day
+// copies of ONE multi-day occurrence — exactly one ParsedEvent in the feed,
+// with no rrule. Any other shared uid (master-less overrides, duplicate-UID
+// one-offs, a rule's occurrences) is several events, which Today must not
+// merge. js/ics.js is not changed for this (spec § 2.4).
+function spanKeyUids(events) {
+  const count = new Map();
+  for (const ev of events) count.set(ev.uid, (count.get(ev.uid) || 0) + 1);
+  const out = new Set();
+  for (const ev of events) if (count.get(ev.uid) === 1 && typeof ev.rrule !== 'string') out.add(ev.uid);
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // instancesForRange
 // ---------------------------------------------------------------------------
@@ -630,6 +643,9 @@ function compareInstances(a, b) {
 //   recurring      true if the instance's series repeats (seriesIndex): Today
 //                  shows it only on its own day, never under Next 7 days
 //   guessedSeries  true if the heuristic, not an RRULE, decided that
+//   spanKey        "<feedId>:<uid>" when the uid is one plain event (so the
+//                  per-day copies of a multi-day event share it), else the
+//                  instance's own id (spanKeyUids)
 // `hidden` feeds are excluded entirely — their events never reach a view.
 // A feed with no cache entry yet (never synced) or an entry a malformed
 // expansion throws on is skipped rather than breaking the whole merge; one
@@ -648,9 +664,11 @@ export function instancesForRange(feeds, cache, start, end, targetTz) {
 
     let expanded;
     let series;
+    let spanUids;
     try {
       expanded = expandEvents(entry.events, start, end, targetTz);
       series = seriesIndex(entry.events, targetTz);
+      spanUids = spanKeyUids(entry.events);
     } catch (err) {
       // Skipping keeps one bad feed from blanking every other calendar, but a
       // silent skip is indistinguishable from an empty calendar. Log the error
@@ -677,6 +695,7 @@ export function instancesForRange(feeds, cache, start, end, targetTz) {
         external: true,
         recurring: series.repeating.has(inst.uid),
         guessedSeries: series.guessed.has(inst.uid),
+        spanKey: spanUids.has(inst.uid) ? `${feed.id}:${inst.uid}` : `${feed.id}:${inst.uid}:${inst.date}:${inst.time}`,
       });
     }
   }
