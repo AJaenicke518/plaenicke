@@ -921,9 +921,11 @@ function tickToday() {
   todayRelative.node.textContent = relativeLabel(todayRelative.item, minutesNow(new Date())) || '';
 }
 
+// The interval is armed BEFORE the first tick (final fixes 2, C2): a first
+// tick that throws must not leave Today with no tick at all.
 function startTodayTick() {
-  tickToday();
   todayTick = { kind: 'interval', id: setInterval(tickToday, TODAY_TICK_MS) };
+  tickToday();
 }
 
 function syncTodayTick() {

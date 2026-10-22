@@ -6142,3 +6142,36 @@ test('Today: a tick on a new day repaints the stamp from the visible calendars',
   unseedFeeds();
   resume();
 });
+
+// Final fixes 2, C2: startTodayTick ticked BEFORE it armed the interval, so a
+// first tick that threw left no interval at all and Today never ticked again
+// until something re-armed it. The interval is armed first; the throw still
+// reaches the caller.
+test('Today: a first tick that throws still leaves the 60 s interval running', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const doc = globalThis.document;
+  const dateEl = doc.getElementById('today-date');
+  // Back to a plain data property, as the fake DOM's constructor makes it.
+  const unbreak = () => { delete dateEl.textContent; dateEl.textContent = ''; };
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 23, 59, 30).getTime() });
+  try {
+    seed([]);
+    click(doc.getElementById('show-week'));
+    click(doc.getElementById('show-today'));
+    assert.equal(liveAligns().length, 1, 'fixture check: waiting for the minute');
+    t.mock.timers.tick(30 * 1000); // 2026-10-22 00:00: the tick renders the new day
+    Object.defineProperty(dateEl, 'textContent', { configurable: true, get: () => '', set: () => { throw new Error('ff2-c2 render failed'); } });
+    assert.throws(() => fireTodayAlign(), /ff2-c2 render failed/, 'the error is not swallowed');
+    unbreak();
+    assert.equal(liveIntervals(60000).length, 1, 'the interval was armed anyway');
+    assert.equal(todayTicks(), 1, 'and only once');
+  } finally {
+    unbreak();
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+  resume();
+});
