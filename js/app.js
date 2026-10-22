@@ -30,6 +30,8 @@ import { renderSyncStatus, syncWriteStarted, syncWriteSettled } from './linkui.j
 import { WORKER_URL } from './config.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
 import { installPress } from './press.js';
+import { buildToday, relativeLabel, NEXT_DAYS, LOOKAHEAD_DAYS } from './today.js';
+import { renderTodayView } from './todayview.js';
 
 const els = {
   text: document.getElementById('entry-text'),
@@ -76,6 +78,11 @@ const els = {
   ideaText: document.getElementById('idea-text'),
   ideaAdd: document.getElementById('idea-add'),
   updatedStamp: document.getElementById('updated-stamp'),
+  // Home-screen stage 3b — the Today page.
+  showToday: document.getElementById('show-today'),
+  todayView: document.getElementById('today-view'),
+  todayBody: document.getElementById('today-body'),
+  todayDate: document.getElementById('today-date'),
 };
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
@@ -408,8 +415,11 @@ function setDone(id, done) {
     items[idx] = before;
     throw e;
   }
-  render();
+  // The save succeeded, so the push is scheduled BEFORE the render (final
+  // fixes 2, C9): a render that throws must not leave a saved tick unsent. Its
+  // error still reaches the caller.
   scheduleSync();
+  render();
 }
 
 // editItem — the sheet's Save (edit-items Task 4c). Returns { ok, error }.
@@ -646,7 +656,7 @@ function isGoogleHost(url) {
 // where the browser puts it.
 function focusOpener(id) {
   const pages = [
-    [els.listView, els.list], [els.dayView, els.dayBody],
+    [els.todayView, els.todayBody], [els.listView, els.list], [els.dayView, els.dayBody],
     [els.todoView, els.todoList], [els.ideasView, els.ideaList],
   ];
   const shown = pages.find(([section]) => !section.hidden);
@@ -658,6 +668,29 @@ function focusOpener(id) {
   // the browser's own scroll-into-view can jump the page under the closing
   // sheet.
   if (opener) opener.focus({ preventScroll: true });
+}
+
+// A tick on Today keeps keyboard focus (final fixes 2, C4). The tick
+// re-renders every page, so the box that had focus is gone; when it did have
+// focus, the NEW box in the row for the same item is focused, found as
+// focusOpener finds an opener: by the open button's data-item-id. To-do is
+// left as it is.
+function todayCheckOwner(box) {
+  if (!box || !box.classList || !box.classList.contains('today-check')) return null;
+  const row = box.parentNode && box.parentNode.parentNode; // label.today-tick, then the row
+  if (!row) return null;
+  const opener = [...row.querySelectorAll('button')].find((b) => b.classList.contains('today-open'));
+  return opener ? opener.getAttribute('data-item-id') : null;
+}
+
+function handleTodayToggleDone(id, done) {
+  const hadFocus = todayCheckOwner(document.activeElement) === id;
+  handleToggleDone(id, done);
+  if (!hadFocus) return;
+  const opener = [...els.todayBody.querySelectorAll('button')]
+    .find((b) => b.classList.contains('today-open') && b.getAttribute('data-item-id') === id);
+  const box = opener && opener.parentNode.querySelector('.today-check');
+  if (box) box.focus({ preventScroll: true });
 }
 
 function handleToggleDone(id, done) {
@@ -855,6 +888,84 @@ function renderIdeas() {
   renderIdeasView(els.ideaList, ideaItems(), { onOpen: openItem, onDelete: requestDelete });
 }
 
+// The Today page (home-screen spec § 2.3). Own items come from liveItems(),
+// so a delete waiting for its Undo is already gone; feed instances are
+// expanded for today .. today + 7, and the 30-day look-ahead for the "Next"
+// line only when buildToday asks for it. One clock reading for the whole page.
+//
+// todayRelative is the one "in N" label on the page and its event, kept for
+// the 60 s tick below; todayRenderedFor is the day that render was for.
+let todayRelative = null;
+let todayRenderedFor = null;
+const minutesNow = (d) => d.getHours() * 60 + d.getMinutes();
+
+function renderToday() {
+  const now = new Date();
+  const todayISO = toISO(now);
+  els.todayDate.textContent = now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+  const today = buildToday(
+    liveItems(),
+    instancesForRange(feeds, feedCache, todayISO, addDays(todayISO, NEXT_DAYS), deviceTz),
+    todayISO,
+    minutesNow(now),
+    () => instancesForRange(feeds, feedCache, addDays(todayISO, 1), addDays(todayISO, LOOKAHEAD_DAYS), deviceTz),
+  );
+  todayRenderedFor = todayISO;
+  todayRelative = renderTodayView(els.todayBody, today, { onOpen: openItem, onToggleDone: handleTodayToggleDone }).relative;
+}
+
+// THE 60 s TICK (spec § 2.3) updates that one text node and never rebuilds
+// the page. Greying, and which event is next, change on the next ordinary
+// render (resume, add, sync); an event that has ended leaves an empty label
+// until then. It runs only while Today AND the page are visible:
+// syncTodayTick is called wherever either can change (load, showView,
+// visibilitychange).
+//
+// It lands on the minute (final review A3): arming first sets a timeout to
+// the next minute boundary, whose callback ticks and then starts the 60 s
+// interval. `todayTick` is the one handle, in either phase —
+// { kind: 'align' | 'interval', id } or null — so clearing works in both and
+// there are never two. tests/apply.test.js recognises the timeout by its
+// callback's name, startTodayTick: keep it.
+const TODAY_TICK_MS = 60 * 1000;
+let todayTick = null;
+
+// relativeLabel reads minutes of the day only, never the date, so after
+// midnight the kept event may be yesterday's: a tick on a new day renders the
+// whole app instead — render(), not renderToday(): refreshForToday, inside
+// render, catches the other pages' cursors up — and repaints the "Updated"
+// stamp (final review A4). Both stamp painters run, the pair onFeedsChanged
+// uses: with a visible calendar stampUpdated paints nothing, and a fetch time
+// from before midnight must now name its day (final fixes 2, C1).
+function tickToday() {
+  if (toISO(new Date()) !== todayRenderedFor) {
+    render();
+    stampUpdated(); stampFromFeeds();
+    return;
+  }
+  if (!todayRelative) return;
+  todayRelative.node.textContent = relativeLabel(todayRelative.item, minutesNow(new Date())) || '';
+}
+
+// The interval is armed BEFORE the first tick (final fixes 2, C2): a first
+// tick that throws must not leave Today with no tick at all.
+function startTodayTick() {
+  todayTick = { kind: 'interval', id: setInterval(tickToday, TODAY_TICK_MS) };
+  tickToday();
+}
+
+function syncTodayTick() {
+  const wanted = !els.todayView.hidden && document.visibilityState !== 'hidden';
+  if (wanted && todayTick === null) {
+    todayTick = { kind: 'align', id: setTimeout(startTodayTick, TODAY_TICK_MS - (Date.now() % TODAY_TICK_MS)) };
+  }
+  if (!wanted && todayTick !== null) {
+    if (todayTick.kind === 'align') clearTimeout(todayTick.id);
+    else clearInterval(todayTick.id);
+    todayTick = null;
+  }
+}
+
 // Every page is re-rendered on every change, so a to-do ticked on the To-do
 // page also leaves the calendar views correct with no second trigger.
 //
@@ -863,16 +974,16 @@ function renderIdeas() {
 // resume. It returns at once when the day has not changed.
 function render() {
   refreshForToday();
-  renderList(); renderCalendar(); renderWeek(); renderDay(); renderTodos(); renderIdeas();
+  renderToday(); renderList(); renderCalendar(); renderWeek(); renderDay(); renderTodos(); renderIdeas();
 }
 
 function showView(which) {
   const views = {
-    list: els.listView, month: els.calView, week: els.weekView, day: els.dayView,
+    today: els.todayView, list: els.listView, month: els.calView, week: els.weekView, day: els.dayView,
     todo: els.todoView, ideas: els.ideasView,
   };
   const buttons = {
-    list: els.showList, month: els.showMonth, week: els.showWeek, day: els.showDay,
+    today: els.showToday, list: els.showList, month: els.showMonth, week: els.showWeek, day: els.showDay,
     todo: els.showTodo, ideas: els.showIdeas,
   };
   for (const [name, el] of Object.entries(views)) el.hidden = name !== which;
@@ -883,6 +994,7 @@ function showView(which) {
     b.setAttribute('aria-pressed', String(name === which));
   }
   render();
+  syncTodayTick();
 }
 
 // A SPECIFIC day was chosen, so catch up with the clock BEFORE setting the
@@ -901,6 +1013,7 @@ function openDay(dateISO) {
 els.time.addEventListener('input', () => { els.end.hidden = !els.time.value; if (!els.time.value) els.end.value = ''; });
 els.add.addEventListener('click', handleAdd);
 els.text.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleAdd(); });
+els.showToday.addEventListener('click', () => showView('today'));
 els.showList.addEventListener('click', () => showView('list'));
 els.showMonth.addEventListener('click', () => showView('month'));
 els.showWeek.addEventListener('click', () => showView('week'));
@@ -923,6 +1036,7 @@ els.prevWeek.addEventListener('click', () => stepFrom(viewWeekStart, (v) => { vi
 els.nextWeek.addEventListener('click', () => stepFrom(viewWeekStart, (v) => { viewWeekStart = addDays(v, 7); }));
 
 render();
+syncTodayTick();
 noteLaunch();
 stampUpdated();
 
@@ -1256,11 +1370,13 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
     if (activeToast) activeToast.dismiss();
     for (const id of [...pendingDeletes]) commitDelete(id);
+    syncTodayTick();
     return;
   }
   if (document.visibilityState !== 'visible') return;
   noteLaunch();
   render(); // refreshForToday runs first, inside render
+  syncTodayTick();
   stampUpdated();
   // Honours syncStale's 30-minute threshold, so a quick app switch does not
   // refetch every calendar.

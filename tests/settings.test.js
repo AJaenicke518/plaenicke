@@ -743,3 +743,74 @@ test('settings: the shape line stays while the row asks to confirm a Remove', ()
   assert.ok(findButtonByText(host, 'Remove from every device'), 'fixture check: asking');
   assert.equal(byClass(host, 'feed-shape').length, 1);
 });
+
+// --- the Tab trap (final fixes 2, C6) ----------------------------------------
+//
+// Settings is a modal (aria-modal), but Tab walked out of it into the page
+// behind — the nav included. It mirrors js/itemsheet.js's trap: only the two
+// edges, and focus outside the panel, are taken over; every other Tab is the
+// browser's own. The panel's controls change while it is open (a Remove
+// question, the sync section), so they are read at each Tab press.
+
+// A Tab press; returns whether the panel cancelled the browser's own move.
+function pressTab(shiftKey = false) {
+  let prevented = false;
+  [...(document._listeners.keydown || [])].forEach((fn) => fn({ key: 'Tab', shiftKey, preventDefault() { prevented = true; } }));
+  return prevented;
+}
+
+test('settings: Tab from the last control wraps to the first, and Shift+Tab from the first wraps to the last', () => {
+  const { host } = openPanel(twoFeeds());
+  const first = findButtonByText(host, 'Light');
+  const last = findButtonByText(host, 'Link this device');
+  assert.ok(first && last, 'fixture check: the first and last controls');
+  last.focus();
+  assert.equal(pressTab(), true, 'Tab on the last control is taken over');
+  assert.equal(document.activeElement, first);
+  assert.equal(pressTab(true), true, 'Shift+Tab on the first is taken over');
+  assert.equal(document.activeElement, last);
+  const middle = findButtonByText(host, 'Add calendar');
+  middle.focus();
+  assert.equal(pressTab(), false, 'a Tab in the middle is left to the browser');
+  assert.equal(pressTab(true), false);
+  assert.equal(document.activeElement, middle);
+});
+
+test('settings: Tab from the heading, or from anywhere outside the panel, goes to its first control', () => {
+  const { host, button } = openPanel(twoFeeds());
+  assert.equal(document.activeElement.tagName, 'H2', 'fixture check: focus starts on the heading');
+  assert.equal(pressTab(), true);
+  assert.equal(document.activeElement, findButtonByText(host, 'Light'));
+  button.focus(); // the gear, outside the panel, as the nav would be
+  assert.equal(pressTab(true), true, 'Shift+Tab from outside is taken over too');
+  assert.equal(document.activeElement, findButtonByText(host, 'Link this device'));
+});
+
+test('settings: a control drawn after the panel opened is inside the Tab order; a disabled one is not', () => {
+  const { host } = openPanel(twoFeeds());
+  findButtonByText(host, 'Remove').click(); // draws the question's two buttons
+  const confirm = findButtonByText(host, 'Remove from every device');
+  assert.ok(confirm, 'fixture check: the question is drawn');
+  confirm.focus();
+  assert.equal(pressTab(), false, 'not treated as focus outside the panel');
+  const last = findButtonByText(host, 'Link this device');
+  last.disabled = true;
+  const findClass = (el, cls) => {
+    for (const c of el.children) {
+      if (c._classes.has(cls)) return c;
+      const found = findClass(c, cls);
+      if (found) return found;
+    }
+    return null;
+  };
+  const input = findClass(host, 'link-code-input');
+  assert.ok(input && input.tagName === 'INPUT', 'fixture check: the link-code input before the last button');
+  input.focus();
+  assert.equal(pressTab(), true, 'with the last button disabled, the input is the last stop');
+  assert.equal(document.activeElement, findButtonByText(host, 'Light'));
+  last.disabled = false;
+  last.hidden = true; // a hidden control is not a stop either
+  input.focus();
+  assert.equal(pressTab(), true, 'with the last button hidden, the input is the last stop');
+  assert.equal(document.activeElement, findButtonByText(host, 'Light'));
+});

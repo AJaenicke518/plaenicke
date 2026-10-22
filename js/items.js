@@ -64,7 +64,13 @@ const TODO_TYPES = new Set(['due', 'start', 'milestone', 'task']);
 // Note what is NOT here: 'general'. It is every pre-V6 record's type (and,
 // until manual add switched to 'event', every manual add's) — treating it as
 // actionable would put birthdays on the to-do list. This is the accepted gap in spec § 3.3.
-export function isTodo(it) { return TODO_TYPES.has(it.type) && it.done !== true; }
+export function isTodo(it) { return isTodoType(it) && it.done !== true; }
+
+// isTodoType: a to-do TYPE, done or not. Today's "To do today" keeps a ticked
+// to-do until tomorrow (home-screen spec § 2.3), so it needs the type test
+// without isTodo's `done` half. The one reader of TODO_TYPES besides isTodo,
+// so the list is still written once.
+export function isTodoType(it) { return TODO_TYPES.has(it.type); }
 
 // Ideas are ordered newest-first: an idea's `date` is when it was captured, so
 // nothing else about it is chronological. Tie-broken by id so two renders of

@@ -1023,3 +1023,15 @@ test('vv: without visualViewport the sheet has no inline style and nothing liste
   const ext = open(external());
   assert.deepEqual(inlineStyle(one(ext.host, 'sheet')), {});
 });
+
+// Home-screen spec § 2.4: a series the heuristic guessed is labelled, so a
+// wrong grouping is visible. A series found by its RRULE carries no label.
+test('an external item from a guessed series says so; one from an RRULE series does not', () => {
+  let { host } = open(external({ recurring: true, guessedSeries: true }), { calendarName: 'Canvas' });
+  assert.equal(one(host, 'sheet-repeat').textContent, 'Repeats weekly (guessed)');
+  const children = one(host, 'sheet').children;
+  assert.equal(children.indexOf(one(host, 'sheet-repeat')), children.indexOf(one(host, 'sheet-when')) + 1,
+    'directly under the day and time');
+  ({ host } = open(external({ recurring: true, guessedSeries: false }), { calendarName: 'Work' }));
+  assert.equal(byClass(host, 'sheet-repeat').length, 0);
+});

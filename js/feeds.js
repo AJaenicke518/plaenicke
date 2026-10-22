@@ -450,6 +450,88 @@ function freqOf(rrule) {
   return null;
 }
 
+// countIsOne: true when a stored RRULE string's COUNT is 1 (final fixes 2,
+// C5). Such a rule has exactly one occurrence: whatever its FREQ, it is a
+// one-off, not a repeating series. The value is read as parseRRule's
+// positiveInt reads it (digits only), so 'COUNT=01' is also 1.
+function countIsOne(rrule) {
+  for (const segment of rrule.split(';')) {
+    const eq = segment.indexOf('=');
+    if (eq > 0 && segment.slice(0, eq).toUpperCase() === 'COUNT') {
+      const v = segment.slice(eq + 1);
+      return /^\d+$/.test(v) && Number(v) === 1;
+    }
+  }
+  return false;
+}
+
+// repeatFreqOf: the FREQ a stored RRULE repeats with, for both feedShape and
+// seriesIndex — null when it has none, or when COUNT=1 makes it a one-off.
+function repeatFreqOf(rrule) {
+  if (typeof rrule !== 'string' || countIsOne(rrule)) return null;
+  return freqOf(rrule);
+}
+
+// The heuristic's grouping (spec § 2.4), shared by feedShape (the Settings
+// line) and seriesIndex (Today), so the two can never disagree.
+//
+// guessKeyOf: an event's (title, weekday, start time) key in targetTz, and
+// its local date; or null when the event can never be guessed:
+//   - an untimed (all-day) event has no start time;
+//   - an event with no length — no DTEND or DURATION, or a DTEND that is not
+//     after DTSTART — is a point in time. That is how Canvas writes a timed
+//     assignment (DTSTART == DTEND; its untimed ones are all-day), so a
+//     weekly deadline is never folded into a series that Today would keep
+//     out of Next 7 days (the stage 3a "Canvas-deadline" risk in the spec).
+//     A class meeting has a length.
+const tzParams = (ref) => (ref.tzid ? { TZID: ref.tzid } : {});
+
+function guessKeyOf(ev, targetTz) {
+  if (ev.form === 'DATE') return null;
+  const start = icsDateToLocal(ev.dtstart.value, tzParams(ev.dtstart), targetTz);
+  let hasLength = false;
+  if (ev.dtend) {
+    const end = icsDateToLocal(ev.dtend.value, tzParams(ev.dtend), targetTz);
+    hasLength = `${end.date}T${end.time}` > `${start.date}T${start.time}`;
+  } else if (ev.duration) {
+    hasLength = parseDuration(ev.duration) > 0;
+  }
+  if (!hasLength) return null;
+  const weekday = new Date(`${start.date}T00:00:00Z`).getUTCDay();
+  return { key: JSON.stringify([ev.title, weekday, start.time]), date: start.date };
+}
+
+// guessedGroups: the groups of events on GUESS_MIN_WEEKS or more distinct
+// dates, each { dates: Set, events: [ParsedEvent] }. Only meaningful for a
+// feed with no RRULE; the callers check that first.
+function guessedGroups(events, targetTz) {
+  const groups = new Map();
+  for (const ev of events) {
+    const g = guessKeyOf(ev, targetTz);
+    if (!g) continue;
+    let group = groups.get(g.key);
+    if (!group) { group = { dates: new Set(), events: [] }; groups.set(g.key, group); }
+    group.dates.add(g.date);
+    group.events.push(ev);
+  }
+  return [...groups.values()].filter((group) => group.dates.size >= GUESS_MIN_WEEKS);
+}
+
+// guessedUids: the uids the heuristic may call repeating — those whose EVERY
+// event in the feed is in a guessed group. A uid with one event outside every
+// group (a meeting moved to another day, sharing the series' uid) is not a
+// guessed series at all: guessing it would hide that moved meeting from Next 7
+// days and label it "Repeats weekly (guessed)" (final review A1, 2026-10-22).
+function guessedUids(events, groups) {
+  const inGroup = new Set(groups.flatMap((group) => group.events));
+  const uids = new Set(groups.flatMap((group) => group.events.map((ev) => ev.uid)));
+  for (const ev of events) if (!inGroup.has(ev)) uids.delete(ev.uid);
+  return uids;
+}
+
+// The heuristic runs only on a feed with no RRULE of any FREQ (spec § 2.4).
+const usesRule = (events) => events.some((ev) => typeof ev.rrule === 'string');
+
 // feedShape: counts over one feed's cached ParsedEvents (`entry.events`).
 // Pure: no storage, no network, no URL. `targetTz` is the device zone, the
 // same one instancesForRange expands in: the heuristic's weekday and start
@@ -464,14 +546,17 @@ function freqOf(rrule) {
 //     single            everything else, master-less overrides included
 //   method 'heuristic'  — no RRULE anywhere in the cache.
 //     guessedSeries     (title, weekday, start time) groups on >= 3 weeks
-//     inGuessedSeries   events in those groups
-//     single            everything else, untimed (all-day) events included
+//                       that hold an event of a guessed uid
+//     inGuessedSeries   events whose uid is guessed: every event with that
+//                       uid is in a group (guessedUids, as seriesIndex)
+//     single            everything else: untimed (all-day) events and events
+//                       with no length (deadlines) included
 //
 // The counts always sum to `total`.
 export function feedShape(events, targetTz) {
   const shape = {
     total: events.length,
-    method: events.some((ev) => typeof ev.rrule === 'string') ? 'rule' : 'heuristic',
+    method: usesRule(events) ? 'rule' : 'heuristic',
     repeatingSeries: 0,
     repeatingChanged: 0,
     otherRuleEvents: 0,
@@ -484,7 +569,10 @@ export function feedShape(events, targetTz) {
     // A series is (feedId, uid); this is one feed, so the uid alone.
     const freqByUid = new Map();
     for (const ev of events) {
-      if (!ev.recurrenceId && typeof ev.rrule === 'string') freqByUid.set(ev.uid, freqOf(ev.rrule));
+      // A COUNT=1 master is single, its overrides with it (C5).
+      if (!ev.recurrenceId && typeof ev.rrule === 'string' && repeatFreqOf(ev.rrule) !== null) {
+        freqByUid.set(ev.uid, repeatFreqOf(ev.rrule));
+      }
     }
     for (const ev of events) {
       const freq = freqByUid.get(ev.uid);
@@ -497,26 +585,14 @@ export function feedShape(events, targetTz) {
     return shape;
   }
 
-  const groups = new Map();
-  for (const ev of events) {
-    if (ev.form === 'DATE') { shape.single += 1; continue; }
-    const params = ev.dtstart.tzid ? { TZID: ev.dtstart.tzid } : {};
-    const { date, time } = icsDateToLocal(ev.dtstart.value, params, targetTz);
-    const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
-    const key = JSON.stringify([ev.title, weekday, time]);
-    let group = groups.get(key);
-    if (!group) { group = { dates: new Set(), count: 0 }; groups.set(key, group); }
-    group.dates.add(date);
-    group.count += 1;
-  }
-  for (const group of groups.values()) {
-    if (group.dates.size >= GUESS_MIN_WEEKS) {
-      shape.guessedSeries += 1;
-      shape.inGuessedSeries += group.count;
-    } else {
-      shape.single += group.count;
-    }
-  }
+  // Counted the way seriesIndex decides (guessedUids): an event is in a
+  // guessed series only when its uid is guessed, and a group counts only when
+  // it holds such an event.
+  const groups = guessedGroups(events, targetTz);
+  const uids = guessedUids(events, groups);
+  shape.guessedSeries = groups.filter((group) => group.events.some((ev) => uids.has(ev.uid))).length;
+  shape.inGuessedSeries = events.filter((ev) => uids.has(ev.uid)).length;
+  shape.single = events.length - shape.inGuessedSeries;
   return shape;
 }
 
@@ -536,6 +612,49 @@ export function describeFeedShape(shape) {
   }
   return `${events}: no RRULE — ${shape.inGuessedSeries} in ${shape.guessedSeries} guessed series, `
     + `${shape.single} single. Uses the heuristic.`;
+}
+
+// ---------------------------------------------------------------------------
+// seriesIndex — which of a feed's series repeat (spec § 2.4, stage 3a)
+// ---------------------------------------------------------------------------
+
+// seriesIndex: the repeating series of ONE feed's cached ParsedEvents.
+//   repeating  uids that repeat: their master has FREQ=DAILY or FREQ=WEEKLY.
+//              A RECURRENCE-ID override shares its master's uid, so it
+//              belongs to the series wherever it moved; a master-less
+//              override has no FREQ and is a one-off. MONTHLY and YEARLY
+//              series are one-offs (spec § 2.4, question 7), and so is a
+//              rule with COUNT=1 (final fixes 2, C5).
+//   guessed    the subset of `repeating` the heuristic decided. Only a feed
+//              with no RRULE at all is guessed (Alex's approval, spec § 2.4,
+//              question 8); there a uid repeats only when every event with
+//              that uid is in a guessed group (guessedUids).
+// A series is (feedId, uid): instancesForRange calls this per feed, so the
+// same uid in another feed is another series. `targetTz` is the zone the
+// heuristic reads weekdays and start times in, as feedShape does.
+export function seriesIndex(events, targetTz) {
+  if (!usesRule(events)) {
+    const guessed = guessedUids(events, guessedGroups(events, targetTz));
+    return { repeating: guessed, guessed };
+  }
+  const repeating = new Set();
+  for (const ev of events) {
+    if (!ev.recurrenceId && REPEATING_FREQS.has(repeatFreqOf(ev.rrule))) repeating.add(ev.uid);
+  }
+  return { repeating, guessed: new Set() };
+}
+
+// spanKeyUids: the uids whose same-uid instances can only be the per-day
+// copies of ONE multi-day occurrence — exactly one ParsedEvent in the feed,
+// with no rrule. Any other shared uid (master-less overrides, duplicate-UID
+// one-offs, a rule's occurrences) is several events, which Today must not
+// merge. js/ics.js is not changed for this (spec § 2.4).
+function spanKeyUids(events) {
+  const count = new Map();
+  for (const ev of events) count.set(ev.uid, (count.get(ev.uid) || 0) + 1);
+  const out = new Set();
+  for (const ev of events) if (count.get(ev.uid) === 1 && typeof ev.rrule !== 'string') out.add(ev.uid);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -565,6 +684,12 @@ function compareInstances(a, b) {
 //   id        "<feedId>:<uid>:<date>:<time>" — stable, unique per instance
 //   createdAt "<date>T<time or 00:00>"       — keeps sortItemsByDate total
 //   feedId, feedColor, external: true
+//   recurring      true if the instance's series repeats (seriesIndex): Today
+//                  shows it only on its own day, never under Next 7 days
+//   guessedSeries  true if the heuristic, not an RRULE, decided that
+//   spanKey        "<feedId>:<uid>" when the uid is one plain event (so the
+//                  per-day copies of a multi-day event share it), else the
+//                  instance's own id (spanKeyUids)
 // `hidden` feeds are excluded entirely — their events never reach a view.
 // A feed with no cache entry yet (never synced) or an entry a malformed
 // expansion throws on is skipped rather than breaking the whole merge; one
@@ -582,8 +707,12 @@ export function instancesForRange(feeds, cache, start, end, targetTz) {
     if (!entry || !entry.events || entry.events.length === 0) continue;
 
     let expanded;
+    let series;
+    let spanUids;
     try {
       expanded = expandEvents(entry.events, start, end, targetTz);
+      series = seriesIndex(entry.events, targetTz);
+      spanUids = spanKeyUids(entry.events);
     } catch (err) {
       // Skipping keeps one bad feed from blanking every other calendar, but a
       // silent skip is indistinguishable from an empty calendar. Log the error
@@ -608,6 +737,9 @@ export function instancesForRange(feeds, cache, start, end, targetTz) {
         feedId: feed.id,
         feedColor: feed.color,
         external: true,
+        recurring: series.repeating.has(inst.uid),
+        guessedSeries: series.guessed.has(inst.uid),
+        spanKey: spanUids.has(inst.uid) ? `${feed.id}:${inst.uid}` : `${feed.id}:${inst.uid}:${inst.date}:${inst.time}`,
       });
     }
   }

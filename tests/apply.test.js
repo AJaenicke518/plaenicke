@@ -1,3 +1,14 @@
+// Alex's zone, pinned, not the machine's (final review A11b). Several tests
+// here build local times (new Date(2026, 9, 21, 9, 18)) and check what app.js
+// derives from them; in a shell with TZ=UTC, a mutant reading UTC instead of
+// local time (getUTCHours for minutesNow, toISOString().slice(0, 10) for
+// today's date) agreed with the local reading and passed. node --test runs
+// each file in its own process, and Node re-reads TZ when it is assigned, so
+// this reaches only this file. Static imports are hoisted above this line,
+// but none of them reads the clock while loading; app.js is imported by the
+// tests, after this has run.
+process.env.TZ = 'America/Los_Angeles';
+
 // The offline fetch is the FIRST import, so it is installed before anything
 // below — app.js included — is evaluated (tests/offline-fetch.js): every fetch
 // a test has not stubbed rejects the way an offline device does.
@@ -20,6 +31,70 @@ import { bytesToBase64url, TOKEN_BYTES, encryptBlob } from '../js/crypto.js';
 import { SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID, SLOW_WRITE_MS } from '../js/linkui.js';
 import { addDays, startOfWeek, weekLabel } from '../js/timegrid.js';
 import { formatDayLabel } from '../js/freshness.js';
+
+// INTERVALS ARE RECORDED, NEVER SCHEDULED, in this file. app.js's Today tick
+// is a 60 s setInterval (home-screen spec § 2.3), armed while Today is shown,
+// and every page here is "shown" at load (the fake DOM ignores index.html's
+// `hidden`). A real interval left running keeps this file's process alive
+// after its last test: measured on Node 22.18, with a last test that leaves
+// Today showing, `node --test tests/apply.test.js` never exits. Installed
+// before app.js is imported (the first test), and no test here mocks
+// setInterval, so app.js only ever sees these. A test runs one by calling
+// its `fn`.
+const intervals = new Map();
+let intervalSeq = 0;
+globalThis.setInterval = (fn, ms) => {
+  intervalSeq += 1;
+  const id = `interval-${intervalSeq}`;
+  intervals.set(id, { fn, ms });
+  return id;
+};
+globalThis.clearInterval = (id) => { intervals.delete(id); };
+const liveIntervals = (ms) => [...intervals.values()].filter((i) => i.ms === ms);
+
+// THE TICK'S FIRST TIMEOUT IS RECORDED THE SAME WAY (final review A3). app.js
+// arms the Today tick as a setTimeout to the next minute boundary whose
+// callback, `startTodayTick`, ticks and then starts the 60 s interval. That
+// one timeout is recognised by its callback's name and recorded here, never
+// scheduled: everywhere this file swaps setTimeout (enableMockTimers,
+// installManualTimers) routes it here too, so it can never sit in a mock
+// queue across reset() (CLAUDE.md's timer-id trap) or be fired by a fake that
+// fires by delay. A test runs it with fireTodayAlign(). If app.js renames the
+// callback, the "tick is armed" assertions below fail rather than a real
+// timer slipping through unseen.
+const alignTimeouts = new Map();
+let alignSeq = 0;
+const isTodayAlign = (fn) => typeof fn === 'function' && fn.name === 'startTodayTick';
+const isAlignHandle = (h) => typeof h === 'string' && h.startsWith('today-align-');
+function recordAlign(fn, ms) {
+  alignSeq += 1;
+  const id = `today-align-${alignSeq}`;
+  alignTimeouts.set(id, { fn, ms });
+  return id;
+}
+const unmockedSetTimeout = globalThis.setTimeout;
+const unmockedClearTimeout = globalThis.clearTimeout;
+globalThis.setTimeout = (fn, ms, ...args) => (isTodayAlign(fn) ? recordAlign(fn, ms) : unmockedSetTimeout(fn, ms, ...args));
+globalThis.clearTimeout = (h) => { if (isAlignHandle(h)) alignTimeouts.delete(h); else unmockedClearTimeout(h); };
+const liveAligns = () => [...alignTimeouts.values()];
+// Runs the one pending first timeout, as the clock reaching the minute would.
+function fireTodayAlign() {
+  const entries = [...alignTimeouts.entries()];
+  assert.equal(entries.length, 1, 'fixture check: one first timeout pending');
+  const [[id, { fn }]] = entries;
+  alignTimeouts.delete(id);
+  fn();
+}
+// How many Today tick handles are live, in either phase: never more than one.
+const todayTicks = () => liveAligns().length + liveIntervals(60000).length;
+// The running 60 s tick, firing the first timeout first if that is the phase.
+function todayInterval() {
+  assert.equal(todayTicks(), 1, 'fixture check: Today is ticking, once');
+  if (liveAligns().length === 1) fireTodayAlign();
+  const [tick] = liveIntervals(60000);
+  assert.ok(tick, 'fixture check: the 60 s interval is running');
+  return tick;
+}
 
 // This file must never reach the production Worker. Tests that need a server
 // stub globalThis.fetch and restore it afterwards, but app.js also schedules
@@ -95,11 +170,15 @@ function enableMockTimers(t, options) {
   const mockedSet = globalThis.setTimeout;
   const mockedClear = globalThis.clearTimeout;
   globalThis.setTimeout = (fn, ms, ...args) => {
+    if (isTodayAlign(fn)) return recordAlign(fn, ms); // recorded, never mocked (see alignTimeouts)
     const handle = mockedSet((...a) => { live.delete(handle); fn(...a); }, ms, ...args);
     live.set(handle, ms || 0);
     return handle;
   };
-  globalThis.clearTimeout = (handle) => { live.delete(handle); mockedClear(handle); };
+  globalThis.clearTimeout = (handle) => {
+    if (isAlignHandle(handle)) { alignTimeouts.delete(handle); return; }
+    live.delete(handle); mockedClear(handle);
+  };
   mockTimerTracker = { t, live };
 }
 
@@ -188,6 +267,12 @@ test('app.js paints the shell sync indicator at load, so a stuck adoption is vis
   assert.equal(shell.hidden, false,
     'a device sitting at adoptionPending syncs nothing at all — the app shell must say so without opening Settings');
   assert.match(shell.textContent, /\S/);
+  // The load-time syncTodayTick() (final review A11c): the app opens on Today,
+  // so the tick is armed before anything is clicked — in its first phase, a
+  // timeout to the next minute boundary.
+  assert.equal(liveAligns().length, 1, 'the Today tick is armed at load');
+  assert.ok(liveAligns()[0].ms > 0 && liveAligns()[0].ms <= 60000, `to the next minute: ${liveAligns()[0].ms} ms`);
+  assert.equal(liveIntervals(60000).length, 0, 'not yet the interval');
   // Phase 0 baseline: a cold load is an open, and it is logged. Asserted here
   // because this is the only test that sees app.js's module-scope code run.
   assert.equal(loadLaunches().length, 1, 'loading the app must record one launch');
@@ -551,6 +636,7 @@ test('each nav button reveals exactly its own page, and marks itself active', as
   installFakeLocalStorage();
   await import('../js/app.js');
   const pages = [
+    ['show-today', 'today-view'],
     ['show-list', 'list-view'],
     ['show-month', 'calendar-view'],
     ['show-week', 'week-view'],
@@ -1350,12 +1436,15 @@ function resume() {
   for (const fn of globalThis.document._listeners.visibilitychange || []) fn();
 }
 
-test('index.html opens on the Day view, not the List', () => {
+// Home-screen stage 3b: the app opens on Today (it opened on Day before).
+test('index.html opens on Today', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-  assert.match(html, /<button id="show-day"[^>]*class="active"/, 'the Day button must be the active one on load');
-  assert.doesNotMatch(html, /<button id="show-list"[^>]*class="active"/, 'List must no longer be the default');
-  assert.match(html, /<section id="day-view"(?![^>]*hidden)[^>]*>/, 'the Day section must be visible on load');
-  assert.match(html, /<section id="list-view"[^>]*hidden/, 'the List section must start hidden');
+  assert.match(html, /<button id="show-today"[^>]*class="active"/, 'the Today button must be the active one on load');
+  assert.doesNotMatch(html, /<button id="show-(list|month|week|day|todo|ideas)"[^>]*class="active"/, 'and no other');
+  assert.match(html, /<section id="today-view"(?![^>]*hidden)[^>]*>/, 'the Today section must be visible on load');
+  for (const id of ['list-view', 'calendar-view', 'week-view', 'day-view', 'todo-view', 'ideas-view']) {
+    assert.match(html, new RegExp(`<section id="${id}"[^>]*hidden`), `#${id} must start hidden`);
+  }
 });
 
 test('resuming the next morning moves the Day view to the new today', async (t) => {
@@ -1491,11 +1580,13 @@ const dayBody = () => globalThis.document.getElementById('day-body');
 const messageText = () => globalThis.document.getElementById('message').textContent;
 
 // The .item-open control of the first row under `root` whose text mentions `title`.
+// allText, as a real button's textContent includes its children's: Today's
+// open button holds its title in a child span (js/todayview.js).
 function openControlFor(root, title) {
   const found = [];
   const walk = (el) => {
     for (const c of el.children) {
-      if (c.tagName === 'BUTTON' && c._classes.has('item-open') && (c.textContent || '').includes(title)) found.push(c);
+      if (c.tagName === 'BUTTON' && c._classes.has('item-open') && allText(c).includes(title)) found.push(c);
       walk(c);
     }
   };
@@ -2002,8 +2093,14 @@ function installManualTimers() {
   const realSet = globalThis.setTimeout;
   const realClear = globalThis.clearTimeout;
   const pending = [];
-  globalThis.setTimeout = (fn, ms) => { const h = { fn, ms, cancelled: false }; pending.push(h); return h; };
-  globalThis.clearTimeout = (h) => { if (h && pending.includes(h)) h.cancelled = true; };
+  globalThis.setTimeout = (fn, ms) => {
+    if (isTodayAlign(fn)) return recordAlign(fn, ms); // recorded, never pending here (see alignTimeouts)
+    const h = { fn, ms, cancelled: false }; pending.push(h); return h;
+  };
+  globalThis.clearTimeout = (h) => {
+    if (isAlignHandle(h)) { alignTimeouts.delete(h); return; }
+    if (h && pending.includes(h)) h.cancelled = true;
+  };
   return {
     // Runs, once, every live timer scheduled for exactly `ms`.
     fire(ms) {
@@ -3298,7 +3395,9 @@ test('sweep D: a tick that fails on quota is shown unticked again, with the erro
 // Ids are prefixed `sU-`. Every test that shows a toast ends with it resolved
 // and #toast-host empty.
 
+const todayBody = () => globalThis.document.getElementById('today-body');
 const PAGES = [
+  ['Today', 'show-today', 'today-view', () => todayBody()],
   ['List', 'show-list', 'list-view', () => itemList()],
   ['Day', 'show-day', 'day-view', () => dayBody()],
   ['To-do', 'show-todo', 'todo-view', () => todoList()],
@@ -3307,6 +3406,7 @@ const PAGES = [
 // The nav button of whichever page is showing, to put it back afterwards.
 function visiblePageButton() {
   for (const [buttonId, sectionId] of [
+    ['show-today', 'today-view'],
     ['show-list', 'list-view'], ['show-month', 'calendar-view'], ['show-week', 'week-view'],
     ['show-day', 'day-view'], ['show-todo', 'todo-view'], ['show-ideas', 'ideas-view'],
   ]) {
@@ -4210,12 +4310,12 @@ test('a11y: Week columns open their day from the keyboard', async () => {
 // The nav's selected page was shown only by a CSS class, which assistive tech
 // does not read. aria-pressed says it, in the markup at load (showView is not
 // run until a button is tapped) and after every tap.
-test('a11y: index.html marks the Day button pressed and every other nav button not', () => {
+test('a11y: index.html marks the Today button pressed and every other nav button not', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-  for (const id of ['show-list', 'show-month', 'show-week', 'show-day', 'show-todo', 'show-ideas']) {
+  for (const id of ['show-today', 'show-list', 'show-month', 'show-week', 'show-day', 'show-todo', 'show-ideas']) {
     const tag = html.match(new RegExp(`<button id="${id}"[^>]*>`));
     assert.ok(tag, `fixture check: #${id}`);
-    assert.match(tag[0], new RegExp(`aria-pressed="${id === 'show-day'}"`), `#${id}`);
+    assert.match(tag[0], new RegExp(`aria-pressed="${id === 'show-today'}"`), `#${id}`);
   }
 });
 
@@ -4223,7 +4323,7 @@ test('a11y: each nav button reports itself pressed, and only itself', async () =
   installFakeLocalStorage();
   await import('../js/app.js');
   const restore = visiblePageButton();
-  const ids = ['show-list', 'show-month', 'show-week', 'show-day', 'show-todo', 'show-ideas'];
+  const ids = ['show-today', 'show-list', 'show-month', 'show-week', 'show-day', 'show-todo', 'show-ideas'];
   try {
     for (const id of ids) {
       click(globalThis.document.getElementById(id));
@@ -5657,4 +5757,531 @@ test('app.js installs the press listeners on the document, once each', async () 
   for (const type of PRESS_EVENTS) {
     assert.equal((globalThis.document._listeners[type] || []).length, 1, type);
   }
+});
+
+// =========================================================================
+// Home-screen stage 3b — the Today page, through the real app
+// =========================================================================
+//
+// Ids are prefixed `td-`. Each test puts the page it found back, and leaves
+// no items or calendars behind.
+
+test('Today: the gear is on the Today page, and nowhere else', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const today = html.match(/<section id="today-view"[\s\S]*?<\/section>/);
+  assert.ok(today, 'fixture check: index.html has a Today section');
+  assert.match(today[0], /<button id="settings-btn"/);
+  assert.equal(html.match(/id="settings-btn"/g).length, 1);
+  assert.doesNotMatch(html.match(/<header>[\s\S]*?<\/header>/)[0], /settings-btn/, 'the shell header no longer holds it');
+});
+
+test('Today: the page names the day and lists live items in their sections', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  // Date only, so the MockTimers timer-id trap (CLAUDE.md) does not apply to these Today tests; use enableMockTimers if setTimeout is ever added.
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
+  try {
+    seed([
+      record({ id: 'td-late', type: 'due', title: 'td Essay', date: '2026-10-18' }),
+      record({ id: 'td-task', type: 'task', title: 'td Call bank', date: '2026-10-21' }),
+      record({ id: 'td-class', type: 'event', title: 'td Lecture', date: '2026-10-21', time: '10:00', endTime: '11:00' }),
+      record({ id: 'td-fri', type: 'event', title: 'td Dinner', date: '2026-10-23', time: '19:00' }),
+      record({ id: 'td-idea', type: 'idea', title: 'td Shelves', date: '2026-10-21' }),
+    ]);
+    click(globalThis.document.getElementById('show-today'));
+    assert.equal(globalThis.document.getElementById('today-view').hidden, false);
+    assert.equal(labelText('today-date'), 'Wednesday, October 21');
+    const text = allText(todayBody());
+    assert.match(text,
+      /Overdue[\s\S]*td Essay[\s\S]*To do today[\s\S]*td Call bank[\s\S]*Today's events[\s\S]*td Lecture[\s\S]*in 42 min[\s\S]*Next 7 days[\s\S]*Fri[\s\S]*td Dinner/);
+    assert.doesNotMatch(text, /td Shelves/, 'an idea is never on Today');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+// The Today row a checkbox belongs to. The box sits in a <label
+// class="today-tick"> inside the row (final review A8), so it is not the
+// box's parent.
+function todayRowOf(box) {
+  let n = box.parentNode;
+  while (n && !n._classes.has('today-row')) n = n.parentNode;
+  assert.ok(n, 'fixture check: the box is inside a Today row');
+  return n;
+}
+
+// Amendment 2026-10-22 (DA I3): a ticked overdue to-do stays in Overdue,
+// struck through, until tomorrow — below the undone ones — and unticking it
+// puts it back above them. It stays because the tick moved its updatedAt to
+// today (js/today.js tickedToday), so this also pins setDone's nextStamp.
+test('Today: an overdue to-do ticked on Today stays in Overdue, struck through, below the undone ones, and unticks back above them', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
+  // The Overdue section is the first one on the page; its rows, in order.
+  const overdue = () => {
+    const section = todayBody().children[0];
+    assert.ok(section && section._classes.has('today-section'), 'fixture check: the first child is a section');
+    assert.equal(allText(section.children[0]), 'Overdue', 'fixture check: the first section is Overdue');
+    return section;
+  };
+  const rowTitles = () => overdue().children[1].children.map((li) => allText(li));
+  try {
+    seed([
+      record({ id: 'td-od-old', type: 'due', title: 'td Old essay', date: '2026-10-15' }),
+      record({ id: 'td-od-new', type: 'task', title: 'td Newer task', date: '2026-10-19' }),
+    ]);
+    click(globalThis.document.getElementById('show-today'));
+    assert.equal(rowTitles().length, 2, 'fixture check: both are overdue');
+    assert.match(rowTitles()[0], /td Old essay/, 'fixture check: oldest first');
+
+    const box = checkboxFor(overdue(), 'td Old essay');
+    assert.ok(box, 'fixture check: the row has a checkbox');
+    box.checked = true;
+    fire(box, 'change');
+    assert.equal(storedById('td-od-old').done, true, 'the tick reached storage');
+    const ticked = checkboxFor(overdue(), 'td Old essay');
+    assert.ok(ticked, 'still in Overdue after the tick');
+    assert.equal(ticked.checked, true);
+    assert.ok(todayRowOf(ticked)._classes.has('done'), 'struck through');
+    assert.equal(rowTitles().length, 2);
+    assert.match(rowTitles()[0], /td Newer task/, 'the undone one is now first');
+    assert.match(rowTitles()[1], /td Old essay/, 'the ticked one below it');
+
+    ticked.checked = false;
+    fire(ticked, 'change');
+    assert.equal(storedById('td-od-old').done, false, 'the untick reached storage');
+    const unticked = checkboxFor(overdue(), 'td Old essay');
+    assert.ok(unticked && unticked.checked === false);
+    assert.equal(todayRowOf(unticked)._classes.has('done'), false);
+    assert.match(rowTitles()[0], /td Old essay/, 'back first');
+    assert.match(rowTitles()[1], /td Newer task/);
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+});
+
+test('Today: a tick on Today is saved, and the row stays, struck through, until tomorrow', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  seed([record({ id: 'td-tick', type: 'task', title: 'td Water plants', date: localISO(new Date()) })]);
+  try {
+    click(globalThis.document.getElementById('show-today'));
+    const box = checkboxFor(todayBody(), 'td Water plants');
+    assert.ok(box, 'fixture check: the row has a checkbox');
+    box.checked = true;
+    fire(box, 'change');
+    assert.equal(storedById('td-tick').done, true, 'the tick reached storage');
+    const again = checkboxFor(todayBody(), 'td Water plants');
+    assert.ok(again && again.checked, 'still on Today, ticked');
+    assert.ok(todayRowOf(again)._classes.has('done'));
+    assert.doesNotMatch(allText(todoList()), /td Water plants/, 'while the To-do page drops it');
+  } finally {
+    if (restore) click(restore);
+  }
+  seed([]);
+});
+
+test('Today: a delete waiting for its Undo is already gone from Today, and Undo brings it back', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'td-del', type: 'task', title: 'td Delete me', date: localISO(new Date()) })]);
+  enableMockTimers(t, { apis: ['setTimeout'] });
+  try {
+    assert.match(allText(todayBody()), /td Delete me/, 'fixture check');
+    click(deleteControlFor(todoList(), 'td Delete me'));
+    assert.doesNotMatch(allText(todayBody()), /td Delete me/);
+    click(toastHost().querySelector('.toast-undo'));
+    assert.match(allText(todayBody()), /td Delete me/);
+  } finally {
+    await resetMockTimers(t);
+  }
+  seed([]);
+});
+
+test('Today: a calendar event is shown by its title; the calendar\'s link never reaches the page', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seedFeed(sdFeed('td-feed', { url: 'https://calendar.google.com/calendar/ical/td-private-token/basic.ics' }));
+  try {
+    assert.match(allText(todayBody()), /Standup from the feed/, 'fixture check: the feed event is on Today');
+    assert.equal(stringsOf(todayBody()).some((x) => x.includes('td-private-token')), false);
+  } finally {
+    unseedFeeds();
+  }
+});
+
+// --- the 60 s tick (spec § 2.3) ----------------------------------------------
+// It updates the one "in N" text node and never rebuilds the list. It runs
+// only while Today and the page are both visible.
+
+test('Today: the tick runs only while Today and the page are both visible, and never twice', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const doc = globalThis.document;
+  try {
+    click(doc.getElementById('show-day'));
+    assert.equal(todayTicks(), 0);
+    click(doc.getElementById('show-today'));
+    assert.equal(liveAligns().length, 1, 'armed: first a timeout to the minute');
+    assert.equal(todayTicks(), 1);
+    click(doc.getElementById('show-today'));
+    assert.equal(todayTicks(), 1, 'tapping Today again arms no second one');
+    click(doc.getElementById('show-week'));
+    assert.equal(todayTicks(), 0, 'leaving Today stops it while it waits for the minute');
+    click(doc.getElementById('show-today'));
+    fireTodayAlign();
+    assert.equal(liveAligns().length, 0);
+    assert.equal(liveIntervals(60000).length, 1, 'then the 60 s interval');
+    click(doc.getElementById('show-today'));
+    assert.equal(todayTicks(), 1, 'tapping Today again arms no second one');
+    click(doc.getElementById('show-week'));
+    assert.equal(todayTicks(), 0, 'leaving Today stops the interval too');
+    click(doc.getElementById('show-today'));
+    doc.visibilityState = 'hidden';
+    resume();
+    assert.equal(todayTicks(), 0, 'a hidden page does not tick');
+    doc.visibilityState = 'visible';
+    resume();
+    assert.equal(todayTicks(), 1, 'and starts again on return');
+    fireTodayAlign();
+    doc.visibilityState = 'hidden';
+    resume();
+    assert.equal(todayTicks(), 0, 'hiding the page stops the interval too');
+    doc.visibilityState = 'visible';
+    resume();
+    assert.equal(todayTicks(), 1);
+  } finally {
+    doc.visibilityState = 'visible';
+    if (restore) click(restore);
+  }
+});
+
+// Final review A3 (2026-10-22): the tick lands on the minute. Armed at
+// 09:18:20.500, it waits 39.5 s for 09:19:00, ticks, then runs every 60 s.
+test('Today: the tick is aligned to the minute: a first timeout to the boundary, which ticks, then the interval', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const doc = globalThis.document;
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18, 20, 500).getTime() });
+  try {
+    seed([record({ id: 'td-align', type: 'event', title: 'td Lecture', date: '2026-10-21', time: '10:00', endTime: '11:00' })]);
+    click(doc.getElementById('show-week'));
+    click(doc.getElementById('show-today'));
+    assert.deepEqual(liveAligns().map((a) => a.ms), [39500], 'waits for 09:19:00');
+    assert.equal(liveIntervals(60000).length, 0, 'no interval before the boundary');
+    const rel = todayBody().querySelector('.today-rel');
+    assert.equal(rel.textContent, 'in 42 min', 'fixture check');
+    t.mock.timers.tick(39500); // 09:19:00.000
+    fireTodayAlign();
+    assert.equal(rel.textContent, 'in 41 min', 'the boundary ticks');
+    assert.equal(liveIntervals(60000).length, 1, 'and starts the 60 s interval');
+    assert.equal(todayTicks(), 1);
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('Today: the tick changes the "in N" text, and no other node', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const nodesOf = (root) => {
+    const out = [];
+    const walk = (n) => { for (const c of n.children) { out.push(c); walk(c); } };
+    walk(root);
+    return out;
+  };
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
+  try {
+    seed([
+      record({ id: 'td-rel', type: 'event', title: 'td Lecture', date: '2026-10-21', time: '10:00', endTime: '11:00' }),
+      record({ id: 'td-rel-gym', type: 'event', title: 'td Gym', date: '2026-10-21', time: '08:00', endTime: '09:00' }),
+      record({ id: 'td-rel-task', type: 'task', title: 'td Pay rent', date: '2026-10-21' }),
+    ]);
+    click(globalThis.document.getElementById('show-today'));
+    const before = nodesOf(todayBody());
+    const texts = before.map((n) => n.textContent);
+    const rel = before.find((n) => n._classes.has('today-rel'));
+    assert.equal(rel.textContent, 'in 42 min', 'fixture check');
+    const tick = todayInterval();
+    t.mock.timers.tick(12 * 60 * 1000); // 09:30
+    tick.fn();
+    assert.equal(rel.textContent, 'in 30 min');
+    const after = nodesOf(todayBody());
+    assert.equal(after.length, before.length, 'nothing added or removed');
+    after.forEach((n, i) => {
+      assert.equal(n, before[i], 'the same nodes: nothing was rebuilt');
+      if (n !== rel) assert.equal(n.textContent, texts[i], 'and no other text changed');
+    });
+    t.mock.timers.tick(30 * 60 * 1000); // 10:00
+    tick.fn();
+    assert.equal(rel.textContent, 'now');
+    t.mock.timers.tick(60 * 60 * 1000); // 11:00
+    tick.fn();
+    assert.equal(rel.textContent, '', 'over: the label empties; the next render greys the row');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+// Final review A2 (2026-10-22): an event over 12 h away at render still gets
+// its (empty) label, so the tick shows "in N" once it is within 12 h without
+// waiting for another render.
+test('Today: an event over 12 h away shows no "in N" at first, and the tick shows it once within 12 h', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 8, 0).getTime() });
+  try {
+    seed([record({ id: 'td-far', type: 'event', title: 'td Talk', date: '2026-10-21', time: '20:30', endTime: '21:30' })]);
+    click(globalThis.document.getElementById('show-today'));
+    const rel = todayBody().querySelector('.today-rel');
+    assert.ok(rel, 'the label is drawn');
+    assert.equal(rel.textContent, '', 'and empty: 12 h 30 min away');
+    const tick = todayInterval();
+    t.mock.timers.tick(31 * 60 * 1000); // 08:31
+    tick.fn();
+    assert.equal(rel.textContent, 'in 11 h 59 min');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+// Review fix (Task 8): relativeLabel reads minutes of the day only, so a tick
+// after midnight with no render in between would count down to YESTERDAY's
+// event (23:55 read at 12:00 the next day is "in 11 h 55 min"). A tick on a
+// new day re-renders instead.
+test('Today: a tick on a new day re-renders the page instead of counting down to yesterday', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const allNodes = (root) => {
+    const out = [];
+    const walk = (n) => { for (const c of n.children) { out.push(c); walk(c); } };
+    walk(root);
+    return out;
+  };
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 23, 50).getTime() });
+  try {
+    seed([
+      record({ id: 'td-mid', type: 'event', title: 'td Late call', date: '2026-10-21', time: '23:55', endTime: '23:59' }),
+    ]);
+    click(globalThis.document.getElementById('show-today'));
+    const rel = allNodes(todayBody()).find((n) => n._classes.has('today-rel'));
+    assert.equal(rel.textContent, 'in 5 min', 'fixture check');
+    assert.equal(labelText('today-date'), 'Wednesday, October 21', 'fixture check');
+    assert.equal(labelText('day-label'), 'Wed, Oct 21', 'fixture check: the Day page is on the old today too');
+    const stamp = globalThis.document.getElementById('updated-stamp');
+    assert.equal(loadFeeds().filter((f) => !f.hidden).length, 0, 'fixture check: no visible calendar, so a render stamps');
+    stamp.textContent = 'stale stamp';
+    const tick = todayInterval();
+    t.mock.timers.tick((12 * 60 + 10) * 60 * 1000); // 2026-10-22 12:00
+    tick.fn();
+    // Final review A4 and A11g: the new day repaints the "Updated" stamp, and
+    // the whole app is rendered — render(), not renderToday(): refreshForToday
+    // catches the other pages' cursors up, so the Day page moves on too.
+    assert.equal(stamp.textContent, 'Updated 12:00 PM', 'the stamp is repainted on the new day');
+    assert.equal(labelText('day-label'), 'Thu, Oct 22', 'another page caught up with the new day');
+    assert.notEqual(rel.textContent, 'in 11 h 55 min', 'no countdown to yesterday\'s event');
+    for (const n of allNodes(todayBody())) {
+      if (n._classes.has('today-rel')) assert.notEqual(n.textContent, 'in 11 h 55 min');
+    }
+    assert.equal(labelText('today-date'), 'Thursday, October 22', 'Today now shows the new day');
+    assert.ok(!allText(todayBody()).includes('td Late call'), 'yesterday\'s event is no longer under Today');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+// Final fixes 2, C1: with a visible calendar, stampUpdated paints nothing, so
+// a tick on a new day left "Updated 11:30 PM" up after midnight, reading as
+// this morning's. The new-day branch repaints from the feeds too, as
+// onFeedsChanged does, and the fetch time now names its day.
+test('Today: a tick on a new day repaints the stamp from the visible calendars', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 23, 50).getTime() });
+  try {
+    seed([]);
+    seedFeedsWithCache([sdFeed('ff2-c1')], { 'ff2-c1': cacheAt(new Date(2026, 9, 21, 23, 30)) });
+    click(globalThis.document.getElementById('show-today'));
+    stampEl().textContent = 'Updated 11:30 PM';
+    const tick = todayInterval();
+    t.mock.timers.tick(15 * 60 * 1000); // 2026-10-22 00:05
+    tick.fn();
+    assert.equal(stampEl().textContent, 'Updated Yesterday, 11:30 PM');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+  unseedFeeds();
+  resume();
+});
+
+// Final fixes 2, C2: startTodayTick ticked BEFORE it armed the interval, so a
+// first tick that threw left no interval at all and Today never ticked again
+// until something re-armed it. The interval is armed first; the throw still
+// reaches the caller.
+test('Today: a first tick that throws still leaves the 60 s interval running', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const doc = globalThis.document;
+  const dateEl = doc.getElementById('today-date');
+  // Back to a plain data property, as the fake DOM's constructor makes it.
+  const unbreak = () => { delete dateEl.textContent; dateEl.textContent = ''; };
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 23, 59, 30).getTime() });
+  try {
+    seed([]);
+    click(doc.getElementById('show-week'));
+    click(doc.getElementById('show-today'));
+    assert.equal(liveAligns().length, 1, 'fixture check: waiting for the minute');
+    t.mock.timers.tick(30 * 1000); // 2026-10-22 00:00: the tick renders the new day
+    Object.defineProperty(dateEl, 'textContent', { configurable: true, get: () => '', set: () => { throw new Error('ff2-c2 render failed'); } });
+    assert.throws(() => fireTodayAlign(), /ff2-c2 render failed/, 'the error is not swallowed');
+    unbreak();
+    assert.equal(liveIntervals(60000).length, 1, 'the interval was armed anyway');
+    assert.equal(todayTicks(), 1, 'and only once');
+  } finally {
+    unbreak();
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+// Final fixes 2, C9: setDone's render() ran after the save and before
+// scheduleSync, outside the save's try. A render that threw after a
+// successful save left the tick saved but never pushed. The sync is scheduled
+// once the save succeeds; the render's error still reaches the caller.
+test('a tick whose render throws after the save still schedules its sync, and the error is not swallowed', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  seed([record({ id: 'ff2-c9', type: 'task', title: 'ff2 render throws', date: '2099-01-01' })]);
+  const dateEl = globalThis.document.getElementById('today-date');
+  const unbreak = () => { delete dateEl.textContent; dateEl.textContent = ''; };
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts = {}) => {
+    requests.push({ url: String(url), method: (opts && opts.method) || 'GET' });
+    return { ok: true, status: 200, json: async () => ({ version: 0, blob: '' }), text: async () => '' };
+  };
+  enableMockTimers(t, { apis: ['setTimeout'] });
+  try {
+    const box = checkboxFor(todoList(), 'ff2 render throws');
+    box.checked = true;
+    Object.defineProperty(dateEl, 'textContent', { configurable: true, get: () => '', set: () => { throw new Error('ff2-c9 render failed'); } });
+    assert.throws(() => fire(box, 'change'), /ff2-c9 render failed/, 'the render error surfaces');
+    unbreak();
+    assert.equal(storedById('ff2-c9').done, true, 'fixture check: the save succeeded');
+    t.mock.timers.tick(2000);
+    for (let i = 0; i < 50; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+  } finally {
+    unbreak();
+    await resetMockTimers(t);
+    globalThis.fetch = originalFetch;
+  }
+  assert.ok(requests.some((r) => r.url.includes('/data') && r.method === 'PUT'),
+    'the saved tick must still be pushed');
+  clearMessage();
+  seed([]);
+});
+
+// Final fixes 2, C4: a tick re-renders every page, so the checkbox that had
+// focus is gone and keyboard focus fell to the page. After a tick on Today,
+// focus goes to the NEW box in the row for the same item, found the way
+// focusOpener finds an opener: by the open button's data-item-id.
+const ff2Today = () => [record({ id: 'ff2-c4', type: 'task', title: 'ff2 Focus me', date: localISO(new Date()) })];
+test('Today: a tick from a focused box puts focus on the re-rendered box in the same row', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const doc = globalThis.document;
+  seed(ff2Today());
+  try {
+    click(doc.getElementById('show-today'));
+    const box = checkboxFor(todayBody(), 'ff2 Focus me');
+    box.focus();
+    doc.lastFocusOptions = undefined;
+    box.checked = true;
+    fire(box, 'change');
+    const again = checkboxFor(todayBody(), 'ff2 Focus me');
+    assert.notEqual(again, box, 'fixture check: the tick re-rendered the row');
+    assert.equal(doc.activeElement, again, 'focus is on the new box');
+    assert.ok(again._classes.has('today-check'));
+    assert.deepEqual(doc.lastFocusOptions, { preventScroll: true });
+  } finally {
+    doc.activeElement = null;
+    if (restore) click(restore);
+  }
+  seed([]);
+});
+
+test('Today: a tick from a box without focus moves no focus', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const doc = globalThis.document;
+  seed(ff2Today());
+  try {
+    click(doc.getElementById('show-today'));
+    const elsewhere = doc.getElementById('entry-text');
+    elsewhere.focus();
+    const box = checkboxFor(todayBody(), 'ff2 Focus me');
+    box.checked = true;
+    fire(box, 'change');
+    assert.equal(doc.activeElement, elsewhere, 'focus stays where it was');
+  } finally {
+    doc.activeElement = null;
+    if (restore) click(restore);
+  }
+  seed([]);
+});
+
+test('To-do: a tick leaves focus alone (C4 is Today only)', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const doc = globalThis.document;
+  seed([record({ id: 'ff2-c4-todo', type: 'task', title: 'ff2 To-do focus', date: '2099-01-01' })]);
+  try {
+    click(doc.getElementById('show-todo'));
+    const box = checkboxFor(todoList(), 'ff2 To-do focus');
+    box.focus();
+    box.checked = true;
+    fire(box, 'change');
+    assert.equal(doc.activeElement, box, 'nothing was focused');
+  } finally {
+    doc.activeElement = null;
+    if (restore) click(restore);
+  }
+  seed([]);
 });

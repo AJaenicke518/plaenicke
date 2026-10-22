@@ -1,0 +1,100 @@
+<h2>Which home screen shape fits how you'll use it?</h2>
+<p class="subtitle">Same Tuesday in all three: 2 classes, a statics assignment due Thursday, an overdue to-do, a dentist appointment Friday. The mic is one tap from opening in every version. Click the one closest to what you want; we'll refine details after.</p>
+
+<style>
+  .phones { display: flex; gap: 18px; flex-wrap: wrap; justify-content: center; }
+  .phone { width: 280px; background: #f6f0e4; color: #2b2118; border-radius: 26px; border: 1px solid #d8ccb6; padding: 14px 14px 0; font: 14px/1.35 -apple-system, system-ui, sans-serif; display: flex; flex-direction: column; min-height: 560px; box-shadow: 0 6px 20px rgba(0,0,0,.12); }
+  .phone h4 { font: 600 22px/1.1 Georgia, serif; margin: 6px 0 2px; color: #2b2118; }
+  .phone .date { color: #8a7a66; font-size: 12px; margin-bottom: 10px; }
+  .cap { display: flex; gap: 6px; align-items: center; background: #fffaf1; border: 1px solid #d8ccb6; border-radius: 12px; padding: 8px 10px; color: #a3937e; margin-bottom: 12px; }
+  .cap .mic { margin-left: auto; width: 34px; height: 34px; border-radius: 50%; background: #7a4a2a; color: #fff; display: grid; place-items: center; font-size: 16px; }
+  .sec { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: #8a7a66; margin: 10px 0 4px; }
+  .row { display: flex; gap: 8px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid #e6dccb; }
+  .row:last-child { border-bottom: 0; }
+  .t { width: 52px; color: #8a7a66; font-variant-numeric: tabular-nums; font-size: 12px; flex: none; }
+  .box { width: 14px; height: 14px; border: 1.5px solid #8a7a66; border-radius: 4px; flex: none; transform: translateY(2px); }
+  .chip { margin-left: auto; font-size: 11px; color: #8a7a66; flex: none; }
+  .od { color: #a33b2b; }
+  .muted { color: #a3937e; }
+  .next { background: #fffaf1; border: 1px solid #d8ccb6; border-radius: 14px; padding: 10px 12px; margin-bottom: 8px; }
+  .next .big { font: 600 17px/1.2 Georgia, serif; }
+  .now { border-top: 2px solid #7a4a2a; margin: 4px 0; position: relative; }
+  .now::before { content: 'now 9:40'; position: absolute; top: -9px; left: 0; background: #f6f0e4; color: #7a4a2a; font-size: 10px; padding-right: 4px; }
+  .tabs { margin-top: auto; display: flex; justify-content: space-around; border-top: 1px solid #d8ccb6; padding: 10px 0 14px; color: #8a7a66; font-size: 11px; }
+  .tabs b { color: #7a4a2a; }
+</style>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Stacked sections — "what's due, then what's on"</h3>
+      <p>Overdue first, then today's to-dos, today's events squeezed to one line each with classes collapsed, then the next 7 days of deadlines and non-class events. Closest to Things 3 / Todoist. <b>My recommendation.</b></p>
+    </div>
+  </div>
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Next-up card + deadlines — "the shortest answer"</h3>
+      <p>One big card for what's happening next, then a single list of everything due with days-left. Today's other events are one tap away in Calendar. Calmest, least on screen.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>One timeline — "my day in order"</h3>
+      <p>Everything for today in time order with a "now" line, to-dos mixed in, then later days below. Closest to TickTick / Structured. Shows gaps in your day; classes and deadlines share one list.</p>
+    </div>
+  </div>
+</div>
+
+<div class="phones">
+  <div class="phone">
+    <div class="label">A</div>
+    <h4>Today</h4><div class="date">Tuesday, Oct 20</div>
+    <div class="cap">Add anything… <span class="mic">🎙</span></div>
+    <div class="sec od">Overdue</div>
+    <div class="row"><span class="box"></span>Email advisor about schedule<span class="chip od">2d</span></div>
+    <div class="sec">To do today</div>
+    <div class="row"><span class="box"></span>Read ch. 4 for STAT 210</div>
+    <div class="sec">Today's events</div>
+    <div class="row"><span class="t">10:30</span>PHYS 201 <span class="chip">in 50 min</span></div>
+    <div class="row"><span class="t">2:00</span>ENGR 150 Statics</div>
+    <div class="sec">Next 7 days</div>
+    <div class="row"><span class="t">Thu</span>Statics assignment due<span class="chip">2d</span></div>
+    <div class="row"><span class="t">Fri</span>Dentist · 3:00</div>
+    <div class="row muted"><span class="t"></span>+ classes Wed–Fri in Calendar</div>
+    <div class="tabs"><b>Today</b><span>Calendar</span><span>To-do</span><span>Ideas</span></div>
+  </div>
+
+  <div class="phone">
+    <div class="label">B</div>
+    <h4>Today</h4><div class="date">Tuesday, Oct 20</div>
+    <div class="cap">Add anything… <span class="mic">🎙</span></div>
+    <div class="next"><div class="sec" style="margin:0 0 2px">Next</div><div class="big">PHYS 201</div><div class="muted">10:30 · in 50 min · then ENGR 150 at 2:00</div></div>
+    <div class="sec">Everything due</div>
+    <div class="row"><span class="box"></span>Email advisor about schedule<span class="chip od">overdue 2d</span></div>
+    <div class="row"><span class="box"></span>Read ch. 4 for STAT 210<span class="chip">today</span></div>
+    <div class="row"><span class="box"></span>Statics assignment<span class="chip">Thu · 2d</span></div>
+    <div class="sec">Coming up</div>
+    <div class="row"><span class="t">Fri</span>Dentist · 3:00</div>
+    <div class="tabs"><b>Today</b><span>Calendar</span><span>To-do</span><span>Ideas</span></div>
+  </div>
+
+  <div class="phone">
+    <div class="label">C</div>
+    <h4>Today</h4><div class="date">Tuesday, Oct 20</div>
+    <div class="cap">Add anything… <span class="mic">🎙</span></div>
+    <div class="row"><span class="t od">late</span><span class="box"></span>Email advisor about schedule</div>
+    <div class="row"><span class="t">anytime</span><span class="box"></span>Read ch. 4 for STAT 210</div>
+    <div class="now"></div>
+    <div class="row"><span class="t">10:30</span>PHYS 201<span class="chip">in 50 min</span></div>
+    <div class="row"><span class="t">2:00</span>ENGR 150 Statics</div>
+    <div class="sec">Wed</div>
+    <div class="row"><span class="t">10:30</span>PHYS 201</div>
+    <div class="sec">Thu</div>
+    <div class="row"><span class="t">all day</span>Statics assignment due</div>
+    <div class="row"><span class="t">10:30</span>PHYS 201</div>
+    <div class="tabs"><b>Today</b><span>Calendar</span><span>To-do</span><span>Ideas</span></div>
+  </div>
+</div>

@@ -52,6 +52,24 @@ function getSetting() {
 // already supplies app.js with renderSyncStatus; importing applySyncedState
 // back would close a cycle that drags the whole DOM-bound app.js into
 // linkui.js's unit tests (DA-C6).
+// The Tab stops under `root`, in DOM order: the enabled buttons and form
+// controls outside any `hidden` subtree. These are the only kinds the panel
+// draws (its heading is a script-only target, tabindex -1); a link added to
+// it would need adding here.
+const TAB_STOP_TAGS = new Set(['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA']);
+function tabStops(root) {
+  const out = [];
+  const walk = (el) => {
+    for (const c of el.children) {
+      if (c.hidden) continue;
+      if (TAB_STOP_TAGS.has(c.tagName) && !c.disabled) out.push(c);
+      walk(c);
+    }
+  };
+  walk(root);
+  return out;
+}
+
 export function initSettings({
   button, host, onFeedsChanged, onSyncedDataChanged, onFeedFetched, applyState,
 }) {
@@ -99,7 +117,25 @@ export function initSettings({
     onSyncedDataChanged();
   }
 
-  function onKey(e) { if (e.key === 'Escape') close(); }
+  // Tab is kept inside the panel while it is open (final fixes 2, C6), as the
+  // item sheet keeps it inside the sheet (js/itemsheet.js, sweep U6), with the
+  // same rule: only the two edges, and focus outside the panel (its heading,
+  // or the page behind), are taken over; every other Tab is the browser's
+  // own. The sheet builds its list once; this panel's controls change while
+  // it is open (a Remove question, the sync section, a disabled Add), so the
+  // list is read from the panel at each Tab press.
+  function onKey(e) {
+    if (e.key === 'Escape') { close(); return; }
+    if (e.key !== 'Tab') return;
+    const focusables = tabStops(host);
+    if (focusables.length === 0) return;
+    const i = focusables.indexOf(document.activeElement);
+    const last = focusables.length - 1;
+    if (e.shiftKey ? i <= 0 : (i === -1 || i === last)) {
+      e.preventDefault();
+      focusables[e.shiftKey ? last : 0].focus();
+    }
+  }
 
   // The page scroll lock is shared with the item sheet (js/scrolllock.js,
   // sweep F O2); this panel's own hold, or null while it is closed.

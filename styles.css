@@ -138,6 +138,8 @@ body {
 header { display: flex; justify-content: space-between; align-items: center; }
 header h1 { font-size: 1.7rem; font-style: italic; font-weight: 700; margin: 16px 0; }
 
+/* 44px: Apple's minimum touch target (final review A9). The settings gear is
+   the only .icon-btn. */
 .icon-btn {
   background: transparent;
   border: 1px solid var(--line);
@@ -145,6 +147,8 @@ header h1 { font-size: 1.7rem; font-style: italic; font-weight: 700; margin: 16p
   border-radius: var(--radius-control);
   font-size: 1.1rem;
   padding: 6px 10px;
+  min-width: 44px;
+  min-height: 44px;
 }
 
 /* ---------- add box ---------- */
@@ -280,6 +284,86 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
    anywhere on the row's left part lands on the opener (sweep U10). */
 .list-main { flex: 1; min-width: 0; }
 .time-line { color: var(--muted); font-size: 0.8rem; font-style: italic; }
+
+/* ---------- Today (home-screen spec § 2.3, § 5) ---------- */
+/* Rows, not cards: full width, a 1px hairline, at least 44px. Classes only,
+   never an id: an id selector would outrank [data-press].pressed (0,2,0) and
+   a pressed row would show nothing (tests/styles.test.js). Every colour is a
+   token, so dark mode follows. After .item-open, whose `font: inherit` the
+   row size below must override. */
+.today-head { display: flex; justify-content: space-between; align-items: flex-start; margin: 0 0 var(--space-4); }
+.today-title { font-family: var(--serif); font-size: var(--text-hero); line-height: 1.2; margin: 0; }
+.today-date, .today-label, .today-day {
+  font-family: var(--sans);
+  font-size: var(--text-label);
+  letter-spacing: var(--label-tracking);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.today-date { margin: var(--space-1) 0 0; }
+.today-label { margin: 0 0 var(--space-2); }
+.today-day { margin: var(--space-3) 0 var(--space-1); }
+.today-section { margin-bottom: var(--space-5); }
+.today-list { list-style: none; margin: 0; padding: 0; }
+.today-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 44px;
+  padding-left: var(--space-2);
+  border-bottom: 1px solid var(--line);
+  border-left: 3px solid var(--type, var(--type-general));
+}
+/* A 20px box inside a 44x44 <label class="today-tick"> (final review A8):
+   the label is the box's hit area, so a tap near the box ticks it instead of
+   landing on the open button. Not [data-press] (js/todayview.js). */
+.today-tick {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-width: 44px;
+  min-height: 44px;
+}
+.today-check { width: 20px; height: 20px; flex: 0 0 auto; margin: 0; }
+/* Wraps (final review A7): "Repeats weekly (guessed)" takes its own line
+   under the title, time and "in N" stay on the title line, and the vertical
+   padding keeps a two-line title off the hairlines. */
+.today-open {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-2) 0;
+  font-size: var(--text-row);
+}
+.today-text { flex: 1; min-width: 0; font-family: var(--serif); }
+.today-time, .today-age, .today-rel, .today-guess {
+  flex: 0 0 auto;
+  font-family: var(--sans);
+  font-size: var(--text-label);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+/* Past a deadline: red. Past a start date: orange (spec § 2.3). */
+.today-age.deadline { color: var(--danger); }
+.today-age.start { color: var(--overdue-start); }
+/* The one accent on the page: the next event's "in N". */
+.today-rel { color: var(--accent); }
+/* Empty until within 12 h (or once over): no flex gap after the time. The tick
+   fills the same node, so it shows again without a render. */
+.today-rel:empty { display: none; }
+.today-guess { font-style: italic; flex-basis: 100%; }
+.today-row.past .today-open { color: var(--muted); }
+/* Struck through only, never dimmed (spec § 2.3; final review A6): this
+   undoes the global .done opacity further down. */
+.today-row.done { opacity: 1; }
+.today-row.done .today-text { text-decoration: line-through; }
+.today-empty { color: var(--muted); font-size: var(--text-row); margin: 0 0 var(--space-5); }
+/* A pressed row is tinted (--chip-bg, above), not dimmed like a button. */
+button[data-press].pressed { opacity: 1; }
 
 /* ---------- calendar controls (shared by month/week/day) ---------- */
 .cal-controls {
@@ -605,8 +689,16 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 }
 #todo-list li.empty, #idea-list li.empty { color: var(--muted); justify-content: center; }
 .todo-main, .idea-main { flex: 1 1 auto; min-width: 0; }
-/* A 20px tap target is below the 44px minimum on a phone; the padding on the
-   row is what makes the whole left edge hittable. */
+/* A 20px box inside a 44x44 <label class="todo-tick"> (final fixes 2, C8), as
+   on Today: the label is the box's hit area. Not [data-press] (js/todoview.js). */
+.todo-tick {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-width: 44px;
+  min-height: 44px;
+}
 #todo-list input[type="checkbox"] { width: 20px; height: 20px; flex: 0 0 auto; margin: 0; }
 
 .idea-title { font-weight: 600; }
@@ -635,8 +727,9 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 
 /* ---------- Phase 0: freshness stamp ---------- */
 /* Quiet on purpose: it answers "is this current?" at a glance and should not
-   compete with the title. Sits between the title and the settings button. */
-.stamp { color: var(--muted); font-size: 0.75rem; margin-left: auto; margin-right: 10px; }
+   compete with the title. The header's last item, at its right edge: the
+   settings gear moved to the Today page, so no margin spaces it from one. */
+.stamp { color: var(--muted); font-size: 0.75rem; margin-left: auto; }
 
 /* ---------- toast (deleted / undo) ---------- */
 /* Above .settings-backdrop (z-index 10) so an Undo raised while a panel is
@@ -736,7 +829,7 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   margin-left: auto;
 }
 .sheet-heading { font-size: 1.1rem; margin: 0 0 6px; }
-.sheet-when, .sheet-source { margin: 0 0 6px; color: var(--muted); }
+.sheet-when, .sheet-source, .sheet-repeat { margin: 0 0 6px; color: var(--muted); }
 .sheet-google { display: inline-flex; align-items: center; min-height: 44px; color: var(--accent); }
 /* The external sheet ends on a line of text or the link, with nothing under
    it; this is the room .sheet-actions' margin gives an own item (sweep U15).

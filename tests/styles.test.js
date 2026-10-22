@@ -35,9 +35,39 @@ const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8')
 // counts: `padding: 0` after `padding-bottom: 12px` resets the bottom.
 // The first version of these helpers took the last LONGHAND only, so a later
 // shorthand that undid it read as the longhand still being in force.
+// Every style rule as { sel, body }, in source order. An at-rule's block
+// (@media) is opened and its rules read as if they stood outside it (final
+// fixes 2, C7): the old regex read `@media (…) { .x { … } }` as one rule whose
+// selector was the prelude, so nothing inside an @media was ever checked.
+// Braces that do not balance throw rather than yield a partial parse.
+function rulesOf(source) {
+  const out = [];
+  let depth = 0;
+  let start = 0;
+  let prelude = '';
+  let bodyStart = 0;
+  for (let i = 0; i < source.length; i += 1) {
+    if (source[i] === '{') {
+      if (depth === 0) { prelude = source.slice(start, i).trim(); bodyStart = i + 1; }
+      depth += 1;
+    } else if (source[i] === '}') {
+      depth -= 1;
+      if (depth < 0) throw new Error(`unbalanced braces at ${i}`);
+      if (depth === 0) {
+        const body = source.slice(bodyStart, i);
+        if (prelude.startsWith('@')) out.push(...rulesOf(body));
+        else out.push({ sel: prelude, body });
+        start = i + 1;
+      }
+    }
+  }
+  if (depth !== 0) throw new Error('unbalanced braces at end of source');
+  return out;
+}
+
 function declsOf(selector, source = css) {
   const out = [];
-  for (const [, sel, body] of source.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+  for (const { sel, body } of rulesOf(source)) {
     const selectors = sel.split(',').map((x) => x.trim().replace(/\s+/g, ' '));
     if (!selectors.includes(selector)) continue;
     for (const decl of body.split(';')) {
@@ -109,6 +139,17 @@ test('declOf reads the winning declaration, shorthands included (S-11)', () => {
     'a font shorthand after the size cannot be read as a size; the test must fail, not pass');
   assert.throws(() => declOf('.a', 'padding', '.a { padding: 0; padding-top: 4px; }'), /partly overridden/);
   assert.equal(lineHeightOf('.x'), null);
+});
+
+// Final fixes 2, C7: the rule regex read `@media (…) { .x { … } }` as ONE
+// rule whose selector is the @media prelude, so a declaration inside any
+// @media block was invisible to every test that reads declarations.
+test('the rule parser reads rules inside @media blocks (C7)', () => {
+  const src = '.b { color: blue; } @media (prefers-color-scheme: dark) { .a { color: red; } .b { color: green; } }';
+  assert.equal(declOf('.a', 'color', src), 'red', 'a rule inside @media is seen');
+  assert.equal(declOf('.b', 'color', src), 'green', 'in source order with the rules outside it');
+  assert.deepEqual(rulesOf(src).map((r) => r.sel), ['.b', '.a', '.b'], 'the @media prelude is not a selector');
+  assert.throws(() => rulesOf('.a { color: red;'), /unbalanced/, 'a parse it cannot finish fails the test');
 });
 
 test('body sets a readable line-height', () => {
@@ -489,10 +530,18 @@ for (const [sel, size] of Object.entries(CALENDAR_SIZES)) {
   });
 }
 
-test('no existing rule reads the new type scale yet', () => {
-  const body = css.replace(/:root\s*\{[^}]*\}/, '');
-  assert.doesNotMatch(body, /var\(--(text-label|text-row|text-title|text-hero|label-tracking|sans)\)/,
-    'stage 3 is the first consumer; Month, Week and Day never are');
+// Stage 3b is the first consumer. Every rule that reads the scale belongs to
+// a new screen (its selectors all name one); Month, Week and Day never do.
+const NEW_SCREEN = /\.today-/;
+test('only the new screens read the new type scale', () => {
+  const readers = [];
+  for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+    if (/var\(--(text-label|text-row|text-title|text-hero|label-tracking|sans)\)/.test(body)) readers.push(sel.trim());
+  }
+  assert.ok(readers.length >= 3, `fixture check: found ${readers.length} readers`);
+  for (const sel of readers) {
+    for (const part of sel.split(',')) assert.match(part.trim(), NEW_SCREEN, `${part.trim()} is not a new screen`);
+  }
 });
 
 // --- home-screen stage 2: press state (spec § 5) ----------------------------
@@ -519,4 +568,147 @@ test('press state is instant, and the stylesheet declares no motion yet', () => 
   assert.equal(declOf('[data-press].pressed', 'transition'), null);
   assert.doesNotMatch(css, /(^|[;{\s])(transition|animation)(-[a-z-]+)?\s*:/);
   assert.doesNotMatch(css, /@keyframes/);
+});
+
+// --- home-screen stage 3b: the guessed-series line on the sheet (spec § 2.4) --
+test('the sheet\'s "Repeats weekly (guessed)" line reads like its other details', () => {
+  assert.equal(declOf('.sheet-repeat', 'color'), 'var(--muted)');
+  assert.equal(declOf('.sheet-repeat', 'margin'), '0 0 6px');
+});
+
+// --- home-screen stage 3b: the Today page (spec § 2.3, § 5) -----------------
+test('Today rows are full-width hairline rows, at least 44px, in 16px type', () => {
+  assert.equal(declOf('.today-row', 'min-height'), '44px');
+  assert.equal(declOf('.today-row', 'border-bottom'), '1px solid var(--line)');
+  assert.equal(declOf('.today-open', 'font-size'), 'var(--text-row)');
+  assert.equal(declOf(':root', '--text-row'), '16px', 'fixture check');
+  assert.ok(px(declOf('.item-open', 'min-height')) >= 44, 'the open button is a 44px target too');
+});
+
+test('Today labels are 13px, uppercase, tracked and muted; the heading is 28px Georgia', () => {
+  for (const sel of ['.today-label', '.today-day', '.today-date']) {
+    assert.equal(declOf(sel, 'font-size'), 'var(--text-label)', sel);
+    assert.equal(declOf(sel, 'text-transform'), 'uppercase', sel);
+    assert.equal(declOf(sel, 'letter-spacing'), 'var(--label-tracking)', sel);
+    assert.equal(declOf(sel, 'color'), 'var(--muted)', sel);
+    assert.equal(declOf(sel, 'font-family'), 'var(--sans)', sel);
+  }
+  assert.equal(declOf('.today-title', 'font-size'), 'var(--text-hero)');
+  assert.equal(declOf('.today-title', 'font-family'), 'var(--serif)');
+  assert.equal(declOf('.today-text', 'font-family'), 'var(--serif)', 'titles in Georgia');
+  for (const sel of ['.today-time', '.today-age', '.today-rel']) {
+    assert.equal(declOf(sel, 'font-family'), 'var(--sans)', sel);
+    assert.equal(declOf(sel, 'font-variant-numeric'), 'tabular-nums', sel);
+  }
+});
+
+test('an overdue age is red past a deadline and orange past a start date', () => {
+  assert.equal(declOf('.today-age.deadline', 'color'), 'var(--danger)');
+  assert.equal(declOf('.today-age.start', 'color'), 'var(--overdue-start)');
+});
+
+test('the next event\'s "in N" is in the accent; a finished event is greyed; a ticked to-do is struck through', () => {
+  assert.equal(declOf('.today-rel', 'color'), 'var(--accent)');
+  assert.equal(declOf('.today-row.past .today-open', 'color'), 'var(--muted)');
+  assert.equal(declOf('.today-row.done .today-text', 'text-decoration'), 'line-through');
+});
+
+// Final fixes 2, C3: an event over 12 h away keeps an EMPTY "in N" span (so
+// the tick can fill it, final review A2), and as a flex item it still took
+// the row's 8px gap after the time. Empty, it is not laid out at all; the
+// tick fills the node it kept, and :empty stops matching.
+test('an empty "in N" takes no space', () => {
+  assert.equal(declOf('.today-rel:empty', 'display'), 'none');
+});
+
+// Final review A8: the <label class="today-tick"> around each Today checkbox
+// is its hit area, at least 44x44, so a near miss no longer opens the sheet.
+test('the Today checkbox\'s label is a 44x44 hit area around the box', () => {
+  assert.equal(declOf('.today-tick', 'min-width'), '44px');
+  assert.equal(declOf('.today-tick', 'min-height'), '44px');
+  assert.equal(declOf('.today-tick', 'display'), 'flex');
+  assert.equal(declOf('.today-tick', 'align-items'), 'center');
+  assert.equal(declOf('.today-tick', 'justify-content'), 'center');
+  assert.equal(declOf('.today-tick', 'flex'), '0 0 auto', 'never squeezed by the title');
+});
+
+// Final fixes 2, C8: To-do's checkbox gets the same 44x44 label as Today's.
+test('the To-do checkbox\'s label is a 44x44 hit area around the box', () => {
+  assert.equal(declOf('.todo-tick', 'min-width'), '44px');
+  assert.equal(declOf('.todo-tick', 'min-height'), '44px');
+  assert.equal(declOf('.todo-tick', 'display'), 'flex');
+  assert.equal(declOf('.todo-tick', 'align-items'), 'center');
+  assert.equal(declOf('.todo-tick', 'justify-content'), 'center');
+  assert.equal(declOf('.todo-tick', 'flex'), '0 0 auto', 'never squeezed by the title');
+});
+
+// Final review A6: the global `.done { opacity: 0.55 }` reached Today's
+// rows. A ticked Today row is struck through only (spec § 2.3).
+test('a ticked Today row is struck through, not dimmed', () => {
+  assert.equal(declOf('.done', 'opacity'), '0.55', 'fixture check: the global rule it overrides');
+  assert.equal(declOf('.today-row.done', 'opacity'), '1');
+  assert.equal(declOf('.today-row.done .today-text', 'text-decoration'), 'line-through');
+});
+
+// Final review A7: the meta spans squeezed the title. "Repeats weekly
+// (guessed)" takes its own line under the title; time and "in N" stay on the
+// title line. The open button pads itself so a two-line title clears the
+// hairlines.
+test('Today\'s guessed-series note wraps under the title; a two-line title clears the hairlines', () => {
+  assert.equal(declOf('.today-open', 'flex-wrap'), 'wrap');
+  assert.equal(declOf('.today-guess', 'flex-basis'), '100%');
+  for (const sel of ['.today-time', '.today-rel']) {
+    assert.equal(declOf(sel, 'flex'), '0 0 auto', `${sel} stays on the title line`);
+  }
+  assert.equal(declOf('.today-open', 'padding-top'), 'var(--space-2)');
+  assert.equal(declOf('.today-open', 'padding-bottom'), 'var(--space-2)');
+  const at = (sel) => css.search(new RegExp(`(^|\\n)${sel.replace('.', '\\.')}\\s*\\{`));
+  assert.ok(at('.item-open') >= 0 && at('.today-open') > at('.item-open'),
+    '.today-open after .item-open, whose padding: 0 it overrides');
+});
+
+// Final review A9: the gear was under Apple's 44px minimum. It is the only
+// .icon-btn in index.html and js/.
+test('the settings gear (.icon-btn) is at least 44x44', () => {
+  assert.equal(declOf('.icon-btn', 'min-width'), '44px');
+  assert.equal(declOf('.icon-btn', 'min-height'), '44px');
+});
+
+// Final review A12: the gear left the header, so the stamp is its last item
+// and the right margin that spaced it from the gear is gone.
+test('the Updated stamp keeps no right margin for a gear that left the header', () => {
+  assert.equal(declOf('.stamp', 'margin-left'), 'auto');
+  assert.equal(declOf('.stamp', 'margin-right'), null);
+});
+
+test('a pressed Today row is tinted, not dimmed like a pressed button', () => {
+  assert.equal(declOf('button[data-press].pressed', 'opacity'), '1');
+  assert.equal(declOf('[data-press].pressed', 'background'), 'var(--chip-bg)', 'fixture check: the tint');
+});
+
+// The punchlist's carry-over (2): [data-press].pressed is (0,2,0). An id
+// selector on a Today row would outrank it, and a pressed row would show
+// nothing.
+test('no rule styles Today through an id', () => {
+  const sels = [...css.matchAll(/([^{}]+)\{/g)].map((m) => m[1].trim()).filter((sel) => /today/.test(sel));
+  assert.ok(sels.length >= 10, `fixture check: found ${sels.length} Today rules`);
+  for (const sel of sels) assert.doesNotMatch(sel, /#/, sel);
+});
+
+test('every Today colour is a theme token, so dark mode follows', () => {
+  let seen = 0;
+  for (const { sel, body } of rulesOf(css)) {
+    if (!/\.today-/.test(sel)) continue;
+    for (const decl of body.split(';')) {
+      const i = decl.indexOf(':');
+      if (i < 0) continue;
+      const prop = decl.slice(0, i).trim();
+      const value = decl.slice(i + 1).trim();
+      if (!/^(color|background|border)/.test(prop)) continue;
+      seen += 1;
+      assert.match(value, /var\(--/, `${sel.trim()} { ${prop}: ${value} }`);
+      assert.doesNotMatch(value, /#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i, `${sel.trim()} { ${prop}: ${value} }`);
+    }
+  }
+  assert.ok(seen >= 8, `fixture check: ${seen} colour declarations`);
 });
