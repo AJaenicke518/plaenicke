@@ -415,8 +415,11 @@ function setDone(id, done) {
     items[idx] = before;
     throw e;
   }
-  render();
+  // The save succeeded, so the push is scheduled BEFORE the render (final
+  // fixes 2, C9): a render that throws must not leave a saved tick unsent. Its
+  // error still reaches the caller.
   scheduleSync();
+  render();
 }
 
 // editItem — the sheet's Save (edit-items Task 4c). Returns { ok, error }.

@@ -6175,3 +6175,42 @@ test('Today: a first tick that throws still leaves the 60 s interval running', a
   }
   resume();
 });
+
+// Final fixes 2, C9: setDone's render() ran after the save and before
+// scheduleSync, outside the save's try. A render that threw after a
+// successful save left the tick saved but never pushed. The sync is scheduled
+// once the save succeeds; the render's error still reaches the caller.
+test('a tick whose render throws after the save still schedules its sync, and the error is not swallowed', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  seed([record({ id: 'ff2-c9', type: 'task', title: 'ff2 render throws', date: '2099-01-01' })]);
+  const dateEl = globalThis.document.getElementById('today-date');
+  const unbreak = () => { delete dateEl.textContent; dateEl.textContent = ''; };
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts = {}) => {
+    requests.push({ url: String(url), method: (opts && opts.method) || 'GET' });
+    return { ok: true, status: 200, json: async () => ({ version: 0, blob: '' }), text: async () => '' };
+  };
+  enableMockTimers(t, { apis: ['setTimeout'] });
+  try {
+    const box = checkboxFor(todoList(), 'ff2 render throws');
+    box.checked = true;
+    Object.defineProperty(dateEl, 'textContent', { configurable: true, get: () => '', set: () => { throw new Error('ff2-c9 render failed'); } });
+    assert.throws(() => fire(box, 'change'), /ff2-c9 render failed/, 'the render error surfaces');
+    unbreak();
+    assert.equal(storedById('ff2-c9').done, true, 'fixture check: the save succeeded');
+    t.mock.timers.tick(2000);
+    for (let i = 0; i < 50; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+  } finally {
+    unbreak();
+    await resetMockTimers(t);
+    globalThis.fetch = originalFetch;
+  }
+  assert.ok(requests.some((r) => r.url.includes('/data') && r.method === 'PUT'),
+    'the saved tick must still be pushed');
+  clearMessage();
+  seed([]);
+});
