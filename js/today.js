@@ -3,7 +3,7 @@
 // instances, today's date and the minute of the day in; js/todayview.js draws
 // the result.
 
-import { isScheduled, isTodoType } from './items.js';
+import { isScheduled, isTodoType, sortItemsByDate } from './items.js';
 import { addDays, minutesOf } from './timegrid.js';
 import { formatDayLabel } from './freshness.js';
 import { toISO } from './dateparse.js';
@@ -98,3 +98,105 @@ export function isPastEvent(item, nowMinutes) {
   const end = item.endTime ? minutesOf(item.endTime) : minutesOf(item.time) + 1;
   return nowMinutes >= end;
 }
+
+// The "Next" line looks this far ahead for a one-off feed instance (spec § 2.3).
+export const LOOKAHEAD_DAYS = 30;
+
+// buildToday: every section of the Today screen (spec § 2.3), from
+//   items       own items — app.js passes liveItems(), so a delete waiting
+//               for its Undo is already gone
+//   instances   instancesForRange(..., today, today + NEXT_DAYS, deviceTz)
+//   todayISO    'YYYY-MM-DD', the device's today
+//   nowMinutes  minutes since local midnight, 0..1439
+//   lookahead   () => instancesForRange(..., today + 1, today + 30, ...);
+//               called only when the first three sections are all empty
+// and returns
+//   overdue    [{ item, age: '3d', tone: 'deadline' | 'start' }]  oldest first
+//   todo       [{ item }]   by time, untimed first; done ones last
+//   events     [{ item, past, relative }]   untimed first; `relative` ("in
+//              42 min", "now") on the next timed event only, `past` on every
+//              timed one that is over
+//   next       [{ date, label, rows: [{ item }] }]  one entry per day that
+//              has rows; days without rows are left out
+//   emptyLine  the one line shown when Overdue, To do today and Today's
+//              events are all empty; otherwise null
+// No section is capped (Alex, question 3). No item appears twice: an own
+// item is in sectionOf's one section; a feed instance is under Today's events
+// on today, or under Next 7 days once — on its first day there, and not at
+// all if it is also on today (a multi-day one-off emits one instance per
+// day). A repeating instance (`recurring`) is never under Next 7 days.
+export function buildToday(items, instances, todayISO, nowMinutes, lookahead) {
+  if (typeof todayISO !== 'string' || !ISO_DAY.test(todayISO)) throw new Error('buildToday requires todayISO');
+  if (!Number.isInteger(nowMinutes) || nowMinutes < 0 || nowMinutes > 1439) {
+    throw new Error('buildToday requires nowMinutes, 0..1439');
+  }
+  if (typeof lookahead !== 'function') throw new Error('buildToday requires lookahead');
+  for (const inst of instances) {
+    if (typeof inst.recurring !== 'boolean') throw new Error('buildToday: an instance has no recurring flag');
+  }
+
+  const own = { overdue: [], todo: [], events: [], next: [] };
+  for (const item of items) {
+    const section = sectionOf(item, todayISO);
+    if (section) own[section].push(item);
+  }
+
+  // Undone first, then the ones ticked today (amendment 2026-10-22).
+  const overdueSorted = sortItemsByDate(own.overdue);
+  const overdue = [
+    ...overdueSorted.filter((it) => it.done !== true), ...overdueSorted.filter((it) => it.done === true),
+  ].map((item) => ({
+    item,
+    age: `${daysBetween(item.date, todayISO)}d`,
+    tone: item.type === 'start' ? 'start' : 'deadline',
+  }));
+
+  const todoSorted = sortItemsByDate(own.todo);
+  const todo = [...todoSorted.filter((it) => it.done !== true), ...todoSorted.filter((it) => it.done === true)]
+    .map((item) => ({ item }));
+
+  const onToday = instances.filter((inst) => inst.date === todayISO);
+  const events = sortItemsByDate([...own.events, ...onToday])
+    .map((item) => ({ item, past: isPastEvent(item, nowMinutes), relative: null }));
+  const upcoming = events.find((row) => row.item.time && !row.past);
+  if (upcoming) upcoming.relative = relativeLabel(upcoming.item, nowMinutes);
+
+  const nextEnd = addDays(todayISO, NEXT_DAYS);
+  const seen = new Set(onToday.map(seriesKey));
+  const nextInstances = [];
+  for (const inst of sortItemsByDate(instances)) {
+    if (inst.recurring || inst.date <= todayISO || inst.date > nextEnd) continue;
+    const key = seriesKey(inst);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    nextInstances.push(inst);
+  }
+  const next = [];
+  for (const item of sortItemsByDate([...own.next, ...nextInstances])) {
+    let day = next[next.length - 1];
+    if (!day || day.date !== item.date) {
+      day = { date: item.date, label: dayWord(item.date, todayISO), rows: [] };
+      next.push(day);
+    }
+    day.rows.push({ item });
+  }
+
+  let emptyLine = null;
+  if (overdue.length === 0 && todo.length === 0 && events.length === 0) {
+    const lookEnd = addDays(todayISO, LOOKAHEAD_DAYS);
+    const candidates = [
+      ...items.filter((it) => isScheduled(it) && it.done !== true
+        && typeof it.date === 'string' && ISO_DAY.test(it.date) && it.date > todayISO),
+      ...lookahead().filter((inst) => inst.recurring === false && inst.date > todayISO && inst.date <= lookEnd),
+    ];
+    const first = sortItemsByDate(candidates)[0];
+    emptyLine = first
+      ? `Nothing due today. Next: ${first.title} · ${dayWord(first.date, todayISO)}.`
+      : 'Nothing coming up.';
+  }
+
+  return { overdue, todo, events, next, emptyLine };
+}
+
+// A feed series, for Next 7 days' "once" rule (spec § 2.3).
+function seriesKey(inst) { return `${inst.feedId}:${inst.uid}`; }
