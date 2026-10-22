@@ -583,6 +583,31 @@ test('the Today checkbox\'s label is a 44x44 hit area around the box', () => {
   assert.equal(declOf('.today-tick', 'flex'), '0 0 auto', 'never squeezed by the title');
 });
 
+// Final review A6: the global `.done { opacity: 0.55 }` reached Today's
+// rows. A ticked Today row is struck through only (spec § 2.3).
+test('a ticked Today row is struck through, not dimmed', () => {
+  assert.equal(declOf('.done', 'opacity'), '0.55', 'fixture check: the global rule it overrides');
+  assert.equal(declOf('.today-row.done', 'opacity'), '1');
+  assert.equal(declOf('.today-row.done .today-text', 'text-decoration'), 'line-through');
+});
+
+// Final review A7: the meta spans squeezed the title. "Repeats weekly
+// (guessed)" takes its own line under the title; time and "in N" stay on the
+// title line. The open button pads itself so a two-line title clears the
+// hairlines.
+test('Today\'s guessed-series note wraps under the title; a two-line title clears the hairlines', () => {
+  assert.equal(declOf('.today-open', 'flex-wrap'), 'wrap');
+  assert.equal(declOf('.today-guess', 'flex-basis'), '100%');
+  for (const sel of ['.today-time', '.today-rel']) {
+    assert.equal(declOf(sel, 'flex'), '0 0 auto', `${sel} stays on the title line`);
+  }
+  assert.equal(declOf('.today-open', 'padding-top'), 'var(--space-2)');
+  assert.equal(declOf('.today-open', 'padding-bottom'), 'var(--space-2)');
+  const at = (sel) => css.search(new RegExp(`(^|\\n)${sel.replace('.', '\\.')}\\s*\\{`));
+  assert.ok(at('.item-open') >= 0 && at('.today-open') > at('.item-open'),
+    '.today-open after .item-open, whose padding: 0 it overrides');
+});
+
 test('a pressed Today row is tinted, not dimmed like a pressed button', () => {
   assert.equal(declOf('button[data-press].pressed', 'opacity'), '1');
   assert.equal(declOf('[data-press].pressed', 'background'), 'var(--chip-bg)', 'fixture check: the tint');
