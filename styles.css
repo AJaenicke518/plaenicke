@@ -138,6 +138,8 @@ body {
 header { display: flex; justify-content: space-between; align-items: center; }
 header h1 { font-size: 1.7rem; font-style: italic; font-weight: 700; margin: 16px 0; }
 
+/* 44px: Apple's minimum touch target (final review A9). The settings gear is
+   the only .icon-btn. */
 .icon-btn {
   background: transparent;
   border: 1px solid var(--line);
@@ -145,6 +147,8 @@ header h1 { font-size: 1.7rem; font-style: italic; font-weight: 700; margin: 16p
   border-radius: var(--radius-control);
   font-size: 1.1rem;
   padding: 6px 10px;
+  min-width: 44px;
+  min-height: 44px;
 }
 
 /* ---------- add box ---------- */
@@ -712,8 +716,9 @@ button[data-press].pressed { opacity: 1; }
 
 /* ---------- Phase 0: freshness stamp ---------- */
 /* Quiet on purpose: it answers "is this current?" at a glance and should not
-   compete with the title. Sits between the title and the settings button. */
-.stamp { color: var(--muted); font-size: 0.75rem; margin-left: auto; margin-right: 10px; }
+   compete with the title. The header's last item, at its right edge: the
+   settings gear moved to the Today page, so no margin spaces it from one. */
+.stamp { color: var(--muted); font-size: 0.75rem; margin-left: auto; }
 
 /* ---------- toast (deleted / undo) ---------- */
 /* Above .settings-backdrop (z-index 10) so an Undo raised while a panel is

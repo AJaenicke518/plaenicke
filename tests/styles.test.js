@@ -608,6 +608,20 @@ test('Today\'s guessed-series note wraps under the title; a two-line title clear
     '.today-open after .item-open, whose padding: 0 it overrides');
 });
 
+// Final review A9: the gear was under Apple's 44px minimum. It is the only
+// .icon-btn in index.html and js/.
+test('the settings gear (.icon-btn) is at least 44x44', () => {
+  assert.equal(declOf('.icon-btn', 'min-width'), '44px');
+  assert.equal(declOf('.icon-btn', 'min-height'), '44px');
+});
+
+// Final review A12: the gear left the header, so the stamp is its last item
+// and the right margin that spaced it from the gear is gone.
+test('the Updated stamp keeps no right margin for a gear that left the header', () => {
+  assert.equal(declOf('.stamp', 'margin-left'), 'auto');
+  assert.equal(declOf('.stamp', 'margin-right'), null);
+});
+
 test('a pressed Today row is tinted, not dimmed like a pressed button', () => {
   assert.equal(declOf('button[data-press].pressed', 'opacity'), '1');
   assert.equal(declOf('[data-press].pressed', 'background'), 'var(--chip-bg)', 'fixture check: the tint');
