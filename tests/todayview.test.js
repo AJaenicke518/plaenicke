@@ -4,6 +4,13 @@ import { makeFakeDocument, allText, findAll, fire } from './fake-dom.js';
 import { buildToday } from '../js/today.js';
 import { renderTodayView } from '../js/todayview.js';
 
+// The overdue-ticked test turns a UTC updatedAt into a local day: pin Alex's
+// zone instead of trusting the machine's (in UTC-10 or UTC-11 its 08:00Z
+// stamp is the previous day; final review A11a). node --test runs each file
+// in its own process, and Node re-reads TZ when it is assigned, so this
+// reaches today.js's Date calls and no other test file.
+process.env.TZ = 'America/Los_Angeles';
+
 // todayview.js draws buildToday's result. Presentation only: the checkbox
 // reports up through onToggleDone and the title through onOpen; app.js
 // writes. The shared fake DOM is enough: nothing here looks anything up by id.

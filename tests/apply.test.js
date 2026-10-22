@@ -1,3 +1,14 @@
+// Alex's zone, pinned, not the machine's (final review A11b). Several tests
+// here build local times (new Date(2026, 9, 21, 9, 18)) and check what app.js
+// derives from them; in a shell with TZ=UTC, a mutant reading UTC instead of
+// local time (getUTCHours for minutesNow, toISOString().slice(0, 10) for
+// today's date) agreed with the local reading and passed. node --test runs
+// each file in its own process, and Node re-reads TZ when it is assigned, so
+// this reaches only this file. Static imports are hoisted above this line,
+// but none of them reads the clock while loading; app.js is imported by the
+// tests, after this has run.
+process.env.TZ = 'America/Los_Angeles';
+
 // The offline fetch is the FIRST import, so it is installed before anything
 // below — app.js included — is evaluated (tests/offline-fetch.js): every fetch
 // a test has not stubbed rejects the way an offline device does.
@@ -5768,6 +5779,7 @@ test('Today: the page names the day and lists live items in their sections', asy
   installFakeLocalStorage();
   await import('../js/app.js');
   const restore = visiblePageButton();
+  // Date only, so the MockTimers timer-id trap (CLAUDE.md) does not apply to these Today tests; use enableMockTimers if setTimeout is ever added.
   t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
   try {
     seed([

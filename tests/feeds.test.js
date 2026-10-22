@@ -1213,16 +1213,23 @@ test('instancesForRange: a weekly deadline (DTSTART == DTEND, the Canvas assignm
   const noEnd = [0, 1, 2, 3].map((i) => pe({
     uid: `essay-${i}`, title: 'Weekly essay', form: 'TZID', tzid: TZ_LA, value: `${weeksAfter('2026-08-27', i)}T170000`,
   }));
-  const out = guessIn([...quiz, ...noEnd], '2026-09-10', '2026-09-18');
+  // A zero DURATION is a point in time too (final review A11f).
+  const zero = [0, 1, 2, 3].map((i) => pe({
+    uid: `lab-due-${i}`, title: 'Lab due', form: 'TZID', tzid: TZ_LA, value: `${weeksAfter('2026-08-26', i)}T090000`,
+    duration: 'PT0S',
+  }));
+  const out = guessIn([...quiz, ...noEnd, ...zero], '2026-09-09', '2026-09-18');
   assert.deepEqual(out.map((i) => [i.title, i.date, i.recurring]), [
+    ['Lab due', '2026-09-09', false],
     ['Weekly essay', '2026-09-10', false],
     ['Reading quiz', '2026-09-11', false],
+    ['Lab due', '2026-09-16', false],
     ['Weekly essay', '2026-09-17', false],
     ['Reading quiz', '2026-09-18', false],
   ], 'every deadline stays a one-off, so Next 7 days shows it');
-  const shape = feedShape([...quiz, ...noEnd], TZ_LA);
+  const shape = feedShape([...quiz, ...noEnd, ...zero], TZ_LA);
   assert.equal(shape.guessedSeries, 0, 'and the Settings line says the same');
-  assert.equal(shape.single, 8);
+  assert.equal(shape.single, 12);
 });
 
 test('instancesForRange: a class written with DTEND after DTSTART is guessable, like one with a DURATION', () => {
