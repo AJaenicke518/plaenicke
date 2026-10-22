@@ -5984,7 +5984,19 @@ test('To-do page: a to-do ticked today stays, checked and done, after the undone
         id: 'tt-old', type: 'task', title: 'tt Ticked yesterday', date: '2026-10-20', done: true,
         updatedAt: new Date(2026, 9, 20, 12, 0).toISOString(),
       }),
+      // Done today but not a to-do type: typeChangePatch keeps `done`, so an
+      // event or idea can carry it. Neither belongs on the To-do page.
+      record({
+        id: 'tt-ev', type: 'event', title: 'tt Done event', date: '2026-10-21', done: true,
+        updatedAt: new Date(2026, 9, 21, 8, 0).toISOString(),
+      }),
+      record({
+        id: 'tt-idea', type: 'idea', title: 'tt Done idea', date: '2026-10-21', done: true,
+        updatedAt: new Date(2026, 9, 21, 8, 0).toISOString(),
+      }),
     ]);
+    assert.doesNotMatch(allText(todoList()), /tt Done event/, 'a done event ticked today is not a to-do');
+    assert.doesNotMatch(allText(todoList()), /tt Done idea/, 'a done idea ticked today is not a to-do');
     assert.equal(rowTexts().length, 2, 'fixture check: the two undone ones only');
     assert.match(rowTexts()[0], /tt Today task/, 'fixture check: date order');
 
@@ -6007,12 +6019,34 @@ test('To-do page: a to-do ticked today stays, checked and done, after the undone
     const unticked = checkboxFor(todoList(), 'tt Today task');
     assert.ok(unticked && unticked.checked === false);
     assert.equal(rowOf('tt Today task')._classes.has('done'), false);
+    assert.equal(rowTexts().length, 2, 'the unticked item is listed once, not in both groups');
     assert.match(rowTexts()[0], /tt Today task/, 'back in date order, first');
     assert.match(rowTexts()[1], /tt Later task/);
   } finally {
     t.mock.timers.reset();
     seed([]);
   }
+});
+
+// The done group reads liveItems(), as the undone group does: a ticked to-do
+// deleted from the To-do page is gone at once, while its Undo is pending.
+test('To-do page: a to-do ticked today and then deleted leaves the page before the Undo expires', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'tt-del', type: 'task', title: 'tt Tick then delete', date: localISO(new Date()) })]);
+  enableMockTimers(t, { apis: ['setTimeout'] });
+  try {
+    const box = checkboxFor(todoList(), 'tt Tick then delete');
+    box.checked = true;
+    fire(box, 'change');
+    assert.ok(checkboxFor(todoList(), 'tt Tick then delete'), 'fixture check: ticked, and still listed');
+    click(deleteControlFor(todoList(), 'tt Tick then delete'));
+    assert.ok(toastHost().querySelector('.toast-undo'), 'fixture check: the Undo is still pending');
+    assert.doesNotMatch(allText(todoList()), /tt Tick then delete/, 'a pending delete is already gone from the To-do page');
+  } finally {
+    await resetMockTimers(t);
+  }
+  seed([]);
 });
 
 test('Today: a delete waiting for its Undo is already gone from Today, and Undo brings it back', async (t) => {
@@ -6391,7 +6425,37 @@ test('Today: a tick from a box without focus moves no focus', async () => {
   seed([]);
 });
 
-test('To-do: a tick leaves focus alone (C4 is Today only)', async () => {
+// 2026-10-22: a ticked to-do now stays on the To-do page until tomorrow, so
+// a To-do tick keeps focus the way Today's does, through the same function
+// (was: 'To-do: a tick leaves focus alone (C4 is Today only)').
+test('To-do: a tick from a focused box puts focus on the re-rendered box in the same row', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const doc = globalThis.document;
+  seed([
+    record({ id: 'ff2-c4-todo', type: 'task', title: 'ff2 To-do focus', date: '2099-01-01' }),
+    record({ id: 'ff2-c4-other', type: 'task', title: 'ff2 To-do other', date: '2099-02-01' }),
+  ]);
+  try {
+    click(doc.getElementById('show-todo'));
+    const box = checkboxFor(todoList(), 'ff2 To-do focus');
+    box.focus();
+    doc.lastFocusOptions = undefined;
+    box.checked = true;
+    fire(box, 'change');
+    const again = checkboxFor(todoList(), 'ff2 To-do focus');
+    assert.notEqual(again, box, 'fixture check: the tick re-rendered the row');
+    assert.equal(doc.activeElement, again, 'focus is on the new box in the same row');
+    assert.deepEqual(doc.lastFocusOptions, { preventScroll: true });
+  } finally {
+    doc.activeElement = null;
+    if (restore) click(restore);
+  }
+  seed([]);
+});
+
+test('To-do: a tick from a box without focus moves no focus', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
   const restore = visiblePageButton();
@@ -6399,11 +6463,12 @@ test('To-do: a tick leaves focus alone (C4 is Today only)', async () => {
   seed([record({ id: 'ff2-c4-todo', type: 'task', title: 'ff2 To-do focus', date: '2099-01-01' })]);
   try {
     click(doc.getElementById('show-todo'));
+    const elsewhere = doc.getElementById('entry-text');
+    elsewhere.focus();
     const box = checkboxFor(todoList(), 'ff2 To-do focus');
-    box.focus();
     box.checked = true;
     fire(box, 'change');
-    assert.equal(doc.activeElement, box, 'nothing was focused');
+    assert.equal(doc.activeElement, elsewhere, 'focus stays where it was');
   } finally {
     doc.activeElement = null;
     if (restore) click(restore);

@@ -185,6 +185,16 @@ test('the To-do view says so when there is nothing to do', () => {
   assert.match(allText(el), /\S/, 'an empty page must say something rather than look broken');
 });
 
+// 2026-10-22: a to-do ticked today is a row like any other; a page holding
+// only that row is not empty.
+test('a To-do page whose only row is ticked today shows the row and no empty message', () => {
+  const el = host();
+  renderTodoView(el, [todo('a', { done: true })], { todayISO: TODAY, onOpen() {}, onDelete() {}, onToggleDone() {} });
+  assert.equal(rows(el).length, 1);
+  assert.equal(el.children.filter((li) => li._classes.has('empty')).length, 0, 'no empty-message row');
+  assert.match(allText(el), /t-a/);
+});
+
 test('a re-render replaces the previous rows rather than appending to them', () => {
   const el = host();
   renderTodoView(el, [todo('a')], { todayISO: TODAY, onOpen() {}, onDelete() {}, onToggleDone() {} });
