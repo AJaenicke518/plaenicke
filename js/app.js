@@ -906,10 +906,13 @@ let todayTick = null;
 
 // relativeLabel reads minutes of the day only, never the date, so after
 // midnight the kept event may be yesterday's: a tick on a new day renders the
-// whole app (refreshForToday catches the cursors up) instead.
+// whole app instead — render(), not renderToday(): refreshForToday, inside
+// render, catches the other pages' cursors up — and repaints the "Updated"
+// stamp, as every other full render does (final review A4).
 function tickToday() {
   if (toISO(new Date()) !== todayRenderedFor) {
     render();
+    stampUpdated();
     return;
   }
   if (!todayRelative) return;

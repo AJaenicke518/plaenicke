@@ -6068,9 +6068,18 @@ test('Today: a tick on a new day re-renders the page instead of counting down to
     const rel = allNodes(todayBody()).find((n) => n._classes.has('today-rel'));
     assert.equal(rel.textContent, 'in 5 min', 'fixture check');
     assert.equal(labelText('today-date'), 'Wednesday, October 21', 'fixture check');
+    assert.equal(labelText('day-label'), 'Wed, Oct 21', 'fixture check: the Day page is on the old today too');
+    const stamp = globalThis.document.getElementById('updated-stamp');
+    assert.equal(loadFeeds().filter((f) => !f.hidden).length, 0, 'fixture check: no visible calendar, so a render stamps');
+    stamp.textContent = 'stale stamp';
     const tick = todayInterval();
     t.mock.timers.tick((12 * 60 + 10) * 60 * 1000); // 2026-10-22 12:00
     tick.fn();
+    // Final review A4 and A11g: the new day repaints the "Updated" stamp, and
+    // the whole app is rendered — render(), not renderToday(): refreshForToday
+    // catches the other pages' cursors up, so the Day page moves on too.
+    assert.equal(stamp.textContent, 'Updated 12:00 PM', 'the stamp is repainted on the new day');
+    assert.equal(labelText('day-label'), 'Thu, Oct 22', 'another page caught up with the new day');
     assert.notEqual(rel.textContent, 'in 11 h 55 min', 'no countdown to yesterday\'s event');
     for (const n of allNodes(todayBody())) {
       if (n._classes.has('today-rel')) assert.notEqual(n.textContent, 'in 11 h 55 min');
