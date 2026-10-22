@@ -5766,13 +5766,83 @@ test('app.js installs the press listeners on the document, once each', async () 
 // Ids are prefixed `td-`. Each test puts the page it found back, and leaves
 // no items or calendars behind.
 
-test('Today: the gear is on the Today page, and nowhere else', () => {
+// Alex, 2026-10-22 (spec § 2.2 amendment): "i want the settings to continue
+// to be on the top right at all times because when i exit the today tab the
+// settings disappears." The gear is the shell header's last item, on every
+// page, and no longer on Today.
+test('the gear is the shell header\'s last item, and not on the Today page', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  assert.equal(html.match(/id="settings-btn"/g).length, 1, 'exactly one gear');
+  const header = html.match(/<header>[\s\S]*?<\/header>/);
+  assert.ok(header, 'fixture check: index.html has a shell <header>');
+  assert.match(header[0], /<button id="settings-btn"[^>]*>[^<]*<\/button>\s*<\/header>$/,
+    'the gear is the header\'s last child, so it sits at the right edge');
   const today = html.match(/<section id="today-view"[\s\S]*?<\/section>/);
   assert.ok(today, 'fixture check: index.html has a Today section');
-  assert.match(today[0], /<button id="settings-btn"/);
-  assert.equal(html.match(/id="settings-btn"/g).length, 1);
-  assert.doesNotMatch(html.match(/<header>[\s\S]*?<\/header>/)[0], /settings-btn/, 'the shell header no longer holds it');
+  assert.doesNotMatch(today[0], /settings-btn/, 'the Today page no longer holds the gear');
+});
+
+// The ids of the elements that contain #`id` in `html`, outermost first, or
+// null when there is no such id. The fake DOM mounts every id flat under
+// <body> (tests/fake-dom.js), so it cannot say what holds the gear; index.html
+// can. app.js shows and hides pages only through elements it finds by id, so
+// an ancestor with an id is the only kind a page switch can hide.
+const VOID_TAGS = new Set(['meta', 'link', 'input', 'br', 'img', 'hr', 'source', 'area', 'base', 'col', 'embed', 'track', 'wbr']);
+function ancestorIdsIn(html, id) {
+  const body = html.replace(/<!--[\s\S]*?-->/g, '').replace(/<(script|style)\b[\s\S]*?<\/\1>/g, '');
+  const stack = [];
+  for (const m of body.matchAll(/<(\/?)([a-zA-Z][a-zA-Z0-9-]*)([^>]*)>/g)) {
+    const [, closing, rawTag, attrs] = m;
+    const tag = rawTag.toLowerCase();
+    if (closing) {
+      const at = stack.map((e) => e.tag).lastIndexOf(tag);
+      if (at < 0) throw new Error(`index.html: </${tag}> closes nothing`);
+      stack.length = at;
+      continue;
+    }
+    const own = attrs.match(/\bid="([^"]+)"/);
+    if (own && own[1] === id) return stack.map((e) => e.id).filter(Boolean);
+    if (!VOID_TAGS.has(tag) && !attrs.trimEnd().endsWith('/')) stack.push({ tag, id: own ? own[1] : null });
+  }
+  return null;
+}
+
+// Every page the nav shows, with the section that shows it.
+const SHELL_PAGES = [
+  ['Today', 'show-today', 'today-view'], ['Day', 'show-day', 'day-view'],
+  ['Week', 'show-week', 'week-view'], ['Month', 'show-month', 'calendar-view'],
+  ['List', 'show-list', 'list-view'], ['To-do', 'show-todo', 'todo-view'],
+  ['Ideas', 'show-ideas', 'ideas-view'],
+];
+
+test('the gear: on every page nothing holding it is hidden, and it opens Settings', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const holders = ancestorIdsIn(html, 'settings-btn');
+  assert.ok(holders, 'fixture check: index.html has #settings-btn');
+  const doc = globalThis.document;
+  const settingsBtn = doc.getElementById('settings-btn');
+  const settingsHost = doc.getElementById('settings-host');
+  if (settingsHost.childElementCount) click(settingsBtn); // left open by an earlier test
+  const restore = visiblePageButton();
+  try {
+    for (const [name, buttonId, sectionId] of SHELL_PAGES) {
+      click(doc.getElementById(buttonId));
+      assert.equal(doc.getElementById(sectionId).hidden, false, `fixture check: ${name} is showing`);
+      assert.notEqual(settingsBtn.hidden, true, `${name}: the gear itself is not hidden`);
+      for (const holder of holders) {
+        assert.notEqual(doc.getElementById(holder).hidden, true, `${name}: #${holder}, which holds the gear, is hidden`);
+      }
+      click(settingsBtn);
+      assert.ok(settingsHost.childElementCount > 0, `${name}: the gear opens Settings`);
+      click(settingsBtn);
+      assert.equal(settingsHost.childElementCount, 0, `fixture check: ${name}: the gear closes Settings`);
+    }
+  } finally {
+    if (settingsHost.childElementCount) click(settingsBtn);
+    if (restore) click(restore);
+  }
 });
 
 test('Today: the page names the day and lists live items in their sections', async (t) => {
