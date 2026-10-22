@@ -136,6 +136,30 @@ test('the checkbox reports the control state, not a hard-coded true', () => {
   assert.deepEqual(calls, [['a', false]]);
 });
 
+// Final fixes 2, C8: the 20px box alone was the tap target. Each box sits in
+// its own <label class="todo-tick">, sized in styles.css to 44x44, as Today's
+// do (final review A8): a direct child of the row, beside the title — not
+// pressable, not inside any element that listens for a click.
+test('each To-do checkbox is wrapped in its own todo-tick label, a sibling of the title', () => {
+  const el = host();
+  renderTodoView(el, [todo('a'), todo('b')], { todayISO: TODAY, onOpen() {}, onDelete() {}, onToggleDone() {} });
+  const boxes = findAll(el, 'INPUT');
+  assert.equal(boxes.length, 2, 'fixture check');
+  for (const box of boxes) {
+    const label = box.parentNode;
+    assert.equal(label.tagName, 'LABEL');
+    assert.ok(label._classes.has('todo-tick'));
+    assert.deepEqual(label.children, [box], 'the label holds the box only');
+    for (let n = label; n; n = n.parentNode) {
+      assert.equal(n.getAttribute('data-press'), null, 'no pressable ancestor');
+      assert.equal((n._listeners.click || []).length, 0, 'no ancestor that listens for a click');
+    }
+    const row = label.parentNode;
+    assert.ok(row._classes.has('todo-row'), 'a direct child of the row');
+    assert.ok(row.children.some((c) => c._classes.has('todo-main')), 'beside the title');
+  }
+});
+
 test('Delete on a To-do row calls onDelete with that id', () => {
   const el = host();
   const deleted = [];

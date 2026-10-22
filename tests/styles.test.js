@@ -632,6 +632,16 @@ test('the Today checkbox\'s label is a 44x44 hit area around the box', () => {
   assert.equal(declOf('.today-tick', 'flex'), '0 0 auto', 'never squeezed by the title');
 });
 
+// Final fixes 2, C8: To-do's checkbox gets the same 44x44 label as Today's.
+test('the To-do checkbox\'s label is a 44x44 hit area around the box', () => {
+  assert.equal(declOf('.todo-tick', 'min-width'), '44px');
+  assert.equal(declOf('.todo-tick', 'min-height'), '44px');
+  assert.equal(declOf('.todo-tick', 'display'), 'flex');
+  assert.equal(declOf('.todo-tick', 'align-items'), 'center');
+  assert.equal(declOf('.todo-tick', 'justify-content'), 'center');
+  assert.equal(declOf('.todo-tick', 'flex'), '0 0 auto', 'never squeezed by the title');
+});
+
 // Final review A6: the global `.done { opacity: 0.55 }` reached Today's
 // rows. A ticked Today row is struck through only (spec § 2.3).
 test('a ticked Today row is struck through, not dimmed', () => {
