@@ -55,7 +55,9 @@ export function sectionOf(item, todayISO) {
 // today after being ticked, which shows it struck for the rest of the day
 // (the accepted cost). An unreadable updatedAt is no evidence: not today —
 // an invalid Date's toISO is 'NaN-NaN-NaN', which no todayISO equals.
-function tickedToday(item, todayISO) {
+// Exported for the To-do page (app.js todoItems), which keeps the same rule
+// (Alex, 2026-10-22); there is one copy of it.
+export function tickedToday(item, todayISO) {
   return typeof item.updatedAt === 'string' && toISO(new Date(item.updatedAt)) === todayISO;
 }
 

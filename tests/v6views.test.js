@@ -103,7 +103,7 @@ test('each To-do row carries a real unchecked checkbox', () => {
   renderTodoView(el, [todo('a')], { todayISO: TODAY, onOpen() {}, onDelete() {}, onToggleDone() {} });
   const boxes = findAll(el, 'INPUT').filter((i) => i.type === 'checkbox');
   assert.equal(boxes.length, 1);
-  assert.equal(boxes[0].checked, false, 'the page only lists items that are NOT done');
+  assert.equal(boxes[0].checked, false, 'an undone item renders unticked');
   assert.match(boxes[0].getAttribute('aria-label') || '', /t-a/,
     'a bare checkbox with no label is unusable with a screen reader');
 });
@@ -130,7 +130,7 @@ test('the checkbox reports the control state, not a hard-coded true', () => {
   const calls = [];
   renderTodoView(el, [todo('a', { done: true })], { todayISO: TODAY, onOpen() {}, onDelete() {}, onToggleDone: (id, d) => calls.push([id, d]) });
   const box = findAll(el, 'INPUT').filter((i) => i.type === 'checkbox')[0];
-  assert.equal(box.checked, true, 'a done item, were it ever shown, must render ticked');
+  assert.equal(box.checked, true, 'a done item (ticked today) renders ticked');
   box.checked = false;
   box.fire('change');
   assert.deepEqual(calls, [['a', false]]);
@@ -158,6 +158,16 @@ test('each To-do checkbox is wrapped in its own todo-tick label, a sibling of th
     assert.ok(row._classes.has('todo-row'), 'a direct child of the row');
     assert.ok(row.children.some((c) => c._classes.has('todo-main')), 'beside the title');
   }
+});
+
+// As Today's (final review A10): the label says what a tap will do.
+test('the To-do checkbox aria-label follows the box: done when unchecked, not done when checked', () => {
+  const el = host();
+  renderTodoView(el, [todo('a', { title: 'Open one' }), todo('b', { title: 'Ticked one', done: true })],
+    { todayISO: TODAY, onOpen() {}, onDelete() {}, onToggleDone() {} });
+  const boxes = findAll(el, 'INPUT').filter((i) => i.type === 'checkbox');
+  assert.equal(boxes[0].getAttribute('aria-label'), 'Mark "Open one" done');
+  assert.equal(boxes[1].getAttribute('aria-label'), 'Mark "Ticked one" not done');
 });
 
 test('Delete on a To-do row calls onDelete with that id', () => {

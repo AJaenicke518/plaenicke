@@ -4,7 +4,7 @@ import {
 } from './storage.js';
 import { followToday, formatDayLabel } from './freshness.js';
 import {
-  makeItem, sortItemsByDate, isScheduled, isTodo, isIdea, sortIdeasNewestFirst,
+  makeItem, sortItemsByDate, isScheduled, isTodo, isTodoType, isIdea, sortIdeasNewestFirst,
 } from './items.js';
 import { normalizeIdea } from './ideas.js';
 import { renderTodoView } from './todoview.js';
@@ -30,7 +30,7 @@ import { renderSyncStatus, syncWriteStarted, syncWriteSettled } from './linkui.j
 import { WORKER_URL } from './config.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
 import { installPress } from './press.js';
-import { buildToday, relativeLabel, NEXT_DAYS, LOOKAHEAD_DAYS } from './today.js';
+import { buildToday, relativeLabel, NEXT_DAYS, LOOKAHEAD_DAYS, tickedToday } from './today.js';
 import { renderTodayView } from './todayview.js';
 
 const els = {
@@ -146,7 +146,17 @@ function visibleItems(start, end) {
 // § 3.3). External feed instances carry no `type`, so they would fail both
 // predicates by ACCIDENT rather than by design — and a feed that ever grew a
 // type-shaped field would start populating the To-do page.
-function todoItems() { return sortItemsByDate(liveItems().filter(isTodo)); }
+//
+// Every undone to-do, soonest first; then, last, every to-do ticked TODAY,
+// soonest first, so a tick can be undone until tomorrow (Alex, 2026-10-22:
+// "i also want to see the crossed out version in the to do tab as well").
+// "Ticked today" is Today's own rule, imported, not restated. A to-do ticked
+// on an earlier day does not show.
+function todoItems(todayISO) {
+  const live = liveItems();
+  const tickedTodayTodo = (it) => isTodoType(it) && it.done === true && tickedToday(it, todayISO);
+  return [...sortItemsByDate(live.filter(isTodo)), ...sortItemsByDate(live.filter(tickedTodayTodo))];
+}
 
 function ideaItems() { return sortIdeasNewestFirst(liveItems().filter(isIdea)); }
 
@@ -879,8 +889,9 @@ function renderDay() {
 }
 
 function renderTodos() {
-  renderTodoView(els.todoList, todoItems(), {
-    todayISO: toISO(new Date()), onOpen: openItem, onDelete: requestDelete, onToggleDone: handleToggleDone,
+  const todayISO = toISO(new Date());
+  renderTodoView(els.todoList, todoItems(todayISO), {
+    todayISO, onOpen: openItem, onDelete: requestDelete, onToggleDone: handleToggleDone,
   });
 }
 

@@ -676,7 +676,7 @@ test('the To-do page lists open to-dos, and nothing else', async () => {
   for (const t of ['Renew the passport', 'Physics essay', 'Start the essay', 'First draft']) {
     assert.match(text, new RegExp(t), `${t} is actionable and belongs on the To-do page`);
   }
-  assert.doesNotMatch(text, /Already finished/, 'a completed to-do leaves the To-do page');
+  assert.doesNotMatch(text, /Already finished/, 'a to-do completed on an earlier day leaves the To-do page');
   assert.doesNotMatch(text, /Dentist appointment/, 'an appointment is not a to-do');
   assert.doesNotMatch(text, /Someones birthday/, 'a general item is not a to-do — birthdays are not chores');
   assert.doesNotMatch(text, /Rework the shelves/, 'an idea is not a to-do');
@@ -788,7 +788,10 @@ test('ticking a to-do writes done to storage and re-renders both pages', async (
   const stored = loadItems();
   assert.equal(stored.find((i) => i.id === 'task1').done, true, 'the tick must reach storage');
   assert.equal(stored.find((i) => i.id === 'task2').done, false, 'and must not touch its neighbour');
-  assert.doesNotMatch(allText(todoList()), /Renew the passport/, 'the completed item leaves the To-do page');
+  // Alex, 2026-10-22: a to-do ticked today stays on the To-do page, struck
+  // through, until tomorrow (was: it left the page at once).
+  const ticked = checkboxFor(todoList(), 'Renew the passport');
+  assert.ok(ticked && ticked.checked, 'the ticked item stays on the To-do page, checked, until tomorrow');
   assert.match(allText(itemList()), /Renew the passport/, 'and stays on the calendar');
 });
 
@@ -5953,11 +5956,63 @@ test('Today: a tick on Today is saved, and the row stays, struck through, until 
     const again = checkboxFor(todayBody(), 'td Water plants');
     assert.ok(again && again.checked, 'still on Today, ticked');
     assert.ok(todayRowOf(again)._classes.has('done'));
-    assert.doesNotMatch(allText(todoList()), /td Water plants/, 'while the To-do page drops it');
+    // Alex, 2026-10-22: the To-do page keeps it too, by the same rule (was:
+    // 'while the To-do page drops it').
+    const onTodo = checkboxFor(todoList(), 'td Water plants');
+    assert.ok(onTodo && onTodo.checked, 'and the To-do page keeps it, ticked');
   } finally {
     if (restore) click(restore);
   }
   seed([]);
+});
+
+// Alex, 2026-10-22: "i also want to see the crossed out version in the to do
+// tab as well". The To-do page uses Today's rule (js/today.js tickedToday): a
+// to-do ticked today stays, checked and struck through, after every undone
+// one, until tomorrow. One ticked on an earlier day does not show.
+test('To-do page: a to-do ticked today stays, checked and done, after the undone ones, and unticks back into date order', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
+  const rowTexts = () => todoList().children.map((li) => allText(li));
+  const rowOf = (title) => todoList().children.find((li) => allText(li).includes(title));
+  try {
+    seed([
+      record({ id: 'tt-later', type: 'task', title: 'tt Later task', date: '2026-10-25' }),
+      record({ id: 'tt-today', type: 'task', title: 'tt Today task', date: '2026-10-21' }),
+      record({
+        id: 'tt-old', type: 'task', title: 'tt Ticked yesterday', date: '2026-10-20', done: true,
+        updatedAt: new Date(2026, 9, 20, 12, 0).toISOString(),
+      }),
+    ]);
+    assert.equal(rowTexts().length, 2, 'fixture check: the two undone ones only');
+    assert.match(rowTexts()[0], /tt Today task/, 'fixture check: date order');
+
+    const box = checkboxFor(todoList(), 'tt Today task');
+    box.checked = true;
+    fire(box, 'change');
+    assert.equal(storedById('tt-today').done, true, 'the tick reached storage');
+    const ticked = checkboxFor(todoList(), 'tt Today task');
+    assert.ok(ticked, 'still on the To-do page after the tick');
+    assert.equal(ticked.checked, true);
+    assert.ok(rowOf('tt Today task')._classes.has('done'), 'struck through');
+    assert.equal(rowTexts().length, 2, 'the done-yesterday item is still absent');
+    assert.match(rowTexts()[0], /tt Later task/, 'the undone one is now first');
+    assert.match(rowTexts()[1], /tt Today task/, 'the ticked one after it');
+    assert.doesNotMatch(allText(todoList()), /tt Ticked yesterday/, 'a to-do ticked on an earlier day does not show');
+
+    ticked.checked = false;
+    fire(ticked, 'change');
+    assert.equal(storedById('tt-today').done, false, 'the untick reached storage');
+    const unticked = checkboxFor(todoList(), 'tt Today task');
+    assert.ok(unticked && unticked.checked === false);
+    assert.equal(rowOf('tt Today task')._classes.has('done'), false);
+    assert.match(rowTexts()[0], /tt Today task/, 'back in date order, first');
+    assert.match(rowTexts()[1], /tt Later task/);
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+  }
 });
 
 test('Today: a delete waiting for its Undo is already gone from Today, and Undo brings it back', async (t) => {

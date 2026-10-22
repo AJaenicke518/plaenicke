@@ -650,6 +650,15 @@ test('a ticked Today row is struck through, not dimmed', () => {
   assert.equal(declOf('.today-row.done .today-text', 'text-decoration'), 'line-through');
 });
 
+// Alex, 2026-10-22: a to-do ticked today stays on the To-do page until
+// tomorrow, drawn as Today draws it: struck through, not dimmed. The title is
+// the .item-open button ("<day> — <title>").
+test('a ticked To-do row is struck through, not dimmed', () => {
+  assert.equal(declOf('.done', 'opacity'), '0.55', 'fixture check: the global rule it overrides');
+  assert.equal(declOf('.todo-row.done', 'opacity'), '1');
+  assert.equal(declOf('.todo-row.done .item-open', 'text-decoration'), 'line-through');
+});
+
 // Final review A7: the meta spans squeezed the title. "Repeats weekly
 // (guessed)" takes its own line under the title; time and "in N" stay on the
 // title line. The open button pads itself so a two-line title clears the
