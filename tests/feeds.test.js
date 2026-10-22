@@ -1082,3 +1082,75 @@ test('describeFeedShape: one event is singular', () => {
   assert.equal(describeFeedShape(feedShape([pe({ uid: 'o', value: '20260824T170000Z' })], 'UTC')),
     '1 event: no RRULE — 0 in 0 guessed series, 1 single. Uses the heuristic.');
 });
+
+// --- recurring: which instances repeat (home-screen spec § 2.4, stage 3a) ----
+//
+// Today shows a repeating event only on its own day and keeps it out of Next 7
+// days. A series is (feedId, uid); it repeats if that feed's cache holds a
+// master with FREQ=DAILY or FREQ=WEEKLY. Every instance says so in a boolean
+// `recurring`, and `guessedSeries` says whether the heuristic decided it.
+
+const RFEED = { id: 'feedR', url: 'https://example.com/r.ics', name: 'Classes', color: '#00f', hidden: false };
+const SFEED = { id: 'feedS', url: 'https://example.com/s.ics', name: 'Other', color: '#0ff', hidden: false };
+const cacheFor = (byFeed) => Object.fromEntries(Object.entries(byFeed)
+  .map(([id, events]) => [id, { fetchedAt: '2026-08-01T00:00:00.000Z', events, skipped: [] }]));
+const flagsByUid = (instances) => {
+  const out = {};
+  for (const i of instances) (out[i.uid] ||= []).push([i.recurring, i.guessedSeries]);
+  return out;
+};
+
+test('instancesForRange: every instance carries recurring and guessedSeries, both booleans', () => {
+  const events = [pe({ uid: 'one', value: '20260825T170000Z' }), pe({ uid: 'w', value: '20260824T170000Z', rrule: 'FREQ=WEEKLY' })];
+  const out = instancesForRange([RFEED], cacheFor({ feedR: events }), '2026-08-24', '2026-08-30', 'UTC');
+  assert.equal(out.length, 2, 'fixture check');
+  for (const inst of out) {
+    assert.deepEqual(Object.keys(inst).sort(), [
+      'createdAt', 'date', 'endTime', 'external', 'feedColor', 'feedId', 'guessedSeries', 'id',
+      'recurring', 'time', 'title', 'uid',
+    ]);
+    assert.equal(typeof inst.recurring, 'boolean');
+    assert.equal(typeof inst.guessedSeries, 'boolean');
+  }
+});
+
+test('instancesForRange: only a DAILY or WEEKLY series is recurring; YEARLY, MONTHLY and one-offs are not', () => {
+  const events = [
+    pe({ uid: 'weekly', value: '20260824T170000Z', rrule: 'FREQ=WEEKLY' }),
+    pe({ uid: 'daily', value: '20260824T080000Z', rrule: 'freq=daily;COUNT=3' }),
+    pe({ uid: 'yearly', value: '20260826T120000Z', rrule: 'FREQ=YEARLY' }),
+    pe({ uid: 'monthly', value: '20260827T120000Z', rrule: 'FREQ=MONTHLY' }),
+    pe({ uid: 'once', value: '20260828T120000Z' }),
+  ];
+  const flags = flagsByUid(instancesForRange([RFEED], cacheFor({ feedR: events }), '2026-08-24', '2026-08-30', 'UTC'));
+  assert.deepEqual(flags, {
+    weekly: [[true, false]],
+    daily: [[true, false], [true, false], [true, false]],
+    yearly: [[false, false]],
+    monthly: [[false, false]],
+    once: [[false, false]],
+  }, 'a rule-detected series is never labelled guessed');
+});
+
+test('instancesForRange: an override belongs to its weekly series, wherever it moved; a master-less override is a one-off', () => {
+  const rid = (value) => ({ value, tzid: null });
+  const events = [
+    pe({ uid: 'class', value: '20260824T170000Z', rrule: 'FREQ=WEEKLY' }),
+    // Monday 31 Aug moved to Wednesday 2 Sep.
+    pe({ uid: 'class', value: '20260902T180000Z', recurrenceId: rid('20260831T170000Z') }),
+    pe({ uid: 'orphan', value: '20260901T170000Z', recurrenceId: rid('20260901T170000Z') }),
+  ];
+  const out = instancesForRange([RFEED], cacheFor({ feedR: events }), '2026-08-31', '2026-09-06', 'UTC');
+  assert.deepEqual(out.map((i) => [i.uid, i.date, i.recurring]), [
+    ['orphan', '2026-09-01', false],
+    ['class', '2026-09-02', true],
+  ]);
+});
+
+test('instancesForRange: a series is per feed — the same uid in another feed is not recurring', () => {
+  const out = instancesForRange([RFEED, SFEED], cacheFor({
+    feedR: [pe({ uid: 'x', value: '20260824T170000Z', rrule: 'FREQ=WEEKLY' })],
+    feedS: [pe({ uid: 'x', value: '20260825T170000Z' })],
+  }), '2026-08-24', '2026-08-30', 'UTC');
+  assert.deepEqual(out.map((i) => [i.feedId, i.recurring]), [['feedR', true], ['feedS', false]]);
+});

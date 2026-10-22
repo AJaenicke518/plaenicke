@@ -539,6 +539,27 @@ export function describeFeedShape(shape) {
 }
 
 // ---------------------------------------------------------------------------
+// seriesIndex — which of a feed's series repeat (spec § 2.4, stage 3a)
+// ---------------------------------------------------------------------------
+
+// seriesIndex: the repeating series of ONE feed's cached ParsedEvents.
+//   repeating  uids that repeat: their master has FREQ=DAILY or FREQ=WEEKLY.
+//              A RECURRENCE-ID override shares its master's uid, so it
+//              belongs to the series wherever it moved; a master-less
+//              override has no FREQ and is a one-off. MONTHLY and YEARLY
+//              series are one-offs (spec § 2.4, question 7).
+//   guessed    the subset of `repeating` the heuristic decided (empty for now)
+// A series is (feedId, uid): instancesForRange calls this per feed, so the
+// same uid in another feed is another series.
+export function seriesIndex(events) {
+  const repeating = new Set();
+  for (const ev of events) {
+    if (!ev.recurrenceId && REPEATING_FREQS.has(freqOf(ev.rrule))) repeating.add(ev.uid);
+  }
+  return { repeating, guessed: new Set() };
+}
+
+// ---------------------------------------------------------------------------
 // instancesForRange
 // ---------------------------------------------------------------------------
 
@@ -565,6 +586,9 @@ function compareInstances(a, b) {
 //   id        "<feedId>:<uid>:<date>:<time>" — stable, unique per instance
 //   createdAt "<date>T<time or 00:00>"       — keeps sortItemsByDate total
 //   feedId, feedColor, external: true
+//   recurring      true if the instance's series repeats (seriesIndex): Today
+//                  shows it only on its own day, never under Next 7 days
+//   guessedSeries  true if the heuristic, not an RRULE, decided that
 // `hidden` feeds are excluded entirely — their events never reach a view.
 // A feed with no cache entry yet (never synced) or an entry a malformed
 // expansion throws on is skipped rather than breaking the whole merge; one
@@ -582,8 +606,10 @@ export function instancesForRange(feeds, cache, start, end, targetTz) {
     if (!entry || !entry.events || entry.events.length === 0) continue;
 
     let expanded;
+    let series;
     try {
       expanded = expandEvents(entry.events, start, end, targetTz);
+      series = seriesIndex(entry.events);
     } catch (err) {
       // Skipping keeps one bad feed from blanking every other calendar, but a
       // silent skip is indistinguishable from an empty calendar. Log the error
@@ -608,6 +634,8 @@ export function instancesForRange(feeds, cache, start, end, targetTz) {
         feedId: feed.id,
         feedColor: feed.color,
         external: true,
+        recurring: series.repeating.has(inst.uid),
+        guessedSeries: series.guessed.has(inst.uid),
       });
     }
   }
