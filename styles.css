@@ -281,6 +281,65 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 .list-main { flex: 1; min-width: 0; }
 .time-line { color: var(--muted); font-size: 0.8rem; font-style: italic; }
 
+/* ---------- Today (home-screen spec § 2.3, § 5) ---------- */
+/* Rows, not cards: full width, a 1px hairline, at least 44px. Classes only,
+   never an id: an id selector would outrank [data-press].pressed (0,2,0) and
+   a pressed row would show nothing (tests/styles.test.js). Every colour is a
+   token, so dark mode follows. After .item-open, whose `font: inherit` the
+   row size below must override. */
+.today-head { display: flex; justify-content: space-between; align-items: flex-start; margin: 0 0 var(--space-4); }
+.today-title { font-family: var(--serif); font-size: var(--text-hero); line-height: 1.2; margin: 0; }
+.today-date, .today-label, .today-day {
+  font-family: var(--sans);
+  font-size: var(--text-label);
+  letter-spacing: var(--label-tracking);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.today-date { margin: var(--space-1) 0 0; }
+.today-label { margin: 0 0 var(--space-2); }
+.today-day { margin: var(--space-3) 0 var(--space-1); }
+.today-section { margin-bottom: var(--space-5); }
+.today-list { list-style: none; margin: 0; padding: 0; }
+.today-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 44px;
+  padding-left: var(--space-2);
+  border-bottom: 1px solid var(--line);
+  border-left: 3px solid var(--type, var(--type-general));
+}
+/* 20px box; the row's padding and gap make the left edge the target. */
+.today-check { width: 20px; height: 20px; flex: 0 0 auto; margin: 0; }
+.today-open {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-row);
+}
+.today-text { flex: 1; min-width: 0; font-family: var(--serif); }
+.today-time, .today-age, .today-rel, .today-guess {
+  flex: 0 0 auto;
+  font-family: var(--sans);
+  font-size: var(--text-label);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+/* Past a deadline: red. Past a start date: orange (spec § 2.3). */
+.today-age.deadline { color: var(--danger); }
+.today-age.start { color: var(--overdue-start); }
+/* The one accent on the page: the next event's "in N". */
+.today-rel { color: var(--accent); }
+.today-guess { font-style: italic; }
+.today-row.past .today-open { color: var(--muted); }
+.today-row.done .today-text { text-decoration: line-through; }
+.today-empty { color: var(--muted); font-size: var(--text-row); margin: 0 0 var(--space-5); }
+/* A pressed row is tinted (--chip-bg, above), not dimmed like a button. */
+button[data-press].pressed { opacity: 1; }
+
 /* ---------- calendar controls (shared by month/week/day) ---------- */
 .cal-controls {
   display: flex;

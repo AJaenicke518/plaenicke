@@ -489,10 +489,18 @@ for (const [sel, size] of Object.entries(CALENDAR_SIZES)) {
   });
 }
 
-test('no existing rule reads the new type scale yet', () => {
-  const body = css.replace(/:root\s*\{[^}]*\}/, '');
-  assert.doesNotMatch(body, /var\(--(text-label|text-row|text-title|text-hero|label-tracking|sans)\)/,
-    'stage 3 is the first consumer; Month, Week and Day never are');
+// Stage 3b is the first consumer. Every rule that reads the scale belongs to
+// a new screen (its selectors all name one); Month, Week and Day never do.
+const NEW_SCREEN = /\.today-/;
+test('only the new screens read the new type scale', () => {
+  const readers = [];
+  for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+    if (/var\(--(text-label|text-row|text-title|text-hero|label-tracking|sans)\)/.test(body)) readers.push(sel.trim());
+  }
+  assert.ok(readers.length >= 3, `fixture check: found ${readers.length} readers`);
+  for (const sel of readers) {
+    for (const part of sel.split(',')) assert.match(part.trim(), NEW_SCREEN, `${part.trim()} is not a new screen`);
+  }
 });
 
 // --- home-screen stage 2: press state (spec § 5) ----------------------------
@@ -525,4 +533,73 @@ test('press state is instant, and the stylesheet declares no motion yet', () => 
 test('the sheet\'s "Repeats weekly (guessed)" line reads like its other details', () => {
   assert.equal(declOf('.sheet-repeat', 'color'), 'var(--muted)');
   assert.equal(declOf('.sheet-repeat', 'margin'), '0 0 6px');
+});
+
+// --- home-screen stage 3b: the Today page (spec § 2.3, § 5) -----------------
+test('Today rows are full-width hairline rows, at least 44px, in 16px type', () => {
+  assert.equal(declOf('.today-row', 'min-height'), '44px');
+  assert.equal(declOf('.today-row', 'border-bottom'), '1px solid var(--line)');
+  assert.equal(declOf('.today-open', 'font-size'), 'var(--text-row)');
+  assert.equal(declOf(':root', '--text-row'), '16px', 'fixture check');
+  assert.ok(px(declOf('.item-open', 'min-height')) >= 44, 'the open button is a 44px target too');
+});
+
+test('Today labels are 13px, uppercase, tracked and muted; the heading is 28px Georgia', () => {
+  for (const sel of ['.today-label', '.today-day', '.today-date']) {
+    assert.equal(declOf(sel, 'font-size'), 'var(--text-label)', sel);
+    assert.equal(declOf(sel, 'text-transform'), 'uppercase', sel);
+    assert.equal(declOf(sel, 'letter-spacing'), 'var(--label-tracking)', sel);
+    assert.equal(declOf(sel, 'color'), 'var(--muted)', sel);
+    assert.equal(declOf(sel, 'font-family'), 'var(--sans)', sel);
+  }
+  assert.equal(declOf('.today-title', 'font-size'), 'var(--text-hero)');
+  assert.equal(declOf('.today-title', 'font-family'), 'var(--serif)');
+  assert.equal(declOf('.today-text', 'font-family'), 'var(--serif)', 'titles in Georgia');
+  for (const sel of ['.today-time', '.today-age', '.today-rel']) {
+    assert.equal(declOf(sel, 'font-family'), 'var(--sans)', sel);
+    assert.equal(declOf(sel, 'font-variant-numeric'), 'tabular-nums', sel);
+  }
+});
+
+test('an overdue age is red past a deadline and orange past a start date', () => {
+  assert.equal(declOf('.today-age.deadline', 'color'), 'var(--danger)');
+  assert.equal(declOf('.today-age.start', 'color'), 'var(--overdue-start)');
+});
+
+test('the next event\'s "in N" is in the accent; a finished event is greyed; a ticked to-do is struck through', () => {
+  assert.equal(declOf('.today-rel', 'color'), 'var(--accent)');
+  assert.equal(declOf('.today-row.past .today-open', 'color'), 'var(--muted)');
+  assert.equal(declOf('.today-row.done .today-text', 'text-decoration'), 'line-through');
+});
+
+test('a pressed Today row is tinted, not dimmed like a pressed button', () => {
+  assert.equal(declOf('button[data-press].pressed', 'opacity'), '1');
+  assert.equal(declOf('[data-press].pressed', 'background'), 'var(--chip-bg)', 'fixture check: the tint');
+});
+
+// The punchlist's carry-over (2): [data-press].pressed is (0,2,0). An id
+// selector on a Today row would outrank it, and a pressed row would show
+// nothing.
+test('no rule styles Today through an id', () => {
+  const sels = [...css.matchAll(/([^{}]+)\{/g)].map((m) => m[1].trim()).filter((sel) => /today/.test(sel));
+  assert.ok(sels.length >= 10, `fixture check: found ${sels.length} Today rules`);
+  for (const sel of sels) assert.doesNotMatch(sel, /#/, sel);
+});
+
+test('every Today colour is a theme token, so dark mode follows', () => {
+  let seen = 0;
+  for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+    if (!/\.today-/.test(sel)) continue;
+    for (const decl of body.split(';')) {
+      const i = decl.indexOf(':');
+      if (i < 0) continue;
+      const prop = decl.slice(0, i).trim();
+      const value = decl.slice(i + 1).trim();
+      if (!/^(color|background|border)/.test(prop)) continue;
+      seen += 1;
+      assert.match(value, /var\(--/, `${sel.trim()} { ${prop}: ${value} }`);
+      assert.doesNotMatch(value, /#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i, `${sel.trim()} { ${prop}: ${value} }`);
+    }
+  }
+  assert.ok(seen >= 8, `fixture check: ${seen} colour declarations`);
 });
