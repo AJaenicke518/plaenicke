@@ -5802,7 +5802,7 @@ test('the gear is the shell header\'s last item, and not on the Today page', () 
   assert.equal(html.match(/id="settings-btn"/g).length, 1, 'exactly one gear');
   const header = html.match(/<header>[\s\S]*?<\/header>/);
   assert.ok(header, 'fixture check: index.html has a shell <header>');
-  assert.match(header[0], /<button id="settings-btn"[^>]*>[^<]*<\/button>\s*<\/header>$/,
+  assert.match(header[0], /<button[^>]*\bid="settings-btn"[^>]*>[^<]*<\/button>\s*<\/header>$/,
     'the gear is the header\'s last child, so it sits at the right edge');
   const today = html.match(/<section id="today-view"[\s\S]*?<\/section>/);
   assert.ok(today, 'fixture check: index.html has a Today section');

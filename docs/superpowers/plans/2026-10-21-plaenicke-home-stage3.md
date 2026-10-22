@@ -3531,6 +3531,8 @@ Expected: `# tests 1431`, `# fail 0`, `# cancelled 0`.
 
 ### Task 13: ship 3c — REQUIRES ALEX'S EXPLICIT GO-AHEAD
 
+**Cache names updated 2026-10-22:** `main` shipped v6-10 for Alex's gear and To-do changes, so 3c bumps to **v6-11** with `CACHE_ON_MAIN` v6-10. `home-screen-3c` already contains that release (merge 7077448); still merge `main` in first in case it moved.
+
 Merging to `main` deploys. Without an explicit yes from Alex in this conversation for this merge, stop after Step 1.
 
 **Branch amendment (2026-10-22, DA I4):** 3c lives on `home-screen-3c`, cut from Task 9's commit, so it lacks Task 10's v6-9 bump and any 3b phone-check fixes. Before Step 2, after Task 10 has shipped: `git checkout home-screen-3c && git merge --no-ff main` (expect `service-worker.js` CACHE → v6-9 and `CACHE_ON_MAIN` → v6-8 from main; resolve any conflict to main's values), then run the commit gate. Do Steps 3–7 on `home-screen-3c`. In Step 1's message and Step 8, every `home-screen-design` reads `home-screen-3c`.
@@ -3540,8 +3542,8 @@ Merging to `main` deploys. Without an explicit yes from Alex in this conversatio
 - Modify: `tests/serviceworker.test.js:48` (`CACHE_ON_MAIN`)
 
 **Interfaces:**
-- Consumes: `CACHE` on `main` after Task 10 (`plaenicke-v6-9`).
-- Produces: `CACHE = 'plaenicke-v6-10'`; `CACHE_ON_MAIN = 'plaenicke-v6-9'`. No new module: `ASSETS` is unchanged. (`version()` in the test compares numbers, so 10 > 9; checked while planning.)
+- Consumes: `CACHE` on `main` after Task 10 (`plaenicke-v6-10`).
+- Produces: `CACHE = 'plaenicke-v6-11'`; `CACHE_ON_MAIN = 'plaenicke-v6-10'`. No new module: `ASSETS` is unchanged. (`version()` in the test compares numbers, so 10 > 9; checked while planning.)
 
 - [ ] **Step 1: Ask Alex, and wait**
 
@@ -3553,37 +3555,37 @@ Send: "Stage 3c (tab bar) is ready on `home-screen-3c`: `npm test` 1431 pass, 0 
 git fetch origin && git rev-parse main origin/main && git show main:service-worker.js | grep "const CACHE"
 ```
 
-Expected: identical SHAs, and `const CACHE = 'plaenicke-v6-9';`. Otherwise stop and report.
+Expected: identical SHAs, and `const CACHE = 'plaenicke-v6-10';`. Otherwise stop and report.
 
 - [ ] **Step 3: Re-pin the guard (the failing test)**
 
 In `tests/serviceworker.test.js`, change line 48 to:
 
 ```js
-const CACHE_ON_MAIN = 'plaenicke-v6-9';
+const CACHE_ON_MAIN = 'plaenicke-v6-10';
 ```
 
 - [ ] **Step 4: Run it and see it fail**
 
-Run: `node --test tests/serviceworker.test.js` → `not ok 3 - the cache name is ahead of the release on main` (`got 'plaenicke-v6-9'`).
+Run: `node --test tests/serviceworker.test.js` → `not ok 3 - the cache name is ahead of the release on main` (`got 'plaenicke-v6-10'`).
 
 - [ ] **Step 5: Bump CACHE**
 
 In `service-worker.js`, change line 13 to:
 
 ```js
-const CACHE = 'plaenicke-v6-10';
+const CACHE = 'plaenicke-v6-11';
 ```
 
 - [ ] **Step 6: Run it and see it pass; mutation-check**
 
 Run: `node --test tests/serviceworker.test.js` → `# pass 9`, `# fail 0`.
-Mutant: `CACHE` back to `'plaenicke-v6-9'` → `the cache name is ahead of the release on main` fails. Restore `'plaenicke-v6-10'`.
+Mutant: `CACHE` back to `'plaenicke-v6-10'` → `the cache name is ahead of the release on main` fails. Restore `'plaenicke-v6-11'`.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-npm test > "$TMPDIR/plaenicke-test.log" 2>&1; tail -8 "$TMPDIR/plaenicke-test.log"; grep -qx '# fail 0' "$TMPDIR/plaenicke-test.log" && grep -qx '# cancelled 0' "$TMPDIR/plaenicke-test.log" && git add service-worker.js tests/serviceworker.test.js && git commit -m "release: bump service-worker CACHE to plaenicke-v6-10" -m "Re-pins the test's CACHE_ON_MAIN to main's v6-9 so the guard can fail." -m "Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
+npm test > "$TMPDIR/plaenicke-test.log" 2>&1; tail -8 "$TMPDIR/plaenicke-test.log"; grep -qx '# fail 0' "$TMPDIR/plaenicke-test.log" && grep -qx '# cancelled 0' "$TMPDIR/plaenicke-test.log" && git add service-worker.js tests/serviceworker.test.js && git commit -m "release: bump service-worker CACHE to plaenicke-v6-11" -m "Re-pins the test's CACHE_ON_MAIN to main's v6-9 so the guard can fail." -m "Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ```
 
 - [ ] **Step 8: Merge, re-test on main, push**
@@ -3599,7 +3601,7 @@ Expected: `# tests 1431`, `# fail 0`, `# cancelled 0`, the push succeeds. If the
 With the Monitor tool:
 
 ```bash
-until curl -s https://ajaenicke518.github.io/plaenicke/service-worker.js | grep -q "plaenicke-v6-10"; do sleep 15; done; echo live
+until curl -s https://ajaenicke518.github.io/plaenicke/service-worker.js | grep -q "plaenicke-v6-11"; do sleep 15; done; echo live
 ```
 
 Then:

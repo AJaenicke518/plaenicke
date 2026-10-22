@@ -21,10 +21,10 @@ Code facts cite file:line on `main` @ 8b4e819 (f2ff20d plus the voice-spike comm
 ## 2. Home screen (Today tab)
 
 ### 2.1 Layout — Decided
-Layout A, stacked: **Overdue → To do today → Today's events → Next 7 days**. Settings is a gear on Today.
+Layout A, stacked: **Overdue → To do today → Today's events → Next 7 days**. ~~Settings is a gear on Today.~~ (Superseded 2026-10-22: the gear is top right on every page — § 2.2 amendment.)
 
 ### 2.2 Header — Claude's call — confirm
-"Today" with the date under it, and the gear (`#settings-btn`, `index.html:31`) on the right, on Today only. The `plaenicke` h1 is replaced by each tab's title. `#sync-indicator` and `#updated-stamp` stay in the shell, unchanged (including the load-bearing load-time paint).
+"Today" with the date under it, and the gear (`#settings-btn`, `index.html:31`) on the right, ~~on Today only~~ (superseded 2026-10-22, see the amendment below). The `plaenicke` h1 is replaced by each tab's title. `#sync-indicator` and `#updated-stamp` stay in the shell, unchanged (including the load-bearing load-time paint).
 
 **Amended 2026-10-22 (Alex, after using the live Today page on his phone: "the today page is correct. however note. i want the settings to continue to be on the top right at all times because when i exit the today tab the settings disappears."):** the gear is not on Today. It lives in the shell header, as its last item, top right on every page; the stamp sits just left of it. Today keeps its heading and date.
 
