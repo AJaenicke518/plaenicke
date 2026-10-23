@@ -540,7 +540,7 @@ for (const [sel, size] of Object.entries(CALENDAR_SIZES)) {
 // a new screen (its selectors all name one); Month, Week and Day never do.
 // The sheet's tag chips are the one other reader: Commit 1b asked for the
 // 13px label scale on them (the List's tags moved into the sheet).
-const NEW_SCREEN = /\.(today-|tab-|cal-switch|sheet-tag)/;
+const NEW_SCREEN = /\.(today-|tab-|cal-switch|sheet-tags?(?![\w-]))/;
 test('only the new screens read the new type scale', () => {
   const readers = [];
   for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {

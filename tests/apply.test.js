@@ -2755,7 +2755,9 @@ test('review4c: an Undo that would store an invalid record is refused, and nothi
 });
 
 // Sweep (dates) Critical, at the app level: an undated record — tolerated by
-// deserializeItems on purpose — must render, not crash the app.
+// deserializeItems on purpose — must not crash the app, and no page may show
+// its missing date as text. To-do still lists an undated task, under the
+// placeholder day label "No date".
 test('sweep: records with a null or empty date do not crash the app, and no page shows a missing date as text', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
