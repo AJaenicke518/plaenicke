@@ -389,6 +389,18 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 .today-row.done { opacity: 1; }
 .today-row.done .today-text { text-decoration: line-through; }
 .today-empty { color: var(--muted); font-size: var(--text-row); margin: 0 0 var(--space-5); }
+/* Coming up (A2, Alex 2026-10-22): a quiet full-width button under Next 7
+   days; open, "Show less" sits a gap below the last day. */
+.today-more {
+  width: 100%;
+  min-height: 44px;
+  background: var(--card);
+  color: var(--accent);
+  border: 1px solid var(--line);
+  font-family: var(--sans);
+  font-size: 15px;
+}
+.today-more-after { margin-top: var(--space-4); }
 /* A pressed row is tinted (--chip-bg, above), not dimmed like a button. */
 button[data-press].pressed { opacity: 1; }
 

@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  sectionOf, daysBetween, dayWord, relativeLabel, isPastEvent, buildToday, NEXT_DAYS,
+  sectionOf, daysBetween, dayWord, relativeLabel, isPastEvent, buildToday, upcomingRows, NEXT_DAYS, LOOKAHEAD_DAYS,
 } from '../js/today.js';
+import { readFileSync } from 'node:fs';
 import { parseICS } from '../js/ics.js';
 import { instancesForRange, feedShape } from '../js/feeds.js';
 import { addDays } from '../js/timegrid.js';
@@ -334,15 +335,21 @@ test('buildToday: with nothing overdue, due or on today, one line names the next
   assert.equal(own2.emptyLine, 'Nothing due today. Next: Stats quiz · Fri.');
 });
 
-test('buildToday: the 30-day look-ahead runs only when the first three sections are empty', () => {
+// Changed in stage 3 Commit 2 (Coming up, Alex 2026-10-22): the look-ahead
+// used to run only when the first three sections were empty, for the "Next"
+// line. It now also feeds `later` (today + 8 .. today + 30), which is built on
+// every render, so it runs once per buildToday, whatever today holds — and
+// still only once when the empty line needs it too.
+test('buildToday: the 30-day look-ahead runs exactly once per build, busy day or empty', () => {
   let calls = 0;
   const lookahead = () => { calls += 1; return []; };
   buildToday([own('t', { type: 'task' })], [], TODAY, at(8, 0), lookahead);
+  assert.equal(calls, 1, 'a to-do today: it runs, for later');
   buildToday([own('o', { type: 'due', date: '2026-10-01' })], [], TODAY, at(8, 0), lookahead);
   buildToday([], [inst('e', TODAY)], TODAY, at(8, 0), lookahead);
-  assert.equal(calls, 0);
+  assert.equal(calls, 3);
   buildToday([], [inst('later', '2026-10-24')], TODAY, at(8, 0), lookahead);
-  assert.equal(calls, 1, 'Next 7 days alone does not count as "something today"');
+  assert.equal(calls, 4, 'an empty day needs it twice (later and the "Next" line) and calls it once');
 });
 
 test('buildToday: the "Next" line skips done items, ideas and anything past 30 days', () => {
@@ -379,7 +386,10 @@ test('buildToday: a day with only classes shows them, draws nothing else, and sa
     inst('phys', TODAY, { time: '10:00', endTime: '11:15', recurring: true }),
     inst('math', '2026-10-23', { time: '09:00', endTime: '09:50', recurring: true }),
   ];
-  const t = buildToday([], instances, TODAY, at(8, 0), () => { throw new Error('not needed'); });
+  // The look-ahead used to throw here, to pin "not called when today has
+  // something"; it now always runs (for `later`; stage 3 Commit 2), so it
+  // returns nothing instead.
+  const t = buildToday([], instances, TODAY, at(8, 0), none);
   assert.deepEqual(t.overdue, []);
   assert.deepEqual(t.todo, []);
   assert.equal(t.events.length, 2);
@@ -585,4 +595,151 @@ test('A5: with only a weekly class starting tomorrow, the "Next" line names it',
   ])]);
   assert.deepEqual(t.next, [], 'a repeating series is never under Next 7 days');
   assert.equal(t.emptyLine, 'Nothing due today. Next: Gym · Tomorrow.');
+});
+
+// --- upcomingRows and Coming up (stage 3 Commit 2, Alex 2026-10-22) ---------
+//
+// upcomingRows holds the one rule for "the rows of a run of coming days":
+// Next 7 days, Today's Coming up (`later`) and the Week page's list all use it.
+
+const dayRows = (days) => days.map((d) => [d.date, d.label, ids(d.rows)]);
+
+test('upcomingRows: own items in range, not done, never ideas; the range is inclusive at both ends', () => {
+  const items = [
+    own('before', { type: 'event', date: '2026-11-01' }),
+    own('first', { type: 'event', date: '2026-11-02' }),
+    own('task', { type: 'task', date: '2026-11-05', time: '09:00' }),
+    own('done', { type: 'due', date: '2026-11-05', done: true }),
+    own('idea', { type: 'idea', date: '2026-11-05' }),
+    own('nodate', { type: 'event', date: '' }),
+    own('last', { type: 'due', date: '2026-11-10' }),
+    own('after', { type: 'event', date: '2026-11-11' }),
+  ];
+  assert.deepEqual(dayRows(upcomingRows(items, [], '2026-11-02', '2026-11-10', TODAY)), [
+    ['2026-11-02', 'Mon, Nov 2', ['first']],
+    ['2026-11-05', 'Thu, Nov 5', ['task']],
+    ['2026-11-10', 'Tue, Nov 10', ['last']],
+  ]);
+});
+
+test('upcomingRows: a repeating instance is never a row; a one-off is, labelled by dayWord, in date order', () => {
+  const instances = [
+    inst('lec', '2026-11-03', { time: '10:00', recurring: true }),
+    inst('lab', '2026-11-04', { time: '14:00', recurring: true, guessedSeries: true }),
+    inst('quiz', '2026-11-04', { time: '09:25' }),
+    inst('exam', '2026-11-03', { time: '10:50' }),
+  ];
+  const items = [own('reg', { type: 'task', date: '2026-11-04' })];
+  assert.deepEqual(dayRows(upcomingRows(items, instances, '2026-10-30', '2026-11-20', TODAY)), [
+    ['2026-11-03', 'Tue, Nov 3', ['feedR:exam:2026-11-03:10:50']],
+    ['2026-11-04', 'Wed, Nov 4', ['reg', 'feedR:quiz:2026-11-04:09:25']],
+  ]);
+  assert.deepEqual(dayRows(upcomingRows([], [inst('x', '2026-10-22'), inst('y', '2026-10-24')], '2026-10-22', '2026-10-28', TODAY)), [
+    ['2026-10-22', 'Tomorrow', ['feedR:x:2026-10-22:null']],
+    ['2026-10-24', 'Sat', ['feedR:y:2026-10-24:null']],
+  ], 'the same day words as Next 7 days');
+});
+
+test('upcomingRows: a multi-day one-off shows once, on its first day in range; one that began earlier is not shown again', () => {
+  const instances = [
+    // Began before the range (shown there already): every copy dropped.
+    inst('break', '2026-10-30'), inst('break', '2026-10-31'), inst('break', '2026-11-01'),
+    // Starts inside the range: once, on its first day.
+    inst('trip', '2026-11-03'), inst('trip', '2026-11-04'), inst('trip', '2026-11-05'),
+  ];
+  assert.deepEqual(dayRows(upcomingRows([], instances, '2026-10-31', '2026-11-10', TODAY)), [
+    ['2026-11-03', 'Tue, Nov 3', ['feedR:trip:2026-11-03:null']],
+  ]);
+  assert.deepEqual(dayRows(upcomingRows([], instances, '2026-10-30', '2026-11-10', TODAY)).map((d) => d[2]), [
+    ['feedR:break:2026-10-30:null'], ['feedR:trip:2026-11-03:null'],
+  ], 'with its first day in range, the break shows on it');
+});
+
+test('upcomingRows: once per spanKey, not per uid — two events sharing a uid each show', () => {
+  const instances = [
+    inst('dup', '2026-11-03', { spanKey: 'feedR:dup:a' }),
+    inst('dup', '2026-11-06', { spanKey: 'feedR:dup:b' }),
+    inst('span', '2026-11-04', { spanKey: 'feedR:span' }),
+    inst('span', '2026-11-05', { spanKey: 'feedR:span' }),
+  ];
+  assert.deepEqual(dayRows(upcomingRows([], instances, '2026-11-01', '2026-11-10', TODAY)).map((d) => d[2]), [
+    ['feedR:dup:2026-11-03:null'], ['feedR:span:2026-11-04:null'], ['feedR:dup:2026-11-06:null'],
+  ]);
+});
+
+test('upcomingRows: refuses input it cannot place, loudly', () => {
+  assert.throws(() => upcomingRows([], [], '2026-11-01', '2026-11-10'), /todayISO/);
+  assert.throws(() => upcomingRows([], [], 'soon', '2026-11-10', TODAY), /range/);
+  assert.throws(() => upcomingRows([], [], '2026-11-10', '2026-11-01', TODAY), /range/, 'an inverted range');
+  const unstamped = inst('x', '2026-11-03');
+  delete unstamped.recurring;
+  assert.throws(() => upcomingRows([], [unstamped], '2026-11-01', '2026-11-10', TODAY), /recurring/);
+});
+
+// One copy of the rule: Next 7 days IS upcomingRows over (today, today + 7],
+// with today's instances in the input (they seed the "already shown" set).
+test('buildToday: Next 7 days is upcomingRows over today + 1 .. today + 7, row for row', () => {
+  const items = [
+    own('a', { type: 'due', date: TODAY }), own('b', { type: 'event', date: '2026-10-22', time: '09:00' }),
+    own('c', { type: 'task', date: '2026-10-25', done: true }), own('d', { type: 'idea', date: '2026-10-23' }),
+    own('e', { type: 'start', date: '2026-10-28' }), own('f', { type: 'event', date: '2026-10-29' }),
+  ];
+  const instances = [
+    inst('trip', TODAY), inst('trip', '2026-10-22'), inst('conf', '2026-10-24'), inst('conf', '2026-10-25'),
+    inst('lec', '2026-10-23', { time: '10:00', recurring: true }), inst('one', '2026-10-27', { time: '08:00' }),
+  ];
+  const t = buildToday(items, instances, TODAY, at(8, 0), none);
+  assert.ok(t.next.length >= 3, 'fixture check');
+  assert.deepEqual(t.next, upcomingRows(items, instances, '2026-10-22', '2026-10-28', TODAY));
+});
+
+test('buildToday: later is upcomingRows over today + 8 .. today + 30, from the look-ahead', () => {
+  assert.equal(LOOKAHEAD_DAYS, 30);
+  const items = [
+    own('p7', { type: 'event', date: '2026-10-28' }), own('p8', { type: 'event', date: '2026-10-29' }),
+    own('p30', { type: 'due', date: '2026-11-20' }), own('p31', { type: 'event', date: '2026-11-21' }),
+    own('done', { type: 'task', date: '2026-11-02', done: true }), own('idea', { type: 'idea', date: '2026-11-02' }),
+  ];
+  const ahead = [
+    inst('i7', '2026-10-28'), inst('i8', '2026-10-29', { time: '09:25' }), inst('i30', '2026-11-20'),
+    inst('i31', '2026-11-21'), inst('cls', '2026-11-03', { time: '10:00', recurring: true }),
+  ];
+  const t = buildToday(items, [], TODAY, at(8, 0), () => ahead);
+  assert.deepEqual(dayRows(t.later), [
+    ['2026-10-29', 'Thu, Oct 29', ['p8', 'feedR:i8:2026-10-29:09:25']],
+    ['2026-11-20', 'Fri, Nov 20', ['p30', 'feedR:i30:2026-11-20:null']],
+  ], '+7 is Next 7 days\' (not later), +8 and +30 are in, +31 is out; done, ideas and classes never');
+  assert.deepEqual(dayRows(t.next), [['2026-10-28', 'Wed', ['p7']]], 'fixture check: +7 is under Next 7 days');
+  assert.deepEqual(t.later, upcomingRows(items, ahead, '2026-10-29', '2026-11-20', TODAY));
+});
+
+test('buildToday: later never repeats what Today or Next 7 days already shows', () => {
+  // A one-off from +6 to +9 is under Next 7 days on +6; one covering today to
+  // +9 is under Today's events. The look-ahead holds every copy from +1.
+  const span = (uid, from, n) => Array.from({ length: n }, (_, i) => inst(uid, addDays(from, i)));
+  const instances = [...span('week', TODAY, 8), ...span('trip', '2026-10-27', 2)];
+  const ahead = [...span('week', '2026-10-22', 9), ...span('trip', '2026-10-27', 4), inst('new', '2026-11-02')];
+  const t = buildToday([], instances, TODAY, at(8, 0), () => ahead);
+  assert.deepEqual(ids(t.events), ['feedR:week:2026-10-21:null'], 'fixture check');
+  assert.deepEqual(t.next.map((d) => ids(d.rows)), [['feedR:trip:2026-10-27:null']], 'fixture check');
+  assert.deepEqual(dayRows(t.later), [['2026-11-02', 'Mon, Nov 2', ['feedR:new:2026-11-02:null']]]);
+  const all = [...allRowIds(t), ...t.later.flatMap((d) => ids(d.rows))].map((id) => id.split(':')[1]);
+  assert.equal(new Set(all).size, all.length, `an event twice in ${all}`);
+});
+
+test('buildToday: later is empty when nothing is past the first week', () => {
+  const t = buildToday([own('soon', { type: 'event', date: '2026-10-23' })], [], TODAY, at(8, 0), none);
+  assert.deepEqual(t.later, []);
+});
+
+// There is ONE copy of the row rule. A behaviour test cannot tell a faithful
+// second copy from a call, so this reads the source: buildToday builds both
+// day lists through upcomingRows and keeps no "seen" set or repeating-
+// instance filter of its own.
+test('buildToday holds no copy of the Next 7 days rule: both day lists come from upcomingRows', () => {
+  const src = readFileSync(new URL('../js/today.js', import.meta.url), 'utf8');
+  const body = src.match(/export function buildToday\([\s\S]*?\n}\n/);
+  assert.ok(body, 'fixture check: buildToday found');
+  assert.equal((body[0].match(/upcomingRows\(/g) || []).length, 2, 'next and later, each from upcomingRows');
+  assert.doesNotMatch(body[0], /\.recurring|\bseen\b|spanKey|dayWord\(item/, 'no second copy of the rule');
 });

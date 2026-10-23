@@ -838,13 +838,20 @@ function renderIdeas() {
 
 // The Today page (home-screen spec § 2.3). Own items come from liveItems(),
 // so a delete waiting for its Undo is already gone; feed instances are
-// expanded for today .. today + 7, and the 30-day look-ahead for the "Next"
-// line only when buildToday asks for it. One clock reading for the whole page.
+// expanded for today .. today + 7, and the 30-day look-ahead (today + 1 ..
+// today + 30) for Coming up and the "Next" line, which buildToday calls once
+// per render. One clock reading for the whole page.
 //
 // todayRelative is the one "in N" label on the page and its event, kept for
 // the 60 s tick below; todayRenderedFor is the day that render was for.
+//
+// laterOpen is whether Coming up ("Show the next 30 days", A2, Alex
+// 2026-10-22) is open. Module state, never stored: closed on each app load,
+// kept across re-renders (the 60 s tick's new-day render, syncs, taps), and
+// closed again when a render is for a new day.
 let todayRelative = null;
 let todayRenderedFor = null;
+let laterOpen = false;
 const minutesNow = (d) => d.getHours() * 60 + d.getMinutes();
 
 function renderToday() {
@@ -858,8 +865,22 @@ function renderToday() {
     minutesNow(now),
     () => instancesForRange(feeds, feedCache, addDays(todayISO, 1), addDays(todayISO, LOOKAHEAD_DAYS), deviceTz),
   );
+  if (todayISO !== todayRenderedFor) laterOpen = false;
   todayRenderedFor = todayISO;
-  todayRelative = renderTodayView(els.todayBody, today, { onOpen: openItem, onToggleDone: toggleDoneKeepingFocus(els.todayBody, 'today-row') }).relative;
+  todayRelative = renderTodayView(els.todayBody, today, {
+    onOpen: openItem, onToggleDone: toggleDoneKeepingFocus(els.todayBody, 'today-row'),
+    laterOpen, onToggleLater: toggleLater,
+  }).relative;
+}
+
+// The tap opens or closes Coming up, then redraws Today only. The button is
+// rebuilt ("Show less" at the bottom, or the closed one), so focus moves to
+// the new one rather than being lost; preventScroll keeps the page still.
+function toggleLater() {
+  laterOpen = !laterOpen;
+  renderToday();
+  const more = els.todayBody.querySelector('.today-more');
+  if (more) more.focus({ preventScroll: true });
 }
 
 // THE 60 s TICK (spec § 2.3) updates that one text node and never rebuilds

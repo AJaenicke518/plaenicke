@@ -6390,6 +6390,72 @@ test('Today: a tick on a new day re-renders the page instead of counting down to
   resume();
 });
 
+// Stage 3 Commit 2 (Alex, 2026-10-22: "what if i want to see something in the
+// next month"; A2): Coming up opens in place. app.js holds open/closed in
+// module state, never stored: closed on load, kept across re-renders (a sync
+// landing, the 60 s tick), closed again on a new day.
+const moreButton = () => todayBody().querySelector('.today-more');
+test('Today: "Show the next 30 days" opens Coming up, which stays open across a re-render and closes on a new day', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 23, 50).getTime() });
+  const far = record({ id: 'cu-far', type: 'event', title: 'cu Registration opens', date: '2026-11-03', time: '09:00' });
+  // Something due today, so the empty line ("Next: …") does not name `far`.
+  const due = record({ id: 'cu-due', type: 'due', title: 'cu Form', date: '2026-10-21' });
+  try {
+    seed([far, due]);
+    click(globalThis.document.getElementById('tab-today'));
+    assert.equal(moreButton().textContent, 'Show the next 30 days', 'closed at first');
+    assert.equal(moreButton().getAttribute('aria-expanded'), 'false');
+    assert.ok(!allText(todayBody()).includes('cu Registration opens'));
+    click(moreButton());
+    assert.equal(moreButton().textContent, 'Show less');
+    assert.equal(moreButton().getAttribute('aria-expanded'), 'true');
+    assert.match(allText(todayBody()), /Coming up[\s\S]*Tue, Nov 3[\s\S]*cu Registration opens/);
+    assert.equal(globalThis.document.activeElement, moreButton(), 'focus stays on the control just used');
+    // A re-render (as a sync landing does) keeps it open.
+    seed([far, due, record({ id: 'cu-soon', type: 'event', title: 'cu Lunch', date: '2026-10-23' })]);
+    assert.match(allText(todayBody()), /cu Lunch/, 'fixture check: the page was rebuilt');
+    assert.equal(moreButton().textContent, 'Show less', 'still open after a re-render');
+    assert.match(allText(todayBody()), /cu Registration opens/);
+    click(moreButton());
+    assert.equal(moreButton().textContent, 'Show the next 30 days', '"Show less" closes it');
+    assert.ok(!allText(todayBody()).includes('cu Registration opens'));
+    click(moreButton());
+    assert.equal(moreButton().textContent, 'Show less', 'fixture check: open again before midnight');
+    const tick = todayInterval();
+    t.mock.timers.tick(20 * 60 * 1000); // 2026-10-22 00:10
+    tick.fn();
+    assert.equal(labelText('today-date'), 'Thursday, October 22', 'fixture check: the new day rendered');
+    assert.equal(moreButton().textContent, 'Show the next 30 days', 'a new day starts closed');
+    assert.equal(moreButton().getAttribute('aria-expanded'), 'false');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('Today: with nothing past the first week there is no "Show the next 30 days"', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 0).getTime() });
+  try {
+    seed([record({ id: 'cu-near', type: 'event', title: 'cu Near', date: '2026-10-28' })]);
+    click(globalThis.document.getElementById('tab-today'));
+    assert.match(allText(todayBody()), /Next 7 days[\s\S]*cu Near/, 'fixture check');
+    assert.equal(moreButton(), null);
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+  resume();
+});
+
 // =========================================================================
 // Home-screen stage 3c — the tab bar and Calendar's switcher (spec § 4)
 // =========================================================================

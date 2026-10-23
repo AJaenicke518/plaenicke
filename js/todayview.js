@@ -31,15 +31,26 @@ function timeText(item) {
   return item.endTime ? formatTimeRange(item.time, item.endTime) : formatTime(item.time);
 }
 
-// renderTodayView(container, today, { onOpen, onToggleDone }) -> { relative }
+// renderTodayView(container, today, { onOpen, onToggleDone, laterOpen,
+//   onToggleLater }) -> { relative }
 // `relative` is { node, item } for the one "in N" label (the next event), so
 // app.js's 60 s tick can update that text node and nothing else; or null when
 // no timed event is still to come. The label is drawn even while it is empty
 // (the event over 12 h away).
-export function renderTodayView(container, today, { onOpen, onToggleDone } = {}) {
+//
+// Coming up (A2, Alex 2026-10-22): when today.later has rows, a full-width
+// button under Next 7 days — "Show the next 30 days" while closed; open, the
+// days of `later` in Next 7 days' row style with "Show less" at the bottom.
+// `laterOpen` is app.js's state (default closed); a tap only reports through
+// onToggleLater, and app.js re-renders.
+export function renderTodayView(container, today, { onOpen, onToggleDone, laterOpen = false, onToggleLater } = {}) {
   // Required: a missing one would draw rows that do nothing on tap.
   if (typeof onOpen !== 'function') throw new Error('renderTodayView requires onOpen');
   if (typeof onToggleDone !== 'function') throw new Error('renderTodayView requires onToggleDone');
+  if (typeof laterOpen !== 'boolean') throw new Error('renderTodayView: laterOpen must be true or false');
+  if (today.later.length > 0 && typeof onToggleLater !== 'function') {
+    throw new Error('renderTodayView requires onToggleLater when there is something coming up');
+  }
   container.innerHTML = '';
   let relative = null;
 
@@ -106,17 +117,36 @@ export function renderTodayView(container, today, { onOpen, onToggleDone } = {})
     section(label).appendChild(list);
   }
 
-  if (today.next.length > 0) {
-    const s = section('Next 7 days');
-    for (const day of today.next) {
+  // Next 7 days and Coming up draw their days alike.
+  function days(s, list) {
+    for (const day of list) {
       s.appendChild(el('h4', 'today-day', day.label));
-      const list = el('ul', 'today-list');
+      const ul = el('ul', 'today-list');
       for (const r of day.rows) {
         const t = timeText(r.item);
-        list.appendChild(row(r.item, { meta: t ? [el('span', 'today-time', t)] : [] }));
+        ul.appendChild(row(r.item, { meta: t ? [el('span', 'today-time', t)] : [] }));
       }
-      s.appendChild(list);
+      s.appendChild(ul);
     }
+  }
+
+  if (today.next.length > 0) days(section('Next 7 days'), today.next);
+
+  if (today.later.length > 0) {
+    let s;
+    if (laterOpen) {
+      s = section('Coming up');
+      days(s, today.later);
+    } else {
+      s = el('section', 'today-section');
+      container.appendChild(s);
+    }
+    const more = el('button', laterOpen ? 'today-more today-more-after' : 'today-more',
+      laterOpen ? 'Show less' : 'Show the next 30 days');
+    more.type = 'button';
+    more.setAttribute('aria-expanded', String(laterOpen));
+    more.addEventListener('click', () => onToggleLater());
+    s.appendChild(more);
   }
 
   return { relative };

@@ -46,7 +46,15 @@ export function sectionOf(item, todayISO) {
     if (isTodoType(item)) return 'todo';
     return EVENT_TYPES.has(item.type) ? 'events' : null;
   }
-  return item.date <= addDays(todayISO, NEXT_DAYS) && !done ? 'next' : null;
+  return isUpcomingOwn(item, addDays(todayISO, 1), addDays(todayISO, NEXT_DAYS)) ? 'next' : null;
+}
+
+// isUpcomingOwn: an own item is a row of a run of days [fromISO, toISO] when
+// it is scheduled (no idea), has a readable date in the range, and is not
+// done. sectionOf's 'next' and upcomingRows both ask this; it is the one copy.
+function isUpcomingOwn(item, fromISO, toISO) {
+  return isScheduled(item) && typeof item.date === 'string' && ISO_DAY.test(item.date)
+    && item.done !== true && item.date >= fromISO && item.date <= toISO;
 }
 
 // tickedToday: no item records when it was ticked, and the spec allows no new
@@ -112,7 +120,8 @@ export const LOOKAHEAD_DAYS = 30;
 //   todayISO    'YYYY-MM-DD', the device's today
 //   nowMinutes  minutes since local midnight, 0..1439
 //   lookahead   () => instancesForRange(..., today + 1, today + 30, ...);
-//               called only when the first three sections are all empty
+//               called once per build: it feeds `later`, and the empty line
+//               when the first three sections are all empty
 // and returns
 //   overdue    [{ item, age: '3d', tone: 'deadline' | 'start' }]  oldest first
 //   todo       [{ item }]   by time, untimed first; done ones last
@@ -121,12 +130,15 @@ export const LOOKAHEAD_DAYS = 30;
 //              event only, null on every other row; `past` on every timed
 //              one that is over
 //   next       [{ date, label, rows: [{ item }] }]  one entry per day that
-//              has rows; days without rows are left out
+//              has rows; days without rows are left out: upcomingRows over
+//              (today, today + 7]
+//   later      the same shape over [today + 8, today + 30] ("Coming up",
+//              Alex 2026-10-22), from the look-ahead's instances
 //   emptyLine  the one line shown when Overdue, To do today and Today's
 //              events are all empty; otherwise null
 // No section is capped (Alex, question 3). No item appears twice: an own
 // item is in sectionOf's one section; a feed instance is under Today's events
-// on today, or under Next 7 days once — on its first day there, and not at
+// on today, or under Next 7 days or Coming up once — on its first day there, and not at
 // all if it is also on today (a multi-day one-off emits one instance per
 // day; those copies share a `spanKey`, which instancesForRange gives only to
 // a uid that is one plain event — other events that share a uid, such as
@@ -140,12 +152,16 @@ export function buildToday(items, instances, todayISO, nowMinutes, lookahead) {
     throw new Error('buildToday requires nowMinutes, 0..1439');
   }
   if (typeof lookahead !== 'function') throw new Error('buildToday requires lookahead');
-  for (const inst of instances) checkStamped(inst);
+  for (const inst of instances) checkStamped(inst, 'buildToday');
+  const ahead = lookahead();
+  for (const inst of ahead) checkStamped(inst, 'buildToday');
 
-  const own = { overdue: [], todo: [], events: [], next: [] };
+  // sectionOf's 'next' items are not collected here: upcomingRows picks them
+  // (by the same isUpcomingOwn), below.
+  const own = { overdue: [], todo: [], events: [] };
   for (const item of items) {
     const section = sectionOf(item, todayISO);
-    if (section) own[section].push(item);
+    if (section && section !== 'next') own[section].push(item);
   }
 
   // Undone first, then the ones ticked today (amendment 2026-10-22).
@@ -170,30 +186,17 @@ export function buildToday(items, instances, todayISO, nowMinutes, lookahead) {
   // its label is drawn and the 60 s tick can fill it in (final review A2).
   if (upcoming) upcoming.relative = relativeLabel(upcoming.item, nowMinutes) ?? '';
 
-  const nextEnd = addDays(todayISO, NEXT_DAYS);
-  const seen = new Set(onToday.map((inst) => inst.spanKey));
-  const nextInstances = [];
-  for (const inst of sortItemsByDate(instances)) {
-    if (inst.recurring || inst.date <= todayISO || inst.date > nextEnd) continue;
-    if (seen.has(inst.spanKey)) continue;
-    seen.add(inst.spanKey);
-    nextInstances.push(inst);
-  }
-  const next = [];
-  for (const item of sortItemsByDate([...own.next, ...nextInstances])) {
-    let day = next[next.length - 1];
-    if (!day || day.date !== item.date) {
-      day = { date: item.date, label: dayWord(item.date, todayISO), rows: [] };
-      next.push(day);
-    }
-    day.rows.push({ item });
-  }
+  // Next 7 days and Coming up: the one row rule (upcomingRows). Each list's
+  // instances include the days before its range, so a one-off already shown
+  // there is not shown again: `instances` holds today's, and the look-ahead
+  // holds today + 1 .. today + 7 — a one-off on today and past today + 7 is
+  // one plain multi-day event, with a copy on every day between.
+  const next = upcomingRows(items, instances, addDays(todayISO, 1), addDays(todayISO, NEXT_DAYS), todayISO);
+  const later = upcomingRows(items, ahead, addDays(todayISO, NEXT_DAYS + 1), addDays(todayISO, LOOKAHEAD_DAYS), todayISO);
 
   let emptyLine = null;
   if (overdue.length === 0 && todo.length === 0 && events.length === 0) {
     const lookEnd = addDays(todayISO, LOOKAHEAD_DAYS);
-    const ahead = lookahead();
-    for (const inst of ahead) checkStamped(inst);
     const candidates = [
       ...items.filter((it) => isScheduled(it) && it.done !== true
         && typeof it.date === 'string' && ISO_DAY.test(it.date) && it.date > todayISO),
@@ -208,11 +211,52 @@ export function buildToday(items, instances, todayISO, nowMinutes, lookahead) {
       : 'Nothing coming up.';
   }
 
-  return { overdue, todo, events, next, emptyLine };
+  return { overdue, todo, events, next, later, emptyLine };
+}
+
+// upcomingRows: the rows of the days [fromISO, toISO], grouped by day —
+// [{ date, label, rows: [{ item }] }], one entry per day that has rows, in
+// sortItemsByDate order, each day named by dayWord(date, todayISO). The ONE
+// copy of the rule Next 7 days, Coming up and the Week page's list share:
+//   own items   scheduled, not done, dated in the range (isUpcomingOwn)
+//   instances   never a repeating one (`recurring`); a one-off once per
+//               spanKey (a multi-day one emits one instance per day, sharing
+//               it), on its first day in the range — and not at all when an
+//               instance with its spanKey is dated BEFORE the range, which is
+//               where it was already shown (for Next 7 days: today's events)
+// `instances` may reach past the range on either side; only the range is
+// drawn. Each must carry `recurring` and `spanKey`: an unstamped one throws.
+export function upcomingRows(items, instances, fromISO, toISO, todayISO) {
+  if (typeof todayISO !== 'string' || !ISO_DAY.test(todayISO)) throw new Error('upcomingRows requires todayISO');
+  if (typeof fromISO !== 'string' || !ISO_DAY.test(fromISO) || typeof toISO !== 'string' || !ISO_DAY.test(toISO)
+    || fromISO > toISO) {
+    throw new Error('upcomingRows requires a range, fromISO <= toISO');
+  }
+  for (const inst of instances) checkStamped(inst, 'upcomingRows');
+
+  const seen = new Set(instances.filter((inst) => inst.date < fromISO).map((inst) => inst.spanKey));
+  const shown = [];
+  for (const inst of sortItemsByDate(instances)) {
+    if (inst.recurring || inst.date < fromISO || inst.date > toISO) continue;
+    if (seen.has(inst.spanKey)) continue;
+    seen.add(inst.spanKey);
+    shown.push(inst);
+  }
+  const days = [];
+  const own = items.filter((item) => isUpcomingOwn(item, fromISO, toISO));
+  for (const item of sortItemsByDate([...own, ...shown])) {
+    let day = days[days.length - 1];
+    if (!day || day.date !== item.date) {
+      day = { date: item.date, label: dayWord(item.date, todayISO), rows: [] };
+      days.push(day);
+    }
+    day.rows.push({ item });
+  }
+  return days;
 }
 
 // An instance instancesForRange did not stamp cannot be placed (zero fallback).
-function checkStamped(inst) {
-  if (typeof inst.recurring !== 'boolean') throw new Error('buildToday: an instance has no recurring flag');
-  if (typeof inst.spanKey !== 'string' || inst.spanKey === '') throw new Error('buildToday: an instance has no spanKey');
+function checkStamped(inst, who) {
+  if (typeof inst.recurring !== 'boolean') throw new Error(`${who}: an instance has no recurring flag`);
+  if (typeof inst.spanKey !== 'string' || inst.spanKey === '') throw new Error(`${who}: an instance has no spanKey`);
 }

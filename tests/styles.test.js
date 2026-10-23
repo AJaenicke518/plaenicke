@@ -733,6 +733,20 @@ test('every Today colour is a theme token, so dark mode follows', () => {
   assert.ok(seen >= 8, `fixture check: ${seen} colour declarations`);
 });
 
+// Stage 3 Commit 2 (Alex, 2026-10-22: "i like A2"): Coming up's button is the
+// mockup's quiet full-width one — card ground, accent text, a hairline — at
+// least 44px tall; open, "Show less" sits a gap below the last day.
+test('Coming up\'s button is full-width, quiet and at least 44px; "Show less" is spaced off the list', () => {
+  assert.equal(declOf('.today-more', 'width'), '100%');
+  assert.equal(declOf('.today-more', 'min-height'), '44px');
+  assert.equal(declOf('.today-more', 'background'), 'var(--card)');
+  assert.equal(declOf('.today-more', 'color'), 'var(--accent)');
+  assert.equal(declOf('.today-more', 'border'), '1px solid var(--line)');
+  assert.equal(declOf('.today-more', 'font-family'), 'var(--sans)');
+  assert.equal(declOf('.today-more', 'font-size'), '15px');
+  assert.equal(declOf('.today-more-after', 'margin-top'), 'var(--space-4)');
+});
+
 // --- home-screen stage 3c: the tab bar and the switcher (spec § 4) ----------
 test('the tab bar is fixed at the bottom, 56px plus the home-indicator inset', () => {
   assert.equal(declOf('.tab-bar', 'position'), 'fixed');
