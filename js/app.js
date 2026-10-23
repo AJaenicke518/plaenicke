@@ -665,7 +665,7 @@ function isGoogleHost(url) {
 // Save or a Delete has re-rendered every page by now, so the button that was
 // tapped is gone: the NEW one is found by item id, on the page that is
 // showing (every page renders every item's opener, hidden pages included).
-// Month and Week have no openers. An item that is no longer listed — deleted,
+// Month has no openers; Week's openers are in its list (the grid has none). An item that is no longer listed — deleted,
 // or moved off the Day being shown — has none to return to, and focus is left
 // where the browser puts it.
 function focusOpener(id) {
@@ -808,11 +808,14 @@ function renderWeek() {
   const end = addDays(viewWeekStart, 6);
   const todayISO = toISO(new Date());
   els.weekLabel.textContent = weekLabel(viewWeekStart, end);
+  // One expansion for the whole week: the grid merges it with the own items
+  // (as visibleItems does) and the list takes the slice it lists.
+  const weekInsts = instancesForRange(feeds, feedCache, viewWeekStart, end, deviceTz);
   renderWeekView(els.weekGrid, viewWeekStart,
-    groupItemsByDate(sortItemsByDate(visibleItems(viewWeekStart, end))), todayISO,
+    groupItemsByDate(sortItemsByDate([...liveItems().filter(isScheduled), ...weekInsts])), todayISO,
     { onSelectDay: openDay });
   const list = buildWeekList(liveItems(),
-    (from, to) => instancesForRange(feeds, feedCache, from, to, deviceTz), viewWeekStart, todayISO);
+    (from, to) => weekInsts.filter((i) => i.date >= from && i.date <= to), viewWeekStart, todayISO);
   renderWeekList(els.weekList, list, { onOpen: openItem, onSelectDay: openDay });
 }
 
@@ -889,7 +892,12 @@ function renderToday() {
 // The tap opens or closes Coming up, then redraws Today only. The button is
 // rebuilt ("Show less" at the bottom, or the closed one), so focus moves to
 // the new one rather than being lost; preventScroll keeps the page still.
+//
+// A tap after midnight and before the 60 s tick is on a stale page: render()
+// first (it resets the page, and laterOpen, for the new day), so the tap then
+// opens the new day's section instead of being swallowed by that reset.
 function toggleLater() {
+  if (toISO(new Date()) !== todayRenderedFor) render();
   laterOpen = !laterOpen;
   renderToday();
   const more = els.todayBody.querySelector('.today-more');

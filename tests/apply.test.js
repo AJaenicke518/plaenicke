@@ -2766,7 +2766,7 @@ test('sweep: records with a null or empty date do not crash the app, and no page
     record({ id: 'sw-null', title: 'Undated null', date: null, type: 'event' }),
     record({ id: 'sw-empty', title: 'Undated empty', date: '', type: 'task' }),
   ]));
-  assert.match(allText(todoList()), /Undated empty/);
+  assert.match(allText(todoList()), /No date — Undated empty/);
   // No page may show a missing date as text ("null — …"). The List, which
   // drew "No date — Undated null", is gone; check every page that is left.
   const doc = globalThis.document;
@@ -6442,6 +6442,36 @@ test('Today: "Show the next 30 days" opens Coming up, which stays open across a 
   resume();
 });
 
+// Follow-up (review of Commit 2): a tap after midnight and before the 60 s
+// tick must act on the new day's page, not the old one's. toggleLater renders
+// first when the day has changed (that render closes Coming up), then opens.
+test('Today: a "Show the next 30 days" tap after midnight, before the tick, opens the new day\'s Coming up', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 23, 50).getTime() });
+  const far = record({ id: 'cm-far', type: 'event', title: 'cm Registration opens', date: '2026-11-03', time: '09:00' });
+  const due = record({ id: 'cm-due', type: 'due', title: 'cm Form', date: '2026-10-21' });
+  try {
+    seed([far, due]);
+    click(globalThis.document.getElementById('tab-today'));
+    click(moreButton());
+    assert.equal(moreButton().textContent, 'Show less', 'fixture check: open on day 1');
+    t.mock.timers.tick(20 * 60 * 1000); // 2026-10-22 00:10, no tick fired
+    assert.equal(labelText('today-date'), 'Wednesday, October 21', 'fixture check: the page is still day 1\'s');
+    click(moreButton()); // the stale button
+    assert.equal(labelText('today-date'), 'Thursday, October 22', 'the tap rendered the new day');
+    assert.equal(moreButton().textContent, 'Show less', 'and the section is open on the new day\'s page');
+    assert.equal(moreButton().getAttribute('aria-expanded'), 'true');
+    assert.match(allText(todayBody()), /cm Registration opens/);
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+  resume();
+});
+
 test('Today: with nothing past the first week there is no "Show the next 30 days"', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
@@ -6498,6 +6528,12 @@ test('Week: the list under the grid has Friday\'s quiz but not the weekly class;
     click(doc.getElementById('show-week'));
     assert.equal(labelText('week-label'), weekLabelFor('2026-10-18'), 'fixture check: the week of Thu Oct 22');
     assert.match(allText(doc.getElementById('week-grid')), /Fri/, 'fixture check: the grid is still drawn');
+    // The grid merges the week's own items with its feed instances (the same
+    // expansion the list is cut from): blocks per day, Sun..Sat. Wed: the item
+    // and the trip; Thu: the weekly class and the trip; Fri: class, trip, quiz,
+    // problem set and the done task (the grid keeps done items).
+    assert.deepEqual([...doc.getElementById('week-grid').children].map((c) => c.children.length - 1),
+      [0, 0, 0, 2, 2, 5, 0], 'the grid draws feed instances beside own items');
 
     const text = allText(weekList());
     assert.match(text,
