@@ -538,7 +538,9 @@ for (const [sel, size] of Object.entries(CALENDAR_SIZES)) {
 
 // Stage 3b is the first consumer. Every rule that reads the scale belongs to
 // a new screen (its selectors all name one); Month, Week and Day never do.
-const NEW_SCREEN = /\.(today-|tab-|cal-switch)/;
+// The sheet's tag chips are the one other reader: Commit 1b asked for the
+// 13px label scale on them (the List's tags moved into the sheet).
+const NEW_SCREEN = /\.(today-|tab-|cal-switch|sheet-tag)/;
 test('only the new screens read the new type scale', () => {
   const readers = [];
   for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
@@ -813,4 +815,19 @@ test('a hidden switcher is not displayed', () => {
 test('the six-button view toggle is gone from the stylesheet', () => {
   assert.equal(ruleExists('.view-toggle'), false);
   assert.equal(ruleExists('.view-toggle button'), false);
+});
+
+// --- stage 3d follow-up: item tags in the details sheet ---------------------
+// The List drew them; the sheet does now (Alex, 2026-10-22). Quiet chips at
+// the 13px label size, token colours only.
+test('the sheet\'s tag chips are quiet 13px pills in token colours', () => {
+  assert.equal(declOf('.sheet-tags', 'display'), 'flex');
+  assert.equal(declOf('.sheet-tags', 'flex-wrap'), 'wrap');
+  assert.equal(declOf('.sheet-tags', 'gap'), '4px');
+  assert.equal(declOf('.sheet-tags', 'margin'), '0 0 6px');
+  assert.equal(declOf('.sheet-tag', 'font-size'), 'var(--text-label)');
+  assert.equal(declOf('.sheet-tag', 'background'), 'var(--chip-bg)');
+  assert.equal(declOf('.sheet-tag', 'color'), 'var(--chip-ink)');
+  assert.equal(declOf('.sheet-tag', 'border-radius'), '999px');
+  assert.equal(declOf('.sheet-tag', 'padding'), '1px 8px');
 });

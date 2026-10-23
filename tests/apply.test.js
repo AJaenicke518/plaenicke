@@ -1969,6 +1969,38 @@ test('delete: a pending delete is hidden from the Day, To-do and Ideas pages at 
   seed([]);
 });
 
+// The commit re-renders (deleteItem's own render(), sweep D5). Between the tap
+// and the commit the item is hidden by the pending set, so a commit that did
+// NOT re-render would change nothing the user can see, EXCEPT when something
+// else moved in the 5 s window. Here the clock crosses midnight inside it:
+// only the commit's render() brings the Today page onto the new day.
+test('delete: the commit re-renders, so a day that rolled over during the Undo window shows on every page', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const beforeMidnight = new Date(2026, 8, 23, 23, 59, 58).getTime();
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: beforeMidnight });
+  try {
+    seed([
+      record({ id: 'del-rr-gone', type: 'task', title: 'Del rr gone', date: '2026-09-23' }),
+      record({ id: 'del-rr-stay', type: 'event', title: 'Del rr stay', date: '2026-09-24', time: '09:00' }),
+    ]);
+    const before = allText(todayBody());
+    assert.match(before, /Tomorrow/, 'fixture check: on 23 Sep the 24th is Tomorrow');
+    click(deleteControlFor(todoList(), 'Del rr gone'));
+    assert.doesNotMatch(allText(todayBody()), /Del rr gone/, 'fixture check: the row is hidden while Undo is offered');
+    assert.match(allText(todayBody()), /Tomorrow/, 'fixture check: still the 23rd');
+    t.mock.timers.tick(5000);
+    assert.ok(tombstoned('del-rr-gone'), 'fixture check: the delete committed');
+    assert.equal(new Date().getDate(), 24, 'fixture check: the clock crossed midnight inside the window');
+    const after = allText(todayBody());
+    assert.doesNotMatch(after, /Tomorrow/, 'the commit must re-render: on the 24th that row is no longer Tomorrow');
+    assert.match(after, /Del rr stay/);
+  } finally {
+    await resetMockTimers(t);
+  }
+  seed([]);
+});
+
 test('delete: Undo before expiry brings the item back and writes no tombstone', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
@@ -2724,7 +2756,7 @@ test('review4c: an Undo that would store an invalid record is refused, and nothi
 
 // Sweep (dates) Critical, at the app level: an undated record — tolerated by
 // deserializeItems on purpose — must render, not crash the app.
-test('sweep: records with a null or empty date render instead of crashing the app', async () => {
+test('sweep: records with a null or empty date do not crash the app, and no page shows a missing date as text', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
   assert.doesNotThrow(() => seed([
