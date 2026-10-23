@@ -101,13 +101,13 @@ One pure function in a new `js/today.js` builds every section, called as `buildT
 
 ## 4. Tab bar and navigation
 
-**Decided:** tabs Today | Calendar | To-do | Ideas. Calendar has a Day / 3-day / Week / Month switcher. Tapping a day opens it. **List stays for now** (question 4), as an extra segment of that switcher; it is not retired in any stage and is revisited after Alex has used Today (stage 3d). **3-day is hidden until it is built** (question 5).
+**Decided:** tabs Today | Calendar | To-do | Ideas. Calendar has a Day / 3-day / Week / Month switcher. Tapping a day opens it. ~~**List stays for now** (question 4), as an extra segment of that switcher; it is not retired in any stage and is revisited after Alex has used Today (stage 3d).~~ (Superseded 2026-10-22: List is removed — § 8 stage 3d result.) **3-day is hidden until it is built** (question 5).
 
 **Claude's call — confirm:**
-- **List lives in Calendar's switcher:** Day / Week / Month / List until sub-project 2; 3-day then joins after Day. List keeps the 367-day feed expansion, the biggest render cost (code audit § 3) — see Later.
+- ~~**List lives in Calendar's switcher:** Day / Week / Month / List until sub-project 2; 3-day then joins after Day. List keeps the 367-day feed expansion, the biggest render cost (code audit § 3) — see Later.~~ (Superseded 2026-10-22: List is removed — § 8 stage 3d result.) The switcher is Day / Week / Month; 3-day joins after Day.
 - **Calendar** opens on its last-used sub-view (Day by default); arrows and `openDay` (`app.js:846`) work as now.
 - **The switcher fits 5 segments** at iPhone width, so adding 3-day later changes no layout; checked in stage 3c.
-- **`focusOpener` (`app.js:599-606`)** learns Today's list in 3b and keeps `els.listView`.
+- **`focusOpener` (`app.js:599-606`)** learns Today's list in 3b ~~and keeps `els.listView`~~ (Superseded 2026-10-22: List is removed — § 8 stage 3d result.)
 - **Geometry:** bar fixed at the bottom, 56 px + `env(safe-area-inset-bottom)`; body bottom padding `56px + 72px + inset`. The toast moves from `bottom: 16px + inset` (`styles.css:606`) to `56px + 12px + inset`, `right: 88px`, clearing the capture button (56 px, `right: 16px`, `bottom: 56px + 16px + inset`). The narrower toast must still fit its text and Undo.
 - **Layers:** content 0 < tab bar 5 < capture button 6 < capture box 8 < settings backdrop 10 < item sheet 15 < toast 20 (existing 10/15/20 unchanged, `styles.css:351,614,625`).
 
@@ -160,11 +160,11 @@ Each stage ships on its own. Merging to `main` is the deploy.
    - **3a** `recurring` (rule, plus the heuristic if a feed is Canvas-shaped) + `buildToday`: pure, tested, no UI. **Precondition:** stage 1's numbers.
    - **3b** a Today tab beside the existing view buttons; nothing removed.
    - **3c** tab bar + Calendar switcher (Day/Week/Month/List; 3-day hidden); toast and padding re-placed.
-   - **3d** revisit List after Alex has used Today. Nothing is removed unless he then decides to.
+   - **3d** revisit List after Alex has used Today. Nothing is removed unless he then decides to. **He decided to remove it** — see the stage 3d result below.
 4. **Capture button and box**, `listen()`, `viewport.js`. Needs the smart-add timeout released.
 5. Then sub-project 2 (3-day view), then sub-project 3 (visibility), each with its own spec.
 
-**Later / open items:** measure render cost on the phone (`render()`, `app.js:816-819`, rebuilds every view; never measured; List's 367-day expansion stays since List stays) before any "render only the visible view" work. Check whether `fetchWithTimeout` can take a caller's abort signal (§ 3 step 7). Gratification for completing things (gamification) is Alex's idea for the punchlist only; no design here.
+**Later / open items:** measure render cost on the phone (`render()`, `app.js:816-819`, rebuilds every view; never measured; ~~List's 367-day expansion stays since List stays~~; List and its 367-day expansion were removed in stage 3d) before any "render only the visible view" work. Check whether `fetchWithTimeout` can take a caller's abort signal (§ 3 step 7). Gratification for completing things (gamification) is Alex's idea for the punchlist only; no design here.
 
 ## 9. Alex's answers (2026-10-21) — Decided
 
@@ -173,7 +173,7 @@ No open questions remain. Each answer is applied in the section named.
 1. **Typing box stays at the top; voice button bottom-right.** "yeah lets try" — refine through use. (§ 3)
 2. **Ticked to-dos stay struck through on Today until tomorrow.** (§ 2.3) Gamification for completing things: punchlist idea only. (§ 8 Later)
 3. **No caps and no "+N more" anywhere** — Next 7 days, Overdue and To do today: "just show every one if i dont like it then we can change it to the +N version." (§ 2.3)
-4. **Keep the List view for now;** revisit after use, no stage removes it. (§ 4, § 8)
+4. **Keep the List view for now;** revisit after use, no stage removes it. (§ 4, § 8) — superseded 2026-10-22: Alex removed it after using Today (§ 8 stage 3d result).
 5. **Hide 3-day until it is built.** (§ 4)
 6. **Relative time "in N" only on the next event;** every other event shows its date and time. (§ 2.3)
 7. **Only `FREQ=DAILY`/`WEEKLY` series repeat;** yearly and monthly behave as one-offs. (§ 2.4)
@@ -185,3 +185,5 @@ No open questions remain. Each answer is applied in the section named.
 **Open risk for stage 3a (found while planning, 2026-10-21; speculative):** if a Canvas-shaped feed gives a weekly assignment the same title, weekday and time every week, the heuristic would group it as a series, and the repeating rule would then keep that DEADLINE out of Next 7 days — the opposite of "see everything I have to do". Resolve in the stage 3a plan, using the stage 1 readout of Alex's real feeds (e.g. never group events whose title marks a deadline, or treat a guessed series' instances as one-offs in Next 7 days when the feed also carries deadlines).
 
 **Stage 1 result (2026-10-21) — the precondition for stage 3a is met.** Alex's Settings line for LMU Classes: "34 events: 7 repeat (RRULE), 27 single. Uses the rule." Read-only check of the same Google calendar (211 instances returned for 2026-01-01..2027-06-30): every regular class is an RRULE series (PHYS 2100 incl. the Tuesday session, MATH 234, ENGR 2001, CLST 1300, MECH 2100 lecture and lab). The 27 one-offs are 8 MATH 234 Standards Exams, 8 PHYS 2100 quizzes, 6 PHYS 2100 reassessments, 2 "no class" days, 2 "class on Zoom" days and 1 club meeting — all things Next 7 days should show. So stage 3a ships the rule only for this feed; the heuristic is not exercised. Alex does not subscribe Brightspace (his LMS) in plaenicke, so the Canvas-deadline risk above has no live feed today; it stays recorded for when one is added.
+
+**Stage 3d result (2026-10-22):** Alex, after using Today: "you can get rid of the list view but what if i want to see something in the next month". List is **removed, not kept**: `#list-view`, the `#show-list` segment, `renderList` and its 367-day feed expansion, and List-only CSS are gone; Calendar's switcher is Day / Week / Month and the Calendar tab still reopens the last view used, starting on Day. His follow-up question ("what if i want to see something in the next month") is answered by Today's "Show the next 30 days" (A2) and the Week page's list (B2), planned as the next two commits on `home-screen-3c`. Tags (`project`, `subject`, `category`) were drawn only on List rows; no remaining page shows them.

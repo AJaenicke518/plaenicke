@@ -355,10 +355,12 @@ test('in a Day block the open button\'s content is top-left', () => {
   }
 });
 
-// U10
-test('the List row\'s main block takes the free width', () => {
-  assert.equal(declOf('.list-main', 'flex'), '1');
-  assert.equal(declOf('.list-main', 'min-width'), '0');
+// Stage 3d removed the List view; its own selectors go with it. The
+// Day page's "Other tasks" list keeps the row styling it shared.
+test('no List-only selectors are left', () => {
+  // .time-line and .tags/.tag were drawn only by the List's renderList.
+  assert.doesNotMatch(css, /#item-list|\.list-main|\.list-note|\.time-line|\.tags?\b/);
+  assert.ok(declOf('.day-other-list', 'list-style'), 'fixture check: the shared list styling stays for Day');
 });
 
 // U12: the own-item heading sits in the top bar, between Cancel and Save.

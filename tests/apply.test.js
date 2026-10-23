@@ -13,7 +13,7 @@ process.env.TZ = 'America/Los_Angeles';
 // below — app.js included — is evaluated (tests/offline-fetch.js): every fetch
 // a test has not stubbed rejects the way an offline device does.
 import './offline-fetch.js';
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
@@ -462,7 +462,8 @@ test('the storage listener ignores plaenicke.syncState and only reacts to the th
   // `items` variable — this simulates another tab's write landing while this
   // one is open.
   saveItems([item('cross-tab-item', '2026-08-01T00:00:00.000Z')]);
-  const list = globalThis.document.getElementById('item-list');
+  // The Day page of the items' date (item() dates every record 2026-08-02).
+  const list = dayOf('2026-08-02');
 
   reloadFromStorage('plaenicke.syncState');
   assert.ok(!allText(list).includes('t-cross-tab-item'), 'a syncState-only write must not trigger a reload/re-render');
@@ -578,7 +579,85 @@ const ideaText = () => globalThis.document.getElementById('idea-text');
 const ideaAdd = () => globalThis.document.getElementById('idea-add');
 const todoList = () => globalThis.document.getElementById('todo-list');
 const ideaList = () => globalThis.document.getElementById('idea-list');
-const itemList = () => globalThis.document.getElementById('item-list');
+const dayBody = () => globalThis.document.getElementById('day-body');
+const DAY_LABEL_OPTS = { weekday: 'short', month: 'short', day: 'numeric' };
+const labelFor = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).toLocaleDateString('en-US', DAY_LABEL_OPTS);
+const localISO = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+// THE LIST VIEW IS GONE (home-screen stage 3d, Alex 2026-10-22), and with it
+// the one page that showed every item whatever its date. Tests that open,
+// edit or delete an item now do it on the Day page of the item's date:
+// dayOf(date) opens Calendar -> Month, steps the month arrows to that date's
+// month, taps its cell (the real openDay path), and returns #day-body. Day
+// shows an .item-open and a Delete (.delete untimed, .day-del timed) on every
+// own item, as List did.
+//
+// When the Day page is already showing that date, dayOf returns #day-body
+// WITHOUT a click. A click re-renders every page, and a read that re-rendered
+// would hide a missing re-render in app.js (a mutant that forgets one would
+// pass); reading List never rendered, so neither does a repeat dayOf.
+//
+// FAR is real today + 45, read once at load from the REAL clock: past
+// Today's 30-day reach, so these items stay off Today as the 2099 dates did,
+// and a month or two of arrow presses away rather than seventy years.
+const FAR = addDays(localISO(new Date()), 45);
+const far = (n) => addDays(FAR, n);
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'];
+// dayOf moves the Day, Week and Month cursors and changes the page showing,
+// and app.js is imported once for the whole file. Tests written before it
+// assume the cursors sit on today, so after any test that used dayOf the
+// cursors go back to today and the page that was showing is shown again.
+const PAGE_CONTROLS = [
+  ['today-view', 'tab-today'], ['day-view', 'show-day'], ['week-view', 'show-week'],
+  ['calendar-view', 'show-month'], ['todo-view', 'tab-todo'], ['ideas-view', 'tab-ideas'],
+];
+let restoreAfterDayOf = null;
+afterEach(() => {
+  if (restoreAfterDayOf === null) return;
+  const control = restoreAfterDayOf;
+  restoreAfterDayOf = null;
+  dayOf(localISO(new Date()));
+  restoreAfterDayOf = null;
+  click(globalThis.document.getElementById(control));
+});
+// The row on a Day page that holds the opener for `title`: an untimed <li>
+// under "Other tasks", or a timed block in the grid. Each carries the item's
+// type classes, as a List row did.
+function dayRowFor(root, title) {
+  const open = openControlFor(root, title);
+  assert.ok(open, `fixture check: the Day page has an opener for ${title}`);
+  return open.parentNode;
+}
+function dayOf(dateISO) {
+  const doc = globalThis.document;
+  const [y, m, d] = dateISO.split('-').map(Number);
+  const want = labelFor(new Date(y, m - 1, d));
+  const dayLabel = doc.getElementById('day-label');
+  if (!doc.getElementById('day-view').hidden && dayLabel.textContent === want) return dayBody();
+  if (restoreAfterDayOf === null) {
+    const shown = PAGE_CONTROLS.find(([section]) => !doc.getElementById(section).hidden);
+    restoreAfterDayOf = shown ? shown[1] : 'tab-today';
+  }
+  click(doc.getElementById('show-month'));
+  const target = y * 12 + (m - 1);
+  const shownMonth = () => {
+    const [name, year] = doc.getElementById('calendar-label').textContent.split(' ');
+    assert.ok(MONTH_NAMES.includes(name), `fixture check: a month label, got ${name} ${year}`);
+    return Number(year) * 12 + MONTH_NAMES.indexOf(name);
+  };
+  for (let steps = 0; shownMonth() !== target; steps += 1) {
+    assert.ok(steps < 1200, `fixture check: the month arrows never reached ${dateISO}`);
+    click(doc.getElementById(shownMonth() < target ? 'next-month' : 'prev-month'));
+  }
+  const cell = doc.getElementById('calendar-grid').children.find((c) => c._classes.has('cal-cell')
+    && !c._classes.has('blank') && c.children[0] && String(c.children[0].textContent) === String(d));
+  assert.ok(cell, `fixture check: Month has a cell for ${dateISO}`);
+  click(cell);
+  assert.equal(doc.getElementById('day-view').hidden, false, `fixture check: tapping ${dateISO} opens Day`);
+  assert.equal(dayLabel.textContent, want, `fixture check: the Day page shows ${dateISO}`);
+  return dayBody();
+}
 
 // As a browser does, a click on a submit button (the sheet's Save) also
 // submits its form, and a submission nothing cancelled would navigate away.
@@ -632,21 +711,21 @@ function seed(records) {
 // the button hides every other section and never un-hides its own: a blank
 // page. Missing from `buttons`, the nav never shows which page you are on.
 // Both are invisible to any test that only inspects list contents.
-// Home-screen stage 3c: four tabs, and Calendar's four segments. Each control
-// reveals exactly its own page; the active tab is the page's tab (Calendar
-// for its four), and the active segment is the page itself.
+// Home-screen stage 3c: four tabs, and Calendar's segments (three since stage
+// 3d removed List). Each control reveals exactly its own page; the active tab
+// is the page's tab (Calendar for its three), and the active segment is the
+// page itself.
 const NAV = [
   // [control, section, tab that is active]
   ['tab-today', 'today-view', 'tab-today'],
   ['show-day', 'day-view', 'tab-calendar'],
   ['show-week', 'week-view', 'tab-calendar'],
   ['show-month', 'calendar-view', 'tab-calendar'],
-  ['show-list', 'list-view', 'tab-calendar'],
   ['tab-todo', 'todo-view', 'tab-todo'],
   ['tab-ideas', 'ideas-view', 'tab-ideas'],
 ];
 const TABS = ['tab-today', 'tab-calendar', 'tab-todo', 'tab-ideas'];
-const SEGMENTS = ['show-day', 'show-week', 'show-month', 'show-list'];
+const SEGMENTS = ['show-day', 'show-week', 'show-month'];
 
 test('each tab and each Calendar segment reveals exactly its own page, and marks itself active', async () => {
   installFakeLocalStorage();
@@ -701,7 +780,7 @@ test('manual add creates an event: on the calendar, not on the To-do page', asyn
   const timers = installManualTimers(); // the add arms a 2 s sync timer; never fired here
   try {
     doc.getElementById('entry-text').value = 'Manual dinner';
-    doc.getElementById('entry-date').value = '2099-03-04';
+    doc.getElementById('entry-date').value = far(0);
     doc.getElementById('entry-time').value = '';
     doc.getElementById('entry-end').value = '';
     click(doc.getElementById('add-btn'));
@@ -712,8 +791,8 @@ test('manual add creates an event: on the calendar, not on the To-do page', asyn
   assert.equal(stored.length, 1, 'fixture check: the manual add stored one record');
   assert.equal(stored[0].type, 'event');
   assert.equal(stored[0].title, 'Manual dinner');
-  const row = itemList().children.find((li) => allText(li).includes('Manual dinner'));
-  assert.ok(row, 'a manual add shows on the calendar list');
+  const row = dayRowFor(dayOf(far(0)), 'Manual dinner');
+  assert.ok(row, 'a manual add shows on the calendar (its Day page)');
   assert.ok(row._classes.has('type-event'), 'in event colours');
   assert.doesNotMatch(allText(todoList()), /Manual dinner/, 'an event is not a to-do');
   seed([]);
@@ -738,28 +817,27 @@ test('the To-do page is ordered soonest first, whatever order storage holds', as
 
 // A COMPLETED TO-DO STAYS ON THE CALENDAR (spec § 3.3) — it still happened
 // that day. Only the To-do page drops it.
-test('a completed to-do stays in the list view, styled as done', async () => {
+test('a completed to-do stays on the calendar (its Day page), styled as done', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
-  seed([record({ id: 'done1', type: 'task', title: 'Already finished', done: true, date: '2099-01-01' })]);
-  assert.match(allText(itemList()), /Already finished/, 'a done to-do must not vanish from the calendar');
-  const row = itemList().children.find((li) => allText(li).includes('Already finished'));
+  seed([record({ id: 'done1', type: 'task', title: 'Already finished', done: true, date: far(0) })]);
+  assert.match(allText(dayOf(far(0))), /Already finished/, 'a done to-do must not vanish from the calendar');
+  const row = dayRowFor(dayOf(far(0)), 'Already finished');
   assert.ok(row._classes.has('done'), 'and it must be styled as completed');
   assert.ok(row._classes.has('type-task'), 'without losing its type colour');
 });
 
-// § 7.1/§ 7.2: visibleItems is the single chokepoint feeding list, month, week
-// and day. renderList calls sortItemsByDate(visibleItems(...)) DIRECTLY —
-// groupItemsByDate is never involved — so this one filter is what covers it.
+// § 7.1/§ 7.2: visibleItems is the single chokepoint feeding month, week and
+// day (and fed the List, removed in stage 3d).
 test('an idea never appears on any calendar view', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
   seed([
-    record({ id: 'idea1', type: 'idea', title: 'Rework the shelves', date: '2099-01-01' }),
-    record({ id: 'ev1', type: 'event', title: 'Dentist appointment', date: '2099-01-01' }),
+    record({ id: 'idea1', type: 'idea', title: 'Rework the shelves', date: far(0) }),
+    record({ id: 'ev1', type: 'event', title: 'Dentist appointment', date: far(0) }),
   ]);
-  assert.doesNotMatch(allText(itemList()), /Rework the shelves/, 'the list view must not show ideas');
-  assert.match(allText(itemList()), /Dentist appointment/, 'fixture check: the same date DOES render');
+  assert.doesNotMatch(allText(dayOf(far(0))), /Rework the shelves/, 'the Day page must not show ideas');
+  assert.match(allText(dayOf(far(0))), /Dentist appointment/, 'fixture check: the same date DOES render');
   assert.doesNotMatch(allText(globalThis.document.getElementById('calendar-grid')), /Rework the shelves/);
   assert.doesNotMatch(allText(globalThis.document.getElementById('week-grid')), /Rework the shelves/);
 });
@@ -785,8 +863,8 @@ test('ticking a to-do writes done to storage and re-renders both pages', async (
   installFakeLocalStorage();
   await import('../js/app.js');
   seed([
-    record({ id: 'task1', type: 'task', title: 'Renew the passport', date: '2099-01-01' }),
-    record({ id: 'task2', type: 'task', title: 'Book the car service', date: '2099-01-01' }),
+    record({ id: 'task1', type: 'task', title: 'Renew the passport', date: far(0) }),
+    record({ id: 'task2', type: 'task', title: 'Book the car service', date: far(0) }),
   ]);
   const box = checkboxFor(todoList(), 'Renew the passport');
   assert.ok(box, 'fixture check: the To-do page must offer a checkbox for the item');
@@ -800,7 +878,7 @@ test('ticking a to-do writes done to storage and re-renders both pages', async (
   // through, until tomorrow (was: it left the page at once).
   const ticked = checkboxFor(todoList(), 'Renew the passport');
   assert.ok(ticked && ticked.checked, 'the ticked item stays on the To-do page, checked, until tomorrow');
-  assert.match(allText(itemList()), /Renew the passport/, 'and stays on the calendar');
+  assert.match(allText(dayOf(far(0))), /Renew the passport/, 'and stays on the calendar');
 });
 
 // § 5.1, the horn that was CHOSEN. unionById's ties go to REMOTE (`>=`), so a
@@ -1152,9 +1230,11 @@ test('a sync whose items write runs out of storage leaves no unsaved synced reco
   const { addItems } = await import('../js/app.js');
   const { encKey } = await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
   clearAdoptionPending();
-  seed([record({ id: 'kept-local', title: 'Kept local', date: '2099-06-01' })]);
+  seed([record({ id: 'kept-local', title: 'Kept local', date: far(0) })]);
   const blob = await encryptBlob(encKey, state({
-    items: [record({ id: 'pulled-unsaved', title: 'Pulled unsaved', date: '2099-06-02' })],
+    // The same day as kept-local, so the one Day page that shows kept-local
+    // would also show this record if app.js held it.
+    items: [record({ id: 'pulled-unsaved', title: 'Pulled unsaved', date: far(0) })],
   }));
   const requests = [];
   const originalFetch = globalThis.fetch;
@@ -1181,7 +1261,7 @@ test('a sync whose items write runs out of storage leaves no unsaved synced reco
     assert.deepEqual(requests, ['GET'], 'fixture check: nothing was pushed');
     assert.deepEqual(loadItems().map((i) => i.id), ['kept-local'], 'fixture check: storage never took the pulled record');
     // Storage has room again; the user adds something by hand.
-    addItems([{ title: 'Typed after', date: '2099-06-03', type: 'event' }]);
+    addItems([{ title: 'Typed after', date: far(2), type: 'event' }]);
   } finally {
     timers.restore(); // the add's 2 s sync timer is never fired
     globalThis.fetch = originalFetch;
@@ -1191,8 +1271,8 @@ test('a sync whose items write runs out of storage leaves no unsaved synced reco
   assert.ok(!stored.some((i) => i.id === 'pulled-unsaved'),
     'the add must not persist a synced record the failed apply never saved');
   assert.deepEqual(stored.map((i) => i.id).sort(), ['kept-local', stored.find((i) => i.title === 'Typed after').id].sort());
-  assert.doesNotMatch(allText(itemList()), /Pulled unsaved/, 'the list must not show a record storage does not hold');
-  assert.match(allText(itemList()), /Kept local/, 'fixture check: the list rendered');
+  assert.doesNotMatch(allText(dayOf(far(0))), /Pulled unsaved/, 'the calendar must not show a record storage does not hold');
+  assert.match(allText(dayOf(far(0))), /Kept local/, 'fixture check: the Day page rendered');
   seed([]);
 });
 
@@ -1205,14 +1285,15 @@ test('a 409 retry whose apply runs out of storage leaves no unsaved synced recor
   const { encKey } = await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
   clearAdoptionPending();
   // local-only makes the first apply's state differ from the server's, so a PUT goes out.
-  seed([record({ id: 'local-only', title: 'Local only', date: '2099-07-01' })]);
+  seed([record({ id: 'local-only', title: 'Local only', date: far(0) })]);
   const first = await encryptBlob(encKey, state({
-    items: [record({ id: 'pulled-first', title: 'Pulled first', date: '2099-07-02' })],
+    items: [record({ id: 'pulled-first', title: 'Pulled first', date: far(1) })],
   }));
   const conflict = await encryptBlob(encKey, state({
     items: [
-      record({ id: 'pulled-first', title: 'Pulled first', date: '2099-07-02' }),
-      record({ id: 'pulled-on-retry', title: 'Pulled on retry', date: '2099-07-03' }),
+      record({ id: 'pulled-first', title: 'Pulled first', date: far(1) }),
+      // The same day as local-only, for the Day page check at the end.
+      record({ id: 'pulled-on-retry', title: 'Pulled on retry', date: far(0) }),
     ],
   }));
   const requests = [];
@@ -1240,7 +1321,7 @@ test('a 409 retry whose apply runs out of storage leaves no unsaved synced recor
     assert.equal(loadSyncState().lastError, 'QuotaError', 'fixture check: the retry apply failed on quota');
     assert.deepEqual(loadItems().map((i) => i.id).sort(), ['local-only', 'pulled-first'],
       'fixture check: storage holds the first apply and not the retry');
-    addItems([{ title: 'Typed after retry', date: '2099-07-04', type: 'event' }]);
+    addItems([{ title: 'Typed after retry', date: far(3), type: 'event' }]);
   } finally {
     timers.restore();
     globalThis.fetch = originalFetch;
@@ -1250,7 +1331,8 @@ test('a 409 retry whose apply runs out of storage leaves no unsaved synced recor
   assert.ok(!stored.some((i) => i.id === 'pulled-on-retry'),
     'the add must not persist a record the failed retry apply never saved');
   assert.ok(stored.some((i) => i.id === 'pulled-first'), 'the first apply\'s saved record stays');
-  assert.doesNotMatch(allText(itemList()), /Pulled on retry/, 'the list must not show a record storage does not hold');
+  assert.doesNotMatch(allText(dayOf(far(0))), /Pulled on retry/, 'the calendar must not show a record storage does not hold');
+  assert.match(allText(dayOf(far(0))), /Local only/, 'fixture check: the Day page rendered');
   seed([]);
 });
 
@@ -1440,9 +1522,6 @@ test('runSync does not proceed into its try/finally while adoption is pending', 
 // calendar data. These tests fire the real visibilitychange listener with a
 // mocked clock a day ahead.
 
-const DAY_LABEL_OPTS = { weekday: 'short', month: 'short', day: 'numeric' };
-const labelFor = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).toLocaleDateString('en-US', DAY_LABEL_OPTS);
-const localISO = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 function resume() {
   for (const fn of globalThis.document._listeners.visibilitychange || []) fn();
 }
@@ -1454,7 +1533,7 @@ test('index.html opens on Today', () => {
   assert.doesNotMatch(html, /<button id="(tab-calendar|tab-todo|tab-ideas|show-[a-z]+)"[^>]*class="active"/, 'and no other');
   assert.match(html, /<div id="cal-switch"[^>]*hidden/, 'the Calendar switcher starts hidden');
   assert.match(html, /<section id="today-view"(?![^>]*hidden)[^>]*>/, 'the Today section must be visible on load');
-  for (const id of ['list-view', 'calendar-view', 'week-view', 'day-view', 'todo-view', 'ideas-view']) {
+  for (const id of ['calendar-view', 'week-view', 'day-view', 'todo-view', 'ideas-view']) {
     assert.match(html, new RegExp(`<section id="${id}"[^>]*hidden`), `#${id} must start hidden`);
   }
 });
@@ -1558,16 +1637,6 @@ test('a hidden-tab visibilitychange is not a launch and does not refresh', async
   assert.equal(loadLaunches().length - before, 0);
 });
 
-test('the List shows human dates, with today named as Today', async () => {
-  installFakeLocalStorage();
-  await import('../js/app.js');
-  const today = localISO(new Date());
-  seed([record({ id: 'h1', title: 'Dentist', date: today })]);
-  assert.match(allText(itemList()), /Today — Dentist/);
-  assert.doesNotMatch(allText(itemList()), new RegExp(`${today} — Dentist`), 'raw ISO dates must not reach the screen');
-  seed([]);
-});
-
 test('the To-do page shows human dates too', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
@@ -1581,14 +1650,13 @@ test('the To-do page shows human dates too', async () => {
 // Edit-items Task 4a — tapping an item opens its sheet
 // =========================================================================
 //
-// These drive the REAL app.js: its renderList / renderDay / renderTodos /
+// These drive the REAL app.js: its renderToday / renderDay / renderTodos /
 // renderIdeas each hand the view an onOpen, and openItem builds the sheet's
 // options. A view test alone cannot see a call site that passes a no-op.
 // Every id here is prefixed `open-`: the module is imported once per file, so
 // state carries between tests. Each test closes the sheet it opened.
 
 const sheetHost = () => globalThis.document.getElementById('sheet-host');
-const dayBody = () => globalThis.document.getElementById('day-body');
 const messageText = () => globalThis.document.getElementById('message').textContent;
 
 // The .item-open control of the first row under `root` whose text mentions `title`.
@@ -1664,13 +1732,13 @@ function unseedFeeds() {
   reloadFromStorage('plaenicke.feeds');
 }
 
-test('open: tapping an item in the List opens its sheet in #sheet-host', async () => {
+test('open: tapping an item on the Day page opens its sheet in #sheet-host', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
-  seed([record({ id: 'open-list1', title: 'Open me from the list', date: '2099-02-01' })]);
+  seed([record({ id: 'open-list1', title: 'Open me from the list', date: far(0) })]);
   assert.equal(sheetHost().children.length, 0, 'fixture check: no sheet before the tap');
-  const btn = openControlFor(itemList(), 'Open me from the list');
-  assert.ok(btn, 'the list row must offer an .item-open control');
+  const btn = openControlFor(dayOf(far(0)), 'Open me from the list');
+  assert.ok(btn, 'the Day row must offer an .item-open control');
   click(btn);
   assert.ok(sheetHost().querySelector('.sheet'), 'a .sheet must be mounted in #sheet-host');
   assert.equal(sheetHost().querySelector('.sheet-title').value, 'Open me from the list', 'and it is THIS item');
@@ -1712,7 +1780,7 @@ test("open: an external item's sheet names its calendar and never contains the f
     updatedAt: '2026-08-01T00:00:00.000Z',
   });
   try {
-    const btn = openControlFor(itemList(), 'Standup from the feed');
+    const btn = openControlFor(dayOf(localISO(new Date())), 'Standup from the feed');
     assert.ok(btn, 'fixture check: the feed event is listed with an open control');
     click(btn);
     const host = sheetHost();
@@ -1743,7 +1811,7 @@ test('open: a Google feed event links to that day in Google Calendar, unpadded',
     updatedAt: '2026-08-01T00:00:00.000Z',
   });
   try {
-    click(openControlFor(itemList(), 'Standup from the feed'));
+    click(openControlFor(dayOf(localISO(new Date())), 'Standup from the feed'));
     const link = sheetHost().querySelector('.sheet-google');
     assert.ok(link, 'a Google feed gets the link');
     const d = new Date();
@@ -1763,10 +1831,10 @@ test('open: an item of an unknown type shows a message and mounts no sheet', asy
   installFakeLocalStorage();
   await import('../js/app.js');
   const logged = t.mock.method(console, 'error', () => {});
-  seed([record({ id: 'open-bogus', type: 'bogus', title: 'Open me with a strange type', date: '2099-02-01' })]);
+  seed([record({ id: 'open-bogus', type: 'bogus', title: 'Open me with a strange type', date: far(0) })]);
   globalThis.document.getElementById('message').textContent = '';
   assert.equal(sheetHost().children.length, 0, 'fixture check: no sheet left over from an earlier test');
-  const btn = openControlFor(itemList(), 'Open me with a strange type');
+  const btn = openControlFor(dayOf(far(0)), 'Open me with a strange type');
   assert.ok(btn, 'fixture check: the row renders');
   assert.doesNotThrow(() => click(btn), 'a sheet that refuses to open must not throw out of the tap');
   assert.equal(sheetHost().children.length, 0, 'no sheet may be mounted');
@@ -1782,13 +1850,13 @@ test('open: an item of an unknown type shows a message and mounts no sheet', asy
 test("open: the sheet's Delete deletes through the existing path, tombstone and all", async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
-  seed([record({ id: 'open-del1', title: 'Open me and delete', date: '2099-02-01' })]);
+  seed([record({ id: 'open-del1', title: 'Open me and delete', date: far(0) })]);
   enableMockTimers(t, { apis: ['setTimeout'] });
   try {
-    click(openControlFor(itemList(), 'Open me and delete'));
+    click(openControlFor(dayOf(far(0)), 'Open me and delete'));
     click(sheetHost().querySelector('.sheet-delete'));
     assert.equal(sheetHost().children.length, 0, 'the sheet closed');
-    assert.doesNotMatch(allText(itemList()), /Open me and delete/);
+    assert.doesNotMatch(allText(dayOf(far(0))), /Open me and delete/);
     assert.equal(loadTombstones().length, 0, 'nothing is committed while Undo is offered');
     t.mock.timers.tick(5000);
     assert.deepEqual(loadItems(), [], 'the item is gone from storage');
@@ -1836,8 +1904,7 @@ function deleteControlFor(root, title) {
 const tombstoned = (id) => loadTombstones().some((ts) => ts.id === id);
 const stored = (id) => loadItems().some((it) => it.id === id);
 
-// Every call site: the List's Delete, the Day grid's ×, the Day page's
-// "Other tasks" Delete, the To-do page, the Ideas page, and the sheet. A
+// Every call site: the Day grid's ×, the Day page's "Other tasks" Delete, the To-do page, the Ideas page, and the sheet. A
 // site left calling handleDelete would commit at once: tombstone written, no
 // toast — which is exactly what this checks for.
 test('delete: every delete control hides the item, offers Undo, and commits only on expiry', async (t) => {
@@ -1845,7 +1912,6 @@ test('delete: every delete control hides the item, offers Undo, and commits only
   await import('../js/app.js');
   const today = localISO(new Date());
   const sites = [
-    ['List', () => itemList(), record({ id: 'del-site-list', title: 'Del via list', date: '2099-03-01' })],
     ['Day ×', () => dayBody(), record({ id: 'del-site-grid', type: 'task', title: 'Del via grid', date: today, time: '09:00' })],
     ['Other tasks', () => dayBody(), record({ id: 'del-site-other', type: 'task', title: 'Del via other', date: today })],
     ['To-do', () => todoList(), record({ id: 'del-site-todo', type: 'task', title: 'Del via todo', date: '2099-03-02' })],
@@ -1874,7 +1940,7 @@ test('delete: every delete control hides the item, offers Undo, and commits only
   seed([]);
 });
 
-test('delete: a pending delete is hidden from the List, Day, To-do and Ideas pages at once', async (t) => {
+test('delete: a pending delete is hidden from the Day, To-do and Ideas pages at once', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
   const today = localISO(new Date());
@@ -1882,13 +1948,13 @@ test('delete: a pending delete is hidden from the List, Day, To-do and Ideas pag
     record({ id: 'del-hide-task', type: 'task', title: 'Del hide task', date: today, time: '10:00' }),
     record({ id: 'del-hide-idea', type: 'idea', title: 'Del hide idea', date: today }),
   ]);
-  for (const [root, title] of [[itemList(), 'Del hide task'], [dayBody(), 'Del hide task'], [todoList(), 'Del hide task'], [ideaList(), 'Del hide idea']]) {
+  for (const [root, title] of [[dayBody(), 'Del hide task'], [todoList(), 'Del hide task'], [ideaList(), 'Del hide idea']]) {
     assert.match(allText(root), new RegExp(title), `fixture check: ${title} is on screen before the delete`);
   }
   enableMockTimers(t, { apis: ['setTimeout'] });
   try {
     click(deleteControlFor(todoList(), 'Del hide task'));
-    for (const root of [itemList(), dayBody(), todoList()]) {
+    for (const root of [dayBody(), todoList()]) {
       assert.doesNotMatch(allText(root), /Del hide task/, 'a pending delete is hidden on every page, not just the one tapped');
     }
     click(deleteControlFor(ideaList(), 'Del hide idea'));
@@ -1906,18 +1972,18 @@ test('delete: a pending delete is hidden from the List, Day, To-do and Ideas pag
 test('delete: Undo before expiry brings the item back and writes no tombstone', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
-  seed([record({ id: 'del-undo', title: 'Del then undo', date: '2099-03-03' })]);
+  seed([record({ id: 'del-undo', title: 'Del then undo', date: far(0) })]);
   enableMockTimers(t, { apis: ['setTimeout'] });
   try {
-    click(deleteControlFor(itemList(), 'Del then undo'));
-    assert.doesNotMatch(allText(itemList()), /Del then undo/, 'fixture check: hidden while pending');
+    click(deleteControlFor(dayOf(far(0)), 'Del then undo'));
+    assert.doesNotMatch(allText(dayOf(far(0))), /Del then undo/, 'fixture check: hidden while pending');
     click(toastHost().querySelector('.toast-undo'));
-    assert.match(allText(itemList()), /Del then undo/, 'Undo shows the item again, at once');
+    assert.match(allText(dayOf(far(0))), /Del then undo/, 'Undo shows the item again, at once');
     assert.equal(toastHost().children.length, 0, 'the toast is gone');
     t.mock.timers.tick(5000);
     assert.ok(!tombstoned('del-undo'), 'an undone delete is never committed');
     assert.ok(stored('del-undo'), 'and the item is still stored');
-    assert.match(allText(itemList()), /Del then undo/);
+    assert.match(allText(dayOf(far(0))), /Del then undo/);
   } finally {
     await resetMockTimers(t);
   }
@@ -1930,10 +1996,10 @@ test('delete: Undo before expiry brings the item back and writes no tombstone', 
 test('delete: going to the background commits a pending delete and leaves no Undo on screen', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
-  seed([record({ id: 'del-hidden', title: 'Del then hide', date: '2099-03-04' })]);
+  seed([record({ id: 'del-hidden', title: 'Del then hide', date: far(0) })]);
   enableMockTimers(t, { apis: ['setTimeout'] });
   try {
-    click(deleteControlFor(itemList(), 'Del then hide'));
+    click(deleteControlFor(dayOf(far(0)), 'Del then hide'));
     assert.ok(toastHost().querySelector('.toast-undo'), 'fixture check: Undo is showing');
     globalThis.document.visibilityState = 'hidden';
     try {
@@ -1955,19 +2021,20 @@ test('delete: going to the background commits a pending delete and leaves no Und
 test('delete: deleting a second item commits the first at once and leaves the second pending', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
+  // One day for all of them: the Day page shows one day (the List showed every day).
   seed([
-    record({ id: 'del-a', title: 'Del first A', date: '2099-03-05' }),
-    record({ id: 'del-b', title: 'Del second B', date: '2099-03-06' }),
+    record({ id: 'del-a', title: 'Del first A', date: far(0) }),
+    record({ id: 'del-b', title: 'Del second B', date: far(0) }),
   ]);
   enableMockTimers(t, { apis: ['setTimeout'] });
   try {
-    click(deleteControlFor(itemList(), 'Del first A'));
-    click(deleteControlFor(itemList(), 'Del second B'));
+    click(deleteControlFor(dayOf(far(0)), 'Del first A'));
+    click(deleteControlFor(dayOf(far(0)), 'Del second B'));
     assert.ok(tombstoned('del-a'), 'only the latest delete can be undone, so A is committed');
     assert.ok(!stored('del-a'));
     assert.ok(!tombstoned('del-b'), 'B is still pending');
     assert.ok(stored('del-b'));
-    assert.doesNotMatch(allText(itemList()), /Del second B/);
+    assert.doesNotMatch(allText(dayOf(far(0))), /Del second B/);
     assert.match(allText(toastHost()), /Deleted "Del second B"/, 'the toast is now for B');
     t.mock.timers.tick(5000);
     assert.ok(tombstoned('del-b'));
@@ -1984,15 +2051,16 @@ test('delete: deleting a second item commits the first at once and leaves the se
 test('delete: opening another item commits a pending delete and clears its toast', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
+  // One day for all of them: the Day page shows one day (the List showed every day).
   seed([
-    record({ id: 'del-open-a', title: 'Del before open', date: '2099-03-07' }),
-    record({ id: 'del-open-b', title: 'Del open me after', date: '2099-03-08' }),
+    record({ id: 'del-open-a', title: 'Del before open', date: far(0) }),
+    record({ id: 'del-open-b', title: 'Del open me after', date: far(0) }),
   ]);
   enableMockTimers(t, { apis: ['setTimeout'] });
   try {
-    click(deleteControlFor(itemList(), 'Del before open'));
+    click(deleteControlFor(dayOf(far(0)), 'Del before open'));
     assert.ok(toastHost().querySelector('.toast-undo'), 'fixture check: Undo is showing');
-    click(openControlFor(itemList(), 'Del open me after'));
+    click(openControlFor(dayOf(far(0)), 'Del open me after'));
     assert.ok(sheetHost().querySelector('.sheet'), 'fixture check: the other sheet opened');
     assert.equal(toastHost().children.length, 0, 'the toast is gone once another item is opened');
     assert.ok(tombstoned('del-open-a'), 'and the delete it offered to undo is committed');
@@ -2012,10 +2080,10 @@ test('delete: opening another item commits a pending delete and clears its toast
 test('delete: Undo, then going to the background, keeps the item', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
-  seed([record({ id: 'del-undo-hide', title: 'Del undo then hide', date: '2099-03-09' })]);
+  seed([record({ id: 'del-undo-hide', title: 'Del undo then hide', date: far(0) })]);
   enableMockTimers(t, { apis: ['setTimeout'] });
   try {
-    click(deleteControlFor(itemList(), 'Del undo then hide'));
+    click(deleteControlFor(dayOf(far(0)), 'Del undo then hide'));
     click(toastHost().querySelector('.toast-undo'));
     globalThis.document.visibilityState = 'hidden';
     try {
@@ -2026,7 +2094,7 @@ test('delete: Undo, then going to the background, keeps the item', async (t) => 
     t.mock.timers.tick(5000);
     assert.ok(!tombstoned('del-undo-hide'), 'an undone delete stays undone across backgrounding');
     assert.ok(stored('del-undo-hide'));
-    assert.match(allText(itemList()), /Del undo then hide/);
+    assert.match(allText(dayOf(far(0))), /Del undo then hide/);
     assert.equal(toastHost().children.length, 0);
   } finally {
     await resetMockTimers(t);
@@ -2036,14 +2104,15 @@ test('delete: Undo, then going to the background, keeps the item', async (t) => 
 
 // --- Task 4a review I1 + the 4b commit-failure finding ----------------------
 
-test('review: tapping the SECOND list item opens the second item', async () => {
+test('review: tapping the SECOND item on a page opens the second item', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
+  // One day for all of them: the Day page shows one day (the List showed every day).
   seed([
-    record({ id: 'rv-a', title: 'First of two', date: '2099-03-01' }),
-    record({ id: 'rv-b', title: 'Second of two', date: '2099-03-02' }),
+    record({ id: 'rv-a', title: 'First of two', date: far(0) }),
+    record({ id: 'rv-b', title: 'Second of two', date: far(0) }),
   ]);
-  click(openControlFor(itemList(), 'Second of two'));
+  click(openControlFor(dayOf(far(0)), 'Second of two'));
   assert.equal(sheetHost().querySelector('.sheet-title').value, 'Second of two');
   closeSheet();
   seed([]);
@@ -2055,12 +2124,12 @@ test('review: tapping the SECOND list item opens the second item', async () => {
 test('review: a delete whose commit fails is shown again, with the error', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
-  seed([record({ id: 'rv-fail', title: 'Cannot be deleted', date: '2099-03-03' })]);
+  seed([record({ id: 'rv-fail', title: 'Cannot be deleted', date: far(0) })]);
   enableMockTimers(t, { apis: ['setTimeout'] });
   const real = localStorage.setItem.bind(localStorage);
   try {
-    click(deleteControlFor(itemList(), 'Cannot be deleted'));
-    assert.doesNotMatch(allText(itemList()), /Cannot be deleted/, 'fixture check: hidden while pending');
+    click(deleteControlFor(dayOf(far(0)), 'Cannot be deleted'));
+    assert.doesNotMatch(allText(dayOf(far(0))), /Cannot be deleted/, 'fixture check: hidden while pending');
     localStorage.setItem = (k, v) => {
       if (k === 'plaenicke.syncTombstones') { const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; }
       return real(k, v);
@@ -2070,7 +2139,7 @@ test('review: a delete whose commit fails is shown again, with the error', async
     localStorage.setItem = real;
     await resetMockTimers(t);
   }
-  assert.match(allText(itemList()), /Cannot be deleted/, 'a delete that did not happen must not look like it did');
+  assert.match(allText(dayOf(far(0))), /Cannot be deleted/, 'a delete that did not happen must not look like it did');
   assert.match(messageText(), /quota/i);
   assert.equal(toastHost().children.length, 0);
   seed([]);
@@ -2169,11 +2238,11 @@ test('wiring: a committed delete schedules a debounced sync that pushes the tomb
   await import('../js/app.js');
   await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
   clearAdoptionPending();
-  seed([record({ id: 'wire-del', title: 'Wire delete', date: '2099-05-02' })]);
+  seed([record({ id: 'wire-del', title: 'Wire delete', date: far(0) })]);
   const net = linkedWithFetch((m) => (m === 'GET' ? emptyAccount() : putAccepted()));
   const timers = installManualTimers();
   try {
-    click(deleteControlFor(itemList(), 'Wire delete'));
+    click(deleteControlFor(dayOf(far(0)), 'Wire delete'));
     assert.equal(timers.live(2000), 0, 'fixture check: nothing is scheduled while Undo is offered');
     timers.fire(5000);
     assert.ok(tombstoned('wire-del'), 'fixture check: the toast expiry committed the delete');
@@ -2240,7 +2309,7 @@ test('edit: a Save through the sheet writes storage, bumps updatedAt and schedul
   await import('../js/app.js');
   await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
   clearAdoptionPending();
-  seed([record({ id: 'edit-save', title: 'Edit me', date: '2099-04-01' })]);
+  seed([record({ id: 'edit-save', title: 'Edit me', date: far(0) })]);
 
   const requests = [];
   const originalFetch = globalThis.fetch;
@@ -2250,14 +2319,14 @@ test('edit: a Save through the sheet writes storage, bumps updatedAt and schedul
   };
   const timers = installManualTimers();
   try {
-    click(openControlFor(itemList(), 'Edit me'));
+    click(openControlFor(dayOf(far(0)), 'Edit me'));
     sheetHost().querySelector('.sheet-title').value = 'Edited title';
     click(sheetHost().querySelector('.sheet-save'));
     assert.equal(sheetHost().children.length, 0, 'a successful save closes the sheet');
     const saved = storedById('edit-save');
     assert.equal(saved.title, 'Edited title', 'the edit is in storage');
     assert.ok(saved.updatedAt > '2026-08-19T00:00:00.000Z', 'updatedAt is bumped, or the next sync reverts the edit');
-    assert.match(allText(itemList()), /Edited title/, 'the screen shows the edit');
+    assert.match(allText(dayOf(far(0))), /Edited title/, 'the screen shows the edit');
     assert.match(allText(toastHost()), /Saved/, 'a toast confirms the save');
     assert.deepEqual(requests.filter((r) => r.url.includes('/data')), [], 'the push is debounced');
     assert.equal(timers.live(2000), 1, 'exactly one debounced sync is scheduled');
@@ -2279,12 +2348,12 @@ test('edit: a Save through the sheet writes storage, bumps updatedAt and schedul
 test('edit: a cleared date is refused, storage is untouched, and the sheet says why', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
-  seed([record({ id: 'edit-nodate', title: 'Keep my date', date: '2099-04-02' })]);
+  seed([record({ id: 'edit-nodate', title: 'Keep my date', date: far(0) })]);
   const beforeRaw = rawStored();
   const beforeItems = loadItems();
   enableMockTimers(t, { apis: ['setTimeout'] });
   try {
-    click(openControlFor(itemList(), 'Keep my date'));
+    click(openControlFor(dayOf(far(0)), 'Keep my date'));
     sheetHost().querySelector('.sheet-date').value = '';
     click(sheetHost().querySelector('.sheet-save'));
     assert.ok(sheetHost().querySelector('.sheet'), 'a refused save keeps the sheet open');
@@ -2307,18 +2376,19 @@ test('edit: a cleared date is refused, storage is untouched, and the sheet says 
 test('edit: with an earlier item pending deletion, the edit lands on the right record and no other', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
+  // One day for all of them: the Day page shows one day (the List showed every day).
   seed([
-    record({ id: 'edit-i1-a', title: 'I1 first', date: '2099-04-03' }),
-    record({ id: 'edit-i1-b', title: 'I1 second', date: '2099-04-04' }),
-    record({ id: 'edit-i1-c', title: 'I1 third', date: '2099-04-05' }),
-    record({ id: 'edit-i1-d', title: 'I1 fourth', date: '2099-04-06' }),
+    record({ id: 'edit-i1-a', title: 'I1 first', date: far(0) }),
+    record({ id: 'edit-i1-b', title: 'I1 second', date: far(0) }),
+    record({ id: 'edit-i1-c', title: 'I1 third', date: far(0) }),
+    record({ id: 'edit-i1-d', title: 'I1 fourth', date: far(0) }),
   ]);
   const beforeById = Object.fromEntries(loadItems().map((it) => [it.id, JSON.stringify(it)]));
   enableMockTimers(t, { apis: ['setTimeout'] });
   try {
-    click(openControlFor(itemList(), 'I1 third'));
+    click(openControlFor(dayOf(far(0)), 'I1 third'));
     // Delete A while C's sheet is open (opening an item would commit it).
-    click(deleteControlFor(itemList(), 'I1 first'));
+    click(deleteControlFor(dayOf(far(0)), 'I1 first'));
     assert.ok(!tombstoned('edit-i1-a'), 'fixture check: A is pending, not committed');
     sheetHost().querySelector('.sheet-title').value = 'I1 third, edited';
     click(sheetHost().querySelector('.sheet-save'));
@@ -2346,11 +2416,11 @@ test('edit: with an earlier item pending deletion, the edit lands on the right r
 test('edit: saving an item that is pending deletion is refused', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
-  seed([record({ id: 'edit-pend', title: 'Pending edit', date: '2099-04-07' })]);
+  seed([record({ id: 'edit-pend', title: 'Pending edit', date: far(0) })]);
   enableMockTimers(t, { apis: ['setTimeout'] });
   try {
-    click(openControlFor(itemList(), 'Pending edit'));
-    click(deleteControlFor(itemList(), 'Pending edit'));
+    click(openControlFor(dayOf(far(0)), 'Pending edit'));
+    click(deleteControlFor(dayOf(far(0)), 'Pending edit'));
     const beforeRaw = rawStored();
     sheetHost().querySelector('.sheet-title').value = 'Renamed while pending';
     click(sheetHost().querySelector('.sheet-save'));
@@ -2372,20 +2442,23 @@ test('edit: saving an item that is pending deletion is refused', async (t) => {
 test('edit: Undo restores the edited field and keeps a field a sync changed in between', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
-  seed([record({ id: 'edit-undo', title: 'Undo me', date: '2099-04-08' })]);
+  seed([record({ id: 'edit-undo', title: 'Undo me', date: far(0) })]);
   enableMockTimers(t, { apis: ['setTimeout'] });
   try {
-    click(openControlFor(itemList(), 'Undo me'));
+    click(openControlFor(dayOf(far(0)), 'Undo me'));
     sheetHost().querySelector('.sheet-title').value = 'Undo me, renamed';
     click(sheetHost().querySelector('.sheet-save'));
     assert.equal(storedById('edit-undo').title, 'Undo me, renamed', 'fixture check: the edit landed');
-    simulateSync([{ ...storedById('edit-undo'), date: '2099-05-01' }]);
+    simulateSync([{ ...storedById('edit-undo'), date: far(23) }]);
+    // The sync moved the item to another day. Go there BEFORE the Undo, so
+    // the reads below see the render the Undo itself does.
+    assert.match(allText(dayOf(far(23))), /Undo me, renamed/, 'fixture check: the synced day shows the edit');
     click(toastHost().querySelector('.toast-undo'));
     const r = storedById('edit-undo');
     assert.equal(r.title, 'Undo me', 'Undo restores the title');
-    assert.equal(r.date, '2099-05-01', 'and keeps the date the sync wrote');
-    assert.match(allText(itemList()), /Undo me/);
-    assert.doesNotMatch(allText(itemList()), /renamed/);
+    assert.equal(r.date, far(23), 'and keeps the date the sync wrote');
+    assert.match(allText(dayOf(far(23))), /Undo me/);
+    assert.doesNotMatch(allText(dayOf(far(23))), /renamed/);
     assert.equal(toastHost().children.length, 0, 'Undo leaves no toast');
     t.mock.timers.tick(5000);
     assert.equal(toastHost().children.length, 0);
@@ -2406,12 +2479,12 @@ test('edit: Undo of a task -> idea switch restores the original task exactly', a
   await import('../js/app.js');
   const original = record({
     id: 'edit-undo-type', type: 'task', title: 'Call the plumber',
-    notes: 'About the kitchen sink', date: '2099-04-09', time: '09:00', endTime: '10:00',
+    notes: 'About the kitchen sink', date: far(0), time: '09:00', endTime: '10:00',
   });
   seed([original]);
   enableMockTimers(t, { apis: ['setTimeout'] });
   try {
-    click(openControlFor(itemList(), 'Call the plumber'));
+    click(openControlFor(dayOf(far(0)), 'Call the plumber'));
     sheetHost().querySelector('.sheet-type').value = 'idea';
     click(sheetHost().querySelector('.sheet-save'));
     const idea = storedById('edit-undo-type');
@@ -2436,12 +2509,12 @@ test('edit: Undo of a task -> idea switch restores the original task exactly', a
 test('edit: a quota failure leaves the in-memory list unchanged and shows the error', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
-  seed([record({ id: 'edit-quota', title: 'Quota original', date: '2099-04-10' })]);
+  seed([record({ id: 'edit-quota', title: 'Quota original', date: far(0) })]);
   const beforeRaw = rawStored();
   enableMockTimers(t, { apis: ['setTimeout'] });
   const real = localStorage.setItem.bind(localStorage);
   try {
-    click(openControlFor(itemList(), 'Quota original'));
+    click(openControlFor(dayOf(far(0)), 'Quota original'));
     sheetHost().querySelector('.sheet-title').value = 'Quota renamed';
     localStorage.setItem = (k, v) => {
       if (k === 'plaenicke.items') { const e = new Error('The quota has been exceeded.'); e.name = 'QuotaExceededError'; throw e; }
@@ -2457,8 +2530,8 @@ test('edit: a quota failure leaves the in-memory list unchanged and shows the er
     assert.equal(toastHost().children.length, 0, 'a failed save offers no Undo');
     closeSheet();
     resume(); // re-renders from app.js's in-memory list
-    assert.match(allText(itemList()), /Quota original/, 'the in-memory list was restored');
-    assert.doesNotMatch(allText(itemList()), /Quota renamed/);
+    assert.match(allText(dayOf(far(0))), /Quota original/, 'the in-memory list was restored');
+    assert.doesNotMatch(allText(dayOf(far(0))), /Quota renamed/);
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000); // a failed assertion must not leave a live toast behind
@@ -2472,10 +2545,10 @@ test('edit: a quota failure leaves the in-memory list unchanged and shows the er
 test('edit: a type switch after a sync changed the notes keeps the synced notes', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
-  seed([record({ id: 'edit-stale', type: 'task', title: 'Stale check', notes: 'notes as opened', date: '2099-04-11' })]);
+  seed([record({ id: 'edit-stale', type: 'task', title: 'Stale check', notes: 'notes as opened', date: far(0) })]);
   enableMockTimers(t, { apis: ['setTimeout'] });
   try {
-    click(openControlFor(itemList(), 'Stale check'));
+    click(openControlFor(dayOf(far(0)), 'Stale check'));
     simulateSync([{ ...storedById('edit-stale'), notes: 'notes from the other device', updatedAt: '2026-08-20T00:00:00.000Z' }]);
     sheetHost().querySelector('.sheet-type').value = 'idea';
     click(sheetHost().querySelector('.sheet-save'));
@@ -2497,18 +2570,18 @@ test('edit: a type switch after a sync changed the notes keeps the synced notes'
 test('edit: a sync carrying an older copy of the record keeps the edit, in storage and on screen', async (t) => {
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
-  const original = record({ id: 'edit-lww', title: 'Before the edit', date: '2099-04-12' });
+  const original = record({ id: 'edit-lww', title: 'Before the edit', date: far(0) });
   seed([original]);
   enableMockTimers(t, { apis: ['setTimeout'] });
   try {
-    click(openControlFor(itemList(), 'Before the edit'));
+    click(openControlFor(dayOf(far(0)), 'Before the edit'));
     sheetHost().querySelector('.sheet-title').value = 'After the edit';
     click(sheetHost().querySelector('.sheet-save'));
     t.mock.timers.tick(5000);
     applySyncedState(state({ items: [original] }));
     assert.equal(storedById('edit-lww').title, 'After the edit', 'storage keeps the edit');
-    assert.match(allText(itemList()), /After the edit/, 'and so does the screen');
-    assert.doesNotMatch(allText(itemList()), /Before the edit/);
+    assert.match(allText(dayOf(far(0))), /After the edit/, 'and so does the screen');
+    assert.doesNotMatch(allText(dayOf(far(0))), /Before the edit/);
     assert.equal(toastHost().children.length, 0);
   } finally {
     forceCloseSheet();
@@ -2524,11 +2597,11 @@ test('edit: a sync carrying an older copy of the record keeps the edit, in stora
 test('review: Undo of an item the other device deleted meanwhile says so', async (t) => {
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
-  const rec = record({ id: 'rv-remote', title: 'Deleted over there', date: '2099-04-01' });
+  const rec = record({ id: 'rv-remote', title: 'Deleted over there', date: far(0) });
   seed([rec]);
   enableMockTimers(t, { apis: ['setTimeout'] });
   try {
-    click(deleteControlFor(itemList(), 'Deleted over there'));
+    click(deleteControlFor(dayOf(far(0)), 'Deleted over there'));
     applySyncedState(state({
       items: [],
       tombstones: [{ id: 'rv-remote', kind: 'item', deletedAt: '2099-12-31T00:00:00.000Z' }],
@@ -2556,10 +2629,10 @@ test('review: Undo of an item the other device deleted meanwhile says so', async
 test('review4c: an Undo survives a sync that returns the already-pushed edit', async (t) => {
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
-  seed([record({ id: 'rv4-bump', title: 'R orig', date: '2099-06-01' })]);
+  seed([record({ id: 'rv4-bump', title: 'R orig', date: far(0) })]);
   enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: Date.parse('2026-09-23T12:00:00.000Z') });
   try {
-    click(openControlFor(itemList(), 'R orig'));
+    click(openControlFor(dayOf(far(0)), 'R orig'));
     sheetHost().querySelector('.sheet-title').value = 'R edited';
     click(sheetHost().querySelector('.sheet-save'));
     const pushed = { ...storedById('rv4-bump') };
@@ -2580,10 +2653,10 @@ test('review4c: an Undo survives a sync that returns the already-pushed edit', a
 test('review4c: an Undo that cannot be applied says why', async (t) => {
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
-  seed([record({ id: 'rv4-gone', title: 'Gone soon', date: '2099-06-02' })]);
+  seed([record({ id: 'rv4-gone', title: 'Gone soon', date: far(0) })]);
   enableMockTimers(t, { apis: ['setTimeout'] });
   try {
-    click(openControlFor(itemList(), 'Gone soon'));
+    click(openControlFor(dayOf(far(0)), 'Gone soon'));
     sheetHost().querySelector('.sheet-title').value = 'Gone soon, renamed';
     click(sheetHost().querySelector('.sheet-save'));
     applySyncedState(state({ items: [], tombstones: [{ id: 'rv4-gone', kind: 'item', deletedAt: '2999-01-01T00:00:00.000Z' }] }));
@@ -2602,17 +2675,18 @@ test('review4c: an Undo that cannot be applied says why', async (t) => {
 test('review4c: opening another item dismisses the Saved toast', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
+  // One day for all of them: the Day page shows one day (the List showed every day).
   seed([
-    record({ id: 'rv4-a', title: 'Saved one', date: '2099-06-03' }),
-    record({ id: 'rv4-b', title: 'Next one', date: '2099-06-04' }),
+    record({ id: 'rv4-a', title: 'Saved one', date: far(0) }),
+    record({ id: 'rv4-b', title: 'Next one', date: far(0) }),
   ]);
   enableMockTimers(t, { apis: ['setTimeout'] });
   try {
-    click(openControlFor(itemList(), 'Saved one'));
+    click(openControlFor(dayOf(far(0)), 'Saved one'));
     sheetHost().querySelector('.sheet-title').value = 'Saved one, renamed';
     click(sheetHost().querySelector('.sheet-save'));
     assert.ok(toastHost().querySelector('.toast-undo'), 'fixture check: the Saved toast is up');
-    click(openControlFor(itemList(), 'Next one'));
+    click(openControlFor(dayOf(far(0)), 'Next one'));
     assert.equal(toastHost().children.length, 0, 'the Saved toast must be dismissed');
   } finally {
     forceCloseSheet();
@@ -2629,10 +2703,10 @@ test('review4c: opening another item dismisses the Saved toast', async (t) => {
 test('review4c: an Undo that would store an invalid record is refused, and nothing is written', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
-  seed([record({ id: 'rv4-inv', title: 'Timed', date: '2099-06-05', time: '09:00', endTime: '10:00' })]);
+  seed([record({ id: 'rv4-inv', title: 'Timed', date: far(0), time: '09:00', endTime: '10:00' })]);
   enableMockTimers(t, { apis: ['setTimeout'] });
   try {
-    click(openControlFor(itemList(), 'Timed'));
+    click(openControlFor(dayOf(far(0)), 'Timed'));
     sheetHost().querySelector('.sheet-end').value = '12:00';
     click(sheetHost().querySelector('.sheet-save'));
     simulateSync([{ ...storedById('rv4-inv'), time: '11:00', updatedAt: '2999-01-01T00:00:00.000Z' }]);
@@ -2657,8 +2731,17 @@ test('sweep: records with a null or empty date render instead of crashing the ap
     record({ id: 'sw-null', title: 'Undated null', date: null, type: 'event' }),
     record({ id: 'sw-empty', title: 'Undated empty', date: '', type: 'task' }),
   ]));
-  assert.match(allText(itemList()), /No date — Undated null/);
   assert.match(allText(todoList()), /Undated empty/);
+  // No page may show a missing date as text ("null — …"). The List, which
+  // drew "No date — Undated null", is gone; check every page that is left.
+  const doc = globalThis.document;
+  const pages = {
+    Today: todayBody(), Day: dayOf(localISO(new Date())), Week: doc.getElementById('week-grid'),
+    Month: doc.getElementById('calendar-grid'), 'To-do': todoList(),
+  };
+  for (const [name, root] of Object.entries(pages)) {
+    assert.doesNotMatch(allText(root), /null|undefined|NaN/, `${name} must not show a missing date as text`);
+  }
   seed([]);
 });
 
@@ -2679,17 +2762,17 @@ const storedTombstone = (id) => loadTombstones().find((x) => x.id === id);
 test('sweep S: an edit of a record stamped in the future survives a sync of the original', async (t) => {
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
-  const original = record({ id: 'sS-skew-edit', title: 'Skewed before', date: '2099-07-01', updatedAt: S_AHEAD });
+  const original = record({ id: 'sS-skew-edit', title: 'Skewed before', date: far(0), updatedAt: S_AHEAD });
   seed([original]);
   enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
-    click(openControlFor(itemList(), 'Skewed before'));
+    click(openControlFor(dayOf(far(0)), 'Skewed before'));
     sheetHost().querySelector('.sheet-title').value = 'Skewed after';
     click(sheetHost().querySelector('.sheet-save'));
     t.mock.timers.tick(5000);
     applySyncedState(state({ items: [original] }));
     assert.equal(storedById('sS-skew-edit').title, 'Skewed after', 'the edit must not lose to the copy it replaced');
-    assert.match(allText(itemList()), /Skewed after/);
+    assert.match(allText(dayOf(far(0))), /Skewed after/);
   } finally {
     forceCloseSheet();
     t.mock.timers.tick(5000);
@@ -2725,10 +2808,10 @@ test('sweep S: a tick of a to-do stamped in the future survives a sync of the or
 test('sweep S: an Undo in the same millisecond as its edit survives a sync of the edit', async (t) => {
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
-  seed([record({ id: 'sS-skew-undo', title: 'Undo skew orig', date: '2099-07-03', updatedAt: S_AHEAD })]);
+  seed([record({ id: 'sS-skew-undo', title: 'Undo skew orig', date: far(0), updatedAt: S_AHEAD })]);
   enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
-    click(openControlFor(itemList(), 'Undo skew orig'));
+    click(openControlFor(dayOf(far(0)), 'Undo skew orig'));
     sheetHost().querySelector('.sheet-title').value = 'Undo skew edited';
     click(sheetHost().querySelector('.sheet-save'));
     const pushed = { ...storedById('sS-skew-undo') };
@@ -2749,16 +2832,16 @@ test('sweep S: an Undo in the same millisecond as its edit survives a sync of th
 test('sweep S: a delete of a record stamped in the future stays deleted after a sync of the original', async (t) => {
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
-  const original = record({ id: 'sS-skew-del', title: 'Skewed delete', date: '2099-07-04', updatedAt: S_AHEAD });
+  const original = record({ id: 'sS-skew-del', title: 'Skewed delete', date: far(0), updatedAt: S_AHEAD });
   seed([original]);
   enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
-    click(deleteControlFor(itemList(), 'Skewed delete'));
+    click(deleteControlFor(dayOf(far(0)), 'Skewed delete'));
     t.mock.timers.tick(5000);
     assert.ok(tombstoned('sS-skew-del'), 'fixture check: the delete committed');
     applySyncedState(state({ items: [original] }));
     assert.ok(!stored('sS-skew-del'), 'the deleted item must not come back');
-    assert.doesNotMatch(allText(itemList()), /Skewed delete/);
+    assert.doesNotMatch(allText(dayOf(far(0))), /Skewed delete/);
   } finally {
     t.mock.timers.tick(5000);
     await resetMockTimers(t);
@@ -2772,20 +2855,20 @@ test('sweep S: a delete of a record stamped in the future stays deleted after a 
 test('sweep S: Undo keeps a field a sync changed since the edit, restores the rest, and says so', async (t) => {
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
-  seed([record({ id: 'sS-undo-theirs', title: 'Undo base', date: '2099-07-05' })]);
+  seed([record({ id: 'sS-undo-theirs', title: 'Undo base', date: far(0) })]);
   enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
     clearMessage();
-    click(openControlFor(itemList(), 'Undo base'));
+    click(openControlFor(dayOf(far(0)), 'Undo base'));
     sheetHost().querySelector('.sheet-title').value = 'mine';
-    sheetHost().querySelector('.sheet-date').value = '2099-07-06';
+    sheetHost().querySelector('.sheet-date').value = far(1);
     click(sheetHost().querySelector('.sheet-save'));
     applySyncedState(state({ items: [{ ...storedById('sS-undo-theirs'), title: 'theirs', updatedAt: S_AHEAD }] }));
     assert.equal(storedById('sS-undo-theirs').title, 'theirs', 'fixture check: the newer sync landed');
     click(toastHost().querySelector('.toast-undo'));
     const r = storedById('sS-undo-theirs');
     assert.equal(r.title, 'theirs', 'Undo must not write over a newer value from the other device');
-    assert.equal(r.date, '2099-07-05', 'Undo still restores the field nobody else changed');
+    assert.equal(r.date, far(0), 'Undo still restores the field nobody else changed');
     assert.equal(messageText(), 'Some changes from your other device were kept.');
   } finally {
     forceCloseSheet();
@@ -2802,11 +2885,11 @@ test('sweep S: Undo keeps a field a sync changed since the edit, restores the re
 test('sweep S: Undo with every edited field changed since writes nothing and says so', async (t) => {
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
-  seed([record({ id: 'sS-undo-none', title: 'Undo none base', date: '2099-07-07' })]);
+  seed([record({ id: 'sS-undo-none', title: 'Undo none base', date: far(0) })]);
   enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
     clearMessage();
-    click(openControlFor(itemList(), 'Undo none base'));
+    click(openControlFor(dayOf(far(0)), 'Undo none base'));
     sheetHost().querySelector('.sheet-title').value = 'mine only';
     click(sheetHost().querySelector('.sheet-save'));
     applySyncedState(state({ items: [{ ...storedById('sS-undo-none'), title: 'theirs only', updatedAt: S_AHEAD }] }));
@@ -2830,10 +2913,10 @@ test('sweep S: Undo with every edited field changed since writes nothing and say
 test('sweep S: saving a sheet whose item changed type underneath it is refused', async (t) => {
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
-  seed([record({ id: 'sS-type-under', type: 'task', title: 'Type under', date: '2099-07-08' })]);
+  seed([record({ id: 'sS-type-under', type: 'task', title: 'Type under', date: far(0) })]);
   enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
-    click(openControlFor(itemList(), 'Type under'));
+    click(openControlFor(dayOf(far(0)), 'Type under'));
     applySyncedState(state({ items: [{ ...storedById('sS-type-under'), type: 'due', updatedAt: S_AHEAD }] }));
     const before = rawStored();
     sheetHost().querySelector('.sheet-title').value = 'Type under, renamed';
@@ -2857,9 +2940,10 @@ test('sweep S: saving a sheet whose item changed type underneath it is refused',
 test('sweep S: a tick that fails on quota is not saved by a later, unrelated edit', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
+  // One day for all of them: the Day page shows one day (the List showed every day).
   seed([
-    record({ id: 'sS-rb-tick', type: 'task', title: 'Rollback tick', date: '2099-07-09' }),
-    record({ id: 'sS-rb-other', title: 'Rollback other', date: '2099-07-10' }),
+    record({ id: 'sS-rb-tick', type: 'task', title: 'Rollback tick', date: far(0) }),
+    record({ id: 'sS-rb-other', title: 'Rollback other', date: far(0) }),
   ]);
   enableMockTimers(t, { apis: ['setTimeout'] });
   const real = localStorage.setItem.bind(localStorage);
@@ -2876,7 +2960,7 @@ test('sweep S: a tick that fails on quota is not saved by a later, unrelated edi
       localStorage.setItem = real;
     }
     assert.equal(storedById('sS-rb-tick').done, false, 'fixture check: the tick was not saved');
-    click(openControlFor(itemList(), 'Rollback other'));
+    click(openControlFor(dayOf(far(0)), 'Rollback other'));
     sheetHost().querySelector('.sheet-title').value = 'Rollback other, renamed';
     click(sheetHost().querySelector('.sheet-save'));
     assert.equal(storedById('sS-rb-other').title, 'Rollback other, renamed', 'fixture check: the edit saved');
@@ -2894,7 +2978,7 @@ test('sweep S: a tick that fails on quota is not saved by a later, unrelated edi
 test('sweep S: an add that fails on quota is not saved by a later, unrelated edit', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
-  seed([record({ id: 'sS-rb-add-other', title: 'Rollback add other', date: '2099-07-11' })]);
+  seed([record({ id: 'sS-rb-add-other', title: 'Rollback add other', date: far(0) })]);
   enableMockTimers(t, { apis: ['setTimeout'] });
   const real = localStorage.setItem.bind(localStorage);
   try {
@@ -2909,7 +2993,7 @@ test('sweep S: an add that fails on quota is not saved by a later, unrelated edi
       localStorage.setItem = real;
     }
     assert.match(messageText(), /quota/i, 'fixture check: the add failed visibly');
-    click(openControlFor(itemList(), 'Rollback add other'));
+    click(openControlFor(dayOf(far(0)), 'Rollback add other'));
     sheetHost().querySelector('.sheet-title').value = 'Rollback add other, renamed';
     click(sheetHost().querySelector('.sheet-save'));
     assert.equal(storedById('sS-rb-add-other').title, 'Rollback add other, renamed', 'fixture check: the edit saved');
@@ -2961,12 +3045,12 @@ test('sweep S: editing an idea\'s text and switching it to a task in one save ke
 test('sweep S: backgrounding commits a pending delete\'s tombstone exactly once', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
-  seed([record({ id: 'sS-bg-once', title: 'Background once', date: '2099-07-13' })]);
+  seed([record({ id: 'sS-bg-once', title: 'Background once', date: far(0) })]);
   enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   const real = localStorage.setItem.bind(localStorage);
   let writes = 0;
   try {
-    click(deleteControlFor(itemList(), 'Background once'));
+    click(deleteControlFor(dayOf(far(0)), 'Background once'));
     localStorage.setItem = (k, v) => {
       if (k === 'plaenicke.syncTombstones' && JSON.parse(v).some((x) => x.id === 'sS-bg-once')) writes += 1;
       return real(k, v);
@@ -3111,10 +3195,10 @@ test('sweep D: a calendar refresh that rejects also says so', async (t) => {
 test('sweep D: a sheet left open past midnight moves "Tomorrow" from the new today', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
-  seed([record({ id: 'sD-move', title: 'sD move me', date: '2099-01-01' })]);
+  seed([record({ id: 'sD-move', title: 'sD move me', date: far(0) })]);
   const timers = installManualTimers();
   try {
-    click(openControlFor(itemList(), 'sD move me'));
+    click(openControlFor(dayOf(far(0)), 'sD move me'));
     t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 24 * 60 * 60 * 1000 });
     const newToday = localISO(new Date());
     click(sheetHost().querySelector('.sheet-move')); // Tomorrow
@@ -3199,7 +3283,7 @@ test('sweep D: calendar times follow a change of the device time zone', async (t
     for (const tz of ['Asia/Tokyo', 'Pacific/Honolulu']) {
       process.env.TZ = tz;
       seed([]);
-      seen[tz] = allText(itemList());
+      seen[tz] = allText(dayOf('2026-10-03'));
     }
   } finally {
     if (prior === undefined) delete process.env.TZ; else process.env.TZ = prior;
@@ -3207,8 +3291,8 @@ test('sweep D: calendar times follow a change of the device time zone', async (t
   }
   unseedFeeds();
   seed([]);
-  assert.match(seen['Asia/Tokyo'], /sD zoned event\s+9:00 PM/, '12:00 UTC is 9 PM in Tokyo');
-  assert.match(seen['Pacific/Honolulu'], /sD zoned event\s+2:00 AM/, '12:00 UTC is 2 AM in Honolulu');
+  assert.match(seen['Asia/Tokyo'], /9:00 PM sD zoned event/, '12:00 UTC is 9 PM in Tokyo');
+  assert.match(seen['Pacific/Honolulu'], /2:00 AM sD zoned event/, '12:00 UTC is 2 AM in Honolulu');
 });
 
 // --- D6: one calendar refresh at a time ------------------------------------
@@ -3246,19 +3330,6 @@ test('sweep D: two quick resumes fetch each calendar once, and a feed pulled mea
   }
   unseedFeeds();
   saveTombstones([]);
-});
-
-// --- D7: the List's footer is a human date ----------------------------------
-
-test('sweep D: the List footer names its horizon as a date, not raw ISO', async () => {
-  installFakeLocalStorage();
-  await import('../js/app.js');
-  seedFeedsWithCache([sdFeed('sD-foot')], { 'sD-foot': cacheAt(new Date()) });
-  const horizon = addDays(localISO(new Date()), 366);
-  const text = allText(itemList());
-  unseedFeeds();
-  assert.match(text, new RegExp(`external calendars shown through ${formatDayLabel(horizon, localISO(new Date()))}`));
-  assert.doesNotMatch(text, /\d{4}-\d{2}-\d{2}/, 'no raw ISO date on screen');
 });
 
 // --- S-1: the week and month cursors follow a resume too --------------------
@@ -3335,7 +3406,7 @@ test('sweep D: the Google day link is unpadded on a single-digit month and day',
       id: 'sD-google', url: 'https://calendar.google.com/calendar/ical/sD/basic.ics', name: 'G',
       color: 'var(--feed-palette-1)', hidden: false, updatedAt: '2026-08-01T00:00:00.000Z',
     });
-    click(openControlFor(itemList(), 'Standup from the feed'));
+    click(openControlFor(dayOf(localISO(new Date())), 'Standup from the feed'));
     assert.equal(sheetHost().querySelector('.sheet-google').href, 'https://calendar.google.com/calendar/r/day/2026/3/5');
   } finally {
     forceCloseSheet();
@@ -3410,7 +3481,6 @@ test('sweep D: a tick that fails on quota is shown unticked again, with the erro
 const todayBody = () => globalThis.document.getElementById('today-body');
 const PAGES = [
   ['Today', 'tab-today', 'today-view', () => todayBody()],
-  ['List', 'show-list', 'list-view', () => itemList()],
   ['Day', 'show-day', 'day-view', () => dayBody()],
   ['To-do', 'tab-todo', 'todo-view', () => todoList()],
   ['Ideas', 'tab-ideas', 'ideas-view', () => ideaList()],
@@ -3419,7 +3489,7 @@ const PAGES = [
 function visiblePageButton() {
   for (const [buttonId, sectionId] of [
     ['tab-today', 'today-view'],
-    ['show-list', 'list-view'], ['show-month', 'calendar-view'], ['show-week', 'week-view'],
+    ['show-month', 'calendar-view'], ['show-week', 'week-view'],
     ['show-day', 'day-view'], ['tab-todo', 'todo-view'], ['tab-ideas', 'ideas-view'],
   ]) {
     if (!globalThis.document.getElementById(sectionId).hidden) return globalThis.document.getElementById(buttonId);
@@ -3508,11 +3578,11 @@ test('sweep U: after a Save, focus returns to a timed Day block\'s opener', asyn
 test('sweep U: Cancel returns focus to the opener too', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
-  seed([record({ id: 'sU-cancel', title: 'sU cancel me', date: '2099-02-02' })]);
+  seed([record({ id: 'sU-cancel', title: 'sU cancel me', date: far(0) })]);
   const restore = visiblePageButton();
   try {
-    click(globalThis.document.getElementById('show-list'));
-    click(openControlFor(itemList(), 'sU cancel me'));
+    dayOf(far(0));
+    click(openControlFor(dayOf(far(0)), 'sU cancel me'));
     globalThis.document.activeElement = null;
     closeSheet();
     assert.equal(globalThis.document.activeElement?.getAttribute('data-item-id'), 'sU-cancel');
@@ -3520,17 +3590,6 @@ test('sweep U: Cancel returns focus to the opener too', async () => {
     forceCloseSheet();
     if (restore) click(restore);
   }
-  seed([]);
-});
-
-// U10: the List row's text block takes the row's whole width, so a tap
-// anywhere on it (not only on the text) lands on the opener.
-test('sweep U: the List row\'s main block is the flexible one', async () => {
-  installFakeLocalStorage();
-  await import('../js/app.js');
-  seed([record({ id: 'sU-main', title: 'sU main block', date: '2099-02-03' })]);
-  const opener = openControlFor(itemList(), 'sU main block');
-  assert.ok(opener.parentNode._classes.has('list-main'));
   seed([]);
 });
 
@@ -3552,7 +3611,7 @@ for (const [label, url, linked] of [
       updatedAt: '2026-08-01T00:00:00.000Z',
     });
     try {
-      click(openControlFor(itemList(), 'Standup from the feed'));
+      click(openControlFor(dayOf(localISO(new Date())), 'Standup from the feed'));
       assert.ok(sheetHost().querySelector('.sheet'), 'fixture check: the sheet opened');
       const link = sheetHost().querySelector('.sheet-google');
       assert.equal(!!link, linked);
@@ -3591,11 +3650,11 @@ test('sweep U: index.html has a persistent #toast-live status region, and #toast
 test('sweep U: a delete announces its message in #toast-live, and it clears when resolved', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
-  seed([record({ id: 'sU-live', title: 'sU live one', date: '2099-02-04' })]);
+  seed([record({ id: 'sU-live', title: 'sU live one', date: far(0) })]);
   const live = globalThis.document.getElementById('toast-live');
   enableMockTimers(t, { apis: ['setTimeout'] });
   try {
-    click(deleteControlFor(itemList(), 'sU live one'));
+    click(deleteControlFor(dayOf(far(0)), 'sU live one'));
     assert.equal(live.textContent, 'Deleted "sU live one"');
     assert.ok(toastHost().querySelector('.toast-undo'), 'the Undo is in the visible toast');
     click(toastHost().querySelector('.toast-undo'));
@@ -3663,12 +3722,12 @@ test('sF: an Undo back across the idea line is refused when the idea text change
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
   seed([record({
-    id: 'sF-toidea', type: 'task', title: 'sF call Bob', date: '2099-08-02', time: '09:00', endTime: '10:00',
+    id: 'sF-toidea', type: 'task', title: 'sF call Bob', date: far(0), time: '09:00', endTime: '10:00',
   })]);
   enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
     clearMessage();
-    click(openControlFor(itemList(), 'sF call Bob'));
+    click(openControlFor(dayOf(far(0)), 'sF call Bob'));
     sheetHost().querySelector('.sheet-type').value = 'idea';
     click(sheetHost().querySelector('.sheet-save'));
     assert.equal(storedById('sF-toidea').type, 'idea', 'fixture check: the switch landed');
@@ -3734,11 +3793,11 @@ test('sF: an Undo whose rebuild would change a skipped field is refused', async 
 test('sF: an Undo keeps both times when a sync changed the end since', async (t) => {
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
-  seed([record({ id: 'sF-times', title: 'sF timed', date: '2099-08-03', time: '09:00', endTime: '10:00' })]);
+  seed([record({ id: 'sF-times', title: 'sF timed', date: far(0), time: '09:00', endTime: '10:00' })]);
   enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
     clearMessage();
-    click(openControlFor(itemList(), 'sF timed'));
+    click(openControlFor(dayOf(far(0)), 'sF timed'));
     sheetHost().querySelector('.sheet-time').value = '08:00';
     click(sheetHost().querySelector('.sheet-save'));
     applySyncedState(state({ items: [{ ...storedById('sF-times'), endTime: '11:00', updatedAt: S_AHEAD }] }));
@@ -3767,12 +3826,12 @@ test('sF: a filtered Undo that fails validation says it could not be undone', as
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
   seed([record({
-    id: 'sF-val', title: 'sF val', notes: 'n0', date: '2099-08-04', time: '09:00', endTime: '10:00',
+    id: 'sF-val', title: 'sF val', notes: 'n0', date: far(0), time: '09:00', endTime: '10:00',
   })]);
   enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
     clearMessage();
-    click(openControlFor(itemList(), 'sF val'));
+    click(openControlFor(dayOf(far(0)), 'sF val'));
     sheetHost().querySelector('.sheet-title').value = 'sF val mine';
     sheetHost().querySelector('.sheet-notes').value = 'n mine';
     click(sheetHost().querySelector('.sheet-save'));
@@ -4004,11 +4063,11 @@ test('sF: removing a calendar in Settings repaints the Updated stamp', async (t)
 test('sF: focus goes back to the opener without scrolling', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
-  seed([record({ id: 'sF-focus', title: 'sF focus me', date: '2099-08-05' })]);
+  seed([record({ id: 'sF-focus', title: 'sF focus me', date: far(0) })]);
   const restore = visiblePageButton();
   try {
-    click(globalThis.document.getElementById('show-list'));
-    click(openControlFor(itemList(), 'sF focus me'));
+    dayOf(far(0));
+    click(openControlFor(dayOf(far(0)), 'sF focus me'));
     globalThis.document.activeElement = null;
     globalThis.document.lastFocusOptions = undefined;
     closeSheet();
@@ -4027,20 +4086,20 @@ test('sF: focus goes back to the opener without scrolling', async () => {
 test('sF: the page stays locked while Settings or a sheet is open, whichever closes first', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
-  seed([record({ id: 'sF-lock', title: 'sF lock me', date: '2099-08-06' })]);
+  seed([record({ id: 'sF-lock', title: 'sF lock me', date: far(0) })]);
   const body = globalThis.document.body;
   const settingsBtn = globalThis.document.getElementById('settings-btn');
   const settingsHost = globalThis.document.getElementById('settings-host');
   if (settingsHost.childElementCount) click(settingsBtn); // left open by an earlier test
   const restore = visiblePageButton();
   try {
-    click(globalThis.document.getElementById('show-list'));
+    dayOf(far(0));
     body.style.overflow = '';
     for (const settingsFirst of [true, false]) {
       const label = settingsFirst ? 'Settings closed first' : 'sheet closed first';
       click(settingsBtn);
       assert.equal(body.style.overflow, 'hidden', `${label}: Settings locks the page`);
-      click(openControlFor(itemList(), 'sF lock me'));
+      click(openControlFor(dayOf(far(0)), 'sF lock me'));
       assert.equal(body.style.overflow, 'hidden', `${label}: both open`);
       if (settingsFirst) click(settingsBtn); else closeSheet();
       assert.equal(settingsHost.childElementCount === 0, settingsFirst, `fixture check (${label})`);
@@ -4602,11 +4661,11 @@ test('visible-only sync: a delete committed on backgrounding is pushed when the 
   await import('../js/app.js');
   await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
   clearAdoptionPending();
-  seed([record({ id: 'vis-del', title: 'Delete then background', date: '2099-05-06' })]);
+  seed([record({ id: 'vis-del', title: 'Delete then background', date: far(0) })]);
   const net = captureAccountRequests();
   const timers = installManualTimers();
   try {
-    click(deleteControlFor(itemList(), 'Delete then background'));
+    click(deleteControlFor(dayOf(far(0)), 'Delete then background'));
     assert.ok(toastHost().querySelector('.toast-undo'), 'fixture check: Undo is showing');
     setVisibility('hidden');
     resume();
@@ -4897,12 +4956,12 @@ test('cross-tab sync: a write from a tab that hid is pushed by the visible tab',
   await import('../js/app.js');
   await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
   clearAdoptionPending();
-  seed([record({ id: 'xtab-del', title: 'Delete in tab A', date: '2099-05-06' })]);
+  seed([record({ id: 'xtab-del', title: 'Delete in tab A', date: far(0) })]);
   const net = captureAccountRequests();
   const timers = installManualTimers();
   try {
     // Tab A: delete, then hide inside the debounce. Its push is skipped.
-    click(deleteControlFor(itemList(), 'Delete in tab A'));
+    click(deleteControlFor(dayOf(far(0)), 'Delete in tab A'));
     setVisibility('hidden');
     resume();
     assert.ok(tombstoned('xtab-del'), 'fixture check: backgrounding committed the delete');
@@ -5835,10 +5894,10 @@ function ancestorIdsIn(html, id) {
 }
 
 // Every page: each tab and Calendar segment from NAV, plus the Calendar tab
-// itself, which reopens the last segment used (List, the row just before it).
+// itself, which reopens the last segment used (Month, the row just before it).
 const SHELL_PAGES = NAV.flatMap(([control, section]) => {
   const row = [[`#${control}`, control, section]];
-  if (control === 'show-list') row.push(['#tab-calendar', 'tab-calendar', 'list-view']);
+  if (control === 'show-month') row.push(['#tab-calendar', 'tab-calendar', 'calendar-view']);
   return row;
 });
 
@@ -6303,7 +6362,7 @@ test('Today: a tick on a new day re-renders the page instead of counting down to
 // Home-screen stage 3c — the tab bar and Calendar's switcher (spec § 4)
 // =========================================================================
 
-test('tabs: the bar is Today | Calendar | To-do | Ideas, and Calendar\'s switcher is Day / Week / Month / List', () => {
+test('tabs: the bar is Today | Calendar | To-do | Ideas, and Calendar\'s switcher is Day / Week / Month', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
   const bar = html.match(/<nav class="tab-bar"[\s\S]*?<\/nav>/);
   assert.ok(bar, 'fixture check: index.html has the tab bar');
@@ -6313,10 +6372,21 @@ test('tabs: the bar is Today | Calendar | To-do | Ideas, and Calendar\'s switche
   const sw = html.match(/<div id="cal-switch"[\s\S]*?<\/div>/);
   assert.ok(sw, 'fixture check: index.html has the switcher');
   assert.deepEqual([...sw[0].matchAll(/<button id="([^"]+)"[^>]*>([^<]*)</g)].map((m) => [m[1], m[2]]), [
-    ['show-day', 'Day'], ['show-week', 'Week'], ['show-month', 'Month'], ['show-list', 'List'],
-  ], 'List stays (question 4); 3-day is hidden until it is built (question 5)');
+    ['show-day', 'Day'], ['show-week', 'Week'], ['show-month', 'Month'],
+  ], 'List is removed (stage 3d, Alex 2026-10-22); 3-day is hidden until it is built (question 5)');
   assert.doesNotMatch(html, /class="view-toggle"|id="show-(today|todo|ideas|3day)"|>3-day</i,
     'the six view buttons are gone, and no 3-day control exists');
+});
+
+// Stage 3d (Alex, 2026-10-22): "you can get rid of the list view". List is
+// removed, not kept as a fourth segment: no markup, no render, no view name.
+test('the List view is gone: no #list-view, #item-list or #show-list, and app.js has no List view', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  for (const id of ['list-view', 'item-list', 'show-list']) {
+    assert.doesNotMatch(html, new RegExp(`id="${id}"`), `index.html still has #${id}`);
+  }
+  const appSrc = readFileSync(new URL('../js/app.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(appSrc, /renderList|listView|showList|'list'/, 'app.js still has List code');
 });
 
 test('tabs: Calendar opens on the view last used there, Day by default', async () => {

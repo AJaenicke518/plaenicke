@@ -273,9 +273,10 @@ button.pressed { opacity: 0.7; }
 }
 .cal-switch button.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 
-/* ---------- list (shared with day view's "Other tasks") ---------- */
-#item-list, .day-other-list { list-style: none; padding: 0; margin: 0; }
-#item-list li, .day-other-list li {
+/* ---------- Day view's "Other tasks" list (it shared these rules with the
+   List view until stage 3d removed List) ---------- */
+.day-other-list { list-style: none; padding: 0; margin: 0; }
+.day-other-list li {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -284,16 +285,6 @@ button.pressed { opacity: 0.7; }
   border-radius: 6px;
   padding: 14px;
   margin-bottom: 10px;
-}
-#item-list li.empty { color: var(--muted); justify-content: center; }
-#item-list li.list-note {
-  color: var(--muted);
-  justify-content: center;
-  font-size: 0.8rem;
-  font-style: italic;
-  border-left: none;
-  background: transparent;
-  box-shadow: none;
 }
 button.delete { background: transparent; color: var(--danger); padding: 6px 10px; }
 /* Every item title is a button that opens the item sheet (edit-items 4a).
@@ -320,10 +311,6 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   min-height: 0; line-height: inherit; height: 100%;
   display: flex; align-items: flex-start; justify-content: flex-start;
 }
-/* The List row's text block takes all the width Delete leaves, so a tap
-   anywhere on the row's left part lands on the opener (sweep U10). */
-.list-main { flex: 1; min-width: 0; }
-.time-line { color: var(--muted); font-size: 0.8rem; font-style: italic; }
 
 /* ---------- Today (home-screen spec § 2.3, § 5) ---------- */
 /* Rows, not cards: full width, a 1px hairline, at least 44px. Classes only,
@@ -669,9 +656,7 @@ button[data-press].pressed { opacity: 1; }
 }
 .link-code-output { background: var(--bg); }
 
-/* ---------- tags & preview (restyled) ---------- */
-.tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
-.tag { font-size: 0.7rem; background: var(--chip-bg); color: var(--chip-ink); border-radius: 999px; padding: 1px 8px; }
+/* ---------- preview (restyled) ---------- */
 
 #preview { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 14px; margin-bottom: 16px; }
 /* Stacked per-item card: title full-width, then date/type/times wrapping below.
@@ -700,7 +685,7 @@ button[data-press].pressed { opacity: 1; }
    fixed type palette above. Falls back to --type-general if a site somehow
    omits the inline property, same as every other --type consumer. */
 .type-external  { --type: var(--feed-color, var(--type-general)); }
-#item-list li, .day-other-list li, #todo-list li, #idea-list li {
+.day-other-list li, #todo-list li, #idea-list li {
   border-left: 4px solid var(--type, var(--type-general));
 }
 
@@ -709,8 +694,8 @@ button[data-press].pressed { opacity: 1; }
    is the second token itemTypeClass returns, so every render site that
    colours an item gets this for free. */
 .done { opacity: 0.55; }
-#item-list li.done span, .day-other-list li.done span,
-#item-list li.done .item-open, .day-other-list li.done .item-open { text-decoration: line-through; }
+.day-other-list li.done span,
+.day-other-list li.done .item-open { text-decoration: line-through; }
 .cal-item.done, .week-block.done, .day-block.done, .day-pin.done { opacity: 0.5; }
 
 

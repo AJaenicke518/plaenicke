@@ -69,13 +69,12 @@
   <section id="preview" hidden></section>
 
   <!-- Calendar's switcher (spec § 4), shown on the Calendar tab only. List
-       stays (question 4); 3-day joins after Day once it is built
-       (question 5). -->
+       was removed in stage 3d (Alex, 2026-10-22); 3-day joins after Day
+       once it is built (question 5). -->
   <div id="cal-switch" class="cal-switch" role="group" aria-label="Calendar view" hidden>
     <button id="show-day" type="button" aria-pressed="false">Day</button>
     <button id="show-week" type="button" aria-pressed="false">Week</button>
     <button id="show-month" type="button" aria-pressed="false">Month</button>
-    <button id="show-list" type="button" aria-pressed="false">List</button>
   </div>
 
   <!-- Today (home-screen spec § 2): js/today.js decides what is on it and
@@ -89,10 +88,6 @@
       </div>
     </div>
     <div id="today-body"></div>
-  </section>
-
-  <section id="list-view" hidden>
-    <ul id="item-list"></ul>
   </section>
 
   <section id="calendar-view" hidden>

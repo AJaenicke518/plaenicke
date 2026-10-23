@@ -3632,6 +3632,8 @@ If anything fails, stop: the fix becomes a new task with its own failing test.
 
 ### Task 14: record that List stays
 
+> **Superseded 2026-10-22.** Alex was asked and decided to remove List: "you can get rid of the list view but what if i want to see something in the next month". It was removed on `home-screen-3c` (List-removal commit; spec § 8 "Stage 3d result"). The steps below are the original plan, kept for the record; do not run them.
+
 Nothing is removed (spec § 4: "it is not retired in any stage"; § 8 3d: "Nothing is removed unless he then decides to").
 
 **Files:**
