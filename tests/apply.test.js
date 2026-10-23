@@ -31,6 +31,7 @@ import { bytesToBase64url, TOKEN_BYTES, encryptBlob } from '../js/crypto.js';
 import { SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID, SLOW_WRITE_MS } from '../js/linkui.js';
 import { addDays, startOfWeek, weekLabel } from '../js/timegrid.js';
 import { formatDayLabel } from '../js/freshness.js';
+import { parseICS } from '../js/ics.js';
 
 // INTERVALS ARE RECORDED, NEVER SCHEDULED, in this file. app.js's Today tick
 // is a 60 s setInterval (home-screen spec § 2.3), armed while Today is shown,
@@ -2771,6 +2772,7 @@ test('sweep: records with a null or empty date do not crash the app, and no page
   const doc = globalThis.document;
   const pages = {
     Today: todayBody(), Day: dayOf(localISO(new Date())), Week: doc.getElementById('week-grid'),
+    'Week list': doc.getElementById('week-list'),
     Month: doc.getElementById('calendar-grid'), 'To-do': todoList(),
   };
   for (const [name, root] of Object.entries(pages)) {
@@ -6453,6 +6455,95 @@ test('Today: with nothing past the first week there is no "Show the next 30 days
   } finally {
     t.mock.timers.reset();
     seed([]);
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+// Stage 3 Commit 3 (Alex, 2026-10-22: "at the bottom of my week page for that
+// week i want to see events"; "leave out weekly classes and events"; B2): the
+// list under the Week grid. It is its own page, so a multi-day event that
+// covers today is listed on today, though Today shows it too (controller
+// ruling, 2026-10-22).
+const weekList = () => globalThis.document.getElementById('week-list');
+const WL_ICS = [
+  'BEGIN:VCALENDAR', 'VERSION:2.0',
+  'BEGIN:VEVENT', 'UID:wl-class', 'SUMMARY:wl Weekly class',
+  'DTSTART;TZID=America/Los_Angeles:20261001T080000', 'DTEND;TZID=America/Los_Angeles:20261001T091500',
+  'RRULE:FREQ=WEEKLY;BYDAY=TH,FR', 'END:VEVENT',
+  'BEGIN:VEVENT', 'UID:wl-quiz', 'SUMMARY:wl Quiz',
+  'DTSTART;TZID=America/Los_Angeles:20261023T105000', 'DTEND;TZID=America/Los_Angeles:20261023T113000', 'END:VEVENT',
+  'BEGIN:VEVENT', 'UID:wl-trip', 'SUMMARY:wl Trip',
+  'DTSTART;VALUE=DATE:20261021', 'DTEND;VALUE=DATE:20261024', 'END:VEVENT',
+  'BEGIN:VEVENT', 'UID:wl-party', 'SUMMARY:wl Party',
+  'DTSTART;TZID=America/Los_Angeles:20261031T190000', 'DTEND;TZID=America/Los_Angeles:20261031T220000', 'END:VEVENT',
+  'END:VCALENDAR',
+].join('\r\n');
+test('Week: the list under the grid has Friday\'s quiz but not the weekly class; → lists next week; a row opens its sheet', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 22, 9, 0).getTime() });
+  try {
+    seed([
+      record({ id: 'wl-pset', type: 'due', title: 'wl Problem set', date: '2026-10-23', time: '17:00' }),
+      record({ id: 'wl-done', type: 'task', title: 'wl Done task', date: '2026-10-23', done: true }),
+      record({ id: 'wl-idea', type: 'idea', title: 'wl An idea', date: '2026-10-23' }),
+      record({ id: 'wl-wed', type: 'event', title: 'wl Yesterday', date: '2026-10-21' }),
+    ]);
+    const { events, skipped } = parseICS(WL_ICS);
+    assert.equal(skipped.length, 0, 'fixture check: every VEVENT parsed');
+    seedFeedsWithCache([sdFeed('wl-feed')], { 'wl-feed': { fetchedAt: new Date().toISOString(), events, skipped: [] } });
+    click(doc.getElementById('show-week'));
+    assert.equal(labelText('week-label'), weekLabelFor('2026-10-18'), 'fixture check: the week of Thu Oct 22');
+    assert.match(allText(doc.getElementById('week-grid')), /Fri/, 'fixture check: the grid is still drawn');
+
+    const text = allText(weekList());
+    assert.match(text,
+      /^\s*Rest of this week\s+Thu\s+22\s+All day\s+wl Trip\s+Fri\s+23\s+10:50 AM\s+wl Quiz\s+5:00 PM\s+wl Problem set\s*$/);
+    assert.equal(allText(doc.getElementById('week-grid')).includes('wl'), false, 'fixture check: the grid draws no titles');
+    for (const gone of ['wl Weekly class', 'wl Done task', 'wl An idea', 'wl Yesterday', 'wl Party']) {
+      assert.ok(!text.includes(gone), `${gone} is not listed`);
+    }
+
+    click(openControlFor(weekList(), 'wl Quiz'));
+    assert.ok(sheetHost().querySelector('.sheet'), 'tapping a row opens its sheet');
+    assert.match(allText(sheetHost()), /wl Quiz/, 'and it is THIS item');
+    closeSheet();
+    assert.equal(doc.activeElement, openControlFor(weekList(), 'wl Quiz'), 'closing the sheet puts focus back on the row');
+
+    click(doc.getElementById('next-week'));
+    assert.match(allText(weekList()), /^\s*This week\s+Sat\s+31\s+7:00 PM\s+wl Party\s*$/, '→ lists next week');
+    click(doc.getElementById('prev-week'));
+    assert.match(allText(weekList()), /Rest of this week[\s\S]*wl Quiz/, '← lists this week again');
+
+    click(weekList().querySelector('.wlist-label'));
+    assert.equal(doc.getElementById('day-view').hidden, false, 'a day label opens Day view');
+    assert.equal(labelText('day-label'), 'Thu, Oct 22');
+  } finally {
+    forceCloseSheet();
+    unseedFeeds();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('Week: a week with nothing left to list says "Nothing else this week."', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 24, 9, 0).getTime() });
+  try {
+    seed([record({ id: 'wl-fri', type: 'event', title: 'wl Friday', date: '2026-10-23' })]);
+    click(globalThis.document.getElementById('show-week'));
+    assert.equal(labelText('week-label'), weekLabelFor('2026-10-18'), 'fixture check');
+    assert.match(allText(weekList()), /^\s*Rest of this week\s+Nothing else this week\.\s*$/);
+  } finally {
+    seed([]);
+    t.mock.timers.reset();
     if (restore) click(restore);
   }
   resume();

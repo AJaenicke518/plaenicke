@@ -539,8 +539,10 @@ for (const [sel, size] of Object.entries(CALENDAR_SIZES)) {
 // Stage 3b is the first consumer. Every rule that reads the scale belongs to
 // a new screen (its selectors all name one); Month, Week and Day never do.
 // The sheet's tag chips are the one other reader: Commit 1b asked for the
-// 13px label scale on them (the List's tags moved into the sheet).
-const NEW_SCREEN = /\.(today-|tab-|cal-switch|sheet-tags?(?![\w-]))/;
+// 13px label scale on them (the List's tags moved into the sheet). The Week
+// page's list (wlist-, stage 3 Commit 3) is a new screen under the grid; the
+// grid itself (week-) keeps its compact sizes.
+const NEW_SCREEN = /\.(today-|tab-|cal-switch|wlist-|sheet-tags?(?![\w-]))/;
 test('only the new screens read the new type scale', () => {
   const readers = [];
   for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
@@ -745,6 +747,61 @@ test('Coming up\'s button is full-width, quiet and at least 44px; "Show less" is
   assert.equal(declOf('.today-more', 'font-family'), 'var(--sans)');
   assert.equal(declOf('.today-more', 'font-size'), '15px');
   assert.equal(declOf('.today-more-after', 'margin-top'), 'var(--space-4)');
+});
+
+// --- stage 3 Commit 3: the Week page's list (B2, Alex 2026-10-22) ----------
+// The mockup's B2: the day in a 48px left column ("FRI" over a bold "23"),
+// rows beside it in Today's row style with the time leading in a fixed 64px
+// column, on one line. The day label is a real button, so it is reset off the
+// global accent chip and kept a 44px target.
+test('the Week list sits a gap under the grid; each day is a 48px column beside its rows', () => {
+  assert.equal(declOf('.wlist', 'margin-top'), 'var(--space-5)');
+  assert.equal(declOf('.wlist-day', 'display'), 'grid');
+  assert.equal(declOf('.wlist-day', 'grid-template-columns'), '48px minmax(0, 1fr)');
+  assert.equal(declOf('.wlist-day', 'border-top'), '1px solid var(--line)');
+});
+
+test('the Week list\'s day label is a quiet 44px button: a muted label over a bold day number', () => {
+  assert.equal(declOf('.wlist-label', 'background'), 'transparent');
+  assert.equal(declOf('.wlist-label', 'border'), 'none');
+  assert.equal(declOf('.wlist-label', 'border-radius'), '0');
+  assert.equal(declOf('.wlist-label', 'padding'), 'var(--space-3) 0 0');
+  assert.equal(declOf('.wlist-label', 'min-height'), '44px');
+  assert.equal(declOf('.wlist-label', 'align-self'), 'start');
+  assert.equal(declOf('.wlist-label', 'text-align'), 'left');
+  assert.equal(declOf('.wlist-label', 'font-family'), 'var(--sans)');
+  assert.equal(declOf('.wlist-label', 'font-size'), 'var(--text-label)');
+  assert.equal(declOf('.wlist-label', 'text-transform'), 'uppercase');
+  assert.equal(declOf('.wlist-label', 'letter-spacing'), 'var(--label-tracking)');
+  assert.equal(declOf('.wlist-label', 'color'), 'var(--muted)');
+  assert.equal(declOf('.wlist-label b', 'display'), 'block');
+  assert.equal(declOf('.wlist-label b', 'font-size'), 'var(--text-title)');
+  assert.equal(declOf('.wlist-label b', 'color'), 'var(--ink)');
+  assert.equal(declOf('.wlist-label b', 'line-height'), '1.1');
+  assert.equal(declOf('.wlist-label b', 'letter-spacing'), '0');
+});
+
+test('a Week list row stays on one line, its time leading in a 64px column', () => {
+  assert.equal(declOf('.wlist-open', 'flex-wrap'), 'nowrap');
+  assert.equal(declOf('.wlist-time', 'flex'), '0 0 64px');
+});
+
+test('every Week list colour is a token', () => {
+  let seen = 0;
+  for (const { sel, body } of rulesOf(css)) {
+    if (!/\.wlist/.test(sel)) continue;
+    for (const decl of body.split(';')) {
+      const i = decl.indexOf(':');
+      if (i < 0) continue;
+      const prop = decl.slice(0, i).trim();
+      const value = decl.slice(i + 1).trim();
+      if (!/^(color|background|border)/.test(prop) || value === 'transparent' || value === 'none' || value === '0') continue;
+      seen += 1;
+      assert.match(value, /var\(--/, `${sel.trim()} { ${prop}: ${value} }`);
+      assert.doesNotMatch(value, /#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i, `${sel.trim()} { ${prop}: ${value} }`);
+    }
+  }
+  assert.ok(seen >= 3, `fixture check: ${seen} colour declarations`);
 });
 
 // --- home-screen stage 3c: the tab bar and the switcher (spec § 4) ----------

@@ -15,6 +15,7 @@ import { startOfWeek, addDays, formatTime, weekLabel } from './timegrid.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
 import { renderDayView } from './dayview.js';
 import { renderWeekView } from './weekview.js';
+import { buildWeekList, renderWeekList } from './weeklist.js';
 import { renderPreview } from './preview.js';
 import { isVoiceSupported, dictate } from './voice.js';
 import { initSettings } from './settings.js';
@@ -58,6 +59,7 @@ const els = {
   weekView: document.getElementById('week-view'),
   weekLabel: document.getElementById('week-label'),
   weekGrid: document.getElementById('week-grid'),
+  weekList: document.getElementById('week-list'),
   prevWeek: document.getElementById('prev-week'),
   nextWeek: document.getElementById('next-week'),
   dayView: document.getElementById('day-view'),
@@ -128,7 +130,10 @@ function liveItems() { return items.filter((it) => !pendingDeletes.has(it.id)); 
 //
 // THE isScheduled FILTER IS THE SINGLE CHOKEPOINT for month, week and day
 // (V6 § 7.1), so one filter covers all three. (It also covered the List view,
-// which iterated visibleItems directly, until stage 3d removed List.)
+// which iterated visibleItems directly, until stage 3d removed List.) The
+// list under the Week grid does not read it: like Today, it takes
+// liveItems() through upcomingRows, whose own rule (isUpcomingOwn) also
+// rejects ideas.
 // Forgetting this is visible (an idea turns up on the calendar on its capture
 // day) rather than silently correct.
 //
@@ -665,7 +670,7 @@ function isGoogleHost(url) {
 // where the browser puts it.
 function focusOpener(id) {
   const pages = [
-    [els.todayView, els.todayBody], [els.dayView, els.dayBody],
+    [els.todayView, els.todayBody], [els.dayView, els.dayBody], [els.weekView, els.weekList],
     [els.todoView, els.todoList], [els.ideasView, els.ideaList],
   ];
   const shown = pages.find(([section]) => !section.hidden);
@@ -795,12 +800,20 @@ function renderCalendar() {
   }
 }
 
+// The grid, and under it the list of the week's days (B2, Alex 2026-10-22).
+// The list's own items come from liveItems(), like Today's: upcomingRows
+// (via buildWeekList) leaves out ideas and done items itself. Its instances
+// are expanded for exactly the days it lists. The arrows re-render both.
 function renderWeek() {
   const end = addDays(viewWeekStart, 6);
+  const todayISO = toISO(new Date());
   els.weekLabel.textContent = weekLabel(viewWeekStart, end);
   renderWeekView(els.weekGrid, viewWeekStart,
-    groupItemsByDate(sortItemsByDate(visibleItems(viewWeekStart, end))), toISO(new Date()),
+    groupItemsByDate(sortItemsByDate(visibleItems(viewWeekStart, end))), todayISO,
     { onSelectDay: openDay });
+  const list = buildWeekList(liveItems(),
+    (from, to) => instancesForRange(feeds, feedCache, from, to, deviceTz), viewWeekStart, todayISO);
+  renderWeekList(els.weekList, list, { onOpen: openItem, onSelectDay: openDay });
 }
 
 let lastDayRendered = null;

@@ -401,6 +401,34 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   font-size: 15px;
 }
 .today-more-after { margin-top: var(--space-4); }
+/* The Week page's list under the grid (B2, Alex 2026-10-22; js/weeklist.js):
+   each day a 48px left column ("FRI" over a bold "23") beside its rows,
+   which are Today's rows with the time leading in a fixed column, on one
+   line. The day label is a button (it opens that day), reset off the global
+   accent chip and kept a 44px target. Classes only, never #week-list. */
+.wlist { margin-top: var(--space-5); }
+.wlist-day {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  border-top: 1px solid var(--line);
+}
+.wlist-label {
+  align-self: start;
+  min-height: 44px;
+  padding: var(--space-3) 0 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  text-align: left;
+  font-family: var(--sans);
+  font-size: var(--text-label);
+  letter-spacing: var(--label-tracking);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.wlist-label b { display: block; font-size: var(--text-title); color: var(--ink); line-height: 1.1; letter-spacing: 0; }
+.wlist-open { flex-wrap: nowrap; }
+.wlist-time { flex: 0 0 64px; }
 /* A pressed row is tinted (--chip-bg, above), not dimmed like a button. */
 button[data-press].pressed { opacity: 1; }
 
