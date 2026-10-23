@@ -11,10 +11,11 @@ import { renderTodoView } from './todoview.js';
 import { renderIdeasView } from './ideasview.js';
 import { toISO, nowISO } from './dateparse.js';
 import { buildMonthGrid, groupItemsByDate, monthCellSummary, chronoFirst, itemTypeClass } from './calendar.js';
-import { startOfWeek, addDays, formatTime, formatTimeRange, weekLabel } from './timegrid.js';
+import { startOfWeek, addDays, formatTime, weekLabel } from './timegrid.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
 import { renderDayView } from './dayview.js';
 import { renderWeekView } from './weekview.js';
+import { buildWeekList, renderWeekList } from './weeklist.js';
 import { renderPreview } from './preview.js';
 import { isVoiceSupported, dictate } from './voice.js';
 import { initSettings } from './settings.js';
@@ -42,8 +43,6 @@ const els = {
   add: document.getElementById('add-btn'),
   message: document.getElementById('message'),
   preview: document.getElementById('preview'),
-  listView: document.getElementById('list-view'),
-  list: document.getElementById('item-list'),
   calView: document.getElementById('calendar-view'),
   prev: document.getElementById('prev-month'),
   next: document.getElementById('next-month'),
@@ -54,13 +53,13 @@ const els = {
   sheetHost: document.getElementById('sheet-host'),
   toastHost: document.getElementById('toast-host'),
   toastLive: document.getElementById('toast-live'),
-  showList: document.getElementById('show-list'),
   showMonth: document.getElementById('show-month'),
   showWeek: document.getElementById('show-week'),
   showDay: document.getElementById('show-day'),
   weekView: document.getElementById('week-view'),
   weekLabel: document.getElementById('week-label'),
   weekGrid: document.getElementById('week-grid'),
+  weekList: document.getElementById('week-list'),
   prevWeek: document.getElementById('prev-week'),
   nextWeek: document.getElementById('next-week'),
   dayView: document.getElementById('day-view'),
@@ -69,8 +68,6 @@ const els = {
   prevDay: document.getElementById('prev-day'),
   nextDay: document.getElementById('next-day'),
   // V6 — the To-do and Ideas pages.
-  showTodo: document.getElementById('show-todo'),
-  showIdeas: document.getElementById('show-ideas'),
   todoView: document.getElementById('todo-view'),
   todoList: document.getElementById('todo-list'),
   ideasView: document.getElementById('ideas-view'),
@@ -79,10 +76,16 @@ const els = {
   ideaAdd: document.getElementById('idea-add'),
   updatedStamp: document.getElementById('updated-stamp'),
   // Home-screen stage 3b — the Today page.
-  showToday: document.getElementById('show-today'),
   todayView: document.getElementById('today-view'),
   todayBody: document.getElementById('today-body'),
   todayDate: document.getElementById('today-date'),
+  // Home-screen stage 3c — the tab bar, the tab title and Calendar's switcher.
+  tabToday: document.getElementById('tab-today'),
+  tabCalendar: document.getElementById('tab-calendar'),
+  tabTodo: document.getElementById('tab-todo'),
+  tabIdeas: document.getElementById('tab-ideas'),
+  tabTitle: document.getElementById('tab-title'),
+  calSwitch: document.getElementById('cal-switch'),
 };
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
@@ -105,7 +108,6 @@ let lastToday = viewDay;
 // the app is resumed rather than reloaded must not keep placing feed events
 // in the zone it was opened in.
 let deviceTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-const LIST_EXTERNAL_HORIZON_DAYS = 366;
 let feeds = loadFeeds();
 let feedCache = loadFeedCache();
 // Calendars whose latest fetch failed, by id, for the "Updated" stamp (see
@@ -126,12 +128,14 @@ function liveItems() { return items.filter((it) => !pendingDeletes.has(it.id)); 
 // [start, end]. Own items are never range-limited here — only the caller's
 // choice of [start, end] bounds how far external instances are expanded.
 //
-// THE isScheduled FILTER IS THE SINGLE CHOKEPOINT for list, month, week and
-// day (V6 § 7.1), so one filter covers all four. It has to be here and not in
-// groupItemsByDate: renderList calls sortItemsByDate(visibleItems(...))
-// DIRECTLY and iterates the result — groupItemsByDate is never involved on the
-// default view. Forgetting this is visible (an idea turns up on the calendar
-// on its capture day) rather than silently correct.
+// THE isScheduled FILTER IS THE SINGLE CHOKEPOINT for month, week and day
+// (V6 § 7.1), so one filter covers all three. (It also covered the List view,
+// which iterated visibleItems directly, until stage 3d removed List.) The
+// list under the Week grid does not read it: like Today, it takes
+// liveItems() through upcomingRows, whose own rule (isUpcomingOwn) also
+// rejects ideas.
+// Forgetting this is visible (an idea turns up on the calendar on its capture
+// day) rather than silently correct.
 //
 // External feed instances carry no `type`, so isScheduled passes them through
 // — by design, not by accident: a feed event is always a scheduled thing.
@@ -661,12 +665,12 @@ function isGoogleHost(url) {
 // Save or a Delete has re-rendered every page by now, so the button that was
 // tapped is gone: the NEW one is found by item id, on the page that is
 // showing (every page renders every item's opener, hidden pages included).
-// Month and Week have no openers. An item that is no longer listed — deleted,
+// Month has no openers; Week's openers are in its list (the grid has none). An item that is no longer listed — deleted,
 // or moved off the Day being shown — has none to return to, and focus is left
 // where the browser puts it.
 function focusOpener(id) {
   const pages = [
-    [els.todayView, els.todayBody], [els.listView, els.list], [els.dayView, els.dayBody],
+    [els.todayView, els.todayBody], [els.dayView, els.dayBody], [els.weekView, els.weekList],
     [els.todoView, els.todoList], [els.ideasView, els.ideaList],
   ];
   const shown = pages.find(([section]) => !section.hidden);
@@ -738,77 +742,6 @@ function handleIdeaAdd() {
   setMessage('Kept.');
 }
 
-function tagChips(it) {
-  const wrap = document.createElement('div');
-  wrap.className = 'tags';
-  for (const val of [it.project, it.subject, it.category]) {
-    if (val) { const s = document.createElement('span'); s.className = 'tag'; s.textContent = val; wrap.appendChild(s); }
-  }
-  return wrap;
-}
-
-function renderList() {
-  // External horizon: today -> today+366d. Own items beyond it still render
-  // (visibleItems never range-limits `items`) — only the external instances
-  // fetched here are bounded, per the design doc's list-view horizon.
-  const todayISO = toISO(new Date());
-  const horizonISO = addDays(todayISO, LIST_EXTERNAL_HORIZON_DAYS);
-  const sorted = sortItemsByDate(visibleItems(todayISO, horizonISO));
-  els.list.innerHTML = '';
-  if (sorted.length === 0) {
-    const li = document.createElement('li');
-    li.className = 'empty';
-    li.textContent = 'Nothing yet. Add something above.';
-    els.list.appendChild(li);
-  } else {
-    for (const it of sorted) {
-      const li = document.createElement('li');
-      // className, NOT classList.add: itemTypeClass can return two tokens
-      // ('type-task done') and classList.add throws on a token with a space.
-      li.className = itemTypeClass(it);
-      if (it.external) li.style.setProperty('--feed-color', it.feedColor);
-      const main = document.createElement('div');
-      // flex: 1 (styles.css), so the whole row width is the opener's, not
-      // only its text (sweep U10).
-      main.className = 'list-main';
-      // The title opens the item. Delete is appended to the <li> below, a
-      // SIBLING of `main` — never inside anything with a click handler, so a
-      // tap on Delete cannot also open the sheet.
-      const open = document.createElement('button');
-      open.type = 'button';
-      open.className = 'item-open';
-      open.setAttribute('data-item-id', it.id);
-      open.textContent = `${formatDayLabel(it.date, todayISO)} — ${it.title}`;
-      open.addEventListener('click', () => openItem(it));
-      main.appendChild(open);
-      if (it.time) {
-        const t = document.createElement('div');
-        t.className = 'time-line';
-        t.textContent = it.endTime ? formatTimeRange(it.time, it.endTime) : formatTime(it.time);
-        main.appendChild(t);
-      }
-      main.appendChild(tagChips(it));
-      li.appendChild(main);
-      // External items aren't deletable from the planner — there's nothing
-      // in `items` to remove, and the feed will just resupply them anyway.
-      if (!it.external) {
-        const del = document.createElement('button');
-        del.className = 'delete';
-        del.textContent = 'Delete';
-        del.addEventListener('click', () => requestDelete(it.id));
-        li.appendChild(del);
-      }
-      els.list.appendChild(li);
-    }
-  }
-  if (feeds.some((f) => !f.hidden)) {
-    const note = document.createElement('li');
-    note.className = 'list-note';
-    note.textContent = `external calendars shown through ${formatDayLabel(horizonISO, todayISO)}`;
-    els.list.appendChild(note);
-  }
-}
-
 function renderCalendar() {
   const year = viewMonth.getFullYear();
   const month = viewMonth.getMonth();
@@ -867,12 +800,23 @@ function renderCalendar() {
   }
 }
 
+// The grid, and under it the list of the week's days (B2, Alex 2026-10-22).
+// The list's own items come from liveItems(), like Today's: upcomingRows
+// (via buildWeekList) leaves out ideas and done items itself. Its instances
+// are expanded for exactly the days it lists. The arrows re-render both.
 function renderWeek() {
   const end = addDays(viewWeekStart, 6);
+  const todayISO = toISO(new Date());
   els.weekLabel.textContent = weekLabel(viewWeekStart, end);
+  // One expansion for the whole week: the grid merges it with the own items
+  // (as visibleItems does) and the list takes the slice it lists.
+  const weekInsts = instancesForRange(feeds, feedCache, viewWeekStart, end, deviceTz);
   renderWeekView(els.weekGrid, viewWeekStart,
-    groupItemsByDate(sortItemsByDate(visibleItems(viewWeekStart, end))), toISO(new Date()),
+    groupItemsByDate(sortItemsByDate([...liveItems().filter(isScheduled), ...weekInsts])), todayISO,
     { onSelectDay: openDay });
+  const list = buildWeekList(liveItems(),
+    (from, to) => weekInsts.filter((i) => i.date >= from && i.date <= to), viewWeekStart, todayISO);
+  renderWeekList(els.weekList, list, { onOpen: openItem, onSelectDay: openDay });
 }
 
 let lastDayRendered = null;
@@ -910,13 +854,20 @@ function renderIdeas() {
 
 // The Today page (home-screen spec § 2.3). Own items come from liveItems(),
 // so a delete waiting for its Undo is already gone; feed instances are
-// expanded for today .. today + 7, and the 30-day look-ahead for the "Next"
-// line only when buildToday asks for it. One clock reading for the whole page.
+// expanded for today .. today + 7, and the 30-day look-ahead (today + 1 ..
+// today + 30) for Coming up and the "Next" line, which buildToday calls once
+// per render. One clock reading for the whole page.
 //
 // todayRelative is the one "in N" label on the page and its event, kept for
 // the 60 s tick below; todayRenderedFor is the day that render was for.
+//
+// laterOpen is whether Coming up ("Show the next 30 days", A2, Alex
+// 2026-10-22) is open. Module state, never stored: closed on each app load,
+// kept across re-renders (the 60 s tick's new-day render, syncs, taps), and
+// closed again when a render is for a new day.
 let todayRelative = null;
 let todayRenderedFor = null;
+let laterOpen = false;
 const minutesNow = (d) => d.getHours() * 60 + d.getMinutes();
 
 function renderToday() {
@@ -930,8 +881,27 @@ function renderToday() {
     minutesNow(now),
     () => instancesForRange(feeds, feedCache, addDays(todayISO, 1), addDays(todayISO, LOOKAHEAD_DAYS), deviceTz),
   );
+  if (todayISO !== todayRenderedFor) laterOpen = false;
   todayRenderedFor = todayISO;
-  todayRelative = renderTodayView(els.todayBody, today, { onOpen: openItem, onToggleDone: toggleDoneKeepingFocus(els.todayBody, 'today-row') }).relative;
+  todayRelative = renderTodayView(els.todayBody, today, {
+    onOpen: openItem, onToggleDone: toggleDoneKeepingFocus(els.todayBody, 'today-row'),
+    laterOpen, onToggleLater: toggleLater,
+  }).relative;
+}
+
+// The tap opens or closes Coming up, then redraws Today only. The button is
+// rebuilt ("Show less" at the bottom, or the closed one), so focus moves to
+// the new one rather than being lost; preventScroll keeps the page still.
+//
+// A tap after midnight and before the 60 s tick is on a stale page: render()
+// first (it resets the page, and laterOpen, for the new day), so the tap then
+// opens the new day's section instead of being swallowed by that reset.
+function toggleLater() {
+  if (toISO(new Date()) !== todayRenderedFor) render();
+  laterOpen = !laterOpen;
+  renderToday();
+  const more = els.todayBody.querySelector('.today-more');
+  if (more) more.focus({ preventScroll: true });
 }
 
 // THE 60 s TICK (spec § 2.3) updates that one text node and never rebuilds
@@ -994,25 +964,46 @@ function syncTodayTick() {
 // resume. It returns at once when the day has not changed.
 function render() {
   refreshForToday();
-  renderToday(); renderList(); renderCalendar(); renderWeek(); renderDay(); renderTodos(); renderIdeas();
+  renderToday(); renderCalendar(); renderWeek(); renderDay(); renderTodos(); renderIdeas();
 }
+
+// The tab bar (home-screen spec § 4): Today | Calendar | To-do | Ideas.
+// Calendar holds three views, chosen by its switcher, and opens on the one
+// last used there (Day until another is picked; this session only). List was
+// a fourth until stage 3d (Alex, 2026-10-22: "you can get rid of the list
+// view").
+const CALENDAR_VIEWS = ['day', 'week', 'month'];
+const TAB_TITLES = { today: 'Today', calendar: 'Calendar', todo: 'To-do', ideas: 'Ideas' };
+let lastCalendarView = 'day';
 
 function showView(which) {
   const views = {
-    today: els.todayView, list: els.listView, month: els.calView, week: els.weekView, day: els.dayView,
+    today: els.todayView, month: els.calView, week: els.weekView, day: els.dayView,
     todo: els.todoView, ideas: els.ideasView,
   };
-  const buttons = {
-    today: els.showToday, list: els.showList, month: els.showMonth, week: els.showWeek, day: els.showDay,
-    todo: els.showTodo, ideas: els.showIdeas,
-  };
+  const tabs = { today: els.tabToday, calendar: els.tabCalendar, todo: els.tabTodo, ideas: els.tabIdeas };
+  const segments = { day: els.showDay, week: els.showWeek, month: els.showMonth };
+  const tab = CALENDAR_VIEWS.includes(which) ? 'calendar' : which;
+  if (tab === 'calendar') lastCalendarView = which;
   for (const [name, el] of Object.entries(views)) el.hidden = name !== which;
-  // aria-pressed says which page is showing to assistive tech, which does not
-  // read the class. index.html carries the load-time values.
-  for (const [name, b] of Object.entries(buttons)) {
+  // The markup says which page is showing to assistive tech, which does not
+  // read the class; index.html carries the load-time values. A tab is
+  // navigation: the showing one is aria-current="page" and the others carry
+  // nothing (final fixes 2, D1). Calendar's segments are toggles: aria-pressed.
+  for (const [name, b] of Object.entries(tabs)) {
+    b.classList.toggle('active', name === tab);
+    if (name === tab) b.setAttribute('aria-current', 'page');
+    else b.removeAttribute('aria-current');
+  }
+  for (const [name, b] of Object.entries(segments)) {
     b.classList.toggle('active', name === which);
     b.setAttribute('aria-pressed', String(name === which));
   }
+  els.calSwitch.hidden = tab !== 'calendar';
+  // Out of sight on Today, never out of the accessibility tree (final review
+  // B3); the header keeps its height either way (styles.css).
+  els.tabTitle.textContent = TAB_TITLES[tab];
+  els.tabTitle.classList.toggle('visually-hidden', tab === 'today');
   render();
   syncTodayTick();
 }
@@ -1033,13 +1024,13 @@ function openDay(dateISO) {
 els.time.addEventListener('input', () => { els.end.hidden = !els.time.value; if (!els.time.value) els.end.value = ''; });
 els.add.addEventListener('click', handleAdd);
 els.text.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleAdd(); });
-els.showToday.addEventListener('click', () => showView('today'));
-els.showList.addEventListener('click', () => showView('list'));
+els.tabToday.addEventListener('click', () => showView('today'));
+els.tabCalendar.addEventListener('click', () => showView(lastCalendarView));
+els.tabTodo.addEventListener('click', () => showView('todo'));
+els.tabIdeas.addEventListener('click', () => showView('ideas'));
 els.showMonth.addEventListener('click', () => showView('month'));
 els.showWeek.addEventListener('click', () => showView('week'));
 els.showDay.addEventListener('click', () => showView('day'));
-els.showTodo.addEventListener('click', () => showView('todo'));
-els.showIdeas.addEventListener('click', () => showView('ideas'));
 els.ideaAdd.addEventListener('click', handleIdeaAdd);
 // An arrow steps from what is ON SCREEN (batch-F review, Important 1). It
 // remembers the cursor the user can see, lets refreshForToday catch the OTHER

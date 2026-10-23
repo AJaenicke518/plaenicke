@@ -64,6 +64,8 @@ export class FakeElement {
 
   getAttribute(name) { return Object.prototype.hasOwnProperty.call(this._attrs, name) ? this._attrs[name] : null; }
 
+  removeAttribute(name) { delete this._attrs[name]; }
+
   addEventListener(type, fn) { (this._listeners[type] ||= []).push(fn); }
 
   removeEventListener(type, fn) {

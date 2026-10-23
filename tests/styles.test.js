@@ -265,8 +265,12 @@ test('the sheet top bar is sticky, so Save stays reachable while the form scroll
 // .toast is position: fixed at the bottom. Without room under the content,
 // the final list row — often the very item whose delete it offers to undo —
 // sits under it with no way to scroll it clear.
-test('body leaves room at the bottom for the toast', () => {
-  assert.equal(declOf('body', 'padding-bottom'), 'calc(96px + env(safe-area-inset-bottom))');
+// Home-screen stage 3c (spec § 4): the bar (56px), the capture button's row
+// (72px, stage 4) and the home indicator. Final review B2: computed from
+// styles.css, the toast's top is 130-134px up, so it can still cover the
+// last 2-6px of the last row (see the comment on body's padding-bottom).
+test('body leaves room at the bottom for the tab bar, the capture button and the toast', () => {
+  assert.equal(declOf('body', 'padding-bottom'), 'calc(56px + 72px + env(safe-area-inset-bottom))');
 });
 
 // --- Task 4a review O1, O2, O3 ----------------------------------------------
@@ -351,10 +355,12 @@ test('in a Day block the open button\'s content is top-left', () => {
   }
 });
 
-// U10
-test('the List row\'s main block takes the free width', () => {
-  assert.equal(declOf('.list-main', 'flex'), '1');
-  assert.equal(declOf('.list-main', 'min-width'), '0');
+// Stage 3d removed the List view; its own selectors go with it. The
+// Day page's "Other tasks" list keeps the row styling it shared.
+test('no List-only selectors are left', () => {
+  // .time-line and .tags/.tag were drawn only by the List's renderList.
+  assert.doesNotMatch(css, /#item-list|\.list-main|\.list-note|\.time-line|\.tags?\b/);
+  assert.ok(declOf('.day-other-list', 'list-style'), 'fixture check: the shared list styling stays for Day');
 });
 
 // U12: the own-item heading sits in the top bar, between Cancel and Save.
@@ -532,7 +538,11 @@ for (const [sel, size] of Object.entries(CALENDAR_SIZES)) {
 
 // Stage 3b is the first consumer. Every rule that reads the scale belongs to
 // a new screen (its selectors all name one); Month, Week and Day never do.
-const NEW_SCREEN = /\.today-/;
+// The sheet's tag chips are the one other reader: Commit 1b asked for the
+// 13px label scale on them (the List's tags moved into the sheet). The Week
+// page's list (wlist-, stage 3 Commit 3) is a new screen under the grid; the
+// grid itself (week-) keeps its compact sizes.
+const NEW_SCREEN = /\.(today-|tab-|cal-switch|wlist-|sheet-tags?(?![\w-]))/;
 test('only the new screens read the new type scale', () => {
   const readers = [];
   for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
@@ -723,4 +733,172 @@ test('every Today colour is a theme token, so dark mode follows', () => {
     }
   }
   assert.ok(seen >= 8, `fixture check: ${seen} colour declarations`);
+});
+
+// Stage 3 Commit 2 (Alex, 2026-10-22: "i like A2"): Coming up's button is the
+// mockup's quiet full-width one — card ground, accent text, a hairline — at
+// least 44px tall; open, "Show less" sits a gap below the last day.
+test('Coming up\'s button is full-width, quiet and at least 44px; "Show less" is spaced off the list', () => {
+  assert.equal(declOf('.today-more', 'width'), '100%');
+  assert.equal(declOf('.today-more', 'min-height'), '44px');
+  assert.equal(declOf('.today-more', 'background'), 'var(--card)');
+  assert.equal(declOf('.today-more', 'color'), 'var(--accent)');
+  assert.equal(declOf('.today-more', 'border'), '1px solid var(--line)');
+  assert.equal(declOf('.today-more', 'font-family'), 'var(--sans)');
+  assert.equal(declOf('.today-more', 'font-size'), '15px');
+  assert.equal(declOf('.today-more-after', 'margin-top'), 'var(--space-4)');
+});
+
+// --- stage 3 Commit 3: the Week page's list (B2, Alex 2026-10-22) ----------
+// The mockup's B2: the day in a 48px left column ("FRI" over a bold "23"),
+// rows beside it in Today's row style with the time leading in a fixed 64px
+// column, on one line. The day label is a real button, so it is reset off the
+// global accent chip and kept a 44px target.
+test('the Week list sits a gap under the grid; each day is a 48px column beside its rows', () => {
+  assert.equal(declOf('.wlist', 'margin-top'), 'var(--space-5)');
+  assert.equal(declOf('.wlist-day', 'display'), 'grid');
+  assert.equal(declOf('.wlist-day', 'grid-template-columns'), '48px minmax(0, 1fr)');
+  assert.equal(declOf('.wlist-day', 'border-top'), '1px solid var(--line)');
+});
+
+test('the Week list\'s day label is a quiet 44px button: a muted label over a bold day number', () => {
+  assert.equal(declOf('.wlist-label', 'background'), 'transparent');
+  assert.equal(declOf('.wlist-label', 'border'), 'none');
+  assert.equal(declOf('.wlist-label', 'border-radius'), '0');
+  assert.equal(declOf('.wlist-label', 'padding'), 'var(--space-3) 0 0');
+  assert.equal(declOf('.wlist-label', 'min-height'), '44px');
+  assert.equal(declOf('.wlist-label', 'align-self'), 'start');
+  assert.equal(declOf('.wlist-label', 'text-align'), 'left');
+  assert.equal(declOf('.wlist-label', 'font-family'), 'var(--sans)');
+  assert.equal(declOf('.wlist-label', 'font-size'), 'var(--text-label)');
+  assert.equal(declOf('.wlist-label', 'text-transform'), 'uppercase');
+  assert.equal(declOf('.wlist-label', 'letter-spacing'), 'var(--label-tracking)');
+  assert.equal(declOf('.wlist-label', 'color'), 'var(--muted)');
+  assert.equal(declOf('.wlist-label b', 'display'), 'block');
+  assert.equal(declOf('.wlist-label b', 'font-size'), 'var(--text-title)');
+  assert.equal(declOf('.wlist-label b', 'color'), 'var(--ink)');
+  assert.equal(declOf('.wlist-label b', 'line-height'), '1.1');
+  assert.equal(declOf('.wlist-label b', 'letter-spacing'), '0');
+});
+
+test('a Week list row stays on one line, its time leading in a 64px column', () => {
+  assert.equal(declOf('.wlist-open', 'flex-wrap'), 'nowrap');
+  assert.equal(declOf('.wlist-time', 'flex'), '0 0 64px');
+});
+
+test('every Week list colour is a token', () => {
+  let seen = 0;
+  for (const { sel, body } of rulesOf(css)) {
+    if (!/\.wlist/.test(sel)) continue;
+    for (const decl of body.split(';')) {
+      const i = decl.indexOf(':');
+      if (i < 0) continue;
+      const prop = decl.slice(0, i).trim();
+      const value = decl.slice(i + 1).trim();
+      if (!/^(color|background|border)/.test(prop) || value === 'transparent' || value === 'none' || value === '0') continue;
+      seen += 1;
+      assert.match(value, /var\(--/, `${sel.trim()} { ${prop}: ${value} }`);
+      assert.doesNotMatch(value, /#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i, `${sel.trim()} { ${prop}: ${value} }`);
+    }
+  }
+  assert.ok(seen >= 3, `fixture check: ${seen} colour declarations`);
+});
+
+// --- home-screen stage 3c: the tab bar and the switcher (spec § 4) ----------
+test('the tab bar is fixed at the bottom, 56px plus the home-indicator inset', () => {
+  assert.equal(declOf('.tab-bar', 'position'), 'fixed');
+  assert.equal(declOf('.tab-bar', 'bottom'), '0');
+  assert.equal(declOf('.tab-bar', 'left'), '0');
+  assert.equal(declOf('.tab-bar', 'right'), '0');
+  assert.equal(declOf('.tab-bar', 'height'), 'calc(56px + env(safe-area-inset-bottom))');
+  assert.equal(declOf('.tab-bar', 'padding-bottom'), 'env(safe-area-inset-bottom)');
+  assert.equal(declOf('.tab-bar', 'background'), 'var(--card)');
+  assert.equal(declOf('.tab-bar', 'border-top'), '1px solid var(--line)');
+});
+
+test('layers: tab bar 5 < settings 10 < item sheet 15 < toast 20 (spec § 4)', () => {
+  assert.equal(zIndexOf('.tab-bar'), 5);
+  assert.equal(zIndexOf('.settings-backdrop'), 10);
+  assert.equal(zIndexOf('.sheet-backdrop'), 15);
+  assert.equal(zIndexOf('.toast'), 20);
+});
+
+test('the toast sits above the tab bar and clears the capture button\'s corner', () => {
+  assert.equal(declOf('.toast', 'bottom'), 'calc(56px + 12px + env(safe-area-inset-bottom))');
+  assert.equal(declOf('.toast', 'right'), '88px');
+  assert.equal(declOf('.toast', 'left'), '16px');
+});
+
+test('a tab is a 44px target; the active one is in the accent', () => {
+  assert.ok(px(declOf('.tab-bar button', 'min-height')) >= 44);
+  assert.equal(declOf('.tab-bar button', 'font-size'), 'var(--text-label)');
+  assert.equal(declOf('.tab-bar button.active', 'color'), 'var(--accent)');
+});
+
+test('the tab title is 20px; Today\'s own heading stays 28px', () => {
+  assert.equal(declOf('.tab-title', 'font-size'), 'var(--text-title)');
+  assert.equal(declOf(':root', '--text-title'), '20px', 'fixture check');
+  assert.equal(declOf('.today-title', 'font-size'), 'var(--text-hero)');
+});
+
+// Final review B1: the switcher's buttons were ~37.5px tall. Height only:
+// each stays flex: 1 with the same side padding, so the four still share the
+// row's width as before.
+test('Calendar\'s switcher buttons are at least 44px tall, and still share the row equally', () => {
+  assert.ok(px(declOf('.cal-switch button', 'min-height')) >= 44);
+  assert.equal(declOf('.cal-switch button', 'flex'), '1');
+  assert.equal(declOf('.cal-switch button', 'padding-left'), '4px');
+  assert.equal(declOf('.cal-switch button', 'padding-right'), '4px');
+});
+
+// Final review B2: a long toast message pushed Undo off the toast and grew it
+// without bound. The message wraps anywhere and stops at two lines; Undo
+// never shrinks.
+test('a toast message wraps and stops at two lines; Undo keeps its size', () => {
+  assert.equal(declOf('.toast span', 'min-width'), '0');
+  assert.equal(declOf('.toast span', 'overflow-wrap'), 'anywhere');
+  assert.equal(declOf('.toast span', 'display'), '-webkit-box');
+  assert.equal(declOf('.toast span', '-webkit-line-clamp'), '2');
+  assert.equal(declOf('.toast span', '-webkit-box-orient'), 'vertical');
+  assert.equal(declOf('.toast span', 'overflow'), 'hidden');
+  assert.equal(declOf('.toast-undo', 'flex-shrink'), '0');
+});
+
+// Final review B3: on Today the tab title is visually hidden, not removed,
+// so the header would lose its height and the add box would jump by it. The
+// header keeps the height the title gives it on every other tab: one line of
+// --text-title at the body's line-height, plus the h1's 16px margins.
+test('the header keeps the tab title\'s height on every tab', () => {
+  assert.equal(declOf(':root', '--text-title'), '20px', 'fixture check');
+  assert.equal(lineHeightOf('body'), 1.5, 'fixture check');
+  assert.equal(declOf('header h1', 'margin-top'), '16px', 'fixture check');
+  assert.equal(declOf('header h1', 'margin-bottom'), '16px', 'fixture check');
+  assert.equal(declOf('header', 'min-height'), `${20 * 1.5 + 16 + 16}px`);
+});
+
+// .cal-switch sets display: flex, which beats the `hidden` attribute's
+// display: none. Without this rule the switcher would show on every tab.
+test('a hidden switcher is not displayed', () => {
+  assert.equal(declOf('.cal-switch', 'display'), 'flex', 'fixture check');
+  assert.equal(declOf('.cal-switch[hidden]', 'display'), 'none');
+});
+
+test('the six-button view toggle is gone from the stylesheet', () => {
+  assert.equal(ruleExists('.view-toggle'), false);
+  assert.equal(ruleExists('.view-toggle button'), false);
+});
+
+// --- stage 3d follow-up: item tags in the details sheet ---------------------
+// The List drew them; the sheet does now (Alex, 2026-10-22). Quiet chips at
+// the 13px label size, token colours only.
+test('the sheet\'s tag chips are quiet 13px pills in token colours', () => {
+  assert.equal(declOf('.sheet-tags', 'display'), 'flex');
+  assert.equal(declOf('.sheet-tags', 'flex-wrap'), 'wrap');
+  assert.equal(declOf('.sheet-tags', 'gap'), '4px');
+  assert.equal(declOf('.sheet-tags', 'margin'), '0 0 6px');
+  assert.equal(declOf('.sheet-tag', 'font-size'), 'var(--text-label)');
+  assert.equal(declOf('.sheet-tag', 'background'), 'var(--chip-bg)');
+  assert.equal(declOf('.sheet-tag', 'color'), 'var(--chip-ink)');
+  assert.equal(declOf('.sheet-tag', 'border-radius'), '999px');
+  assert.equal(declOf('.sheet-tag', 'padding'), '1px 8px');
 });

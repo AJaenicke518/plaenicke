@@ -123,9 +123,15 @@ body {
   background: var(--bg);
   color: var(--ink);
   padding: env(safe-area-inset-top) 16px 40px;
-  /* Room for the fixed .toast (edit-items Task 4b): without it the last row,
-     often the very item a delete offers to undo, sits under the toast. */
-  padding-bottom: calc(96px + env(safe-area-inset-bottom));
+  /* Room under the content for the fixed tab bar (56px) and the capture
+     button's row (72px, stage 4), above the home indicator (home-screen
+     spec § 4). The toast does NOT fit inside it (final review B2, computed
+     from this file, not measured): its bottom is 68px up (.toast) and it is
+     62px tall with a one-line message (44px Undo + 16px padding + 2px
+     border), 66px with two (2 x 24px lines), so its top is 130-134px up and
+     can cover the last 2-6px of the last row when the page is scrolled to
+     the end. */
+  padding-bottom: calc(56px + 72px + env(safe-area-inset-bottom));
   /* There was no line-height rule at all before this, so everything ran at
      the browser default (~1.2) — tight for a serif read at arm's length.
      This is a readability change, NOT an attempt to fill the viewport: the
@@ -135,7 +141,12 @@ body {
   line-height: 1.5;
 }
 
-header { display: flex; justify-content: space-between; align-items: center; }
+/* A stable height (final review B3): the tab title is visually hidden on
+   Today, which takes it out of the flow. Without this the header shrank by
+   the title's height there and the add box jumped between tabs. 62px is one
+   line of --text-title (20px) at the body's 1.5 line-height plus the h1's
+   16px margins (tests/styles.test.js derives it). */
+header { display: flex; justify-content: space-between; align-items: center; min-height: 62px; }
 header h1 { font-size: 1.7rem; font-style: italic; font-weight: 700; margin: 16px 0; }
 
 /* 44px: Apple's minimum touch target (final review A9). The settings gear is
@@ -221,21 +232,51 @@ button, [data-press] { -webkit-tap-highlight-color: transparent; }
 button.pressed { opacity: 0.7; }
 [data-press].pressed { background: var(--chip-bg); }
 
-/* ---------- view toggle ---------- */
-.view-toggle { display: flex; gap: 6px; margin-bottom: 12px; }
-.view-toggle button {
+/* ---------- tab bar and Calendar's switcher (home-screen spec § 4) ---------- */
+/* Layers: content 0 < tab bar 5 < capture button 6 < capture box 8 (stage 4)
+   < settings 10 < item sheet 15 < toast 20. */
+.tab-bar {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  z-index: 5;
+  display: flex;
+  height: calc(56px + env(safe-area-inset-bottom));
+  padding-bottom: env(safe-area-inset-bottom);
+  background: var(--card);
+  border-top: 1px solid var(--line);
+}
+.tab-bar button {
   flex: 1;
+  min-height: 44px;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: var(--text-label);
+}
+.tab-bar button.active { color: var(--accent); font-weight: 600; }
+.tab-title { font-size: var(--text-title); font-style: normal; }
+.cal-switch { display: flex; gap: var(--space-1); margin-bottom: var(--space-3); }
+.cal-switch[hidden] { display: none; }
+/* 44px: Apple's minimum touch target (final review B1). Height only: the
+   four still share the row's width as before. */
+.cal-switch button {
+  flex: 1;
+  min-height: 44px;
+  padding: 8px 4px;
   background: var(--card);
   color: var(--ink);
   border: 1px solid var(--line);
-  padding: 8px 4px;
-  font-size: 0.9rem;
+  font-family: var(--sans);
+  font-size: var(--text-label);
 }
-.view-toggle button.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.cal-switch button.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 
-/* ---------- list (shared with day view's "Other tasks") ---------- */
-#item-list, .day-other-list { list-style: none; padding: 0; margin: 0; }
-#item-list li, .day-other-list li {
+/* ---------- Day view's "Other tasks" list (it shared these rules with the
+   List view until stage 3d removed List) ---------- */
+.day-other-list { list-style: none; padding: 0; margin: 0; }
+.day-other-list li {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -244,16 +285,6 @@ button.pressed { opacity: 0.7; }
   border-radius: 6px;
   padding: 14px;
   margin-bottom: 10px;
-}
-#item-list li.empty { color: var(--muted); justify-content: center; }
-#item-list li.list-note {
-  color: var(--muted);
-  justify-content: center;
-  font-size: 0.8rem;
-  font-style: italic;
-  border-left: none;
-  background: transparent;
-  box-shadow: none;
 }
 button.delete { background: transparent; color: var(--danger); padding: 6px 10px; }
 /* Every item title is a button that opens the item sheet (edit-items 4a).
@@ -280,10 +311,6 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   min-height: 0; line-height: inherit; height: 100%;
   display: flex; align-items: flex-start; justify-content: flex-start;
 }
-/* The List row's text block takes all the width Delete leaves, so a tap
-   anywhere on the row's left part lands on the opener (sweep U10). */
-.list-main { flex: 1; min-width: 0; }
-.time-line { color: var(--muted); font-size: 0.8rem; font-style: italic; }
 
 /* ---------- Today (home-screen spec § 2.3, § 5) ---------- */
 /* Rows, not cards: full width, a 1px hairline, at least 44px. Classes only,
@@ -362,6 +389,46 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 .today-row.done { opacity: 1; }
 .today-row.done .today-text { text-decoration: line-through; }
 .today-empty { color: var(--muted); font-size: var(--text-row); margin: 0 0 var(--space-5); }
+/* Coming up (A2, Alex 2026-10-22): a quiet full-width button under Next 7
+   days; open, "Show less" sits a gap below the last day. */
+.today-more {
+  width: 100%;
+  min-height: 44px;
+  background: var(--card);
+  color: var(--accent);
+  border: 1px solid var(--line);
+  font-family: var(--sans);
+  font-size: 15px;
+}
+.today-more-after { margin-top: var(--space-4); }
+/* The Week page's list under the grid (B2, Alex 2026-10-22; js/weeklist.js):
+   each day a 48px left column ("FRI" over a bold "23") beside its rows,
+   which are Today's rows with the time leading in a fixed column, on one
+   line. The day label is a button (it opens that day), reset off the global
+   accent chip and kept a 44px target. Classes only, never #week-list. */
+.wlist { margin-top: var(--space-5); }
+.wlist-day {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  border-top: 1px solid var(--line);
+}
+.wlist-label {
+  align-self: start;
+  min-height: 44px;
+  padding: var(--space-3) 0 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  text-align: left;
+  font-family: var(--sans);
+  font-size: var(--text-label);
+  letter-spacing: var(--label-tracking);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.wlist-label b { display: block; font-size: var(--text-title); color: var(--ink); line-height: 1.1; letter-spacing: 0; }
+.wlist-open { flex-wrap: nowrap; }
+.wlist-time { flex: 0 0 64px; }
 /* A pressed row is tinted (--chip-bg, above), not dimmed like a button. */
 button[data-press].pressed { opacity: 1; }
 
@@ -629,9 +696,7 @@ button[data-press].pressed { opacity: 1; }
 }
 .link-code-output { background: var(--bg); }
 
-/* ---------- tags & preview (restyled) ---------- */
-.tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
-.tag { font-size: 0.7rem; background: var(--chip-bg); color: var(--chip-ink); border-radius: 999px; padding: 1px 8px; }
+/* ---------- preview (restyled) ---------- */
 
 #preview { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 14px; margin-bottom: 16px; }
 /* Stacked per-item card: title full-width, then date/type/times wrapping below.
@@ -660,7 +725,7 @@ button[data-press].pressed { opacity: 1; }
    fixed type palette above. Falls back to --type-general if a site somehow
    omits the inline property, same as every other --type consumer. */
 .type-external  { --type: var(--feed-color, var(--type-general)); }
-#item-list li, .day-other-list li, #todo-list li, #idea-list li {
+.day-other-list li, #todo-list li, #idea-list li {
   border-left: 4px solid var(--type, var(--type-general));
 }
 
@@ -669,8 +734,8 @@ button[data-press].pressed { opacity: 1; }
    is the second token itemTypeClass returns, so every render site that
    colours an item gets this for free. */
 .done { opacity: 0.55; }
-#item-list li.done span, .day-other-list li.done span,
-#item-list li.done .item-open, .day-other-list li.done .item-open { text-decoration: line-through; }
+.day-other-list li.done span,
+.day-other-list li.done .item-open { text-decoration: line-through; }
 .cal-item.done, .week-block.done, .day-block.done, .day-pin.done { opacity: 0.5; }
 
 
@@ -739,11 +804,12 @@ button[data-press].pressed { opacity: 1; }
 
 /* ---------- toast (deleted / undo) ---------- */
 /* Above .settings-backdrop (z-index 10) so an Undo raised while a panel is
-   open is still reachable; bottom inset clears the iPhone home indicator. */
+   open is still reachable. Above the tab bar, and clear of the capture
+   button's corner (56px wide at right: 16px, stage 4; spec § 4). */
 .toast {
   position: fixed;
-  left: 16px; right: 16px;
-  bottom: calc(16px + env(safe-area-inset-bottom));
+  left: 16px; right: 88px;
+  bottom: calc(56px + 12px + env(safe-area-inset-bottom));
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   background: var(--card);
   color: var(--ink);
@@ -753,8 +819,20 @@ button[data-press].pressed { opacity: 1; }
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
   z-index: 20;
 }
-/* 44px: Apple's minimum touch target; this is the one control that undoes a delete. */
-.toast-undo { min-height: 44px; }
+/* The message (final review B2): it may shrink (min-width: 0), wraps even
+   inside a long word, and stops at two lines, so a long title can neither
+   push Undo off the toast nor grow the toast without bound. */
+.toast span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* 44px: Apple's minimum touch target; this is the one control that undoes a
+   delete. It never shrinks, so it stays whole beside any message. */
+.toast-undo { min-height: 44px; flex-shrink: 0; }
 
 /* ---------- item sheet (open / edit one item) ---------- */
 /* Above .settings-backdrop (10), below .toast (20): a Deleted/Saved toast
@@ -836,6 +914,8 @@ button[data-press].pressed { opacity: 1; }
 }
 .sheet-heading { font-size: 1.1rem; margin: 0 0 6px; }
 .sheet-when, .sheet-source, .sheet-repeat { margin: 0 0 6px; color: var(--muted); }
+.sheet-tags { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 6px; }
+.sheet-tag { font-size: var(--text-label); background: var(--chip-bg); color: var(--chip-ink); border-radius: 999px; padding: 1px 8px; }
 .sheet-google { display: inline-flex; align-items: center; min-height: 44px; color: var(--accent); }
 /* The external sheet ends on a line of text or the link, with nothing under
    it; this is the room .sheet-actions' margin gives an own item (sweep U15).

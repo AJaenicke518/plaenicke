@@ -285,6 +285,14 @@ export function openItemSheet(host, item, {
     const error = el('p', 'sheet-error', '');
     error.setAttribute('role', 'alert');
     formEl.appendChild(error);
+    // The item's tags, when it has any (the List view drew them until stage 3d
+    // removed it). Nothing at all when none is set; textContent only.
+    const tags = [item.project, item.subject, item.category].filter(Boolean);
+    if (tags.length) {
+      const wrap = el('div', 'sheet-tags');
+      for (const tag of tags) wrap.appendChild(el('span', 'sheet-tag', tag));
+      formEl.appendChild(wrap);
+    }
     const form = el('div', 'sheet-form');
     formEl.appendChild(form);
     const type = typeSelect(item.type);

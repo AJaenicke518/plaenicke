@@ -266,3 +266,93 @@ test('Today: an overdue to-do ticked today keeps its row, drawn checked and mark
   assert.ok(row._classes.has('done'));
   assert.equal(findAll(row, 'INPUT')[0].checked, true);
 });
+
+// --- Coming up (A2; stage 3 Commit 2, Alex 2026-10-22) ------------------------
+// A full-width quiet button, "Show the next 30 days", under Next 7 days. It
+// opens the days today + 8 .. today + 30 in place, in Next 7 days' row style,
+// with "Show less" at the bottom. app.js holds open/closed; the page only
+// reports the tap.
+
+const LATER_ITEMS = [
+  own('soon', { type: 'event', date: '2026-10-23', title: 'Dinner', time: '19:00' }),
+  own('reg', { type: 'task', date: '2026-11-10', title: 'Register for spring classes' }),
+];
+const LATER_AHEAD = [
+  inst('quiz', '2026-11-03', { time: '09:25', title: 'PHYS 2100 Quiz 6' }),
+  inst('cls', '2026-11-04', { time: '10:00', title: 'Weekly class', recurring: true }),
+];
+function drawLater(laterOpen, { items = LATER_ITEMS, ahead = LATER_AHEAD } = {}) {
+  const host = document.createElement('div');
+  const calls = { toggleLater: 0 };
+  renderTodayView(host, buildToday(items, [], TODAY, at(9, 0), () => ahead), {
+    onOpen() {}, onToggleDone() {}, laterOpen, onToggleLater: () => { calls.toggleLater += 1; },
+  });
+  return { host, calls };
+}
+const moreButtons = (host) => byClass(host, 'today-more');
+
+test('Coming up, closed: one "Show the next 30 days" button, last on the page, and none of its rows', () => {
+  const { host } = drawLater(false);
+  const buttons = moreButtons(host);
+  assert.equal(buttons.length, 1);
+  const b = buttons[0];
+  assert.equal(b.tagName, 'BUTTON');
+  assert.equal(b.type, 'button');
+  assert.equal(b.textContent, 'Show the next 30 days');
+  assert.equal(b.getAttribute('aria-expanded'), 'false');
+  const sections = byClass(host, 'today-section');
+  assert.equal(sections.at(-1), b.parentNode, 'in its own section, after Next 7 days');
+  assert.equal(byClass(sections.at(-2), 'today-label')[0].textContent, 'Next 7 days', 'fixture check');
+  assert.ok(!allText(host).includes('Coming up'));
+  assert.ok(!allText(host).includes('PHYS 2100 Quiz 6'));
+  assert.ok(!allText(host).includes('Register for spring classes'));
+});
+
+test('Coming up, open: its days in Next 7 days\' row style, then "Show less" at the bottom', () => {
+  const { host } = drawLater(true);
+  const section = byClass(host, 'today-section').at(-1);
+  assert.equal(byClass(section, 'today-label')[0].textContent, 'Coming up');
+  assert.deepEqual(byClass(section, 'today-day').map((h) => h.textContent), ['Tue, Nov 3', 'Tue, Nov 10']);
+  const quiz = rowOf(section, 'PHYS 2100 Quiz 6');
+  assert.ok(quiz && quiz._classes.has('type-external'));
+  assert.equal(quiz.style['--feed-color'], 'var(--feed-palette-2)');
+  assert.equal(byClass(quiz, 'today-time')[0].textContent, '9:25 AM');
+  assert.equal(byClass(quiz, 'today-open')[0].getAttribute('data-item-id'), 'feedR:quiz:2026-11-03:09:25');
+  const reg = rowOf(section, 'Register for spring classes');
+  assert.equal(byClass(reg, 'today-time').length, 0, 'untimed: no time, as under Next 7 days');
+  assert.equal(findAll(section, 'INPUT').length, 0, 'no checkbox, as under Next 7 days');
+  assert.ok(!allText(section).includes('Weekly class'), 'fixture check: classes are never here');
+  const b = moreButtons(host);
+  assert.equal(b.length, 1);
+  assert.equal(section.children.at(-1), b[0], '"Show less" is the last thing in the section');
+  assert.equal(b[0].textContent, 'Show less');
+  assert.equal(b[0].getAttribute('aria-expanded'), 'true');
+  assert.equal(b[0].type, 'button');
+  assert.ok(b[0]._classes.has('today-more-after'));
+});
+
+test('Coming up: a tap on either button reports it once, and changes nothing by itself', () => {
+  for (const open of [false, true]) {
+    const { host, calls } = drawLater(open);
+    fire(moreButtons(host)[0], 'click');
+    assert.equal(calls.toggleLater, 1, `open=${open}`);
+    assert.equal(moreButtons(host)[0].getAttribute('aria-expanded'), String(open), 'app.js re-renders, not the page');
+  }
+});
+
+test('Coming up: nothing past the first week, no button and no section, open or closed', () => {
+  for (const open of [false, true]) {
+    const { host } = drawLater(open, { items: [LATER_ITEMS[0]], ahead: [LATER_AHEAD[1]] });
+    assert.equal(moreButtons(host).length, 0, `open=${open}`);
+    assert.ok(!allText(host).includes('Coming up'));
+    assert.deepEqual(byClass(host, 'today-label').map((h) => h.textContent), ['Next 7 days'], 'fixture check');
+  }
+});
+
+test('Coming up: a button that would do nothing on tap is refused', () => {
+  const host = document.createElement('div');
+  const model = buildToday(LATER_ITEMS, [], TODAY, at(9, 0), () => LATER_AHEAD);
+  assert.throws(() => renderTodayView(host, model, { onOpen() {}, onToggleDone() {}, laterOpen: false }), /onToggleLater/);
+  assert.throws(() => renderTodayView(host, model, { onOpen() {}, onToggleDone() {}, onToggleLater() {}, laterOpen: 'yes' }),
+    /laterOpen/);
+});

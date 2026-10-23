@@ -1035,3 +1035,37 @@ test('an external item from a guessed series says so; one from an RRULE series d
   ({ host } = open(external({ recurring: true, guessedSeries: false }), { calendarName: 'Work' }));
   assert.equal(byClass(host, 'sheet-repeat').length, 0);
 });
+
+// Stage 3d removed the List view, the only page that drew an item's tags
+// (project, subject, category). Alex, 2026-10-22: "sure show the in details
+// sheet". Own items only: a feed instance carries no tags.
+test('an own item with all three tags shows them as chips, in order, under the top bar and above the form', () => {
+  const { host } = open(task({ project: 'Thesis', subject: 'Biology', category: 'Lab' }));
+  const wrap = one(host, 'sheet-tags');
+  assert.deepEqual(wrap.children.map((c) => c.textContent), ['Thesis', 'Biology', 'Lab']);
+  assert.ok(wrap.children.every((c) => c._classes.has('sheet-tag')));
+  const body = one(host, 'sheet-body');
+  assert.equal(body.children.indexOf(wrap), body.children.indexOf(one(host, 'sheet-error')) + 1, 'directly under the error line');
+  assert.equal(body.children.indexOf(one(host, 'sheet-form')), body.children.indexOf(wrap) + 1, 'directly above the form');
+});
+
+test('only the tags that are set are shown', () => {
+  let { host } = open(task({ subject: 'Biology' }));
+  assert.deepEqual(one(host, 'sheet-tags').children.map((c) => c.textContent), ['Biology']);
+  ({ host } = open(task({ project: 'Thesis', category: 'Lab' })));
+  assert.deepEqual(one(host, 'sheet-tags').children.map((c) => c.textContent), ['Thesis', 'Lab']);
+});
+
+test('an own item with no tags draws no tag element at all', () => {
+  const { host } = open(task());
+  assert.equal(byClass(host, 'sheet-tags').length, 0);
+  assert.equal(byClass(host, 'sheet-tag').length, 0);
+});
+
+test('an idea sheet shows its tags too, and a feed instance never draws any', () => {
+  let { host } = open(idea({ project: 'Garden' }));
+  assert.deepEqual(one(host, 'sheet-tags').children.map((c) => c.textContent), ['Garden']);
+  ({ host } = open(external({ project: 'Leak', subject: 'Leak', category: 'Leak' }), { calendarName: 'Work' }));
+  assert.equal(byClass(host, 'sheet-tags').length, 0);
+  assert.equal(byClass(host, 'sheet-tag').length, 0);
+});
