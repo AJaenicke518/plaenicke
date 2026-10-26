@@ -20,7 +20,8 @@ import { installFakeLocalStorage } from './fake-localstorage.js';
 import {
   makeFakeDocument, makeFakeWindow, mountIds, indexHtmlIds, allText, fire,
 } from './fake-dom.js';
-import { SCHEMA_VERSION } from '../js/merge.js';
+import { SCHEMA_VERSION, toWire } from '../js/merge.js';
+import { localState } from '../js/sync.js';
 import {
   saveItems, loadItems, saveTombstones, saveFeeds, loadFeeds, loadTombstones, loadSyncState, saveSyncState,
   loadLaunches,
@@ -7025,3 +7026,273 @@ for (const [page, tab, list, date] of [
     seed([]);
   });
 }
+
+// =========================================================================
+// Per-series visibility, option A (2026-10-26)
+// =========================================================================
+//
+// Two switches on a feed event's sheet: the calendar (Day, the Week grid,
+// Month) and lists (Today's events, Next 7 days, Coming up, the Week list,
+// the "Next:" line — controller ruling 1). Device-local in
+// plaenicke.seriesVisibility; a toggle writes nothing else, schedules no sync
+// and leaves toWire's output alone (the controller's hard constraints).
+
+const VIS_KEY = 'plaenicke.seriesVisibility';
+const VIS_URL = 'https://example.com/private/vis-SECRET-TOKEN-77/basic.ics';
+const VIS_ICS = [
+  'BEGIN:VCALENDAR', 'VERSION:2.0',
+  'BEGIN:VEVENT', 'UID:vis-class', 'SUMMARY:vis Class',
+  'DTSTART;TZID=America/Los_Angeles:20261001T121500', 'DTEND;TZID=America/Los_Angeles:20261001T133000',
+  'RRULE:FREQ=WEEKLY;BYDAY=TH,FR', 'END:VEVENT',
+  'BEGIN:VEVENT', 'UID:vis-quiz', 'SUMMARY:vis Quiz',
+  'DTSTART;TZID=America/Los_Angeles:20261023T105000', 'DTEND;TZID=America/Los_Angeles:20261023T113000', 'END:VEVENT',
+  'BEGIN:VEVENT', 'UID:vis-club', 'SUMMARY:vis Club',
+  'DTSTART;TZID=America/Los_Angeles:20261029T180000', 'DTEND;TZID=America/Los_Angeles:20261029T190000',
+  'RRULE:FREQ=MONTHLY', 'END:VEVENT',
+  'END:VCALENDAR',
+].join('\r\n');
+
+function seedVisFeed(ics = VIS_ICS) {
+  const { events, skipped } = parseICS(ics);
+  assert.equal(skipped.length, 0, 'fixture check: every VEVENT parsed');
+  seedFeedsWithCache([sdFeed('vis-feed', { url: VIS_URL, name: 'Vis classes' })],
+    { 'vis-feed': { fetchedAt: new Date().toISOString(), events, skipped: [] } });
+}
+function unseedVis() {
+  localStorage.removeItem(VIS_KEY);
+  unseedFeeds();
+}
+// Every stored key but the visibility one, byte for byte.
+const otherKeys = () => JSON.stringify([...localStorage.store.entries()].filter(([k]) => k !== VIS_KEY).sort());
+const wire = () => JSON.stringify(toWire(localState()));
+const weekCounts = () => [...globalThis.document.getElementById('week-grid').children].map((c) => c.children.length - 1);
+const switchFor = (surface) => sheetHost().querySelectorAll('button')
+  .find((b) => b._classes.has('sheet-switch') && b.getAttribute('aria-label').endsWith(surface === 'calendar' ? 'on the calendar' : 'on Today and in lists'));
+
+// Taps one switch on the open sheet, measuring around the tap only (the sheet
+// is opened before, so a toast it dismissed cannot count against the toggle).
+function toggleMeasured(surface) {
+  const feedsBefore = localStorage.getItem('plaenicke.feeds');
+  const keysBefore = otherKeys();
+  const wireBefore = wire();
+  const timers = installManualTimers();
+  try {
+    click(switchFor(surface));
+    assert.equal(timers.live(2000), 0, 'a visibility toggle schedules no sync');
+  } finally {
+    timers.restore();
+  }
+  assert.equal(localStorage.getItem('plaenicke.feeds'), feedsBefore, 'plaenicke.feeds is byte-identical');
+  assert.equal(otherKeys(), keysBefore, 'and so is every other key but plaenicke.seriesVisibility');
+  assert.equal(wire(), wireBefore, "toWire's output is unchanged");
+}
+
+test('vis: the calendar switch hides a series from Day, the Week grid and Month only; the list switch from Today and the Week list', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 22, 9, 0).getTime() });
+  try {
+    seed([]);
+    seedVisFeed();
+    click(doc.getElementById('show-week'));
+    assert.equal(labelText('week-label'), weekLabelFor('2026-10-18'), 'fixture check: the week of Thu Oct 22');
+    assert.deepEqual(weekCounts(), [0, 0, 0, 0, 1, 2, 0], 'fixture check: Thu the class; Fri the class and the quiz');
+    assert.match(allText(weekList()), /vis Quiz/, 'fixture check: the quiz is in the Week list');
+    assert.match(allText(todayBody()), /vis Quiz/, 'fixture check: and in Next 7 days');
+    click(doc.getElementById('show-month'));
+    assert.equal(labelText('calendar-label'), 'October 2026', 'fixture check: Month shows October');
+    assert.match(allText(doc.getElementById('calendar-grid')), /vis Quiz/, 'fixture check: Month has the quiz');
+
+    click(doc.getElementById('show-week'));
+    click(openControlFor(weekList(), 'vis Quiz'));
+    assert.equal(switchFor('calendar').getAttribute('aria-checked'), 'true', 'fixture check: shown');
+    assert.match(allText(sheetHost()), /Show vis Quiz\b/, 'a one-off: no "every"');
+    toggleMeasured('calendar');
+    assert.equal(switchFor('calendar').getAttribute('aria-checked'), 'false', 'the switch follows the write');
+    for (const s of stringsOf(sheetHost())) {
+      assert.ok(!s.includes('vis-SECRET-TOKEN-77'), `the feed URL must never be rendered; found it in ${JSON.stringify(s)}`);
+    }
+    closeSheet();
+
+    assert.deepEqual(weekCounts(), [0, 0, 0, 0, 1, 1, 0], 'gone from the Week grid');
+    assert.match(allText(weekList()), /vis Quiz/, 'still in the Week list');
+    assert.match(allText(todayBody()), /vis Quiz/, 'still in Next 7 days');
+    click(doc.getElementById('show-month'));
+    assert.doesNotMatch(allText(doc.getElementById('calendar-grid')), /vis Quiz/, 'gone from Month');
+    assert.equal(openControlFor(dayOf('2026-10-23'), 'vis Quiz'), null, 'gone from Day');
+    assert.ok(openControlFor(dayOf('2026-10-23'), 'vis Class'), 'and only that series: the class is still there');
+
+    click(doc.getElementById('show-week'));
+    click(openControlFor(weekList(), 'vis Quiz'));
+    toggleMeasured('list');
+    closeSheet();
+    assert.doesNotMatch(allText(weekList()), /vis Quiz/, 'gone from the Week list');
+    assert.doesNotMatch(allText(todayBody()), /vis Quiz/, 'gone from Today');
+    assert.match(allText(todayBody()), /vis Class/, 'the class is still on Today');
+
+    // Positive control: the same timer harness sees an ordinary write's sync.
+    const { addItems } = await import('../js/app.js');
+    const timers = installManualTimers();
+    try {
+      addItems([{ title: 'vis control', date: '2099-05-01', type: 'event' }]);
+      assert.equal(timers.live(2000), 1, 'fixture check: the harness sees a scheduled sync');
+      timers.fire(2000);
+    } finally {
+      timers.restore();
+    }
+  } finally {
+    forceCloseSheet();
+    unseedVis();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('vis: a weekly class hidden from lists leaves Today\'s events and the "Next:" line (ruling 1), and stays on the calendar', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 22, 9, 0).getTime() });
+  try {
+    seed([]);
+    seedVisFeed();
+    click(doc.getElementById('tab-today'));
+    click(openControlFor(todayBody(), 'vis Class'));
+    assert.match(allText(sheetHost()), /Show every vis Class/);
+    assert.match(allText(sheetHost()), /Today’s events and the “Next” line/);
+    toggleMeasured('list');
+    closeSheet();
+    assert.doesNotMatch(allText(todayBody()), /vis Class/, "gone from Today's events");
+    assert.ok(openControlFor(dayOf('2026-10-22'), 'vis Class'), 'still on Day');
+    click(doc.getElementById('tab-today'));
+
+    // Saturday: nothing today, so the empty line names the next thing.
+    t.mock.timers.setTime(new Date(2026, 9, 24, 9, 0).getTime());
+    resume();
+    // The class (Thu 29, 12:15) comes before the club (Thu 29, 18:00), so only
+    // the look-ahead's filter keeps the class off this line.
+    assert.doesNotMatch(allText(todayBody()), /Next: vis Class/, 'a list-hidden class is not the "Next:" line');
+    assert.match(allText(todayBody()), /Next: vis Club · Thu\./, 'the next shown thing is');
+  } finally {
+    forceCloseSheet();
+    unseedVis();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('vis: a monthly series is not `recurring`, but its sheet says "every"', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 22, 9, 0).getTime() });
+  try {
+    seed([]);
+    seedVisFeed();
+    click(globalThis.document.getElementById('tab-today'));
+    click(openControlFor(todayBody(), 'vis Club'));
+    assert.match(allText(sheetHost()), /Show every vis Club/);
+    assert.match(allText(sheetHost()), /upcoming lists/, 'a monthly series can be in the upcoming lists');
+  } finally {
+    forceCloseSheet();
+    unseedVis();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('vis: a write in another tab re-renders here and schedules no sync', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 22, 9, 0).getTime() });
+  try {
+    seed([]);
+    seedVisFeed();
+    click(globalThis.document.getElementById('tab-today'));
+    assert.match(allText(todayBody()), /vis Class/, 'fixture check');
+    localStorage.setItem(VIS_KEY, JSON.stringify({ 'vis-feed': { 'vis-class': { calendar: true, list: false, title: 'vis Class' } } }));
+    const timers = installManualTimers();
+    try {
+      for (const fn of globalThis.window._listeners.storage) fn({ key: VIS_KEY });
+      assert.equal(timers.live(2000), 0, 'a visibility write is not synced data');
+    } finally {
+      timers.restore();
+    }
+    assert.doesNotMatch(allText(todayBody()), /vis Class/, 'the other tab\'s hide shows here');
+  } finally {
+    unseedVis();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('vis: a guessed series gets no switches (ruling 3)', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 22, 9, 0).getTime() });
+  const lab = (n, day) => ['BEGIN:VEVENT', `UID:vis-lab-${n}`, 'SUMMARY:vis Lab',
+    `DTSTART;TZID=America/Los_Angeles:202610${day}T100000`, `DTEND;TZID=America/Los_Angeles:202610${day}T110000`, 'END:VEVENT'];
+  try {
+    seed([]);
+    seedVisFeed(['BEGIN:VCALENDAR', 'VERSION:2.0', ...lab(1, '08'), ...lab(2, '15'), ...lab(3, '22'), 'END:VCALENDAR'].join('\r\n'));
+    click(globalThis.document.getElementById('tab-today'));
+    click(openControlFor(todayBody(), 'vis Lab'));
+    assert.match(allText(sheetHost()), /Repeats weekly \(guessed\)/, 'fixture check: a guessed series');
+    assert.equal(sheetHost().querySelectorAll('button').filter((b) => b._classes.has('sheet-switch')).length, 0);
+  } finally {
+    forceCloseSheet();
+    unseedVis();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('vis: a toggle that saved but whose render throws keeps the switch and says it saved', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const dateEl = globalThis.document.getElementById('today-date');
+  const unbreak = () => { Object.defineProperty(dateEl, 'textContent', { configurable: true, writable: true, value: '' }); };
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 22, 9, 0).getTime() });
+  const errors = [];
+  const origError = console.error;
+  try {
+    seed([]);
+    seedVisFeed();
+    click(globalThis.document.getElementById('tab-today'));
+    click(openControlFor(todayBody(), 'vis Class'));
+    Object.defineProperty(dateEl, 'textContent', { configurable: true, get: () => '', set: () => { throw new Error('vis render failed'); } });
+    console.error = (...a) => errors.push(a);
+    click(switchFor('list'));
+    console.error = origError;
+    unbreak();
+    assert.equal(switchFor('list').getAttribute('aria-checked'), 'false', 'the write landed, so the switch moved');
+    assert.equal(JSON.parse(localStorage.getItem(VIS_KEY))['vis-feed']['vis-class'].list, false, 'fixture check: saved');
+    assert.equal(messageText(), "Saved, but the screen couldn't update — reload.");
+    assert.equal(errors.length, 1, 'and the render error reaches the console');
+  } finally {
+    console.error = origError;
+    unbreak();
+    forceCloseSheet();
+    unseedVis();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});

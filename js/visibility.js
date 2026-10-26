@@ -22,7 +22,11 @@
 
 import { readSeriesVisibility, writeSeriesVisibility, loadFeeds } from './storage.js';
 
-const SURFACES = new Set(['calendar', 'list']);
+// The two surfaces, by name. Callers use these constants rather than the
+// strings, so a typo is an undefined import, not a silently shown series.
+export const CALENDAR = 'calendar';
+export const LISTS = 'list';
+const SURFACES = new Set([CALENDAR, LISTS]);
 
 function checkSurface(surface) {
   if (!SURFACES.has(surface)) throw new Error(`visibility: unknown surface ${surface}`);
