@@ -6920,3 +6920,41 @@ test('To-do: a tick from a box without focus moves no focus', async () => {
   }
   seed([]);
 });
+
+// Stage 3 round-2 re-review leftover (1): toggleDoneKeepingFocus moves focus
+// only when the focused box belongs to the row that was ticked (`=== id`).
+// Under the mutant "any owner" (`!== null`) every earlier test still passed:
+// they tick the focused row, or focus something that is not a box. Here row
+// Y's box has focus and row X is ticked; focus must not move to X's box.
+for (const [page, tab, list, date] of [
+  ['Today', 'tab-today', () => todayBody(), () => localISO(new Date())],
+  ['To-do', 'tab-todo', () => todoList(), () => '2099-01-01'],
+]) {
+  test(`${page}: ticking row X while row Y's box has focus does not move focus to X's box`, async () => {
+    installFakeLocalStorage();
+    await import('../js/app.js');
+    const restore = visiblePageButton();
+    const doc = globalThis.document;
+    seed([
+      record({ id: 'lo1-x', type: 'task', title: 'lo1 Row X', date: date() }),
+      record({ id: 'lo1-y', type: 'task', title: 'lo1 Row Y', date: date() }),
+    ]);
+    try {
+      click(doc.getElementById(tab));
+      const boxY = checkboxFor(list(), 'lo1 Row Y');
+      const boxX = checkboxFor(list(), 'lo1 Row X');
+      assert.ok(boxX && boxY, 'fixture check: both rows show a box');
+      boxY.focus();
+      boxX.checked = true;
+      fire(boxX, 'change');
+      const againX = checkboxFor(list(), 'lo1 Row X');
+      assert.ok(againX && againX !== boxX, 'fixture check: the tick re-rendered row X, which still shows');
+      assert.notEqual(doc.activeElement, againX, 'focus must not move to the ticked row\'s box');
+      assert.equal(doc.activeElement, boxY, 'focus is left where the user put it');
+    } finally {
+      doc.activeElement = null;
+      if (restore) click(restore);
+    }
+    seed([]);
+  });
+}
