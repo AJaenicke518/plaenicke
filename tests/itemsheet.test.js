@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { allText } from './fake-dom.js';
 import { openItemSheet } from '../js/itemsheet.js';
 import { TYPES } from '../js/preview.js';
+import { tagColour } from '../js/palette.js';
 
 // --- minimal fake DOM ------------------------------------------------------
 // Modelled on tests/v6views.test.js. Events DO NOT BUBBLE here, so a test of
@@ -1068,4 +1069,14 @@ test('an idea sheet shows its tags too, and a feed instance never draws any', ()
   ({ host } = open(external({ project: 'Leak', subject: 'Leak', category: 'Leak' }), { calendarName: 'Work' }));
   assert.equal(byClass(host, 'sheet-tags').length, 0);
   assert.equal(byClass(host, 'sheet-tag').length, 0);
+});
+
+// Tag chips are coloured by name (Alex, 2026-10-25): each carries --tag-color.
+test('each tag chip carries --tag-color equal to tagColour of its text', () => {
+  const { host } = open(task({ project: 'Thesis', subject: 'Biology', category: 'Lab' }));
+  const chips = one(host, 'sheet-tags').children;
+  assert.deepEqual(chips.map((c) => c.style['--tag-color']), ['Thesis', 'Biology', 'Lab'].map(tagColour));
+  assert.deepEqual(chips.map((c) => c.style['--tag-color']),
+    ['var(--feed-palette-4)', 'var(--feed-palette-5)', 'var(--feed-palette-3)']);
+  assert.notEqual(chips[0].style['--tag-color'], chips[1].style['--tag-color']);
 });
