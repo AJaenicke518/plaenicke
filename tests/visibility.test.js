@@ -180,6 +180,40 @@ test('a full device is a QuotaError, and the stored map is unchanged', () => {
   assert.equal(readSeriesVisibility(), before);
 });
 
+test('a "__proto__" or "constructor" key, stored or from a feed UID, is an ordinary series', () => {
+  const stored = '{"__proto__":{"polluted":{"calendar":false,"list":false,"title":"x"}}}';
+  const { map } = parseVisibility(stored);
+  assert.equal(({}).polluted, undefined, 'parsing must not write onto Object.prototype');
+  assert.equal(isShown(map, inst('__proto__', 'polluted'), 'list'), false, 'it is just a hidden series');
+  assert.equal(isShown({}, inst('constructor', 'name'), 'calendar'), true, 'an inherited name is not an entry');
+  assert.equal(isShown({ f1: {} }, inst('f1', 'constructor'), 'calendar'), true);
+
+  installFakeLocalStorage();
+  saveFeeds([feed('f1'), feed('__proto__')]);
+  setSeriesVisibility({ feedId: 'f1', uid: '__proto__', title: 'Odd UID' }, 'list', false);
+  setSeriesVisibility({ feedId: '__proto__', uid: 'pw', title: 'Odd feed' }, 'calendar', false);
+  assert.equal(({}).pw, undefined, 'writing must not touch Object.prototype');
+  const back = loadVisibility();
+  assert.equal(isShown(back, inst('f1', '__proto__'), 'list'), false, 'the hide was really stored');
+  assert.equal(isShown(back, inst('__proto__', 'pw'), 'calendar'), false);
+  assert.deepEqual(hiddenSeriesFor(back, 'f1').map((r) => r.uid), ['__proto__']);
+  showSeries('f1', '__proto__');
+  assert.equal(isShown(loadVisibility(), inst('f1', '__proto__'), 'list'), true);
+});
+
+test('a write for a calendar no longer linked throws and stores nothing; an unreadable feeds key wipes nothing', () => {
+  installFakeLocalStorage();
+  saveFeeds([feed('f1')]);
+  setSeriesVisibility({ feedId: 'f1', uid: 'a', title: 'A' }, 'list', false);
+  const before = readSeriesVisibility();
+  assert.throws(() => setSeriesVisibility({ feedId: 'gone', uid: 'u', title: 'T' }, 'list', false), /no longer linked/);
+  assert.throws(() => showSeries('gone', 'u'), /no longer linked/);
+  assert.equal(readSeriesVisibility(), before);
+  localStorage.setItem(FEEDS_KEY, '{corrupt');
+  assert.throws(() => showSeries('f1', 'zzz'), /no longer linked/);
+  assert.equal(readSeriesVisibility(), before, 'the f1/a hide survives');
+});
+
 test('hiddenSeriesFor lists one feed\'s hidden series by title', () => {
   const map = {
     f1: { z: entry({ list: false, title: 'Zoology' }), a: entry({ calendar: false, list: false, title: 'Art' }) },

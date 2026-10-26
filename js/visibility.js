@@ -28,6 +28,17 @@ function checkSurface(surface) {
   if (!SURFACES.has(surface)) throw new Error(`visibility: unknown surface ${surface}`);
 }
 
+// Keys are a feed id and a raw UID from a third-party ICS feed, so either can
+// be "__proto__" or "constructor". Every read is own-property only and every
+// write defines an own property: a plain `map[k] = v` with k "__proto__"
+// would set a prototype (polluting Object.prototype from stored JSON, or
+// silently storing nothing), and a plain read of "constructor" would find an
+// inherited function.
+const get = (obj, k) => (Object.hasOwn(obj, k) ? obj[k] : undefined);
+function put(obj, k, v) {
+  Object.defineProperty(obj, k, { value: v, enumerable: true, writable: true, configurable: true });
+}
+
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const isEntry = (e) => isObject(e)
   && typeof e.calendar === 'boolean' && typeof e.list === 'boolean' && typeof e.title === 'string';
@@ -52,8 +63,8 @@ export function parseVisibility(json) {
     for (const [uid, e] of Object.entries(series)) {
       if (!isEntry(e)) { corrupt = true; continue; }
       if (e.calendar && e.list) continue;
-      if (!map[feedId]) map[feedId] = {};
-      map[feedId][uid] = { calendar: e.calendar, list: e.list, title: e.title };
+      if (!get(map, feedId)) put(map, feedId, {});
+      put(get(map, feedId), uid, { calendar: e.calendar, list: e.list, title: e.title });
     }
   }
   return { map, corrupt };
@@ -77,8 +88,8 @@ export function loadVisibility() {
 export function isShown(map, item, surface) {
   checkSurface(surface);
   if (!item || item.external !== true) return true;
-  const e = map[item.feedId] && Object.prototype.hasOwnProperty.call(map[item.feedId], item.uid)
-    ? map[item.feedId][item.uid] : null;
+  const series = get(map, item.feedId);
+  const e = series ? get(series, item.uid) : undefined;
   return e ? e[surface] : true;
 }
 
@@ -105,9 +116,17 @@ function checkIds(feedId, uid) {
 // Pruning drops calendars not in plaenicke.feeds and (by parsing) corrupt
 // entries. A uid that has left its feed is KEPT: the cache can be emptied to
 // free storage and refill later.
-function update(change) {
+//
+// The target calendar must be in plaenicke.feeds, or the write throws and
+// nothing is stored: a hide written for a calendar removed meanwhile (a sync
+// can remove one while its sheet is open) would be pruned by this very write,
+// leaving a switch that says hidden over nothing stored. The same check keeps
+// an unreadable plaenicke.feeds (loadFeeds() reads it as []) from pruning
+// every hide on this device.
+function update(feedId, change) {
   const { map } = parseVisibility(readSeriesVisibility());
   const live = new Set(loadFeeds().map((f) => f.id));
+  if (!live.has(feedId)) throw new Error('visibility: that calendar is no longer linked on this device');
   for (const feedId of Object.keys(map)) if (!live.has(feedId)) delete map[feedId];
   change(map);
   for (const feedId of Object.keys(map)) if (Object.keys(map[feedId]).length === 0) delete map[feedId];
@@ -122,28 +141,28 @@ export function setSeriesVisibility({ feedId, uid, title } = {}, surface, shown)
   if (typeof title !== 'string') throw new Error('visibility: title required');
   checkSurface(surface);
   if (typeof shown !== 'boolean') throw new Error('visibility: shown must be a boolean');
-  return update((map) => {
-    const prev = map[feedId] && map[feedId][uid];
+  return update(feedId, (map) => {
+    const prev = get(map, feedId) && get(get(map, feedId), uid);
     const next = { calendar: prev ? prev.calendar : true, list: prev ? prev.list : true, title };
     next[surface] = shown;
     if (next.calendar && next.list) {
-      if (map[feedId]) delete map[feedId][uid];
+      if (get(map, feedId)) delete map[feedId][uid];
       return;
     }
-    if (!map[feedId]) map[feedId] = {};
-    map[feedId][uid] = next;
+    if (!get(map, feedId)) put(map, feedId, {});
+    put(get(map, feedId), uid, next);
   });
 }
 
 // showSeries(feedId, uid): Settings' Show — both surfaces back on at once.
 export function showSeries(feedId, uid) {
   checkIds(feedId, uid);
-  return update((map) => { if (map[feedId]) delete map[feedId][uid]; });
+  return update(feedId, (map) => { if (get(map, feedId)) delete map[feedId][uid]; });
 }
 
 // hiddenSeriesFor(map, feedId): Settings' rows for one calendar, by title.
 export function hiddenSeriesFor(map, feedId) {
-  const series = map[feedId] || {};
+  const series = get(map, feedId) || {};
   return Object.entries(series)
     .map(([uid, e]) => ({ uid, title: e.title, calendar: e.calendar, list: e.list }))
     .sort((a, b) => a.title.localeCompare(b.title) || (a.uid < b.uid ? -1 : 1));
