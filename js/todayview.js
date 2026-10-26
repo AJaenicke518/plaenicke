@@ -50,7 +50,7 @@ export function renderTally(node, tally) {
 }
 
 // renderTodayView(container, today, { onOpen, onToggleDone, laterOpen,
-//   onToggleLater }) -> { relative }
+//   onToggleLater, justTicked }) -> { relative }
 // `relative` is { node, item } for the one "in N" label (the next event), so
 // app.js's 60 s tick can update that text node and nothing else; or null when
 // no timed event is still to come. The label is drawn even while it is empty
@@ -61,11 +61,21 @@ export function renderTally(node, tally) {
 // days of `later` in Next 7 days' row style with "Show less" at the bottom.
 // `laterOpen` is app.js's state (default closed); a tap only reports through
 // onToggleLater, and app.js re-renders.
-export function renderTodayView(container, today, { onOpen, onToggleDone, laterOpen = false, onToggleLater } = {}) {
+//
+// The tick moment (rewards concept 1, Alex 2026-10-26): justTicked is the id
+// of the item a tick just marked done, passed by app.js for the one render
+// after the tick, else null. Its row, if it is drawn done with a checkbox,
+// gets `tick-just` and its title text is wrapped in <span class="tick-strike">,
+// so styles.css can draw the strike across the text alone. It plays where the
+// row lands (controller ruling, 2026-10-26): nothing here holds the reorder.
+export function renderTodayView(container, today, {
+  onOpen, onToggleDone, laterOpen = false, onToggleLater, justTicked = null,
+} = {}) {
   // Required: a missing one would draw rows that do nothing on tap.
   if (typeof onOpen !== 'function') throw new Error('renderTodayView requires onOpen');
   if (typeof onToggleDone !== 'function') throw new Error('renderTodayView requires onToggleDone');
   if (typeof laterOpen !== 'boolean') throw new Error('renderTodayView: laterOpen must be true or false');
+  if (justTicked !== null && typeof justTicked !== 'string') throw new Error('renderTodayView: justTicked must be an id or null');
   if (today.later.length > 0 && typeof onToggleLater !== 'function') {
     throw new Error('renderTodayView requires onToggleLater when there is something coming up');
   }
@@ -96,7 +106,11 @@ export function renderTodayView(container, today, { onOpen, onToggleDone, laterO
     // How app.js's focusOpener finds this button again.
     open.setAttribute('data-item-id', item.id);
     open.addEventListener('click', () => onOpen(item));
-    open.append(el('span', 'today-text', item.title), ...meta);
+    const just = check && item.done === true && item.id === justTicked;
+    if (just) li.classList.add('tick-just');
+    const text = el('span', 'today-text', just ? undefined : item.title);
+    if (just) text.appendChild(el('span', 'tick-strike', item.title));
+    open.append(text, ...meta);
     li.appendChild(open);
     return li;
   }

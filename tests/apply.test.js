@@ -1889,7 +1889,10 @@ function deleteControlFor(root, title) {
     for (const c of el.children) {
       if (hit) return;
       const chain = [...ancestors, el];
-      if (c.tagName === 'BUTTON' && c._classes.has('item-open') && (c.textContent || '').includes(title)) {
+      // allText, not the button's own textContent: the row a tick just
+      // marked holds its title in a .tick-strike span (rewards concept 1),
+      // and a real button's textContent includes its descendants too.
+      if (c.tagName === 'BUTTON' && c._classes.has('item-open') && allText(c).includes(title)) {
         for (let i = chain.length - 1; i >= 0 && !hit; i--) {
           hit = chain[i].children.find((s) => s._classes.has('delete') || s._classes.has('day-del')) || null;
         }
@@ -6223,6 +6226,94 @@ test('Today: a delete waiting for its Undo is already gone from Today, and Undo 
   } finally {
     await resetMockTimers(t);
   }
+  seed([]);
+});
+
+// Rewards concept 1 (Alex, 2026-10-26): the render right after a tick marks
+// that row `tick-just` on Today and on To-do, where the row lands; every later
+// render (here a tab switch) marks none. An untick and a failed save mark none.
+const rowWith = (box, cls) => {
+  let n = box.parentNode;
+  while (n && !n._classes.has(cls)) n = n.parentNode;
+  assert.ok(n, `fixture check: the box is inside a ${cls}`);
+  return n;
+};
+const justRows = (root) => {
+  const out = [];
+  const walk = (n) => { for (const c of n.children) { if (c._classes.has('tick-just')) out.push(c); walk(c); } };
+  walk(root);
+  return out;
+};
+
+test('the tick moment: a tick on Today marks its row once; the next render, and an untick, mark none', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const today = localISO(new Date());
+  seed([
+    record({ id: 'rw-a', type: 'task', title: 'rw First', date: today }),
+    record({ id: 'rw-b', type: 'task', title: 'rw Second', date: today }),
+  ]);
+  try {
+    click(globalThis.document.getElementById('tab-today'));
+    assert.equal(justRows(todayBody()).length, 0, 'fixture check: none before a tick');
+    const box = checkboxFor(todayBody(), 'rw First');
+    box.checked = true;
+    fire(box, 'change');
+    const landed = checkboxFor(todayBody(), 'rw First');
+    assert.deepEqual(justRows(todayBody()), [rowWith(landed, 'today-row')], 'the ticked row, where it landed');
+    assert.match(allText(todayBody()), /rw Second[\s\S]*rw First/, 'fixture check: it moved below the undone one');
+    click(globalThis.document.getElementById('tab-todo'));
+    click(globalThis.document.getElementById('tab-today'));
+    assert.equal(justRows(todayBody()).length, 0, 'a later render plays nothing');
+    assert.equal(justRows(todoList()).length, 0);
+    const again = checkboxFor(todayBody(), 'rw First');
+    again.checked = false;
+    fire(again, 'change');
+    assert.equal(justRows(todayBody()).length, 0, 'an untick plays nothing');
+  } finally {
+    if (restore) click(restore);
+  }
+  seed([]);
+});
+
+test('the tick moment: a tick on the To-do page marks its row there', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  seed([record({ id: 'rw-t', type: 'task', title: 'rw On the list', date: '2099-07-09' })]);
+  try {
+    click(globalThis.document.getElementById('tab-todo'));
+    const box = checkboxFor(todoList(), 'rw On the list');
+    box.checked = true;
+    fire(box, 'change');
+    assert.deepEqual(justRows(todoList()), [rowWith(checkboxFor(todoList(), 'rw On the list'), 'todo-row')]);
+  } finally {
+    if (restore) click(restore);
+  }
+  seed([]);
+});
+
+test('the tick moment: a tick that fails to save marks no row', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'rw-q', type: 'task', title: 'rw Quota', date: '2099-07-09' })]);
+  const real = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = (k, v) => {
+    if (k === 'plaenicke.items') { const e = new Error('The quota has been exceeded.'); e.name = 'QuotaExceededError'; throw e; }
+    return real(k, v);
+  };
+  try {
+    const box = checkboxFor(todoList(), 'rw Quota');
+    box.checked = true;
+    fire(box, 'change');
+  } finally {
+    localStorage.setItem = real;
+  }
+  assert.equal(storedById('rw-q').done, false, 'fixture check: not saved');
+  assert.equal(justRows(todoList()).length, 0);
+  assert.equal(justRows(todayBody()).length, 0);
+  clearMessage();
   seed([]);
 });
 

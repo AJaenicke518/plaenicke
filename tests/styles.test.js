@@ -570,14 +570,91 @@ test('the grey iOS tap highlight is off exactly where .pressed replaces it', () 
   assert.equal(declOf('html', '-webkit-tap-highlight-color'), null, 'links and checkboxes keep the native highlight');
 });
 
-// Feedback on touch-down means instantly. And stage 2 adds no motion at all,
-// so nothing needs a prefers-reduced-motion override yet: stage 4's capture
-// box is the first animation, and it must add that override and change this.
-test('press state is instant, and the stylesheet declares no motion yet', () => {
+// Feedback on touch-down means instantly.
+test('press state is instant', () => {
   assert.equal(declOf('button.pressed', 'transition'), null);
   assert.equal(declOf('[data-press].pressed', 'transition'), null);
-  assert.doesNotMatch(css, /(^|[;{\s])(transition|animation)(-[a-z-]+)?\s*:/);
-  assert.doesNotMatch(css, /@keyframes/);
+});
+
+// Every style rule with the at-rule it sits in: { at, sel, body }. `at` is the
+// enclosing @media prelude, or null at the top level. rulesOf flattens at-rules
+// and drops their preludes, so it cannot say where a rule sits (plan review
+// I2). @keyframes blocks are returned whole as { at: '@keyframes name' }, never
+// read as rules with selectors like `from`.
+function rulesInContext(source, at = null) {
+  const out = [];
+  let depth = 0;
+  let start = 0;
+  let prelude = '';
+  let bodyStart = 0;
+  for (let i = 0; i < source.length; i += 1) {
+    if (source[i] === '{') {
+      if (depth === 0) { prelude = source.slice(start, i).trim(); bodyStart = i + 1; }
+      depth += 1;
+    } else if (source[i] === '}') {
+      depth -= 1;
+      if (depth < 0) throw new Error(`unbalanced braces at ${i}`);
+      if (depth === 0) {
+        const body = source.slice(bodyStart, i);
+        if (prelude.startsWith('@keyframes')) out.push({ at: prelude, sel: null, body });
+        else if (prelude.startsWith('@')) out.push(...rulesInContext(body, prelude.replace(/\s+/g, ' ')));
+        else out.push({ at, sel: prelude, body });
+        start = i + 1;
+      }
+    }
+  }
+  if (depth !== 0) throw new Error('unbalanced braces at end of source');
+  return out;
+}
+const NO_PREFERENCE = '@media (prefers-reduced-motion: no-preference)';
+
+test('rulesInContext keeps each rule\'s @media and reads @keyframes whole (fixture check on the helper)', () => {
+  const src = '.a { color: red; } @media (prefers-reduced-motion: no-preference) { .b { animation: x 1s; } } @keyframes x { from { opacity: 0; } to { opacity: 1; } }';
+  const rules = rulesInContext(src);
+  assert.deepEqual(rules.map((r) => [r.at, r.sel]), [[null, '.a'], [NO_PREFERENCE, '.b'], ['@keyframes x', null]]);
+});
+
+// Rewards concept 1 (Alex, 2026-10-26) is the first motion in the app, and it
+// respects Reduce Motion by construction: every animation and transition sits
+// inside a no-preference block, so with Reduce Motion on nothing moves and the
+// page is what it was before. The only keyframes are the tick moment's.
+test('every animation is inside a reduced-motion no-preference block; the only keyframes are the tick moment\'s', () => {
+  let moving = 0;
+  const keyframes = [];
+  for (const { at, sel, body } of rulesInContext(css)) {
+    if (sel === null) { keyframes.push(at.replace('@keyframes ', '')); continue; }
+    if (/(^|[;{\s])(transition|animation)(-[a-z-]+)?\s*:/.test(body)) {
+      moving += 1;
+      assert.equal(at, NO_PREFERENCE, `${sel} moves outside a no-preference block`);
+    }
+  }
+  assert.ok(moving >= 3, `fixture check: ${moving} rules that move`);
+  assert.deepEqual(keyframes.sort(), ['tick-draw', 'tick-pop', 'tick-wash']);
+});
+
+// The mockup's motion: a ~0.9 s fading wash, a 260 ms pop of the box, and the
+// strike drawn left to right in 320 ms. The wash is an inset shadow in the
+// --tick-glow token (both themes), so a To-do card fades back to its own
+// ground. The title's line-through is turned off on the element that carries
+// it, at one class more than the .done rule (plan review C1), so the drawn
+// line replaces it rather than doubling it.
+test('the tick moment: wash, pop and drawn strike, in tokens, replacing the line-through on the element that carries it', () => {
+  const tick = rulesInContext(css).filter((r) => r.at === NO_PREFERENCE);
+  const decl = (selector, prop) => declOf(selector, prop, tick.map((r) => `${r.sel} {${r.body}}`).join('\n'));
+  assert.match(decl('.tick-just', 'animation'), /^tick-wash 900ms ease-out$/);
+  assert.equal(decl('.tick-just .today-check', 'animation'), 'tick-pop 260ms ease-out');
+  assert.equal(decl('.tick-just .todo-tick input', 'animation'), 'tick-pop 260ms ease-out');
+  assert.equal(decl('.tick-strike', 'animation'), 'tick-draw 320ms 60ms ease-out both');
+  assert.equal(decl('.tick-strike', 'background'), 'linear-gradient(currentColor, currentColor) no-repeat 0 58% / 100% 1.5px');
+  assert.equal(decl('.today-row.done.tick-just .today-text', 'text-decoration'), 'none');
+  assert.equal(decl('.todo-row.done.tick-just .item-open', 'text-decoration'), 'none');
+  assert.equal(declOf('.today-row.done .today-text', 'text-decoration'), 'line-through', 'fixture check: the rule it overrides');
+  assert.equal(declOf('.todo-row.done .item-open', 'text-decoration'), 'line-through', 'fixture check: the rule it overrides');
+  const wash = rulesInContext(css).find((r) => r.at === '@keyframes tick-wash');
+  assert.match(wash.body, /from\s*\{\s*box-shadow: inset 0 0 0 100vmax var\(--tick-glow\);\s*\}/);
+  assert.match(wash.body, /to\s*\{\s*box-shadow: inset 0 0 0 100vmax transparent;\s*\}/);
+  assert.equal(declOf(':root', '--tick-glow'), 'rgba(138, 90, 59, 0.14)');
+  assert.equal(declOf('[data-theme="dark"]', '--tick-glow'), 'rgba(143, 167, 200, 0.18)');
 });
 
 // --- home-screen stage 3b: the guessed-series line on the sheet (spec § 2.4) --

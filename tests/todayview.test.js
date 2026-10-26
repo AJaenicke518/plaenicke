@@ -357,6 +357,60 @@ test('Coming up: a button that would do nothing on tap is refused', () => {
     /laterOpen/);
 });
 
+// --- the tick moment (rewards concept 1, Alex 2026-10-26) -------------------
+// app.js passes the id of the row just ticked for the one render after the
+// tick. That row, and only that row, gets `tick-just`, and its title text is
+// wrapped in a `tick-strike` span so the strike is drawn across the text
+// alone (styles.css). It plays where the row lands: no reorder is held.
+const justDraw = (justTicked) => draw(DAY, DAY_FEED, at(9, 18), { justTicked });
+const strikeOf = (li) => byClass(li, 'tick-strike');
+
+test('the tick moment: the just-ticked row, and only it, gets tick-just and a strike span around its title', () => {
+  const { host } = justDraw('ticked');
+  const row = rowOf(host, 'Water plants');
+  assert.ok(row._classes.has('tick-just'));
+  assert.ok(row._classes.has('done'), 'fixture check: it is the ticked row');
+  const [text] = byClass(row, 'today-text');
+  assert.equal(text.children.length, 1);
+  assert.ok(text.children[0]._classes.has('tick-strike'));
+  assert.equal(text.children[0].textContent, 'Water plants');
+  assert.equal(text.textContent, '', 'the title is in the span, once');
+  const others = byClass(host, 'today-row').filter((li) => li !== row);
+  assert.ok(others.length >= 5, 'fixture check');
+  for (const li of others) {
+    assert.equal(li._classes.has('tick-just'), false, allText(li));
+    assert.equal(strikeOf(li).length, 0, allText(li));
+  }
+});
+
+test('the tick moment: no id, or the id of a row that is not done, draws it nowhere', () => {
+  for (const justTicked of [undefined, null, 'bank', 'gone']) {
+    const { host } = justDraw(justTicked);
+    for (const li of byClass(host, 'today-row')) {
+      assert.equal(li._classes.has('tick-just'), false, `${justTicked}: ${allText(li)}`);
+      assert.equal(strikeOf(li).length, 0, `${justTicked}: ${allText(li)}`);
+    }
+  }
+  const { host } = draw(DAY, DAY_FEED);
+  assert.equal(rowOf(host, 'Water plants')._classes.has('tick-just'), false, 'the default is none');
+});
+
+test('the tick moment: a just-ticked overdue row plays too', () => {
+  const late = own('lateDone', { type: 'due', date: '2026-10-18', title: 'Old essay', done: true, updatedAt: new Date(2026, 9, 21, 9, 0).toISOString() });
+  const { host } = draw([late], [], at(9, 18), { justTicked: 'lateDone' });
+  const row = rowOf(host, 'Old essay');
+  assert.ok(row && row._classes.has('tick-just'));
+  assert.equal(strikeOf(row).length, 1);
+});
+
+test('renderTodayView refuses a justTicked that is not an id or null', () => {
+  const host = document.createElement('div');
+  const model = buildToday(DAY, [], TODAY, at(9, 0), () => []);
+  for (const bad of [1, true, {}]) {
+    assert.throws(() => renderTodayView(host, model, { onOpen() {}, onToggleDone() {}, justTicked: bad }), /justTicked/);
+  }
+});
+
 // --- the "N DONE · M LEFT" count (rewards concept 2, Alex 2026-10-26) -------
 // renderTally draws today.js's tally into Today's head. null: empty and
 // hidden (until the first tick). Upper case is styles.css's, not the text's.
