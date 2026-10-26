@@ -30,6 +30,36 @@ Nothing is stored, synced or migrated. `sync.js`, `merge.js`, `ics.js`, `schemaV
 13. **A refusal lasts the page's life** ("later taps that session go straight to typing").
 14. **Icons:** inline SVG, a mic and a stop square, in `currentColor` on the accent.
 15. **Service worker:** `CACHE` → `plaenicke-v6-13`; `CACHE_ON_MAIN` re-pinned to main's `plaenicke-v6-12` (it was stale at `-v6-11`).
+16. **A superseded box is told at once** (review I1). When a newer Add from either box (manual or smart) supersedes a smart add in flight, that request's box is told immediately: its "Thinking…" goes (only if still showing) and the capture box drops its adding latch and Cancel. So the capture box's Cancel or × can only ever cancel its own request. This replaces the first draft's "clear Thinking… when the superseded reply finally arrives".
+17. **A listen while this box's own preview is open starts from an empty field** (review I2): spec § 3 step 8 calls it a new capture with "nothing was added from it", so the previewed text does not become the new listen's prefix. After Cancel, a failure or recognition ending, the next listen still appends (spec step 5).
+18. **Add is always reachable** (review I3): the field grows to at most 120 px (five lines), then scrolls; × moved into the actions row (× left, Cancel/Add right), which is the panel's last child and `position: sticky; bottom: 0`; the preview sits above it.
+19. **`.typing` follows any keyboard-raising control in the box** (review I4): the field (not while read-only) or a preview input/select, via `focusin`/`focusout` on the box; moving focus between two of them keeps it. It stays on while the box closes, so a close with the keyboard up fades in place instead of jumping first (review M1).
+20. **A closing box lets taps through** (`pointer-events: none`, review M2); **the textarea's height includes its border** (review M3); **a `SpeechRecognition` constructor that throws reports `start-failed`** like `start()` (review M4); **a stale preview's Cancel is refused like its confirm**, through a small `js/preview.js` change: `onCancel` returning `false` leaves the container alone (review M5). The capture box's Cancel is styled secondary and × uses the 20 px title size (review M16).
+
+**Devil's-advocate review of d54cc97 (2026-10-26) — adjudication.** No Critical findings. Every Important and Minor finding:
+
+| Finding | Ruling | Where |
+|---|---|---|
+| I1 the capture box's Cancel/× cancelled whichever request was newest, even the top box's; its latch stayed up to 60 s after a top-box Add superseded it | **APPLY** | decision 16; Task 6 `supersedePending`, `capture.released()`; tests `capture: a top-box Add that supersedes it …`, `capture: a manual add releases it too …` |
+| I2 a listen with this box's preview open re-sent the old text as its prefix | **APPLY** (the spec's "new capture … nothing was added from it"); listed for Alex to confirm | decision 17; Task 4 |
+| I3 with the keyboard up, a growing field pushed Add out of the box | **APPLY** | decision 18; Task 3 CSS and markup |
+| I4 a preview input raised the keyboard without `.typing` | **APPLY** | decision 19; Task 4 |
+| M1 a close with the keyboard up jumped before fading | **APPLY** | decision 19; Task 4 |
+| M2 a closing box swallowed taps | **APPLY** | decision 20; Task 3 |
+| M3 textarea 2 px short | **APPLY** | decision 20; Task 4 |
+| M4 a throwing constructor left the box stuck | **APPLY** | decision 20; Task 2 |
+| M5 a stale preview's Cancel wiped the newer preview | **APPLY** | decision 20; Task 5 (`js/preview.js`) |
+| M6 "Added." from the capture box is never seen (the box closes) | **DEFER** — blocker: Alex's call (spec § 3 says only "Success closes the box"); open question 1 in the lead report | — |
+| M7 return in the capture field makes a newline instead of adding | **DEFER** — blocker: Alex's call (the spec is silent; the textarea default is kept); open question 2 | — |
+| M8 a top-box request superseded by a capture just goes blank | **DEFER** — blocker: Alex's call on whether to say more; behaviour now immediate (decision 16); open question 3 | — |
+| M9 reopening during the 250 ms close restarts the grow animation | **DISMISS** — a 250 ms window, and the grow it restarts is the open animation the spec asks for; matching mid-animation state needs reading computed transforms, more code than the case is worth | — |
+| M10 "Settings → plaenicke" may not be a real path | **DEFER** — blocker: needs the phone; phone check 20 | — |
+| M11 duplicated words in continuous mode | **DEFER** — blocker: needs the phone; phone check 17 | — |
+| M12 first-time permission prompts may end the first listen | **DEFER** — blocker: needs the phone; phone check 18 | — |
+| M13 `.typing` lands before the keyboard has shrunk the viewport | **DEFER** — blocker: needs the phone; phone check 19 | — |
+| M14 test fragility: no `closeCapture` in two `finally`s; refusal test must stay last; `installManualTimers` handles | **APPLY** the `finally`s; **DISMISS** the rest: the refusal test fails loudly if moved (its comment says why), and `installManualTimers` handles are objects, not recycled integers (tests/apply.test.js `installManualTimers`) | Task 6 tests |
+| M15 desktop: a focused field covers the tab bar and button | **DEFER** — blocker: Alex's call; told in the lead report (decision 2 known limit) | — |
+| M16 × off the type scale; Cancel styled primary | **APPLY** | decision 20; Task 3 |
 
 **Tech Stack:** Vanilla ES modules, no framework, no build step, no bundler; `node:test` + `node:assert/strict`; no new dependencies.
 
@@ -508,7 +538,14 @@ test('a start() that throws reports start-failed and returns no session', () => 
   assert.equal(instances[0].onresult, null, 'and nothing stays attached');
 });
 
-test('errorKind: not-allowed and service-not-allowed are refusals; every other code is retry', () => {
+test('a constructor that throws reports start-failed too and returns no session', () => {
+  const { log, cbs } = recorder();
+  globalThis.window = { SpeechRecognition: function Broken() { throw new Error('nope'); } };
+  assert.equal(listen(cbs), null);
+  assert.deepEqual(log.error, ['start-failed']);
+});
+
+test('errorKind:not-allowed and service-not-allowed are refusals; every other code is retry', () => {
   assert.deepEqual(REFUSED_ERRORS, ['not-allowed', 'service-not-allowed']);
   assert.equal(errorKind('not-allowed'), 'refused');
   assert.equal(errorKind('service-not-allowed'), 'refused');
@@ -540,9 +577,10 @@ test('errorKind: not-allowed and service-not-allowed are refusals; every other c
 //   onText   (text) on every result.
 //   onEnd    () when recognition ended on its own (not after stop()).
 //   onError  (code) on an error — e.error, e.g. 'not-allowed' — or
-//            'start-failed' when start() throws. Ends the listen.
+//            'start-failed' when the constructor or start() throws. Ends the listen.
 //   session  { stop() }: detach, then stop(), then abort(). Idempotent.
-//   null     only when start() threw (onError has already been called).
+//   null     only when the constructor or start() threw (onError has already
+//            been called).
 // Throws when there is no SpeechRecognition: callers check
 // isVoiceSupported() inside the tap first, and must not reach here without it.
 
@@ -576,7 +614,15 @@ export function listen({ prefix = '', onText, onEnd, onError } = {}) {
   }
   const SR = getRecognizer();
   if (!SR) throw new Error('listen: no SpeechRecognition here — check isVoiceSupported() first');
-  const rec = new SR();
+  // A constructor that throws reports like a start() that throws (DA M4): an
+  // escaping throw would leave the box open with nothing listening.
+  let rec;
+  try {
+    rec = new SR();
+  } catch {
+    onError('start-failed');
+    return null;
+  }
   rec.lang = 'en-US';
   rec.continuous = true;
   rec.interimResults = true;
@@ -633,7 +679,7 @@ p.write_text(s + '\n' + block)
 print('ok')
 ```
 
-- [ ] **Step 4: Run; it passes.** `node --test tests/voice.test.js` → `# tests 10`, `# pass 10`.
+- [ ] **Step 4: Run; it passes.** `node --test tests/voice.test.js` → `# tests 11`, `# pass 11`.
 
 - [ ] **Step 5: Mutants.**
 
@@ -648,8 +694,9 @@ print('ok')
 | V7 service-not-allowed is retry | `REFUSED_ERRORS = ['not-allowed']` | `errorKind: …` |
 | V8 a reused recognizer | `const rec = new SR();` → `const rec = (globalThis.__rec \|\|= new SR());` | `each listen makes a NEW recognizer …` (and others) |
 | V9 interim dropped | `else interim += r[0].transcript;` → `else interim += '';` | `each result shows prefix …`, `composeText joins …` |
+| V10 constructor outside the try | the `let rec; try { rec = new SR(); } catch { … }` block → `const rec = new SR();` | `a constructor that throws reports start-failed …` |
 
-- [ ] **Step 6: Gate and commit.** Expected: `# tests 1546`, `# fail 0`, `# cancelled 0`. Message: `Stage 4: listen() in voice.js — a new recognizer per listen, live words, stop-and-detach`, body naming spec § 3 and the 2026-10-20 spike's findings, then your Co-Authored-By line. Files: `js/voice.js tests/voice.test.js`.
+- [ ] **Step 6: Gate and commit.** Expected: `# tests 1547`, `# fail 0`, `# cancelled 0`. Message: `Stage 4: listen() in voice.js — a new recognizer per listen, live words, stop-and-detach`, body naming spec § 3 and the 2026-10-20 spike's findings, then your Co-Authored-By line. Files: `js/voice.js tests/voice.test.js`.
 
 ---
 
@@ -660,7 +707,7 @@ print('ok')
 
 The box is static here (hidden; nothing drives it until Task 4/6). `apply.test.js` mounts the new ids automatically and app.js does not look them up yet.
 
-- [ ] **Step 1: Write the failing tests** with `scripts/t3_styles_edit.py`. It adds `.capture-text` to the 16 px input rules; replaces the stage-2 test "press state is instant, and the stylesheet declares no motion yet" (whose comment says stage 4 must change it) with three motion tests; lets the capture box read the new type scale (spec § 5: Today, tab bar, capture box are the new screens); extends the layers test with 6 and 8; and adds eight capture tests:
+- [ ] **Step 1: Write the failing tests** with `scripts/t3_styles_edit.py`. It adds `.capture-text` to the 16 px input rules; replaces the stage-2 test "press state is instant, and the stylesheet declares no motion yet" (whose comment says stage 4 must change it) with three motion tests; lets the capture box read the new type scale (spec § 5: Today, tab bar, capture box are the new screens); extends the layers test with 6 and 8; and adds eleven capture tests:
 
 ```python
 # Task 3: tests/styles.test.js edits. Run from the repo root.
@@ -836,16 +883,40 @@ test('the capture panel has the sheet radius and a shadow, and scrolls inside it
 
 test('every capture control is a 44px target', () => {
   assert.ok(px(declOf('.capture-close', 'min-width')) >= 44);
-  assert.ok(px(declOf('.capture-close', 'min-height')) >= 44);
-  assert.ok(px(declOf('.capture-actions button', 'min-height')) >= 44);
+  assert.ok(px(declOf('.capture-actions button', 'min-height')) >= 44, 'x, Cancel and Add are all in this row');
   assert.ok(px(declOf('.capture-type', 'min-height')) >= 44);
+  assert.match(indexHtml, /<div class="capture-actions">\\s*<button id="capture-close"/, 'x is in the actions row');
+});
+
+// Add must stay reachable in a box that may be ~200px tall with the keyboard
+// up (DA I3): the field stops growing at five lines, and the actions row is
+// the panel's last child, stuck to its bottom edge.
+test('Add stays reachable: the field stops growing, and the actions row sticks to the bottom', () => {
+  assert.equal(declOf('.capture-text', 'max-height'), '120px');
+  assert.equal(declOf('.capture-text', 'overflow-y'), 'auto');
+  assert.equal(declOf('.capture-actions', 'position'), 'sticky');
+  assert.equal(declOf('.capture-actions', 'bottom'), '0');
+  assert.equal(declOf('.capture-actions', 'background'), 'var(--card)', 'opaque, so scrolled content does not show through');
+  const panel = indexHtml.slice(indexHtml.indexOf('<div class="capture-panel"'), indexHtml.indexOf('<button id="capture-btn"'));
+  assert.ok(panel.lastIndexOf('<div class="capture-actions">') > panel.indexOf('id="capture-preview"'),
+    'the actions row comes after the preview');
+});
+
+test('a closing capture box lets taps through to the page', () => {
+  assert.equal(declOf('.capture-box.closing', 'pointer-events'), 'none');
+});
+
+test('the capture box\\'s Cancel is secondary, like the preview\\'s and the sheet\\'s', () => {
+  assert.match(indexHtml, /<button id="capture-cancel" class="cancel" type="button" hidden>Cancel<\\/button>/);
+  assert.equal(declOf('.capture-actions .cancel', 'background'), 'var(--card)');
+  assert.equal(declOf('.capture-actions .cancel', 'border'), '1px solid var(--line)');
 });
 """
 p.write_text(s)
 print('ok')
 ```
 
-- [ ] **Step 2: Run; it fails.** `node --test tests/styles.test.js` → `# tests 129`, `# pass 116`, `# fail 13`: `.capture-text is at least 16px`; the three motion tests; the layers test; the eight capture tests (`index.html puts the capture button after both hosts …` included).
+- [ ] **Step 2: Run; it fails.** `node --test tests/styles.test.js` → `# tests 132`, `# pass 116`, `# fail 16`: `.capture-text is at least 16px`; the three motion tests; the layers test; the eleven capture tests (`index.html puts the capture button after both hosts …` included).
 
 - [ ] **Step 3: Implement** with `scripts/t3_impl_edit.py files/index_block.html files/capture.css`. It inserts this right after `  <div id="sheet-host"></div>` in `index.html`:
 
@@ -857,18 +928,19 @@ print('ok')
        sibling. The box is not a modal: no backdrop, no tap-outside-to-close. -->
   <div id="capture-box" class="capture-box" hidden>
     <div class="capture-panel" role="region" aria-label="Capture">
-      <div class="capture-head">
-        <button id="capture-close" class="capture-close" type="button" aria-label="Close">&times;</button>
-      </div>
       <textarea id="capture-text" class="capture-text" rows="2" autocomplete="off"
                 placeholder="Say it, or tap here to type"></textarea>
       <p id="capture-message" class="message" role="status"></p>
       <button id="capture-type" class="capture-type" type="button" hidden>Type instead</button>
+      <section id="capture-preview" class="capture-preview" hidden></section>
+      <!-- One row, last and sticky at the panel's bottom, so Add stays
+           reachable however much text or preview there is: x on the left,
+           Cancel / Add on the right. -->
       <div class="capture-actions">
-        <button id="capture-cancel" type="button" hidden>Cancel</button>
+        <button id="capture-close" class="capture-close" type="button" aria-label="Close">&times;</button>
+        <button id="capture-cancel" class="cancel" type="button" hidden>Cancel</button>
         <button id="capture-add" type="button">Add</button>
       </div>
-      <section id="capture-preview" class="capture-preview" hidden></section>
     </div>
   </div>
   <button id="capture-btn" class="capture-btn" type="button"
@@ -965,17 +1037,15 @@ and appends this to the end of `styles.css` after one blank line:
   .capture-panel { animation-name: capture-fade-in; }
   .capture-box.closing .capture-panel { animation-name: capture-fade-out; }
 }
-.capture-head { display: flex; justify-content: flex-end; }
-.capture-close {
-  min-width: 44px;
-  min-height: 44px;
-  padding: 0;
-  background: transparent;
-  color: var(--muted);
-  font-size: 24px;
-}
+/* A closing box is on its way out: taps go to the page under it. */
+.capture-box.closing { pointer-events: none; }
+/* The field grows (js/capture.js) up to five lines, then scrolls, so the
+   actions row stays inside a box that may be only ~200px tall with the
+   keyboard up. */
 .capture-text {
   width: 100%;
+  max-height: 120px;
+  overflow-y: auto;
   font-size: 16px;
   font-family: var(--sans);
   padding: var(--space-3);
@@ -985,8 +1055,29 @@ and appends this to the end of `styles.css` after one blank line:
   color: var(--ink);
   resize: none;
 }
-.capture-actions { display: flex; gap: var(--space-2); justify-content: flex-end; margin-top: var(--space-2); }
+/* x, Cancel and Add in one row, last in the panel and stuck to its bottom
+   edge, so Add is reachable however long the text or the preview. */
+.capture-actions {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  gap: var(--space-2);
+  justify-content: flex-end;
+  margin-top: var(--space-2);
+  background: var(--card);
+}
 .capture-actions button { min-height: 44px; }
+/* x on the left, away from Add. */
+.capture-close {
+  min-width: 44px;
+  margin-right: auto;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--text-title);
+}
+/* Cancel is secondary, as the preview's and the sheet's are. */
+.capture-actions .cancel { background: var(--card); color: var(--ink); border: 1px solid var(--line); }
 .capture-type { min-height: 44px; margin-top: var(--space-2); }
 .capture-preview { margin-top: var(--space-3); }
 ```
@@ -1010,7 +1101,7 @@ p.write_text(s + '\n' + css_block)
 print('ok')
 ```
 
-- [ ] **Step 4: Run; it passes.** `node --test tests/styles.test.js` → `# tests 129`, `# pass 129`.
+- [ ] **Step 4: Run; it passes.** `node --test tests/styles.test.js` → `# tests 132`, `# pass 132`.
 
 - [ ] **Step 5: Mutants.**
 
@@ -1025,8 +1116,12 @@ print('ok')
 | S7 grow animates width | add `width: 0;` to `capture-grow`'s `from` | `the capture panel grows from the button's corner …` |
 | S8 button before the hosts | insert `<button id="capture-btn" class="capture-btn" type="button"></button>` before `#settings-host` | `index.html puts the capture button after both hosts …` |
 | S9 button gets a shadow | add `box-shadow: 0 2px 4px black;` to `.capture-btn` | `the capture button is a 56px accent circle …` |
+| S10 the field grows without bound | delete `max-height: 120px;` from `.capture-text` | `Add stays reachable …` |
+| S11 the actions row is not sticky | delete `position: sticky;` and `bottom: 0;` from `.capture-actions` | `Add stays reachable …` |
+| S12 a closing box takes taps | delete `.capture-box.closing { pointer-events: none; }` | `a closing capture box lets taps through …` |
+| S13 Cancel is primary | `index.html`: drop `class="cancel"` from `#capture-cancel` | `the capture box's Cancel is secondary …` |
 
-- [ ] **Step 6: Gate and commit.** Expected: `# tests 1557`, `# fail 0`, `# cancelled 0`. Message: `Stage 4: capture button and box markup and styles (hidden until wired)`. Files: `index.html styles.css tests/styles.test.js`.
+- [ ] **Step 6: Gate and commit.** Expected: `# tests 1561`, `# fail 0`, `# cancelled 0`. Message: `Stage 4: capture button and box markup and styles (hidden until wired)`. Files: `index.html styles.css tests/styles.test.js`.
 
 ---
 
@@ -1178,13 +1273,40 @@ test('a tap opens the box, follows the visual viewport, closes any preview and l
   assert.equal(fx.capture.state().mode, 'listening');
 });
 
-test('live words fill the field and grow it', () => {
+test('live words fill the field and grow it, border included', () => {
   const fx = setup();
   listening(fx);
+  // A border-box textarea: scrollHeight leaves out its 2px of border.
   fx.els.field.scrollHeight = 72;
+  fx.els.field.offsetHeight = 50;
+  fx.els.field.clientHeight = 48;
   fx.voice.current.opts.onText('lunch with sam');
   assert.equal(fx.els.field.value, 'lunch with sam');
-  assert.equal(fx.els.field.style.height, '72px');
+  assert.equal(fx.els.field.style.height, '74px');
+});
+
+test('a listen while this box\'s own preview is open is a new capture: the old text is not its prefix', () => {
+  const fx = setup();
+  listening(fx, 'two things on friday');
+  fx.voice.current.opts.onEnd();
+  fx.els.preview.appendChild(new FakeElement('div'));
+  tap(fx.els.button);
+  assert.equal(fx.voice.current.opts.prefix, '');
+  assert.equal(fx.els.field.value, '');
+  assert.equal(fx.previews, 2, 'and the preview is closed');
+});
+
+test('released() drops the latch at once and adds nothing', async () => {
+  const fx = setup();
+  listening(fx, 'lunch');
+  tap(fx.els.button);
+  assert.equal(fx.capture.state().adding, true, 'fixture check');
+  fx.capture.released();
+  assert.equal(fx.capture.state().adding, false);
+  assert.equal(fx.els.button.disabled, false);
+  assert.equal(fx.els.cancel.hidden, true);
+  assert.equal(fx.cancels, 0, 'released is not a cancel');
+  assert.equal(fx.els.field.value, 'lunch', 'the text is kept');
 });
 
 test('a tap while listening stops first, then adds the text shown, behind the adding latch', async () => {
@@ -1391,18 +1513,52 @@ test('x stops listening, clears everything, and closes with the grow-back animat
   assert.equal(fx.follows[0].stops, 1, 'and stops following the viewport');
 });
 
-test('x with the keyboard up fades instead', () => {
+// focusin/focusout as a browser sends them to the box: they bubble from the
+// control, and focusout names where focus is going (relatedTarget).
+function focusEvent(fx, type, target, relatedTarget = null) {
+  for (const fn of fx.els.box._listeners[type] || []) fn({ target, relatedTarget });
+}
+
+test('the box drops to the keyboard while the field or a preview input has focus, and not for a read-only field', () => {
   const fx = setup();
   listening(fx, 'typed');
-  fire(fx.els.field, 'focus');
-  assert.equal(fx.els.box.classList.contains('typing'), false, 'a read-only focus raises no keyboard');
+  const box = fx.els.box;
+  focusEvent(fx, 'focusin', fx.els.field);
+  assert.equal(box.classList.contains('typing'), false, 'a read-only focus raises no keyboard');
   fx.voice.current.opts.onEnd();
-  fire(fx.els.field, 'focus');
-  assert.ok(fx.els.box.classList.contains('typing'));
+  focusEvent(fx, 'focusin', fx.els.field);
+  assert.ok(box.classList.contains('typing'));
+  // Into the preview's title input: still typing, no flicker.
+  const input = new FakeElement('input');
+  fx.els.preview.appendChild(input);
+  fx.els.box.appendChild(fx.els.preview);
+  focusEvent(fx, 'focusout', fx.els.field, input);
+  assert.ok(box.classList.contains('typing'), 'moving between two inputs in the box keeps it');
+  focusEvent(fx, 'focusin', input);
+  assert.ok(box.classList.contains('typing'));
+  // Out to a button (no keyboard): the box goes back above the round button.
+  focusEvent(fx, 'focusout', input, fx.els.add);
+  assert.equal(box.classList.contains('typing'), false);
+  // A preview input alone raises it too.
+  focusEvent(fx, 'focusin', input);
+  assert.ok(box.classList.contains('typing'));
+  focusEvent(fx, 'focusout', input, null);
+  assert.equal(box.classList.contains('typing'), false);
+});
+
+test('x with the keyboard up fades where it is, keeping its place until it is hidden', () => {
+  const fx = setup();
+  listening(fx, 'typed');
+  fx.voice.current.opts.onEnd();
+  focusEvent(fx, 'focusin', fx.els.field);
   tap(fx.els.close);
+  focusEvent(fx, 'focusout', fx.els.field, null); // the blur close() causes
   assert.ok(fx.els.box.classList.contains('fade'));
   assert.ok(fx.els.box.classList.contains('closing'));
+  assert.ok(fx.els.box.classList.contains('typing'), 'no jump up before the fade');
+  fx.timers[0].fn();
   assert.equal(fx.els.box.classList.contains('typing'), false);
+  assert.equal(fx.els.box.hidden, true);
 });
 
 test('x during Thinking discards the request', () => {
@@ -1418,10 +1574,14 @@ test('x during Thinking discards the request', () => {
 test('a tap while the box is closing reopens it without a second viewport follow', () => {
   const fx = setup();
   listening(fx, 'x');
+  fx.voice.current.opts.onEnd();
+  focusEvent(fx, 'focusin', fx.els.field);
   tap(fx.els.close);
   tap(fx.els.button);
   assert.equal(fx.timers[0].cleared, true);
   assert.equal(fx.els.box.classList.contains('closing'), false);
+  assert.equal(fx.els.box.classList.contains('fade'), false);
+  assert.equal(fx.els.box.classList.contains('typing'), false, 'the field lost focus as the box began to close');
   assert.equal(fx.els.box.hidden, false);
   assert.equal(fx.follows.length, 1);
   assert.equal(fx.voice.listens.length, 2);
@@ -1541,20 +1701,34 @@ export function createCapture({
     els.field.readOnly = next === 'listening';
   }
 
-  // The field grows with its text (spec § 3: "a new textarea that grows").
+  // The field grows with its text (spec § 3: "a new textarea that grows"), up
+  // to styles.css's max-height, after which it scrolls. scrollHeight leaves
+  // out the border, which border-box sizing counts: offsetHeight - clientHeight
+  // adds it back, or the last line is clipped (DA M3).
   function grow() {
     els.field.style.height = 'auto';
-    els.field.style.height = `${els.field.scrollHeight}px`;
+    els.field.style.height = `${els.field.scrollHeight + els.field.offsetHeight - els.field.clientHeight}px`;
   }
+
+  // A control that raises the keyboard: the field unless it is read-only
+  // (listening), and the preview's inputs and selects (DA I4).
+  const raisesKeyboard = (node) => !!node && (node === els.field
+    ? !els.field.readOnly
+    : ['INPUT', 'TEXTAREA', 'SELECT'].includes(node.tagName));
+  const inBox = (node) => {
+    for (let n = node; n; n = n.parentNode) if (n === els.box) return true;
+    return false;
+  };
 
   function open() {
     if (closeTimer !== null) {
       // Reopened while closing: the box is still showing and still placed,
-      // so it only stops closing.
+      // so it only stops closing. Its field lost focus when it began to.
       clearLater(closeTimer);
       closeTimer = null;
       els.box.classList.remove('closing');
       els.box.classList.remove('fade');
+      els.box.classList.remove('typing');
     }
     if (!els.box.hidden) return;
     els.box.hidden = false;
@@ -1566,6 +1740,7 @@ export function createCapture({
     els.box.hidden = true;
     els.box.classList.remove('closing');
     els.box.classList.remove('fade');
+    els.box.classList.remove('typing');
     if (stopFollow) { stopFollow(); stopFollow = null; }
   }
 
@@ -1611,6 +1786,10 @@ export function createCapture({
   function startListening() {
     line.set('');
     els.typeInstead.hidden = true;
+    // A listen while this box's own preview is open is a NEW capture (spec
+    // § 3 step 8): the text that made the preview goes with it, or it would
+    // be the new listen's prefix and be sent again (DA I2).
+    if (els.preview.children.length > 0) els.field.value = '';
     // After clearing the line: closing this box's own preview says so here.
     closePreviews();
     const s = voice.listen({
@@ -1654,8 +1833,10 @@ export function createCapture({
     stopListening();
     if (adding !== null) cancel(); // x while thinking discards the request
     // With the keyboard up the button is covered, so the box fades out.
-    const fade = els.box.classList.contains('typing');
-    els.box.classList.remove('typing');
+    // .closing goes on BEFORE the blur, and .typing stays until finishClose:
+    // the box fades where it is instead of jumping up first (DA M1).
+    if (els.box.classList.contains('typing')) els.box.classList.add('fade');
+    els.box.classList.add('closing');
     els.field.blur();
     els.field.value = '';
     els.field.style.height = '';
@@ -1664,8 +1845,6 @@ export function createCapture({
     els.preview.hidden = true;
     els.preview.innerHTML = '';
     setMode('closed');
-    if (fade) els.box.classList.add('fade');
-    els.box.classList.add('closing');
     closeTimer = later(finishClose, CLOSE_MS);
   }
 
@@ -1705,10 +1884,17 @@ export function createCapture({
     focusField();
   });
   els.field.addEventListener('input', grow);
-  // .typing lowers the box to just above the keyboard (styles.css). Not on a
-  // read-only focus: no keyboard comes up for that.
-  els.field.addEventListener('focus', () => { if (!els.field.readOnly) els.box.classList.add('typing'); });
-  els.field.addEventListener('blur', () => { els.box.classList.remove('typing'); });
+  // .typing lowers the box to just above the keyboard (styles.css) while any
+  // control in it that raises the keyboard has focus: the field (not while
+  // read-only: no keyboard comes up for that) or an input of its preview
+  // (DA I4). Moving focus between two such controls keeps it, and a closing
+  // box keeps it until it is hidden (DA M1).
+  els.box.addEventListener('focusin', (e) => { if (raisesKeyboard(e.target)) els.box.classList.add('typing'); });
+  els.box.addEventListener('focusout', (e) => {
+    if (els.box.classList.contains('closing')) return;
+    if (raisesKeyboard(e.relatedTarget) && inBox(e.relatedTarget)) return;
+    els.box.classList.remove('typing');
+  });
 
   els.box.hidden = true;
   els.cancel.hidden = true;
@@ -1718,6 +1904,12 @@ export function createCapture({
   return {
     // Stop a listen and keep its text (page hidden, a sheet or Settings opening).
     stopAndKeep() { if (stopListening()) line.set(M.stopped); },
+    // A newer Add from the other box superseded this box's smart add: its
+    // reply will change nothing, so the latch goes now, not when the reply
+    // comes up to a minute later (DA I1). app.js clears the line.
+    released() {
+      if (adding !== null) { adding = null; setAdding(false); }
+    },
     // A capture was added (direct, or from its preview).
     added() {
       if (adding !== null) { adding = null; setAdding(false); }
@@ -1744,7 +1936,7 @@ p.write_text(s.replace(old, "  'js/viewport.js', 'js/capture.js',\n"))
 print('ok')
 ```
 
-- [ ] **Step 4: Run; it passes.** `node --test tests/capture.test.js` → `# tests 22`, `# pass 22`. `node --test tests/serviceworker.test.js` → `# pass 9`.
+- [ ] **Step 4: Run; it passes.** `node --test tests/capture.test.js` → `# tests 25`, `# pass 25`. `node --test tests/serviceworker.test.js` → `# pass 9`.
 
 - [ ] **Step 5: Mutants.**
 
@@ -1755,7 +1947,7 @@ print('ok')
 | K3 Cancel does not cancel the request | delete `cancelSubmit();` in `cancel()` | `Cancel during Thinking …`, `x during Thinking …` |
 | K4 added() closes over typed text | delete `if (els.field.value.trim()) return;` in `added()` | `added() clears the latch …` |
 | K5 latch cleared without its token | `if (adding === token) { adding = null; setAdding(false); }` → `adding = null; setAdding(false);` | `Cancel during Thinking …` |
-| K6 never fades | delete `if (fade) els.box.classList.add('fade');` | `x with the keyboard up fades instead` |
+| K6 never fades | delete `if (els.box.classList.contains('typing')) els.box.classList.add('fade');` | `x with the keyboard up fades where it is …` |
 | K7 a listen leaves previews open | delete `closePreviews();` in `startListening()` | `a tap opens the box …`, `recognition ending on its own …` |
 | K8 no blur before focus | delete `els.field.blur();` in `focusField()` | `tapping the text while listening …` |
 | K9 a refusal is forgotten | delete `refused = true;` | both `a refusal in …` tests |
@@ -1765,17 +1957,25 @@ print('ok')
 | K14 not read-only while listening | `els.field.readOnly = next === 'listening';` → `= false;` | `a tap opens the box …`, `x with the keyboard up …` |
 | K15 empty spoken text submitted | delete the `if (spoken && !els.field.value.trim())` line | `a tap while listening with nothing heard …` |
 | K16 capture.js missing from ASSETS | `'js/viewport.js', 'js/capture.js',` → `'js/viewport.js',` | serviceworker `every js/ module is precached …` |
+| K17 grow leaves out the border | `scrollHeight + offsetHeight - clientHeight` → `scrollHeight` | `live words fill the field and grow it, border included` |
+| K18 the old preview's text becomes the prefix | delete `if (els.preview.children.length > 0) els.field.value = '';` | `a listen while this box's own preview is open …` |
+| K19 moving between inputs drops typing | delete the `relatedTarget` line in the `focusout` listener | `the box drops to the keyboard while …` |
+| K20 the close blur drops typing | delete `if (els.box.classList.contains('closing')) return;` in `focusout` | `x with the keyboard up fades where it is …` |
+| K21 a preview input raises nothing | `['INPUT', 'TEXTAREA', 'SELECT'].includes(node.tagName)` → `false` | `the box drops to the keyboard while …` |
+| K22 released() keeps the latch | `if (adding !== null)` in `released()` → `if (false)` | `released() drops the latch at once …` |
+| K23 reopening keeps typing | delete `els.box.classList.remove('typing');` in `open()`'s closing branch | `a tap while the box is closing reopens it …` |
+| K24 finishClose keeps typing | delete `els.box.classList.remove('typing');` in `finishClose()` | `x with the keyboard up fades where it is …` |
 
 (No K12: an explicit `return` after cancelling a close and a second `stopListening()` in `tapButton` were found redundant in the trial run — their mutants survived as equivalents — and were removed from the code above.)
 
-- [ ] **Step 6: Gate and commit.** Expected: `# tests 1579`, `# fail 0`, `# cancelled 0`. Message: `Stage 4: js/capture.js — the capture button's state machine`. Files: `js/capture.js tests/capture.test.js tests/fake-dom.js service-worker.js`.
+- [ ] **Step 6: Gate and commit.** Expected: `# tests 1586`, `# fail 0`, `# cancelled 0`. Message: `Stage 4: js/capture.js — the capture button's state machine`. Files: `js/capture.js tests/capture.test.js tests/fake-dom.js service-worker.js`.
 
 ---
 
 ## Task 5: `handleAdd` takes a target box
 
 **Files:**
-- Modify: `js/app.js`, `tests/apply.test.js` (append one test)
+- Modify: `js/app.js`, `js/preview.js` (a refused Cancel leaves the container alone), `tests/apply.test.js` (append one test)
 
 Only the top box exists as a target here; Task 6 adds the capture box. Every existing smart-add test must pass unchanged: that is the proof the top box behaves as before.
 
@@ -1790,7 +1990,7 @@ Only the top box exists as a target here; Task 6 adds the capture box. Every exi
 // confirm checks that its request is still the newest and refuses otherwise,
 // and it must leave the container alone: by then it may hold the NEWER
 // request's preview.
-test('smart add: a preview from a superseded request cannot be confirmed, and the newer preview is left alone', async () => {
+test('smart add: a preview from a superseded request cannot be confirmed or cancelled, and the newer preview is left alone', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
   seed([]);
@@ -1808,8 +2008,9 @@ test('smart add: a preview from a superseded request cannot be confirmed, and th
       { title: 'Old two', date: '2099-05-01', type: 'task' },
     ]));
     await settle();
-    const staleAddAll = preview.querySelector('.preview-actions').children[0];
+    const [staleAddAll, staleCancel] = preview.querySelector('.preview-actions').children;
     assert.equal(staleAddAll.textContent, 'Add all', 'fixture check: the old preview\'s Add all');
+    assert.equal(staleCancel.textContent, 'Cancel', 'fixture check: and its Cancel');
     typeIntoAddBox('two other things on may 2');
     click(doc.getElementById('add-btn'));
     await settle();
@@ -1827,6 +2028,11 @@ test('smart add: a preview from a superseded request cannot be confirmed, and th
     assert.equal(messageText(), 'Preview closed — nothing was added from it.');
     assert.equal(preview.children.length, newer, 'the newer preview is untouched');
     assert.equal(preview.hidden, false);
+
+    click(staleCancel);
+    assert.equal(preview.children.length, newer, 'a stale Cancel leaves the newer preview too');
+    assert.equal(preview.hidden, false);
+    assert.equal(messageText(), 'Preview closed — nothing was added from it.', 'and says nothing new');
   } finally {
     timers.restore();
     net.restore();
@@ -1837,7 +2043,7 @@ test('smart add: a preview from a superseded request cannot be confirmed, and th
 });
 ```
 
-- [ ] **Step 2: Run; it fails.** `node --test tests/apply.test.js` → `# tests 214`, `# fail 1`: `not ok 214 - smart add: a preview from a superseded request cannot be confirmed, and the newer preview is left alone` (on `main` the stale Add all adds its items).
+- [ ] **Step 2: Run; it fails.** `node --test tests/apply.test.js` → `# tests 214`, `# fail 1`: `not ok 214 - smart add: a preview from a superseded request cannot be confirmed or cancelled, and the newer preview is left alone` (on `main` the stale Add all adds its items).
 
 - [ ] **Step 3: Implement** with `scripts/t5_app_edit.py`:
 
@@ -2018,7 +2224,13 @@ async function handleAdd(target) {
       target.onAdded();
       return true;
     },
-    onCancel: () => line.set('Cancelled.'),
+    // The same check for its Cancel: a stale Cancel changes nothing, and
+    // returns false so renderPreview leaves the container alone (DA M5).
+    onCancel: () => {
+      if (generation !== addGeneration) return false;
+      line.set('Cancelled.');
+      return true;
+    },
   });
   return 'preview';
 }
@@ -2031,6 +2243,20 @@ els.text.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleAdd()
 """els.add.addEventListener('click', () => { handleAdd(topTarget); });
 els.text.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleAdd(topTarget); });""")
 
+p.write_text(s)
+
+# 5. preview.js: a Cancel that its caller refuses (returns false) leaves the
+#    container alone, as a refused confirm already does.
+p = pathlib.Path('js/preview.js')
+s = p.read_text()
+rep("""  cancel.addEventListener('click', () => { container.hidden = true; container.innerHTML = ''; onCancel(); });""",
+"""  // onCancel returning false (a stale preview's Cancel, js/app.js) leaves the
+  // container alone: by then it may hold a newer preview.
+  cancel.addEventListener('click', () => {
+    if (onCancel() === false) return;
+    container.hidden = true;
+    container.innerHTML = '';
+  });""")
 p.write_text(s)
 print('ok')
 ```
@@ -2047,15 +2273,17 @@ print('ok')
 | P4 a manual add leaves it open | delete `closePreviews();` in the manual branch | `a manual add closes an open preview …` |
 | P5 say ignores the token | `const say = (t) => { line.set(t); };` | the three `… after the Ideas box said "Kept."` tests |
 | P6 duplicate guard dropped | `&& pendingSmart.target === target && pendingSmart.raw === raw)` → `&& false)` | `a second Add of the same text …` |
+| P7 stale Cancel not checked | delete `if (generation !== addGeneration) return false;` in `onCancel` | the new test |
+| P8 preview.js ignores a refused Cancel | clear the container first, then call `onCancel()` (the old order) | the new test |
 
-- [ ] **Step 6: Gate and commit.** Expected: `# tests 1580`, `# fail 0`, `# cancelled 0`. Message: `Stage 4: handleAdd takes a target box; a stale preview cannot be confirmed`. Files: `js/app.js tests/apply.test.js`.
+- [ ] **Step 6: Gate and commit.** Expected: `# tests 1587`, `# fail 0`, `# cancelled 0`. Message: `Stage 4: handleAdd takes a target box; a stale preview cannot be confirmed or cancelled`. Files: `js/app.js js/preview.js tests/apply.test.js`.
 
 ---
 
 ## Task 6: wire the capture button; retire `#mic-btn` and `dictate()`
 
 **Files:**
-- Modify: `js/app.js`, `js/voice.js`, `index.html`, `styles.css`, `tests/apply.test.js` (append twelve tests)
+- Modify: `js/app.js`, `js/voice.js`, `index.html`, `styles.css`, `tests/apply.test.js` (append fourteen tests)
 
 - [ ] **Step 1: Write the failing tests.** Append to the end of `tests/apply.test.js` (after Task 5's test). The refusal test stays LAST: a refusal lasts the session.
 
@@ -2140,6 +2368,7 @@ test('capture: tap, speak, tap again adds through smart add, with its messages i
     assert.equal(capEl('capture-btn').disabled, false);
     assert.equal(messageText(), 'top line');
   } finally {
+    closeCapture(timers);
     timers.restore();
     net.restore();
     voice.restore();
@@ -2304,6 +2533,7 @@ test('capture: confirming its preview adds and closes the box', async () => {
     timers.fire(250);
     assert.equal(capEl('capture-box').hidden, true);
   } finally {
+    closeCapture(timers);
     timers.restore();
     net.restore();
     voice.restore();
@@ -2417,11 +2647,95 @@ test('capture: the same words from the other box are sent, not swallowed by the 
     click(capEl('capture-btn'));
     await settle();
     assert.deepEqual(net.posts, ['lunch at noon', 'lunch at noon']);
+    assert.equal(messageText(), '', 'the superseded top box stops saying "Thinking…" at once');
     held[1](smartReply([{ title: 'Lunch', date: '2099-06-02', type: 'event' }]));
     held[0](smartReply([{ title: 'Lunch (old)', date: '2099-06-02', type: 'event' }]));
     await settle();
     assert.deepEqual(loadItems().map((it) => it.title), ['Lunch'], 'the newer capture wins');
     assert.equal(messageText(), '', 'the superseded top box does not keep saying "Thinking…"');
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
+    voice.restore();
+  }
+  seed([]);
+});
+
+// DA I1: a top-box Add that supersedes the capture box's smart add releases
+// the capture box at once (no "Thinking…", no Cancel, the button enabled), so
+// its Cancel or x can never cancel the top box's newer request.
+test('capture: a top-box Add that supersedes it releases the capture box at once, and x then cancels nothing', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const voice = withVoice();
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    click(capEl('capture-btn'));
+    voice.last().say('dentist friday');
+    click(capEl('capture-btn'));
+    await settle();
+    assert.equal(captureMessage(), 'Thinking…', 'fixture check');
+    typeIntoAddBox('dentist on friday at 3');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.equal(captureMessage(), '', 'the capture box stops saying "Thinking…"');
+    assert.equal(capEl('capture-btn').disabled, false);
+    assert.equal(capEl('capture-cancel').hidden, true);
+    assert.equal(capEl('capture-add').hidden, false);
+    assert.equal(capEl('capture-text').value, 'dentist friday', 'its text is kept');
+    click(capEl('capture-close'));
+    held[1](smartReply([{ title: 'Dentist', date: '2099-05-15', time: '15:00', type: 'event' }]));
+    await settle();
+    assert.deepEqual(loadItems().map((it) => it.title), ['Dentist'], 'the top box\'s request still lands');
+    assert.equal(messageText(), 'Added.');
+    held[0](smartReply([{ title: 'Dentist (voice)', date: '2099-05-15', type: 'event' }]));
+    await settle();
+    assert.deepEqual(loadItems().map((it) => it.title), ['Dentist']);
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
+    voice.restore();
+  }
+  seed([]);
+});
+
+// The release is for any newer Add, a manual one included, and it clears a
+// line only while that line still shows its own request's "Thinking…".
+test('capture: a manual add releases it too; a release leaves another action\'s message alone', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const voice = withVoice();
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    click(capEl('capture-btn'));
+    voice.last().say('call the vet');
+    click(capEl('capture-btn'));
+    await settle();
+    typeIntoAddBox('Vet', '2099-07-01');
+    click(doc.getElementById('add-btn'));
+    assert.equal(messageText(), 'Added.', 'fixture check: the manual add landed');
+    assert.equal(captureMessage(), '', 'a manual add releases the capture box too');
+    assert.equal(capEl('capture-btn').disabled, false);
+
+    typeIntoAddBox('lunch with sam tomorrow');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    ideaText().value = 'An idea meanwhile';
+    click(ideaAdd());
+    assert.equal(messageText(), 'Kept.', 'fixture check');
+    click(capEl('capture-add'));
+    await settle();
+    assert.equal(messageText(), 'Kept.', 'the release does not clear a message the top request did not set');
   } finally {
     closeCapture(timers);
     timers.restore();
@@ -2463,9 +2777,9 @@ test('capture: a refusal in the home-screen app points to Settings and offers Ty
 });
 ```
 
-- [ ] **Step 2: Run; they fail.** `node --test tests/apply.test.js` → `# tests 226`, `# pass 214`, `# fail 12`: every new test (215–226).
+- [ ] **Step 2: Run; they fail.** `node --test tests/apply.test.js` → `# tests 228`, `# pass 214`, `# fail 14`: every new test (215–228).
 
-- [ ] **Step 3: Implement** with `scripts/t6_edit.py`. It: imports `listen`, `errorKind` and `createCapture`; drops `els.mic` and adds the nine capture elements; makes the capture box's line and target (failure text names the top box's date row; `onAdded` calls `capture.added()`); adds `cancelAdd()`; makes a superseded request clear its own "Thinking…"; stops-and-keeps in `openItem`, on `visibilitychange` → hidden and on the Settings button; creates the capture after the other controls are wired; removes the dictation block, `#mic-btn` and its CSS, and `dictate()` with the old voice.js header.
+- [ ] **Step 3: Implement** with `scripts/t6_edit.py`. It: imports `listen`, `errorKind` and `createCapture`; drops `els.mic` and adds the nine capture elements; makes the capture box's line and target (failure text names the top box's date row; `onAdded` calls `capture.added()`); adds `cancelAdd()` and `supersedePending()` (a newer Add tells the superseded box at once: decision 16); stops-and-keeps in `openItem`, on `visibilitychange` → hidden and on the Settings button; creates the capture after the other controls are wired; removes the dictation block, `#mic-btn` and its CSS, and `dictate()` with the old voice.js header.
 
 ```python
 # Task 6: wire the capture button into app.js; retire #mic-btn and dictate().
@@ -2522,13 +2836,15 @@ if (els.mic && isVoiceSupported()) {
 }
 
 """, ""),
-    # the capture box joins the boxes that add
+    # the capture box joins the boxes that add; each box is told at once when
+    # a newer Add supersedes its smart add (DA I1)
     ("""  onAdded() {},
 };
 const TARGETS = [topTarget];""", """  onAdded() {},
+  onSuperseded() {},
 };
 // The capture box has no date row, so its failure names the top box's.
-// `capture` is created below; onAdded runs only after an add, long after.
+// `capture` is created below; these run only after an Add, long after.
 const captureTarget = {
   field: els.captureText,
   dates: null,
@@ -2536,41 +2852,54 @@ const captureTarget = {
   preview: els.capturePreview,
   unavailable: 'Smart add is unavailable — use the box at the top with a date to add it.',
   onAdded() { capture.added(); },
+  onSuperseded() { capture.released(); },
 };
 const TARGETS = [topTarget, captureTarget];"""),
-    # Cancel
+    # Cancel, and telling a superseded box at once
     ("""// Resolves to how it ended: 'refused' (validation; nothing started),""",
      """// Makes the smart add in flight superseded, as a newer Add would: its reply,
 // whenever it comes, changes nothing (spec § 3 step 7: the capture box's
 // Cancel). The same text can then be sent again: the duplicate guard above
 // only holds for the current generation. The request itself is not aborted,
-// so it may still spend credit (spec § 8, Later).
+// so it may still spend credit (spec § 8, Later). Only the capture box calls
+// this, and only while its latch is set; a newer Add from the top box
+// releases that latch at once (supersedePending), so its Cancel can never
+// reach the top box's request.
 function cancelAdd() {
   addGeneration += 1;
 }
 
+// A newer Add (either box, manual or smart) is about to supersede the smart
+// add in flight. Its reply will change nothing, so its box is told NOW, not
+// when the reply comes up to SMART_ADD_TIMEOUT_MS later: its "Thinking…" goes
+// (if still showing) and the capture box drops its adding latch. Without this
+// a request superseded from the OTHER box left "Thinking…" up, and the
+// capture box's Cancel then cancelled the NEWER request (DA I1).
+function supersedePending() {
+  if (pendingSmart && pendingSmart.generation === addGeneration) pendingSmart.release();
+}
+
 // Resolves to how it ended: 'refused' (validation; nothing started),"""),
-    # A request superseded from the OTHER box would leave its own box's
-    # "Thinking…" up for good: nothing else writes to that line. say() only
-    # clears it while it is still this request's own "Thinking…".
-    ("""  const clearSentText = () => { if (field.value.trim() === raw) field.value = ''; };
-""", """  const clearSentText = () => { if (field.value.trim() === raw) field.value = ''; };
-  // Superseded by a newer Add (from either box) or a Cancel: this request
-  // changes nothing, and its "Thinking…", if still showing, goes.
-  const superseded = () => { say(''); return 'superseded'; };
+    ("""    if (!field.value.trim()) { line.set('For manual add, type a title and pick a date.'); return 'refused'; }
+    addGeneration += 1;""", """    if (!field.value.trim()) { line.set('For manual add, type a title and pick a date.'); return 'refused'; }
+    supersedePending();
+    addGeneration += 1;"""),
+    ("""  const generation = ++addGeneration;
+  pendingSmart = { generation, raw, target };
+  // An earlier request's preview must not stay confirmable under a new one.
+  closePreviews();
+  line.set('Thinking…');
+  const thinking = line.token();
+  const say = (t) => { if (line.token() === thinking) line.set(t); };
+""", """  supersedePending();
+  const generation = ++addGeneration;
+  // An earlier request's preview must not stay confirmable under a new one.
+  closePreviews();
+  line.set('Thinking…');
+  const thinking = line.token();
+  const say = (t) => { if (line.token() === thinking) line.set(t); };
+  pendingSmart = { generation, raw, target, release: () => { say(''); target.onSuperseded(); } };
 """),
-    ("""    if (generation !== addGeneration) return 'superseded';
-    pendingSmart = null;
-    if (e.message === 'too_long')""", """    if (generation !== addGeneration) return superseded();
-    pendingSmart = null;
-    if (e.message === 'too_long')"""),
-    ("""  if (generation !== addGeneration) return 'superseded';
-  pendingSmart = null;
-
-  const flow""", """  if (generation !== addGeneration) return superseded();
-  pendingSmart = null;
-
-  const flow"""),
     # opening an item stops a listen and keeps its text
     ("""function openItem(item) {
   // Only the latest action can be undone,""", """function openItem(item) {
@@ -2654,7 +2983,7 @@ p.write_text(s)
 print('ok')
 ```
 
-- [ ] **Step 4: Run; they pass.** `node --test tests/apply.test.js` → `# tests 226`, `# pass 226`.
+- [ ] **Step 4: Run; they pass.** `node --test tests/apply.test.js` → `# tests 228`, `# pass 228`.
 
 - [ ] **Step 5: Mutants.**
 
@@ -2670,12 +2999,15 @@ print('ok')
 | W8 never standalone | `isStandalone: () => false,` | `capture: a refusal in the home-screen app …` |
 | W9 capture adds through the top box | `submit: () => handleAdd(topTarget),` | five capture tests |
 | W10 success does not close the box | `onAdded() {},` on the capture target | `capture: tap, speak, tap again …`, `capture: confirming its preview …` |
-| W11 superseded keeps "Thinking…" | `const superseded = () => 'superseded';` | `capture: the same words from the other box …` |
-| W12 superseded clears whatever is shown | `say('')` → `line.set('')` | the three `smart add: …` supersede tests and `capture: Cancel during Thinking …` |
+| W14 a supersede tells nobody | empty `supersedePending()`'s body | `capture: a top-box Add that supersedes it …` and others |
+| W15 the capture box is not released | captureTarget `onSuperseded() {},` | `capture: a top-box Add that supersedes it …` |
+| W16 the release keeps "Thinking…" | `release: () => { target.onSuperseded(); }` | `capture: the same words from the other box …` |
+| W17 a manual add releases nothing | delete `supersedePending();` in the manual branch | `capture: a manual add releases it too …` |
+| W18 the release clears whatever is shown | `say('')` → `line.set('')` in `release` | `capture: a manual add releases it too …` |
 
 (In the trial run, `pendingSmart = null` inside `cancelAdd` survived as an equivalent mutant — the guard already compares generations — and was removed.)
 
-- [ ] **Step 6: Gate and commit.** Expected: `# tests 1592`, `# fail 0`, `# cancelled 0`. Message: `Stage 4: the capture button, wired; the small mic and dictate() retire`. Files: `js/app.js js/voice.js index.html styles.css tests/apply.test.js`.
+- [ ] **Step 6: Gate and commit.** Expected: `# tests 1601`, `# fail 0`, `# cancelled 0`. Message: `Stage 4: the capture button, wired; the small mic and dictate() retire`. Files: `js/app.js js/voice.js index.html styles.css tests/apply.test.js`.
 
 ---
 
@@ -2702,4 +3034,8 @@ Append a "Stage 4 result" paragraph to spec § 8 (what shipped, the decisions ab
 13. Press feedback on the round button (scale) is instant and never sticks.
 14. Dark mode: the button, box and its text read correctly.
 15. "Thinking…" → Cancel → the late reply adds nothing.
-16. A long dictation: the field grows, the box stays within half the screen and scrolls inside.
+16. A long dictation: the field grows to five lines then scrolls; Add stays visible at the box's bottom.
+17. Continuous mode: no repeated words in the live text after pauses (review M11, speculative — WebKit has repeated finals before).
+18. The very first listen: the iOS microphone and speech-recognition prompts do not end the listen (if they hide the page, the listen stops and keeps its words: review M12).
+19. Typing in the box: the box moves from above the round button to above the keyboard without an ugly jump (review M13); with a preview open, editing a preview field also keeps the box above the keyboard (decision 19).
+20. "Settings → plaenicke" is a real path to the microphone switch for the home-screen app (review M10, speculative; the wording is the spec's).
