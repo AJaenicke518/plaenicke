@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   sectionOf, daysBetween, dayWord, relativeLabel, isPastEvent, buildToday, upcomingRows, NEXT_DAYS, LOOKAHEAD_DAYS,
+  tally,
 } from '../js/today.js';
 import { readFileSync } from 'node:fs';
 import { parseICS } from '../js/ics.js';
@@ -742,4 +743,68 @@ test('buildToday holds no copy of the Next 7 days rule: both day lists come from
   assert.ok(body, 'fixture check: buildToday found');
   assert.equal((body[0].match(/upcomingRows\(/g) || []).length, 2, 'next and later, each from upcomingRows');
   assert.doesNotMatch(body[0], /\.recurring|\bseen\b|spanKey|dayWord\(item/, 'no second copy of the rule');
+});
+
+// --- tally: Today's "N DONE · M LEFT" (rewards concept 2, Alex 2026-10-26) --
+//
+// Controller rulings, 2026-10-26: it counts only the rows in Overdue and To do
+// today, so it matches the struck rows on screen (a to-do finished early,
+// dated later, is in neither); it is hidden (null) until the first tick of
+// the day; and it says "all done" (left 0) only when both sections are fully
+// ticked. TICKED is a local-today instant: 2026-10-21 08:00 in Los Angeles.
+const TICKED = '2026-10-21T15:00:00.000Z';
+const tallyOf = (items) => tally(buildToday(items, [], TODAY, at(10, 0), none));
+
+test('tally: nothing ticked yet gives null, so the count stays hidden', () => {
+  assert.equal(tallyOf([own('a'), own('b', { type: 'due', date: '2026-10-19' })]), null);
+  assert.equal(tallyOf([]), null, 'an empty day too');
+});
+
+test('tally: two ticked of five in Overdue and To do today gives 2 done, 3 left', () => {
+  const items = [
+    own('o1', { type: 'due', date: '2026-10-19' }),
+    own('o2', { type: 'start', date: '2026-10-20' }),
+    own('o3', { type: 'task', date: '2026-10-20', done: true, updatedAt: TICKED }),
+    own('t1', { type: 'due', time: '23:59' }),
+    own('t2', { type: 'task', done: true, updatedAt: TICKED }),
+    own('ev', { type: 'event', time: '09:00' }),
+  ];
+  assert.deepEqual(tallyOf(items), { done: 2, left: 3 }, 'events are not counted');
+});
+
+test('tally: an overdue to-do ticked today counts as done', () => {
+  assert.deepEqual(tallyOf([own('o', { type: 'due', date: '2026-10-15', done: true, updatedAt: TICKED })]),
+    { done: 1, left: 0 });
+});
+
+test('tally: an item ticked yesterday, or a to-do finished early with a later date, counts in neither', () => {
+  const items = [
+    own('t', { type: 'task' }),
+    own('old', { type: 'due', date: '2026-10-19', done: true, updatedAt: '2026-10-20T15:00:00.000Z' }),
+    own('early', { type: 'task', date: '2026-10-24', done: true, updatedAt: TICKED }),
+    own('t2', { type: 'task', done: true, updatedAt: TICKED }),
+  ];
+  assert.deepEqual(tallyOf(items), { done: 1, left: 1 });
+});
+
+// The rulings meet here (devil's advocate I1, plan review 2026-10-26): a
+// to-do dated today and ticked on an earlier day is a struck row in To do
+// today (sectionOf), so it counts as done, and the count can show before the
+// first tick of today. "Match the struck rows on screen" is the rule kept;
+// the report puts the conflict to Alex.
+test('tally: a to-do dated today, ticked on an earlier day, is a struck row and counts as done', () => {
+  const items = [
+    own('early', { type: 'task', done: true, updatedAt: '2026-10-19T15:00:00.000Z' }),
+    own('t', { type: 'task' }),
+  ];
+  assert.deepEqual(tallyOf(items), { done: 1, left: 1 });
+});
+
+test('tally: everything ticked but one overdue item is never "all done"', () => {
+  const items = [
+    own('o', { type: 'due', date: '2026-10-19' }),
+    own('t1', { type: 'task', done: true, updatedAt: TICKED }),
+    own('t2', { type: 'due', done: true, updatedAt: TICKED }),
+  ];
+  assert.deepEqual(tallyOf(items), { done: 2, left: 1 });
 });

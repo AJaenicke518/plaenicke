@@ -31,8 +31,8 @@ import { renderSyncStatus, syncWriteStarted, syncWriteSettled } from './linkui.j
 import { WORKER_URL } from './config.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
 import { installPress } from './press.js';
-import { buildToday, relativeLabel, NEXT_DAYS, LOOKAHEAD_DAYS, tickedToday } from './today.js';
-import { renderTodayView } from './todayview.js';
+import { buildToday, relativeLabel, NEXT_DAYS, LOOKAHEAD_DAYS, tickedToday, tally } from './today.js';
+import { renderTodayView, renderTally } from './todayview.js';
 
 const els = {
   text: document.getElementById('entry-text'),
@@ -79,6 +79,7 @@ const els = {
   todayView: document.getElementById('today-view'),
   todayBody: document.getElementById('today-body'),
   todayDate: document.getElementById('today-date'),
+  todayTally: document.getElementById('today-tally'),
   // Home-screen stage 3c — the tab bar, the tab title and Calendar's switcher.
   tabToday: document.getElementById('tab-today'),
   tabCalendar: document.getElementById('tab-calendar'),
@@ -898,6 +899,8 @@ function renderToday() {
     minutesNow(now),
     () => instancesForRange(feeds, feedCache, addDays(todayISO, 1), addDays(todayISO, LOOKAHEAD_DAYS), deviceTz),
   );
+  // The head's "N DONE · M LEFT" (rewards concept 2), from the same rows.
+  renderTally(els.todayTally, tally(today));
   if (todayISO !== todayRenderedFor) laterOpen = false;
   todayRenderedFor = todayISO;
   todayRelative = renderTodayView(els.todayBody, today, {

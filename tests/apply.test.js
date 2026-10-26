@@ -6060,6 +6060,47 @@ test('Today: an overdue to-do ticked on Today stays in Overdue, struck through, 
   }
 });
 
+// Rewards concept 2 (Alex, 2026-10-26): "N DONE · M LEFT" in Today's head,
+// hidden until the first tick, "All N done" once Overdue and To do today are
+// both fully ticked. Painted on every render, through the real app.
+test('Today: the done/left count is hidden until a tick, counts each tick, and says "All 2 done" at the end', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
+  const node = () => globalThis.document.getElementById('today-tally');
+  const shown = () => node().children.map((c) => c.textContent).join('');
+  const tick = (title, on) => {
+    const box = checkboxFor(todayBody(), title);
+    assert.ok(box, `fixture check: ${title} has a checkbox`);
+    box.checked = on;
+    fire(box, 'change');
+  };
+  try {
+    seed([
+      record({ id: 'rw-late', type: 'due', title: 'rw Essay', date: '2026-10-19' }),
+      record({ id: 'rw-task', type: 'task', title: 'rw Call bank', date: '2026-10-21' }),
+      record({ id: 'rw-soon', type: 'task', title: 'rw Next week', date: '2026-10-24' }),
+    ]);
+    click(globalThis.document.getElementById('tab-today'));
+    assert.ok(node(), 'fixture check: index.html has #today-tally');
+    assert.equal(node().hidden, true, 'hidden before the first tick');
+    tick('rw Call bank', true);
+    assert.equal(node().hidden, false);
+    assert.equal(shown(), '1 done · 1 left');
+    tick('rw Essay', true);
+    assert.equal(shown(), 'All 2 done', 'a to-do dated later is not counted');
+    tick('rw Essay', false);
+    assert.equal(shown(), '1 done · 1 left');
+    tick('rw Call bank', false);
+    assert.equal(node().hidden, true, 'hidden again with nothing ticked');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+});
+
 test('Today: a tick on Today is saved, and the row stays, struck through, until tomorrow', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeFakeDocument, allText, findAll, fire } from './fake-dom.js';
 import { buildToday } from '../js/today.js';
-import { renderTodayView } from '../js/todayview.js';
+import { renderTodayView, renderTally } from '../js/todayview.js';
 
 // The overdue-ticked test turns a UTC updatedAt into a local day: pin Alex's
 // zone instead of trusting the machine's (in UTC-10 or UTC-11 its 08:00Z
@@ -355,4 +355,53 @@ test('Coming up: a button that would do nothing on tap is refused', () => {
   assert.throws(() => renderTodayView(host, model, { onOpen() {}, onToggleDone() {}, laterOpen: false }), /onToggleLater/);
   assert.throws(() => renderTodayView(host, model, { onOpen() {}, onToggleDone() {}, onToggleLater() {}, laterOpen: 'yes' }),
     /laterOpen/);
+});
+
+// --- the "N DONE · M LEFT" count (rewards concept 2, Alex 2026-10-26) -------
+// renderTally draws today.js's tally into Today's head. null: empty and
+// hidden (until the first tick). Upper case is styles.css's, not the text's.
+// What the line reads: its parts' text, joined as the browser joins them.
+const shown = (node) => node.children.map((c) => c.textContent).join('');
+const tallyNode = () => {
+  const node = document.createElement('p');
+  node.hidden = true;
+  return node;
+};
+
+test('the count: null leaves it empty and hidden', () => {
+  const node = tallyNode();
+  renderTally(node, null);
+  assert.equal(node.hidden, true);
+  assert.equal(node.children.length, 0);
+});
+
+test('the count: "2 done · 3 left", the done part bold and the left part its own span', () => {
+  const node = tallyNode();
+  renderTally(node, { done: 2, left: 3 });
+  assert.equal(node.hidden, false);
+  assert.equal(shown(node), '2 done · 3 left');
+  assert.equal(node.children[0].tagName, 'B');
+  assert.equal(node.children[0].textContent, '2 done');
+  assert.ok(byClass(node, 'today-tally-left').some((s) => s.textContent === '3 left'));
+});
+
+test('the count: "All 5 done" only when nothing is left', () => {
+  const node = tallyNode();
+  renderTally(node, { done: 5, left: 0 });
+  assert.equal(node.hidden, false);
+  assert.equal(shown(node), 'All 5 done');
+  assert.equal(node.children.length, 1);
+  assert.equal(node.children[0].tagName, 'B');
+  renderTally(node, { done: 4, left: 1 });
+  assert.equal(shown(node), '4 done · 1 left', 'one left is not all done');
+});
+
+test('the count: a re-render replaces the text, and null hides it again', () => {
+  const node = tallyNode();
+  renderTally(node, { done: 1, left: 1 });
+  renderTally(node, { done: 2, left: 0 });
+  assert.equal(shown(node), 'All 2 done');
+  renderTally(node, null);
+  assert.equal(node.hidden, true);
+  assert.equal(node.children.length, 0);
 });

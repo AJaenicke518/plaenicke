@@ -214,6 +214,19 @@ export function buildToday(items, instances, todayISO, nowMinutes, lookahead) {
   return { overdue, todo, events, next, later, emptyLine };
 }
 
+// tally: Today's "N DONE · M LEFT" (rewards concept 2, Alex 2026-10-26), from
+// a buildToday result. It counts the rows of Overdue and To do today and
+// nothing else, so it is the struck rows on screen by construction (and
+// carries tickedToday's accepted cost): a to-do finished early, dated later,
+// is in neither section and is not counted. null until something is ticked,
+// so the count stays hidden until the first tick of the day; `left` is 0 only
+// when both sections are fully ticked.
+export function tally(today) {
+  const rows = [...today.overdue, ...today.todo];
+  const done = rows.filter((r) => r.item.done === true).length;
+  return done === 0 ? null : { done, left: rows.length - done };
+}
+
 // upcomingRows: the rows of the days [fromISO, toISO], grouped by day —
 // [{ date, label, rows: [{ item }] }], one entry per day that has rows, in
 // sortItemsByDate order, each day named by dayWord(date, todayISO). The ONE

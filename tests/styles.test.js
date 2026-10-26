@@ -627,6 +627,24 @@ test('the next event\'s "in N" is in the accent; a finished event is greyed; a t
 // the tick can fill it, final review A2), and as a flex item it still took
 // the row's 8px gap after the time. Empty, it is not laid out at all; the
 // tick fills the node it kept, and :empty stops matching.
+// Rewards concept 2 (Alex, 2026-10-26): the count reads like the date beside
+// it, done in the accent and left in ink. It sets no display, so the `hidden`
+// attribute (the browser's [hidden] rule) can hide it (plan review I3).
+test('the done/left count: the date\'s capitals, right-aligned, done in the accent, left in ink', () => {
+  assert.equal(declOf('.today-head', 'justify-content'), 'space-between', 'fixture check: a right-hand slot');
+  assert.equal(declOf('.today-tally', 'font-family'), 'var(--sans)');
+  assert.equal(declOf('.today-tally', 'font-size'), 'var(--text-label)');
+  assert.equal(declOf('.today-tally', 'letter-spacing'), 'var(--label-tracking)');
+  assert.equal(declOf('.today-tally', 'text-transform'), 'uppercase');
+  assert.equal(declOf('.today-tally', 'color'), 'var(--muted)');
+  assert.equal(declOf('.today-tally', 'text-align'), 'right');
+  assert.equal(declOf('.today-tally', 'white-space'), 'nowrap');
+  assert.equal(declOf('.today-tally', 'font-variant-numeric'), 'tabular-nums');
+  assert.equal(declOf('.today-tally b', 'color'), 'var(--accent)');
+  assert.equal(declOf('.today-tally-left', 'color'), 'var(--ink)');
+  assert.equal(declOf('.today-tally', 'display'), null, 'a display here would defeat hidden');
+});
+
 test('an empty "in N" takes no space', () => {
   assert.equal(declOf('.today-rel:empty', 'display'), 'none');
 });

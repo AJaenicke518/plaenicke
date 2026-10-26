@@ -31,6 +31,24 @@ function timeText(item) {
   return item.endTime ? formatTimeRange(item.time, item.endTime) : formatTime(item.time);
 }
 
+// renderTally(node, tally): Today's "N DONE · M LEFT" (rewards concept 2,
+// Alex 2026-10-26) in the head's right-hand slot (index.html #today-tally),
+// from js/today.js's tally. null: empty and hidden, until the first tick of
+// the day. Nothing left: "All N done". Otherwise "N done · M left", the done
+// part bold in the accent and the left part in ink (styles.css), so the
+// number left keeps you behind. Upper case is the stylesheet's.
+export function renderTally(node, tally) {
+  node.innerHTML = '';
+  node.hidden = tally === null;
+  if (tally === null) return;
+  if (tally.left === 0) {
+    node.appendChild(el('b', null, `All ${tally.done} done`));
+    return;
+  }
+  node.append(el('b', null, `${tally.done} done`), el('span', null, ' · '),
+    el('span', 'today-tally-left', `${tally.left} left`));
+}
+
 // renderTodayView(container, today, { onOpen, onToggleDone, laterOpen,
 //   onToggleLater }) -> { relative }
 // `relative` is { node, item } for the one "in N" label (the next event), so
