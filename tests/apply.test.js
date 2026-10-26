@@ -6819,6 +6819,38 @@ test('a tick whose render throws after the save still schedules its sync, and th
   seed([]);
 });
 
+// Stage 3 round-2 re-review leftover (3): handleToggleDone's catch assumed
+// setDone had restored the record. When the save succeeded and render() then
+// threw, it showed the render error as though the tick had failed, and its
+// second render rethrew. A tick that saved is not reported as failed: the
+// message says it saved and asks for a reload. The render error still
+// reaches the caller (no swallow), and render is not run a second time.
+test('a tick that saved but whose render throws says it saved, rethrows the render error, and renders once', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'lo3-saved', type: 'task', title: 'lo3 render throws', date: '2099-01-01' })]);
+  clearMessage();
+  const dateEl = globalThis.document.getElementById('today-date');
+  const unbreak = () => { delete dateEl.textContent; dateEl.textContent = ''; };
+  let renders = 0;
+  try {
+    const box = checkboxFor(todoList(), 'lo3 render throws');
+    box.checked = true;
+    Object.defineProperty(dateEl, 'textContent', {
+      configurable: true, get: () => '', set: () => { renders += 1; throw new Error('lo3 render failed'); },
+    });
+    assert.throws(() => fire(box, 'change'), /lo3 render failed/, 'the render error surfaces');
+  } finally {
+    unbreak();
+  }
+  assert.equal(storedById('lo3-saved').done, true, 'fixture check: the save succeeded');
+  assert.equal(messageText(), "Saved, but the screen couldn't update — reload.",
+    'a tick that saved is not reported as failed');
+  assert.equal(renders, 1, 'render is not run a second time');
+  clearMessage();
+  seed([]);
+});
+
 // Final fixes 2, C4: a tick re-renders every page, so the checkbox that had
 // focus is gone and keyboard focus fell to the page. After a tick on Today,
 // focus goes to the NEW box in the row for the same item, found the way
