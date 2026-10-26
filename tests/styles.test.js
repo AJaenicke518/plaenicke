@@ -919,3 +919,34 @@ test('no tag-chip rule carries a hex literal', () => {
     for (const [, , body] of m) assert.doesNotMatch(body, /#[0-9a-fA-F]{3,8}\b/, sel);
   }
 });
+
+// --- per-series visibility (option A, 2026-10-26) ----------------------------
+// The sheet's switch is a 44px-tall tap target that draws a 51x31 track; the
+// track takes the accent only while aria-checked is "true", so its colour is
+// the state a screen reader hears. Tokens only, so dark mode follows. No
+// motion: the stylesheet declares none yet (see "press state is instant").
+test('vis: the sheet switch is a 44px target drawing a track that is accent only when on', () => {
+  assert.ok(ruleExists('.sheet .sheet-switch'), 'outranks .sheet button and the global button chip');
+  assert.ok(px(declOf('.sheet .sheet-switch', 'min-height')) >= 44);
+  assert.equal(declOf('.sheet .sheet-switch', 'background'), 'transparent');
+  assert.equal(declOf('.sheet .sheet-switch', 'padding'), '0');
+  assert.equal(declOf('.sheet-switch::before', 'background'), 'var(--line)');
+  assert.equal(declOf('.sheet-switch[aria-checked="true"]::before', 'background'), 'var(--accent)');
+  assert.equal(declOf('.sheet-switch::after', 'background'), 'var(--card)');
+  assert.notEqual(declOf('.sheet-switch[aria-checked="true"]::after', 'left'), null, 'the knob moves when on');
+});
+
+test('vis: switch rows are at least 44px; an empty error takes no space; the note is muted', () => {
+  assert.ok(px(declOf('.sheet-switch-row', 'min-height')) >= 44);
+  assert.equal(declOf('.sheet-vis-error:empty', 'display'), 'none');
+  assert.equal(declOf('.sheet-vis-error', 'color'), 'var(--danger)');
+  assert.equal(declOf('.sheet-vis-note', 'color'), 'var(--muted)');
+  assert.equal(declOf('.sheet-switch-sub', 'color'), 'var(--muted)');
+});
+
+test('vis: the hidden rows in Settings and their Show buttons are at least 44px', () => {
+  assert.ok(px(declOf('.feed-hidden-row', 'min-height')) >= 44);
+  assert.ok(px(declOf('.feed-hidden-row button', 'min-height')) >= 44);
+  assert.equal(declOf('.feed-hidden-where', 'color'), 'var(--muted)');
+  assert.equal(declOf('.feed-hidden-error', 'color'), 'var(--danger)');
+});

@@ -601,6 +601,18 @@ button[data-press].pressed { opacity: 1; }
 .feed-status { color: var(--muted); font-size: 0.75rem; margin: 4px 0 6px; }
 /* The stage-1 feed-shape readout (home-screen spec § 2.4), under the status. */
 .feed-shape { color: var(--muted); font-size: 0.75rem; margin: 0 0 6px; }
+/* "Hidden on this device (N)": series this device hides, under the shape line
+   (option A, 2026-10-26). */
+.feed-hidden { margin: 6px 0 8px; padding-top: 6px; border-top: 1px dashed var(--line); }
+.feed-hidden-head { font-size: 0.75rem; color: var(--muted); margin: 0 0 4px; }
+.feed-hidden-row { display: flex; align-items: center; gap: 8px; min-height: 44px; }
+.feed-hidden-name { flex: 1; min-width: 0; font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.feed-hidden-where { font-size: 0.75rem; color: var(--muted); white-space: nowrap; }
+.feed-hidden-row button {
+  background: var(--bg); color: var(--ink); border: 1px solid var(--line);
+  font-size: 0.8rem; padding: 6px 10px; min-height: 44px;
+}
+.feed-hidden-error { color: var(--danger); margin: 4px 0 0; }
 .feed-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .feed-actions button {
   flex: 1 1 auto;
@@ -917,6 +929,37 @@ button[data-press].pressed { opacity: 1; }
 .sheet-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 6px; }
 .sheet-tag { display: inline-flex; align-items: center; gap: 8px; font-size: var(--text-row); background: color-mix(in srgb, var(--tag-color) 18%, var(--card)); color: var(--ink); border-radius: 999px; padding: 2px 12px; }
 .sheet-tag::before { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--tag-color); flex: none; }
+/* Per-series visibility (option A, 2026-10-26): two switches on a feed
+   event's sheet. The button is the 44px tap target and draws a 51x31 track
+   (::before) and knob (::after); aria-checked is the state, so the colour
+   always matches what a screen reader hears. `.sheet .sheet-switch` outranks
+   `.sheet button` and the global accent chip. No transition: the stylesheet
+   declares no motion yet. */
+.sheet-vis { margin: 10px 0 6px; border-top: 1px solid var(--line); }
+.sheet-vis-head { margin: 10px 0 2px; color: var(--muted); font-size: 0.8rem; }
+.sheet-switch-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  min-height: 52px; border-bottom: 1px solid var(--line);
+}
+.sheet-switch-text { display: flex; flex-direction: column; min-width: 0; }
+.sheet-switch-sub { color: var(--muted); font-size: 0.8rem; }
+.sheet .sheet-switch {
+  flex: 0 0 auto; position: relative; width: 51px; min-height: 44px;
+  padding: 0; border: 0; border-radius: 999px; background: transparent;
+}
+.sheet-switch::before {
+  content: ""; position: absolute; left: 0; top: 50%; width: 51px; height: 31px; margin-top: -15.5px;
+  border-radius: 999px; background: var(--line);
+}
+.sheet-switch::after {
+  content: ""; position: absolute; left: 2px; top: 50%; width: 27px; height: 27px; margin-top: -13.5px;
+  border-radius: 50%; background: var(--card); box-shadow: 0 1px 3px var(--scrim);
+}
+.sheet-switch[aria-checked="true"]::before { background: var(--accent); }
+.sheet-switch[aria-checked="true"]::after { left: 22px; }
+.sheet-vis-error { color: var(--danger); margin: 6px 0 0; }
+.sheet-vis-error:empty { display: none; }
+.sheet-vis-note { color: var(--muted); font-size: 0.8rem; margin: 8px 0 0; }
 .sheet-google { display: inline-flex; align-items: center; min-height: 44px; color: var(--accent); }
 /* The external sheet ends on a line of text or the link, with nothing under
    it; this is the room .sheet-actions' margin gives an own item (sweep U15).

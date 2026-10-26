@@ -7296,3 +7296,58 @@ test('vis: a toggle that saved but whose render throws keeps the switch and says
   }
   resume();
 });
+
+test('vis: Settings lists a series hidden everywhere; Show puts it back on every page, writes only its key and schedules no sync', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 22, 9, 0).getTime() });
+  const settingsBtn = doc.getElementById('settings-btn');
+  const host = doc.getElementById('settings-host');
+  const toggleSettings = () => { for (const fn of settingsBtn._listeners.click || []) fn({ target: settingsBtn }); };
+  try {
+    seed([]);
+    seedVisFeed();
+    click(doc.getElementById('show-week'));
+    click(openControlFor(weekList(), 'vis Quiz'));
+    toggleMeasured('calendar');
+    toggleMeasured('list');
+    closeSheet();
+    assert.doesNotMatch(allText(weekList()) + allText(todayBody()), /vis Quiz/, 'fixture check: hidden everywhere');
+
+    toggleSettings();
+    assert.match(allText(host), /Hidden on this device \(1\)/);
+    assert.match(allText(host), /vis Quiz\s+everywhere/);
+    for (const str of stringsOf(host)) {
+      assert.ok(!str.includes('vis-SECRET-TOKEN-77'), `the feed URL must never be rendered; found it in ${JSON.stringify(str)}`);
+    }
+    const show = host.querySelectorAll('button').find((b) => b.getAttribute('aria-label') === 'Show vis Quiz again');
+    assert.ok(show, 'fixture check: the Show button');
+    const feedsBefore = localStorage.getItem('plaenicke.feeds');
+    const keysBefore = otherKeys();
+    const wireBefore = wire();
+    const timers = installManualTimers();
+    try {
+      click(show);
+      assert.equal(timers.live(2000), 0, 'Show schedules no sync');
+    } finally {
+      timers.restore();
+    }
+    assert.equal(localStorage.getItem('plaenicke.feeds'), feedsBefore);
+    assert.equal(otherKeys(), keysBefore);
+    assert.equal(wire(), wireBefore);
+    assert.doesNotMatch(allText(host), /Hidden on this device/, 'the list is gone');
+    assert.match(allText(weekList()), /vis Quiz/, 'back in the Week list');
+    assert.match(allText(todayBody()), /vis Quiz/, 'back on Today');
+    assert.deepEqual(weekCounts(), [0, 0, 0, 0, 1, 2, 0], 'back in the Week grid');
+  } finally {
+    if (host.childElementCount) toggleSettings();
+    forceCloseSheet();
+    unseedVis();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
