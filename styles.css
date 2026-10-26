@@ -3,7 +3,7 @@
   --bg: #f4f1ea;            /* warm cream */
   --card: #fffdf8;          /* paper */
   --ink: #2b2620;
-  --muted: #8a8070;
+  --muted: #766d5f;      /* 4.52 on --bg, 5.01 on --card (was #8a8070, 3.45 / 3.82); tests/styles.test.js */
   --accent: #8a5a3b;        /* leather brown */
   --accent-ink: #fffdf8;    /* text on accent */
   --danger: #b04a3a;
@@ -66,7 +66,7 @@
   --bg: #14161a;            /* neutral near-black */
   --card: #1e2126;
   --ink: #e2e5ea;
-  --muted: #7d828c;
+  --muted: #838891;      /* 5.09 on --bg, 4.53 on --card (was #7d828c, card 4.19); tests/styles.test.js */
   --accent: #8fa7c8;
   --accent-ink: #14161a;
   --danger: #e06c5e;
@@ -124,14 +124,14 @@ body {
   color: var(--ink);
   padding: env(safe-area-inset-top) 16px 40px;
   /* Room under the content for the fixed tab bar (56px) and the capture
-     button's row (72px, stage 4), above the home indicator (home-screen
-     spec § 4). The toast does NOT fit inside it (final review B2, computed
-     from this file, not measured): its bottom is 68px up (.toast) and it is
-     62px tall with a one-line message (44px Undo + 16px padding + 2px
-     border), 66px with two (2 x 24px lines), so its top is 130-134px up and
-     can cover the last 2-6px of the last row when the page is scrolled to
-     the end. */
-  padding-bottom: calc(56px + 72px + env(safe-area-inset-bottom));
+     button's row (80px, stage 4; was 72px until 2026-10-26), above the home
+     indicator (home-screen spec § 4). The toast's bottom is 68px up (.toast)
+     and it is 62px tall with a one-line message (44px Undo + 16px padding +
+     2px border), 66px with two (2 x 24px lines), so its top is 130-134px up
+     (computed from this file, not measured). The 136px band (56 + 80)
+     clears it by 2-6px, so the toast no longer covers the last row when the
+     page is scrolled to the end (final review B2 found it did at 72px). */
+  padding-bottom: calc(56px + 80px + env(safe-area-inset-bottom));
   /* There was no line-height rule at all before this, so everything ran at
      the browser default (~1.2) — tight for a serif read at arm's length.
      This is a readability change, NOT an attempt to fill the viewport: the
