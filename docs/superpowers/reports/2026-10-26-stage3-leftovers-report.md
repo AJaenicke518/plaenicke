@@ -58,7 +58,21 @@ A fresh general-purpose reviewer agent (opus), not the implementer, reviewed all
 - It confirmed the sync and ownership invariants are intact: no new writer, `nextStamp` kept, the restore on a failed save kept.
 - Its gate: tests 1534, pass 1534, fail 0, cancelled 0. Its tree was clean after the run.
 
-## Open questions for Alex
+## Follow-up: the missing-id path is now pinned
+
+The controller approved open question 2 and kept the message wording (question 1).
+
+New test in `tests/apply.test.js`: `a tick on a box whose item is gone saves nothing, shows no error, and re-renders`.
+- **Setup:** render the box, then `seed([])` so the item is gone, then put a sentinel element in the To-do list and tick the stale box.
+- **Asserts:** the tick does not throw, no message is shown, storage stays empty, and the sentinel is gone (the page re-rendered).
+- **Results:**
+  - On the current code the test passes. This is a pin, not a fix.
+  - Reviewer mutant M12 (`setDone` throws when `idx < 0`): the test fails.
+  - Mutant that skips the render for a missing id (an early return at the top of `handleToggleDone`): the test fails.
+  - `js/app.js` was restored after each mutant; `git status` showed only the test file changed.
+- **Gate:** tests 1535, pass 1535, fail 0, cancelled 0. One commit holds this test and this report update.
+
+## Open questions for Alex (as of the first hand-off; both now settled by the controller)
 
 1. The message for a tick that saved but whose screen failed to update. It is currently "Saved, but the screen couldn't update — reload." Recommendation: keep it. It says the data is safe and gives the one action that fixes the screen.
 2. Pin the missing-id tick path (M12)? Recommendation: yes, as a small follow-up test.

@@ -6851,6 +6851,29 @@ test('a tick that saved but whose render throws says it saved, rethrows the rend
   seed([]);
 });
 
+// Stage 3 leftovers follow-up (2026-10-26): a tick on a box whose item is
+// gone (sync removed it before the box was re-rendered). setDone's
+// `idx < 0` returns quietly: nothing is saved, no error is shown, and
+// handleToggleDone still re-renders from `items`, so the stale box goes away.
+test('a tick on a box whose item is gone saves nothing, shows no error, and re-renders', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'lo3-gone', type: 'task', title: 'lo3 gone', date: '2099-01-01' })]);
+  const box = checkboxFor(todoList(), 'lo3 gone');
+  assert.ok(box, 'fixture check: the box is shown');
+  seed([]);
+  clearMessage();
+  const sentinel = globalThis.document.createElement('div');
+  todoList().appendChild(sentinel);
+  box.checked = true;
+  assert.doesNotThrow(() => fire(box, 'change'), 'a missing item is not an error');
+  assert.equal(messageText(), '', 'no error is shown');
+  assert.deepEqual(loadItems(), [], 'nothing is saved');
+  assert.ok(!todoList().children.includes(sentinel), 'the page was re-rendered from items');
+  clearMessage();
+  seed([]);
+});
+
 // Final fixes 2, C4: a tick re-renders every page, so the checkbox that had
 // focus is gone and keyboard focus fell to the page. After a tick on Today,
 // focus goes to the NEW box in the row for the same item, found the way
