@@ -22,6 +22,7 @@ import { diffPatch, quickMoves } from './edit.js';
 import { formatDayLabel } from './freshness.js';
 import { formatTime, formatTimeRange } from './timegrid.js';
 import { lock } from './scrolllock.js';
+import { tagColour } from './palette.js';
 
 // The teardown of the sheet currently mounted in each host. Mounting empties
 // the host, so a sheet replaced by another must lose its Escape listener too;
@@ -290,7 +291,11 @@ export function openItemSheet(host, item, {
     const tags = [item.project, item.subject, item.category].filter(Boolean);
     if (tags.length) {
       const wrap = el('div', 'sheet-tags');
-      for (const tag of tags) wrap.appendChild(el('span', 'sheet-tag', tag));
+      for (const tag of tags) {
+        const chip = el('span', 'sheet-tag', tag);
+        chip.style.setProperty('--tag-color', tagColour(tag));
+        wrap.appendChild(chip);
+      }
       formEl.appendChild(wrap);
     }
     const form = el('div', 'sheet-form');

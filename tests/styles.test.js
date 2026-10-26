@@ -538,8 +538,8 @@ for (const [sel, size] of Object.entries(CALENDAR_SIZES)) {
 
 // Stage 3b is the first consumer. Every rule that reads the scale belongs to
 // a new screen (its selectors all name one); Month, Week and Day never do.
-// The sheet's tag chips are the one other reader: Commit 1b asked for the
-// 13px label scale on them (the List's tags moved into the sheet). The Week
+// The sheet's tag chips are the one other reader: first the 13px label scale
+// (Commit 1b), now the 16px row scale (2026-10-25). The List's tags moved into the sheet. The Week
 // page's list (wlist-, stage 3 Commit 3) is a new screen under the grid; the
 // grid itself (week-) keeps its compact sizes.
 const NEW_SCREEN = /\.(today-|tab-|cal-switch|wlist-|sheet-tags?(?![\w-]))/;
@@ -889,16 +889,33 @@ test('the six-button view toggle is gone from the stylesheet', () => {
 });
 
 // --- stage 3d follow-up: item tags in the details sheet ---------------------
-// The List drew them; the sheet does now (Alex, 2026-10-22). Quiet chips at
-// the 13px label size, token colours only.
-test('the sheet\'s tag chips are quiet 13px pills in token colours', () => {
+// The List drew them; the sheet does now (Alex, 2026-10-22). Chips at the 16px
+// row size, coloured by name through --tag-color, token colours only.
+test('the sheet\'s tag chips are 16px pills tinted by their own --tag-color', () => {
   assert.equal(declOf('.sheet-tags', 'display'), 'flex');
   assert.equal(declOf('.sheet-tags', 'flex-wrap'), 'wrap');
-  assert.equal(declOf('.sheet-tags', 'gap'), '4px');
+  assert.equal(declOf('.sheet-tags', 'gap'), '6px');
   assert.equal(declOf('.sheet-tags', 'margin'), '0 0 6px');
-  assert.equal(declOf('.sheet-tag', 'font-size'), 'var(--text-label)');
-  assert.equal(declOf('.sheet-tag', 'background'), 'var(--chip-bg)');
-  assert.equal(declOf('.sheet-tag', 'color'), 'var(--chip-ink)');
+  assert.equal(declOf('.sheet-tag', 'font-size'), 'var(--text-row)');
+  assert.equal(declOf('.sheet-tag', 'background'), 'color-mix(in srgb, var(--tag-color) 18%, var(--card))');
+  assert.equal(declOf('.sheet-tag', 'color'), 'var(--ink)');
   assert.equal(declOf('.sheet-tag', 'border-radius'), '999px');
-  assert.equal(declOf('.sheet-tag', 'padding'), '1px 8px');
+  assert.equal(declOf('.sheet-tag', 'padding'), '2px 12px');
+  assert.equal(declOf('.sheet-tag', 'display'), 'inline-flex');
+  assert.equal(declOf('.sheet-tag', 'align-items'), 'center');
+});
+
+test('each tag chip starts with a solid dot of its colour', () => {
+  assert.ok(ruleExists('.sheet-tag::before'));
+  assert.equal(declOf('.sheet-tag::before', 'background'), 'var(--tag-color)');
+  assert.equal(declOf('.sheet-tag::before', 'content'), '""');
+  assert.equal(declOf('.sheet-tag::before', 'border-radius'), '50%');
+});
+
+test('no tag-chip rule carries a hex literal', () => {
+  for (const sel of ['.sheet-tags', '.sheet-tag', '.sheet-tag::before']) {
+    const m = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].filter(([, s]) => s.trim() === sel);
+    assert.ok(m.length, sel);
+    for (const [, , body] of m) assert.doesNotMatch(body, /#[0-9a-fA-F]{3,8}\b/, sel);
+  }
 });

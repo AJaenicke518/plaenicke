@@ -14,3 +14,16 @@ export const FEED_PALETTE = [
   'var(--feed-palette-1)', 'var(--feed-palette-2)', 'var(--feed-palette-3)',
   'var(--feed-palette-4)', 'var(--feed-palette-5)', 'var(--feed-palette-6)',
 ];
+
+// A tag's colour is a pure function of its text: 32-bit FNV-1a over the
+// UTF-8 bytes of the trimmed, lower-cased name, mod 6. No state, no storage,
+// so the same name is the same colour on every device and every load. Changing
+// this hash recolours every tag (tests/palette.test.js pins known names).
+export function tagColour(name) {
+  let h = 0x811c9dc5;
+  for (const b of new TextEncoder().encode(String(name).trim().toLowerCase())) {
+    h ^= b;
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return FEED_PALETTE[h % FEED_PALETTE.length];
+}
