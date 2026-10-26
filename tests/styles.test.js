@@ -623,10 +623,6 @@ test('the next event\'s "in N" is in the accent; a finished event is greyed; a t
   assert.equal(declOf('.today-row.done .today-text', 'text-decoration'), 'line-through');
 });
 
-// Final fixes 2, C3: an event over 12 h away keeps an EMPTY "in N" span (so
-// the tick can fill it, final review A2), and as a flex item it still took
-// the row's 8px gap after the time. Empty, it is not laid out at all; the
-// tick fills the node it kept, and :empty stops matching.
 // Rewards concept 2 (Alex, 2026-10-26): the count reads like the date beside
 // it, done in the accent and left in ink. It sets no display, so the `hidden`
 // attribute (the browser's [hidden] rule) can hide it (plan review I3).
@@ -643,8 +639,13 @@ test('the done/left count: the date\'s capitals, right-aligned, done in the acce
   assert.equal(declOf('.today-tally b', 'color'), 'var(--accent)');
   assert.equal(declOf('.today-tally-left', 'color'), 'var(--ink)');
   assert.equal(declOf('.today-tally', 'display'), null, 'a display here would defeat hidden');
+  assert.equal(declOf('.today-tally[hidden]', 'display'), 'none', 'and hidden is guarded, as .cal-switch[hidden] is');
 });
 
+// Final fixes 2, C3: an event over 12 h away keeps an EMPTY "in N" span (so
+// the tick can fill it, final review A2), and as a flex item it still took
+// the row's 8px gap after the time. Empty, it is not laid out at all; the
+// tick fills the node it kept, and :empty stops matching.
 test('an empty "in N" takes no space', () => {
   assert.equal(declOf('.today-rel:empty', 'display'), 'none');
 });

@@ -330,7 +330,7 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 .today-date { margin: var(--space-1) 0 0; }
 /* "N DONE · M LEFT" (rewards concept 2, the mockup's values): the date's
    capitals, in the head's right-hand slot. Done is in the accent, left in ink.
-   No display here: it is shown and hidden by the `hidden` attribute. */
+   No display here: the `hidden` attribute shows and hides it (guarded below). */
 .today-tally {
   margin: 6px 0 0;
   font-family: var(--sans);
@@ -344,6 +344,7 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
 }
 .today-tally b { color: var(--accent); font-weight: 700; }
 .today-tally-left { color: var(--ink); }
+.today-tally[hidden] { display: none; }
 .today-label { margin: 0 0 var(--space-2); }
 .today-day { margin: var(--space-3) 0 var(--space-1); }
 .today-section { margin-bottom: var(--space-5); }

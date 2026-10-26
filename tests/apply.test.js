@@ -6226,6 +6226,35 @@ test('Today: a delete waiting for its Undo is already gone from Today, and Undo 
   seed([]);
 });
 
+// Task 1 review (2026-10-26): the count is painted by every render, not only
+// a tick's. A to-do ticked today arrives here with no tick on this device (as
+// a sync or a reload brings it), and a delete waiting for its Undo takes its
+// struck row, and its count, away until Undo.
+test('Today: the done/left count follows every render: a stored tick shows it, a pending delete takes it away, Undo restores it', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const today = localISO(new Date());
+  const node = () => globalThis.document.getElementById('today-tally');
+  const shown = () => node().children.map((c) => c.textContent).join('');
+  seed([
+    record({ id: 'rw-done', type: 'task', title: 'rw Ticked elsewhere', date: today, done: true, updatedAt: new Date().toISOString() }),
+    record({ id: 'rw-open', type: 'task', title: 'rw Still open', date: today }),
+  ]);
+  enableMockTimers(t, { apis: ['setTimeout'] });
+  try {
+    assert.equal(node().hidden, false, 'no tick on this device, and the count shows');
+    assert.equal(shown(), '1 done · 1 left');
+    click(deleteControlFor(todoList(), 'rw Ticked elsewhere'));
+    assert.equal(node().hidden, true, 'its struck row is gone, and so is its count');
+    click(toastHost().querySelector('.toast-undo'));
+    assert.equal(shown(), '1 done · 1 left');
+  } finally {
+    await resetMockTimers(t);
+  }
+  seed([]);
+  assert.equal(node().hidden, true, 'an empty day: hidden');
+});
+
 test('Today: a calendar event is shown by its title; the calendar\'s link never reaches the page', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
