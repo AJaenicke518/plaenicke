@@ -418,6 +418,11 @@ function handleDelete(id) {
 // The stamp is strictly later than the record's own (nextStamp), and a failed
 // save restores the record, as editItem does: `items` is what the next save
 // of any item writes.
+//
+// setDone does NOT render; handleToggleDone, its only caller, does. So a
+// throw out of setDone always means the save failed and the record was
+// restored, and a throw out of the render that follows always means the tick
+// saved (stage 3 leftover 3, 2026-10-26).
 function setDone(id, done) {
   const idx = items.findIndex((it) => it.id === id);
   if (idx < 0) return;
@@ -430,10 +435,8 @@ function setDone(id, done) {
     throw e;
   }
   // The save succeeded, so the push is scheduled BEFORE the render (final
-  // fixes 2, C9): a render that throws must not leave a saved tick unsent. Its
-  // error still reaches the caller.
+  // fixes 2, C9): a render that throws must not leave a saved tick unsent.
   scheduleSync();
-  render();
 }
 
 // editItem — the sheet's Save (edit-items Task 4c). Returns { ok, error }.
@@ -715,14 +718,28 @@ function toggleDoneKeepingFocus(container, rowClass) {
   };
 }
 
+const TICK_SAVED_RENDER_FAILED = "Saved, but the screen couldn't update — reload.";
+
 function handleToggleDone(id, done) {
   try {
     setDone(id, done);
   } catch (e) {
     setMessage(e.message);
-    // setDone restored the record, but the checkbox the user tapped still
-    // shows the tick. Re-render from `items`, so a failed tick looks failed.
+    // The save failed and setDone restored the record, but the checkbox the
+    // user tapped still shows the tick. Re-render from `items`, so a failed
+    // tick looks failed.
     render();
+    return;
+  }
+  // The tick saved and its sync is scheduled. A render that throws now must
+  // not report the tick as failed, and must not be retried (it would throw
+  // again). The error is rethrown, not swallowed: the user is told to reload
+  // and the error still reaches the console.
+  try {
+    render();
+  } catch (e) {
+    setMessage(TICK_SAVED_RENDER_FAILED);
+    throw e;
   }
 }
 
