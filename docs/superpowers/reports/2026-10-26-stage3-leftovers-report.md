@@ -72,6 +72,19 @@ New test in `tests/apply.test.js`: `a tick on a box whose item is gone saves not
   - `js/app.js` was restored after each mutant; `git status` showed only the test file changed.
 - **Gate:** tests 1535, pass 1535, fail 0, cancelled 0. One commit holds this test and this report update.
 
+### Second fix: the "nothing is saved" assertion could not fail
+
+An independent review of d74f57b found that mutant (c) survived. In that mutant, the missing-id path calls `saveItems(items)` before returning.
+
+- **Why it survived:** the test asserted `deepEqual(loadItems(), [])`. A save of the same `[]` that `seed([])` had already stored leaves the stored value unchanged, so the assertion cannot see it.
+- **Fix:** during the tick, the test wraps `localStorage.setItem` and counts writes to `plaenicke.items`, restoring the original in `finally`. It now asserts zero writes.
+- **Mutants:** run with the script in my scratchpad (`mut3.py`), which restores `js/app.js` in `finally`. Afterwards `git status` showed only the test file changed.
+  - (a) `setDone` throws when `idx < 0`: fails.
+  - (b) `handleToggleDone` skips the render for a missing id: fails.
+  - (c) the missing-id path calls `saveItems(items)`: **fails now** (it survived before).
+- **Gate:** tests 1535, pass 1535, fail 0, cancelled 0.
+- **Lesson:** to assert that a write did not happen, count the writes. Comparing stored contents misses a write that stores the same value.
+
 ## Open questions for Alex (as of the first hand-off; both now settled by the controller)
 
 1. The message for a tick that saved but whose screen failed to update. It is currently "Saved, but the screen couldn't update — reload." Recommendation: keep it. It says the data is safe and gives the one action that fixes the screen.

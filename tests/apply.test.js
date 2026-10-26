@@ -6866,9 +6866,21 @@ test('a tick on a box whose item is gone saves nothing, shows no error, and re-r
   const sentinel = globalThis.document.createElement('div');
   todoList().appendChild(sentinel);
   box.checked = true;
-  assert.doesNotThrow(() => fire(box, 'change'), 'a missing item is not an error');
+  // Count writes, not stored contents: a save of the same [] that seed([])
+  // stored would leave loadItems() unchanged.
+  const real = localStorage.setItem.bind(localStorage);
+  let itemWrites = 0;
+  localStorage.setItem = (k, v) => {
+    if (k === 'plaenicke.items') itemWrites += 1;
+    return real(k, v);
+  };
+  try {
+    assert.doesNotThrow(() => fire(box, 'change'), 'a missing item is not an error');
+  } finally {
+    localStorage.setItem = real;
+  }
   assert.equal(messageText(), '', 'no error is shown');
-  assert.deepEqual(loadItems(), [], 'nothing is saved');
+  assert.equal(itemWrites, 0, 'nothing is saved');
   assert.ok(!todoList().children.includes(sentinel), 'the page was re-rendered from items');
   clearMessage();
   seed([]);
