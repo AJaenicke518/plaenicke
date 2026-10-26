@@ -92,13 +92,20 @@ export function renderThreeDayView(container, startISO, itemsByDate, todayISO, {
       block.style.left = `${(row.col / row.cols) * 100}%`;
       block.style.width = `calc(${100 / row.cols}% - 2px)`;
       const when = row.item.endTime ? formatTimeRange(row.item.time, row.item.endTime) : formatTime(row.item.time);
+      const start = shortTime(row.item.time);
       // No ×: a column is too narrow for one, and the sheet has Delete.
       const open = el('button', 'item-open');
       open.type = 'button';
       open.setAttribute('data-item-id', row.item.id);
-      // The visible time drops AM/PM; the accessible name keeps it.
-      open.setAttribute('aria-label', `${when} ${row.item.title}`);
-      open.append(el('span', 'tday-time', shortTime(row.item.time)), el('span', 'tday-title', row.item.title));
+      // The visible time drops AM/PM; the rest of it ("–10:15 AM") is in a
+      // visually hidden span, so the accessible name is the full time and
+      // still begins with the visible text (WCAG 2.5.3), which an aria-label
+      // would not.
+      open.append(
+        el('span', 'tday-time', start),
+        el('span', 'visually-hidden', `${when.slice(start.length)} `),
+        el('span', 'tday-title', row.item.title),
+      );
       open.addEventListener('click', () => onOpen(row.item));
       block.appendChild(open);
       col.appendChild(block);

@@ -119,15 +119,25 @@ test('a timed item is a block in its own day\'s column, placed by its minutes at
   assert.equal(block.style.width, 'calc(100% - 2px)');
 });
 
-test('a block shows its start time without AM/PM over its title, and its name carries the full time', () => {
+// The accessible name is the button's text in a browser: the spans joined
+// with nothing between them. It must carry the full time and begin with the
+// visible "1:45" (WCAG 2.5.3, label in name), so no aria-label replaces it.
+const nameOf = (button) => button.children.map((s) => s.textContent).join('');
+test('a block shows its start time without AM/PM, then its title; its name carries the full time', () => {
   const c = container();
   renderThreeDayView(c, START, byDate([own('a', START, '13:45', '15:25'), own('p', START, '17:00')]), TODAY, noop);
   const [ranged, pinned] = openButtons(one(c, 'tday-grid'));
   assert.deepEqual(ranged.children.map((s) => [s.className, s.textContent]),
-    [['tday-time', '1:45'], ['tday-title', 't-a']]);
-  assert.equal(ranged.getAttribute('aria-label'), '1:45–3:25 PM t-a');
-  assert.deepEqual(pinned.children.map((s) => s.textContent), ['5:00', 't-p']);
-  assert.equal(pinned.getAttribute('aria-label'), '5:00 PM t-p');
+    [['tday-time', '1:45'], ['visually-hidden', '–3:25 PM '], ['tday-title', 't-a']]);
+  assert.equal(nameOf(ranged), '1:45–3:25 PM t-a');
+  assert.equal(nameOf(pinned), '5:00 PM t-p');
+  assert.equal(ranged.getAttribute('aria-label'), null, 'an aria-label would replace the visible text');
+});
+
+test('the full time across noon keeps both periods', () => {
+  const c = container();
+  renderThreeDayView(c, START, byDate([own('a', START, '10:50', '12:05')]), TODAY, noop);
+  assert.equal(nameOf(openButtons(c)[0]), '10:50 AM–12:05 PM t-a');
 });
 
 test('an item with no end time is a pin, 30 minutes tall', () => {
@@ -201,6 +211,24 @@ test('untimed items sit in the All-day strip, in their own day\'s cell, and open
   chip.click();
   assert.deepEqual(opened, [reg]);
   assert.equal(byClass(one(c, 'tday-grid'), 'tday-chip').length, 0, 'the untimed item is not also in the grid');
+});
+
+test('All-day chips: each opens its own item, keeps the done class and takes its feed colour', () => {
+  const c = container();
+  const opened = [];
+  const first = own('u1', START, null, null, { type: 'task' });
+  const done = own('u2', START, null, null, { type: 'task', done: true });
+  const ext = { ...own('u3', '2026-10-28', null), external: true, feedId: 'f', feedColor: 'var(--feed-palette-3)' };
+  renderThreeDayView(c, START, byDate([first, done, ext]), TODAY, { onOpen: (it) => opened.push(it), onSelectDay() {} });
+  const chips = byClass(one(c, 'tday-allday'), 'tday-chip');
+  assert.deepEqual(chips.map((x) => x.getAttribute('data-item-id')), ['u1', 'u2', 'u3']);
+  assert.ok(chips[1]._classes.has('type-task') && chips[1]._classes.has('done'), 'a done to-do stays, marked done');
+  assert.ok(!chips[0]._classes.has('done'));
+  assert.ok(chips[2]._classes.has('type-external'));
+  assert.equal(chips[2].style['--feed-color'], 'var(--feed-palette-3)');
+  chips[1].click();
+  chips[2].click();
+  assert.deepEqual(opened, [done, ext]);
 });
 
 test('with nothing untimed in the three days, there is no All-day strip', () => {

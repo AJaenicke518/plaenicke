@@ -610,7 +610,7 @@ const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
 // assume the cursors sit on today, so after any test that used dayOf the
 // cursors go back to today and the page that was showing is shown again.
 const PAGE_CONTROLS = [
-  ['today-view', 'tab-today'], ['day-view', 'show-day'], ['week-view', 'show-week'],
+  ['today-view', 'tab-today'], ['day-view', 'show-day'], ['three-day-view', 'show-3day'], ['week-view', 'show-week'],
   ['calendar-view', 'show-month'], ['todo-view', 'tab-todo'], ['ideas-view', 'tab-ideas'],
 ];
 let restoreAfterDayOf = null;
@@ -720,13 +720,14 @@ const NAV = [
   // [control, section, tab that is active]
   ['tab-today', 'today-view', 'tab-today'],
   ['show-day', 'day-view', 'tab-calendar'],
+  ['show-3day', 'three-day-view', 'tab-calendar'],
   ['show-week', 'week-view', 'tab-calendar'],
   ['show-month', 'calendar-view', 'tab-calendar'],
   ['tab-todo', 'todo-view', 'tab-todo'],
   ['tab-ideas', 'ideas-view', 'tab-ideas'],
 ];
 const TABS = ['tab-today', 'tab-calendar', 'tab-todo', 'tab-ideas'];
-const SEGMENTS = ['show-day', 'show-week', 'show-month'];
+const SEGMENTS = ['show-day', 'show-3day', 'show-week', 'show-month'];
 
 test('each tab and each Calendar segment reveals exactly its own page, and marks itself active', async () => {
   installFakeLocalStorage();
@@ -1534,7 +1535,7 @@ test('index.html opens on Today', () => {
   assert.doesNotMatch(html, /<button id="(tab-calendar|tab-todo|tab-ideas|show-[a-z]+)"[^>]*class="active"/, 'and no other');
   assert.match(html, /<div id="cal-switch"[^>]*hidden/, 'the Calendar switcher starts hidden');
   assert.match(html, /<section id="today-view"(?![^>]*hidden)[^>]*>/, 'the Today section must be visible on load');
-  for (const id of ['calendar-view', 'week-view', 'day-view', 'todo-view', 'ideas-view']) {
+  for (const id of ['calendar-view', 'week-view', 'three-day-view', 'day-view', 'todo-view', 'ideas-view']) {
     assert.match(html, new RegExp(`<section id="${id}"[^>]*hidden`), `#${id} must start hidden`);
   }
 });
@@ -3374,6 +3375,7 @@ test('sweep D: two quick resumes fetch each calendar once, and a feed pulled mea
 // navigation tests do not fail in the week across New Year's.
 const weekLabelFor = (iso) => weekLabel(iso, addDays(iso, 6));
 const monthLabelFor = (d) => d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+const threeDayLabelFor = (iso) => weekLabel(iso, addDays(iso, 2));
 
 test('sweep D: the Week view follows a resume, and a navigated week stays put', async (t) => {
   installFakeLocalStorage();
@@ -3525,7 +3527,7 @@ const PAGES = [
 function visiblePageButton() {
   for (const [buttonId, sectionId] of [
     ['tab-today', 'today-view'],
-    ['show-month', 'calendar-view'], ['show-week', 'week-view'],
+    ['show-month', 'calendar-view'], ['show-week', 'week-view'], ['show-3day', 'three-day-view'],
     ['show-day', 'day-view'], ['tab-todo', 'todo-view'], ['tab-ideas', 'ideas-view'],
   ]) {
     if (!globalThis.document.getElementById(sectionId).hidden) return globalThis.document.getElementById(buttonId);
@@ -3968,6 +3970,7 @@ test('sF: the next arrows after the clock turns move from what is on screen, wit
   const cases = [
     ['prev-day', 'next-day', 'day-label', Date.now() + DAY, labelFor(real)],
     ['prev-week', 'next-week', 'week-label', Date.now() + 7 * DAY, weekLabelFor(startOfWeek(localISO(real)))],
+    ['prev-3day', 'next-3day', 'three-day-label', Date.now() + DAY, threeDayLabelFor(localISO(real))],
     ['prev-month', 'next-month', 'calendar-label',
       new Date(real.getFullYear(), real.getMonth() + 1, 1, 12).getTime(), monthLabelFor(real)],
   ];
@@ -6586,10 +6589,230 @@ test('Week: a week with nothing left to list says "Nothing else this week."', as
 });
 
 // =========================================================================
+// The 3-day view (option A, Alex 2026-10-26): three columns of Day's hour
+// grid; ← → move 3 days; it starts on today and follows today as Day does;
+// repeating feed instances (the classes) are drawn; a block opens its sheet
+// and a heading opens Day.
+// =========================================================================
+const threeDayBody = () => globalThis.document.getElementById('three-day-body');
+const TD_ICS = [
+  'BEGIN:VCALENDAR', 'VERSION:2.0',
+  'BEGIN:VEVENT', 'UID:td-mwf', 'SUMMARY:td PHYS 2100',
+  'DTSTART;TZID=America/Los_Angeles:20261005T092500', 'DTEND;TZID=America/Los_Angeles:20261005T101500',
+  'RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR', 'END:VEVENT',
+  'BEGIN:VEVENT', 'UID:td-tuth', 'SUMMARY:td ENGR 2001',
+  'DTSTART;TZID=America/Los_Angeles:20261006T134500', 'DTEND;TZID=America/Los_Angeles:20261006T143500',
+  'RRULE:FREQ=WEEKLY;BYDAY=TU,TH', 'END:VEVENT',
+  'END:VCALENDAR',
+].join('\r\n');
+// The titles drawn in each of the three columns, timed blocks only, top to bottom.
+function threeDayColumns() {
+  const grid = threeDayBody().querySelector('.tday-grid');
+  assert.ok(grid, 'fixture check: the 3-day grid is drawn');
+  return grid.children.filter((c) => c._classes.has('tday-col')).map((col) => col.children
+    .filter((b) => b._classes.has('tday-block'))
+    .map((b) => b.querySelector('.tday-title').textContent));
+}
+
+test('3-day: today and the next two days, classes included; → and ← move three days', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 26, 9, 0).getTime() });
+  try {
+    seed([
+      record({ id: 'td-adv', type: 'event', title: 'td Advising', date: '2026-10-26', time: '12:00', endTime: '12:30' }),
+      record({ id: 'td-reg', type: 'task', title: 'td Register', date: '2026-10-27' }),
+      record({ id: 'td-idea', type: 'idea', title: 'td An idea', date: '2026-10-27' }),
+      record({ id: 'td-thu', type: 'due', title: 'td Thursday HW', date: '2026-10-29', time: '17:00' }),
+    ]);
+    const { events, skipped } = parseICS(TD_ICS);
+    assert.equal(skipped.length, 0, 'fixture check: every VEVENT parsed');
+    seedFeedsWithCache([sdFeed('td-feed')], { 'td-feed': { fetchedAt: new Date().toISOString(), events, skipped: [] } });
+    click(doc.getElementById('show-3day'));
+    assert.equal(doc.getElementById('three-day-view').hidden, false);
+    assert.equal(labelText('three-day-label'), '10/26 – 10/28', 'it starts on today');
+    assert.deepEqual(threeDayColumns(), [
+      ['td PHYS 2100', 'td Advising'],
+      ['td ENGR 2001'],
+      ['td PHYS 2100'],
+    ], 'the repeating classes are drawn on their days, beside own items');
+    const strip = threeDayBody().querySelector('.tday-allday');
+    assert.ok(strip, 'an untimed item puts up the All-day strip');
+    assert.match(allText(strip), /td Register/);
+    assert.ok(!allText(threeDayBody()).includes('td An idea'), 'an idea is not on the calendar');
+    assert.ok(!allText(threeDayBody()).includes('td Thursday HW'), 'Thursday is outside the window');
+
+    click(doc.getElementById('next-3day'));
+    assert.equal(labelText('three-day-label'), '10/29 – 10/31', '→ moves three days');
+    assert.deepEqual(threeDayColumns(), [['td ENGR 2001', 'td Thursday HW'], ['td PHYS 2100'], []]);
+    assert.equal(threeDayBody().querySelector('.tday-allday'), null, 'no untimed item, no strip');
+    click(doc.getElementById('prev-3day'));
+    click(doc.getElementById('prev-3day'));
+    assert.equal(labelText('three-day-label'), '10/23 – 10/25', '← moves three days');
+    click(doc.getElementById('next-3day'));
+    assert.equal(labelText('three-day-label'), '10/26 – 10/28');
+  } finally {
+    unseedFeeds();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('3-day: a block and an All-day chip open their sheet, and closing it returns focus there', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 26, 9, 0).getTime() });
+  try {
+    seed([
+      record({ id: 'td-o1', type: 'event', title: 'td Open me', date: '2026-10-27', time: '15:00', endTime: '16:00' }),
+      record({ id: 'td-o2', type: 'event', title: 'td Not me', date: '2026-10-27', time: '09:00', endTime: '10:00' }),
+      record({ id: 'td-o3', type: 'task', title: 'td Untimed', date: '2026-10-28' }),
+    ]);
+    click(doc.getElementById('show-3day'));
+    for (const title of ['td Open me', 'td Untimed']) {
+      click(openControlFor(threeDayBody(), title));
+      assert.ok(sheetHost().querySelector('.sheet'), `tapping ${title} opens a sheet`);
+      assert.equal(sheetHost().querySelector('.sheet-title').value, title, 'and it is THIS item');
+      closeSheet();
+      assert.equal(doc.activeElement, openControlFor(threeDayBody(), title), 'focus goes back to it');
+    }
+  } finally {
+    forceCloseSheet();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('3-day: a day heading opens that day in Day view, inside Calendar', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 26, 9, 0).getTime() });
+  try {
+    seed([]);
+    click(doc.getElementById('show-3day'));
+    const heads = threeDayBody().querySelector('.tday-heads').children.filter((c) => c._classes.has('tday-head'));
+    assert.equal(heads.length, 3, 'fixture check');
+    click(heads[1]);
+    assert.equal(doc.getElementById('day-view').hidden, false, 'Day view is showing');
+    assert.equal(doc.getElementById('three-day-view').hidden, true);
+    assert.equal(labelText('day-label'), 'Tue, Oct 27');
+    assert.ok(doc.getElementById('show-day')._classes.has('active'));
+    assert.ok(doc.getElementById('tab-calendar')._classes.has('active'));
+    click(doc.getElementById('show-3day'));
+    assert.equal(labelText('three-day-label'), '10/26 – 10/28', 'opening a day does not move the 3-day window');
+  } finally {
+    seed([]);
+    t.mock.timers.reset();
+    click(doc.getElementById('show-month'));
+    openDayForToday();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('3-day: Calendar reopens on 3-day when it was the last view used there', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  try {
+    click(doc.getElementById('show-3day'));
+    click(doc.getElementById('tab-todo'));
+    click(doc.getElementById('tab-calendar'));
+    assert.equal(doc.getElementById('three-day-view').hidden, false);
+    assert.ok(doc.getElementById('show-3day')._classes.has('active'));
+    assert.equal(doc.getElementById('show-3day').getAttribute('aria-pressed'), 'true');
+  } finally {
+    click(doc.getElementById('show-day'));
+    if (restore) click(restore);
+  }
+});
+
+test('3-day: the window follows a resume onto the new today, and a moved window stays put', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const DAY = 24 * 60 * 60 * 1000;
+  assert.equal(labelText('three-day-label'), threeDayLabelFor(localISO(new Date())), 'fixture check: on today');
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + DAY });
+  try {
+    resume();
+    assert.equal(labelText('three-day-label'), threeDayLabelFor(localISO(new Date())),
+      'a window that started on today starts on the new today');
+  } finally {
+    t.mock.timers.reset();
+  }
+  resume();
+  assert.equal(labelText('three-day-label'), threeDayLabelFor(localISO(new Date())), 'and back');
+  click(globalThis.document.getElementById('next-3day'));
+  const moved = labelText('three-day-label');
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + DAY });
+  try {
+    resume();
+    assert.equal(labelText('three-day-label'), moved, 'a window the user moved must not jump');
+  } finally {
+    t.mock.timers.reset();
+  }
+  resume();
+  click(globalThis.document.getElementById('prev-3day'));
+  assert.equal(labelText('three-day-label'), threeDayLabelFor(localISO(new Date())), 'restored for later tests');
+});
+
+// sF's rule for every arrow: it steps from what is ON SCREEN. A window still
+// showing the old today when the clock turns, then →, lands three days after
+// the old today, not three after the new one (a skipped day).
+test('3-day: → after midnight, before any render, steps from the window on screen', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const DAY = 24 * 60 * 60 * 1000;
+  const oldToday = localISO(new Date());
+  assert.equal(labelText('three-day-label'), threeDayLabelFor(oldToday), 'fixture check: on today');
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + DAY });
+  try {
+    click(globalThis.document.getElementById('next-3day'));
+    assert.equal(labelText('three-day-label'), threeDayLabelFor(addDays(oldToday, 3)));
+    click(globalThis.document.getElementById('prev-3day'));
+    assert.equal(labelText('three-day-label'), threeDayLabelFor(oldToday));
+  } finally {
+    t.mock.timers.reset();
+  }
+  resume();
+  assert.equal(labelText('three-day-label'), threeDayLabelFor(localISO(new Date())), 'fixture check: back on today');
+  // And ← first: three days before the old today, not before the new one.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + DAY });
+  try {
+    click(globalThis.document.getElementById('prev-3day'));
+    assert.equal(labelText('three-day-label'), threeDayLabelFor(addDays(oldToday, -3)));
+    click(globalThis.document.getElementById('next-3day'));
+  } finally {
+    t.mock.timers.reset();
+  }
+  resume();
+  assert.equal(labelText('three-day-label'), threeDayLabelFor(localISO(new Date())), 'restored for later tests');
+});
+
+test('3-day: the arrows are named for what they do', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  assert.match(html, /<button id="prev-3day" type="button" aria-label="Previous 3 days">/);
+  assert.match(html, /<button id="next-3day" type="button" aria-label="Next 3 days">/);
+});
+
+
+// =========================================================================
 // Home-screen stage 3c — the tab bar and Calendar's switcher (spec § 4)
 // =========================================================================
 
-test('tabs: the bar is Today | Calendar | To-do | Ideas, and Calendar\'s switcher is Day / Week / Month', () => {
+test('tabs: the bar is Today | Calendar | To-do | Ideas, and Calendar\'s switcher is Day / 3-day / Week / Month', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
   const bar = html.match(/<nav class="tab-bar"[\s\S]*?<\/nav>/);
   assert.ok(bar, 'fixture check: index.html has the tab bar');
@@ -6599,10 +6822,10 @@ test('tabs: the bar is Today | Calendar | To-do | Ideas, and Calendar\'s switche
   const sw = html.match(/<div id="cal-switch"[\s\S]*?<\/div>/);
   assert.ok(sw, 'fixture check: index.html has the switcher');
   assert.deepEqual([...sw[0].matchAll(/<button id="([^"]+)"[^>]*>([^<]*)</g)].map((m) => [m[1], m[2]]), [
-    ['show-day', 'Day'], ['show-week', 'Week'], ['show-month', 'Month'],
-  ], 'List is removed (stage 3d, Alex 2026-10-22); 3-day is hidden until it is built (question 5)');
-  assert.doesNotMatch(html, /class="view-toggle"|id="show-(today|todo|ideas|3day)"|>3-day</i,
-    'the six view buttons are gone, and no 3-day control exists');
+    ['show-day', 'Day'], ['show-3day', '3-day'], ['show-week', 'Week'], ['show-month', 'Month'],
+  ], 'List is removed (stage 3d, Alex 2026-10-22); 3-day sits after Day, beside Week (Alex, 2026-10-26)');
+  assert.doesNotMatch(html, /class="view-toggle"|id="show-(today|todo|ideas)"/,
+    'the six view buttons are gone');
 });
 
 // Stage 3d (Alex, 2026-10-22): "you can get rid of the list view". List is
