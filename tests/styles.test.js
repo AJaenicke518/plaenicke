@@ -995,3 +995,17 @@ test('every 3-day colour is a token', () => {
   }
   assert.ok(seen >= 5, `fixture check: ${seen} colour declarations`);
 });
+
+// The 3-day overrides win over .item-open, .day-block and Day's open button
+// only by coming LATER at equal specificity (Task 3 review). Moving the
+// section up would pass every value check above and undo all of them.
+test('3-day: the overrides come after the rules they override', () => {
+  const at = (selector) => {
+    const i = rulesOf(css).findIndex(({ sel }) => sel.split(',').map((x) => x.trim().replace(/\s+/g, ' ')).includes(selector));
+    assert.ok(i >= 0, `fixture check: ${selector} exists`);
+    return i;
+  };
+  assert.ok(at('.tday-chip') > at('.item-open'));
+  assert.ok(at('.tday-block') > at('.day-block'));
+  assert.ok(at('.tday-block .item-open') > at('.day-block .item-open'));
+});

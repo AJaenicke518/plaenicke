@@ -861,11 +861,14 @@ function renderThreeDay() {
     groupItemsByDate(sortItemsByDate(visibleItems(viewThreeDayStart, end))), toISO(new Date()), {
       onOpen: openItem,
       onSelectDay: openDay,
-      // Day's rule (renderDay below): scroll to 07:00 only when the window
-      // changed while visible; otherwise keep the grid where the user left it.
+      // Scroll to 07:00 when the window changed or the page has just come
+      // back into view; otherwise keep the grid where the user left it. A
+      // grid drawn while hidden holds no scroll position (a browser reports
+      // 0), so a hidden render forgets the window: without that, returning
+      // to Calendar on the same window opened the grid at midnight.
       autoScroll: visible && viewThreeDayStart !== lastThreeDayRendered,
     });
-  if (visible) lastThreeDayRendered = viewThreeDayStart;
+  lastThreeDayRendered = visible ? viewThreeDayStart : null;
 }
 
 let lastDayRendered = null;

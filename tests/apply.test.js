@@ -6801,6 +6801,34 @@ test('3-day: → after midnight, before any render, steps from the window on scr
   assert.equal(labelText('three-day-label'), threeDayLabelFor(localISO(new Date())), 'restored for later tests');
 });
 
+// A grid drawn while its page is hidden cannot hold a scroll position: a
+// browser reports scrollTop 0 for it, and the fake keeps whatever was
+// written, so the test sets 0 the way the browser would. Without the rule,
+// coming back to the same window opened the grid at midnight (seen in Chrome,
+// 2026-10-26, Task 2 review).
+test('3-day: coming back to Calendar opens the grid at 7 AM again, not at midnight', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  const grid = () => threeDayBody().querySelector('.tday-grid');
+  try {
+    click(doc.getElementById('show-3day'));
+    assert.equal(grid().scrollTop, 7 * 48, 'fixture check: first show scrolls to 7 AM');
+    click(doc.getElementById('tab-today'));
+    grid().scrollTop = 0; // drawn while hidden: what a browser reports
+    click(doc.getElementById('tab-calendar'));
+    assert.equal(doc.getElementById('three-day-view').hidden, false, 'fixture check');
+    assert.equal(grid().scrollTop, 7 * 48);
+    grid().scrollTop = 600;
+    seed([]); // a re-render while it stays visible keeps the user's place
+    assert.equal(grid().scrollTop, 600);
+  } finally {
+    click(doc.getElementById('show-day'));
+    if (restore) click(restore);
+  }
+});
+
 test('3-day: the arrows are named for what they do', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
   assert.match(html, /<button id="prev-3day" type="button" aria-label="Previous 3 days">/);
