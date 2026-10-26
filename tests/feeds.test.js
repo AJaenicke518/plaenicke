@@ -1160,6 +1160,26 @@ test('instancesForRange and feedShape: a DAILY or WEEKLY rule with COUNT=1 is a 
   assert.equal(sumOf(shape), shape.total);
 });
 
+// Stage 3 round-2 re-review leftover (2): the same holds for YEARLY and
+// MONTHLY. A COUNT=1 rule of either reads "single" in the Settings line, not
+// "yearly/monthly (shown as one-offs)". The COUNT=2 rules are the control:
+// they still read as yearly/monthly.
+test('feedShape and describeFeedShape: a YEARLY or MONTHLY rule with COUNT=1 reads "single"', () => {
+  const { events } = parseICS(icsWith(
+    vevent({ uid: 'once-y', summary: 'Once yearly', dtstart: '20260824T170000Z', dtend: '20260824T180000Z', rrule: 'FREQ=YEARLY;COUNT=1' }),
+    vevent({ uid: 'once-m', summary: 'Once monthly', dtstart: '20260825T170000Z', dtend: '20260825T180000Z', rrule: 'count=1;freq=monthly' }),
+    vevent({ uid: 'twice-y', summary: 'Twice yearly', dtstart: '20260826T170000Z', dtend: '20260826T180000Z', rrule: 'FREQ=YEARLY;COUNT=2' }),
+    vevent({ uid: 'twice-m', summary: 'Twice monthly', dtstart: '20260827T170000Z', dtend: '20260827T180000Z', rrule: 'FREQ=MONTHLY;COUNT=2' }),
+  ));
+  assert.equal(events.length, 4, 'fixture check: parseICS kept all four');
+  const shape = feedShape(events, 'UTC');
+  assert.equal(shape.single, 2, 'the COUNT=1 masters are single');
+  assert.equal(shape.otherRuleEvents, 2, 'the COUNT=2 masters are yearly/monthly');
+  assert.equal(sumOf(shape), shape.total);
+  assert.equal(describeFeedShape(shape),
+    '4 events: 0 repeat (RRULE), 2 yearly/monthly (shown as one-offs), 2 single. Uses the rule.');
+});
+
 test('instancesForRange: an override belongs to its weekly series, wherever it moved; a master-less override is a one-off', () => {
   const rid = (value) => ({ value, tzid: null });
   const events = [
