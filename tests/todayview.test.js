@@ -403,6 +403,17 @@ test('the tick moment: a just-ticked overdue row plays too', () => {
   assert.equal(strikeOf(row).length, 1);
 });
 
+// Task 2 review, minor 1: only a row with a checkbox plays. A done own event
+// (a to-do retyped to an event in the sheet keeps done) has none.
+test('the tick moment: a done row with no checkbox never plays', () => {
+  const ev = own('doneEvent', { type: 'event', time: '08:00', title: 'Retyped', done: true });
+  const { host } = draw([ev], [], at(9, 18), { justTicked: 'doneEvent' });
+  const row = rowOf(host, 'Retyped');
+  assert.ok(row, 'fixture check: drawn under Today\'s events');
+  assert.equal(row._classes.has('tick-just'), false);
+  assert.equal(strikeOf(row).length, 0);
+});
+
 test('renderTodayView refuses a justTicked that is not an id or null', () => {
   const host = document.createElement('div');
   const model = buildToday(DAY, [], TODAY, at(9, 0), () => []);
