@@ -31,8 +31,8 @@ import { renderSyncStatus, syncWriteStarted, syncWriteSettled } from './linkui.j
 import { WORKER_URL } from './config.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
 import { installPress } from './press.js';
-import { buildToday, relativeLabel, NEXT_DAYS, LOOKAHEAD_DAYS, tickedToday } from './today.js';
-import { renderTodayView } from './todayview.js';
+import { buildToday, relativeLabel, NEXT_DAYS, LOOKAHEAD_DAYS, tickedToday, tally } from './today.js';
+import { renderTodayView, renderTally } from './todayview.js';
 
 const els = {
   text: document.getElementById('entry-text'),
@@ -79,6 +79,7 @@ const els = {
   todayView: document.getElementById('today-view'),
   todayBody: document.getElementById('today-body'),
   todayDate: document.getElementById('today-date'),
+  todayTally: document.getElementById('today-tally'),
   // Home-screen stage 3c — the tab bar, the tab title and Calendar's switcher.
   tabToday: document.getElementById('tab-today'),
   tabCalendar: document.getElementById('tab-calendar'),
@@ -718,6 +719,14 @@ function toggleDoneKeepingFocus(container, rowClass) {
   };
 }
 
+// The tick moment (rewards concept 1, Alex 2026-10-26): the id of the item a
+// tick just marked done, set only for the one render() that follows a saved
+// tick and cleared in its finally, so no later render (a sync, a tab switch)
+// plays it again. An untick and a failed save never set it. Module state,
+// never stored. The row plays where it lands (controller ruling): nothing
+// holds the reorder.
+let justTicked = null;
+
 const TICK_SAVED_RENDER_FAILED = "Saved, but the screen couldn't update — reload.";
 
 function handleToggleDone(id, done) {
@@ -735,11 +744,14 @@ function handleToggleDone(id, done) {
   // not report the tick as failed, and must not be retried (it would throw
   // again). The error is rethrown, not swallowed: the user is told to reload
   // and the error still reaches the console.
+  justTicked = done === true ? id : null;
   try {
     render();
   } catch (e) {
     setMessage(TICK_SAVED_RENDER_FAILED);
     throw e;
+  } finally {
+    justTicked = null;
   }
 }
 
@@ -863,7 +875,7 @@ function renderTodos() {
   const todayISO = toISO(new Date());
   renderTodoView(els.todoList, todoItems(todayISO), {
     todayISO, onOpen: openItem, onDelete: requestDelete,
-    onToggleDone: toggleDoneKeepingFocus(els.todoList, 'todo-row'),
+    onToggleDone: toggleDoneKeepingFocus(els.todoList, 'todo-row'), justTicked,
   });
 }
 
@@ -900,11 +912,13 @@ function renderToday() {
     minutesNow(now),
     () => instancesForRange(feeds, feedCache, addDays(todayISO, 1), addDays(todayISO, LOOKAHEAD_DAYS), deviceTz),
   );
+  // The head's "N DONE · M LEFT" (rewards concept 2), from the same rows.
+  renderTally(els.todayTally, tally(today));
   if (todayISO !== todayRenderedFor) laterOpen = false;
   todayRenderedFor = todayISO;
   todayRelative = renderTodayView(els.todayBody, today, {
     onOpen: openItem, onToggleDone: toggleDoneKeepingFocus(els.todayBody, 'today-row'),
-    laterOpen, onToggleLater: toggleLater,
+    laterOpen, onToggleLater: toggleLater, justTicked,
   }).relative;
 }
 

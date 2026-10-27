@@ -27,6 +27,8 @@
   --on-type: #fffdf8;               /* text on type-colored blocks */
   --shade: rgba(0, 0, 0, 0.25);     /* subtle overlay accents */
   --scrim: rgba(0, 0, 0, 0.35);     /* modal backdrop */
+  /* The tick moment's wash (rewards concept 1): the accent, faint. */
+  --tick-glow: rgba(138, 90, 59, 0.14);
   --serif: Georgia, 'Times New Roman', serif;
   /* linked-calendar palette (Task 8): 6 fixed swatches feeds auto-assign
      from / cycle through. Kept distinct from the item-type palette above so
@@ -87,6 +89,7 @@
   --on-type: #14161a;
   /* 0.35 barely dims a near-black page; a sheet must read as in front. */
   --scrim: rgba(0, 0, 0, 0.6);
+  --tick-glow: rgba(143, 167, 200, 0.18);
   /* linked-calendar palette (Task 8) — lighter/brighter twins of the light
      values above, same contrast strategy as the item-type palette. */
   --feed-palette-1: #9a98d4;
@@ -328,6 +331,23 @@ button.delete { background: transparent; color: var(--danger); padding: 6px 10px
   color: var(--muted);
 }
 .today-date { margin: var(--space-1) 0 0; }
+/* "N DONE · M LEFT" (rewards concept 2, the mockup's values): the date's
+   capitals, in the head's right-hand slot. Done is in the accent, left in ink.
+   No display here: the `hidden` attribute shows and hides it (guarded below). */
+.today-tally {
+  margin: 6px 0 0;
+  font-family: var(--sans);
+  font-size: var(--text-label);
+  letter-spacing: var(--label-tracking);
+  text-transform: uppercase;
+  color: var(--muted);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.today-tally b { color: var(--accent); font-weight: 700; }
+.today-tally-left { color: var(--ink); }
+.today-tally[hidden] { display: none; }
 .today-label { margin: 0 0 var(--space-2); }
 .today-day { margin: var(--space-3) 0 var(--space-1); }
 .today-section { margin-bottom: var(--space-5); }
@@ -922,3 +942,32 @@ button[data-press].pressed { opacity: 1; }
    it; this is the room .sheet-actions' margin gives an own item (sweep U15).
    After .sheet, which it overrides at equal specificity. */
 .sheet-external { padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+
+/* ---------- the tick moment (rewards concept 1, Alex 2026-10-26) ----------
+   The render right after a tick marks that row .tick-just (Today and To-do;
+   js/todayview.js, js/todoview.js) and wraps its title text in .tick-strike.
+   A wash of the accent over the row that fades out over 900 ms, a 260 ms pop of the
+   box, and the strike drawn left to right across the text in 320 ms. It plays where
+   the row lands. Every rule is inside no-preference, so with Reduce Motion
+   on the page is exactly what it was: the span is plain inline text and the
+   row's own line-through strikes it. The wash is an inset shadow, not a
+   background, so a To-do card fades back to its --card ground. The title's
+   line-through is turned off on the element that carries it (.today-text,
+   the To-do .item-open), at one class more than the .done rule, so the drawn
+   line replaces it rather than doubling it. The next render draws the plain
+   line-through. */
+@media (prefers-reduced-motion: no-preference) {
+  .tick-just { animation: tick-wash 900ms ease-out; }
+  .tick-just .today-check, .tick-just .todo-tick input { animation: tick-pop 260ms ease-out; }
+  .today-row.done.tick-just .today-text, .todo-row.done.tick-just .item-open { text-decoration: none; }
+  .tick-strike {
+    background: linear-gradient(currentColor, currentColor) no-repeat 0 58% / 100% 1.5px;
+    animation: tick-draw 320ms 60ms ease-out both;
+  }
+}
+@keyframes tick-wash {
+  from { box-shadow: inset 0 0 0 100vmax var(--tick-glow); }
+  to { box-shadow: inset 0 0 0 100vmax transparent; }
+}
+@keyframes tick-pop { 0% { transform: scale(1); } 45% { transform: scale(1.28); } 100% { transform: scale(1); } }
+@keyframes tick-draw { from { background-size: 0 1.5px; } to { background-size: 100% 1.5px; } }

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeFakeDocument, allText, findAll, fire } from './fake-dom.js';
 import { buildToday } from '../js/today.js';
-import { renderTodayView } from '../js/todayview.js';
+import { renderTodayView, renderTally } from '../js/todayview.js';
 
 // The overdue-ticked test turns a UTC updatedAt into a local day: pin Alex's
 // zone instead of trusting the machine's (in UTC-10 or UTC-11 its 08:00Z
@@ -355,4 +355,118 @@ test('Coming up: a button that would do nothing on tap is refused', () => {
   assert.throws(() => renderTodayView(host, model, { onOpen() {}, onToggleDone() {}, laterOpen: false }), /onToggleLater/);
   assert.throws(() => renderTodayView(host, model, { onOpen() {}, onToggleDone() {}, onToggleLater() {}, laterOpen: 'yes' }),
     /laterOpen/);
+});
+
+// --- the tick moment (rewards concept 1, Alex 2026-10-26) -------------------
+// app.js passes the id of the row just ticked for the one render after the
+// tick. That row, and only that row, gets `tick-just`, and its title text is
+// wrapped in a `tick-strike` span so the strike is drawn across the text
+// alone (styles.css). It plays where the row lands: no reorder is held.
+const justDraw = (justTicked) => draw(DAY, DAY_FEED, at(9, 18), { justTicked });
+const strikeOf = (li) => byClass(li, 'tick-strike');
+
+test('the tick moment: the just-ticked row, and only it, gets tick-just and a strike span around its title', () => {
+  const { host } = justDraw('ticked');
+  const row = rowOf(host, 'Water plants');
+  assert.ok(row._classes.has('tick-just'));
+  assert.ok(row._classes.has('done'), 'fixture check: it is the ticked row');
+  const [text] = byClass(row, 'today-text');
+  assert.equal(text.children.length, 1);
+  assert.ok(text.children[0]._classes.has('tick-strike'));
+  assert.equal(text.children[0].textContent, 'Water plants');
+  assert.equal(text.textContent, '', 'the title is in the span, once');
+  const others = byClass(host, 'today-row').filter((li) => li !== row);
+  assert.ok(others.length >= 5, 'fixture check');
+  for (const li of others) {
+    assert.equal(li._classes.has('tick-just'), false, allText(li));
+    assert.equal(strikeOf(li).length, 0, allText(li));
+  }
+});
+
+test('the tick moment: no id, or the id of a row that is not done, draws it nowhere', () => {
+  for (const justTicked of [undefined, null, 'bank', 'gone']) {
+    const { host } = justDraw(justTicked);
+    for (const li of byClass(host, 'today-row')) {
+      assert.equal(li._classes.has('tick-just'), false, `${justTicked}: ${allText(li)}`);
+      assert.equal(strikeOf(li).length, 0, `${justTicked}: ${allText(li)}`);
+    }
+  }
+  const { host } = draw(DAY, DAY_FEED);
+  assert.equal(rowOf(host, 'Water plants')._classes.has('tick-just'), false, 'the default is none');
+});
+
+test('the tick moment: a just-ticked overdue row plays too', () => {
+  const late = own('lateDone', { type: 'due', date: '2026-10-18', title: 'Old essay', done: true, updatedAt: new Date(2026, 9, 21, 9, 0).toISOString() });
+  const { host } = draw([late], [], at(9, 18), { justTicked: 'lateDone' });
+  const row = rowOf(host, 'Old essay');
+  assert.ok(row && row._classes.has('tick-just'));
+  assert.equal(strikeOf(row).length, 1);
+});
+
+// Task 2 review, minor 1: only a row with a checkbox plays. A done own event
+// (a to-do retyped to an event in the sheet keeps done) has none.
+test('the tick moment: a done row with no checkbox never plays', () => {
+  const ev = own('doneEvent', { type: 'event', time: '08:00', title: 'Retyped', done: true });
+  const { host } = draw([ev], [], at(9, 18), { justTicked: 'doneEvent' });
+  const row = rowOf(host, 'Retyped');
+  assert.ok(row, 'fixture check: drawn under Today\'s events');
+  assert.equal(row._classes.has('tick-just'), false);
+  assert.equal(strikeOf(row).length, 0);
+});
+
+test('renderTodayView refuses a justTicked that is not an id or null', () => {
+  const host = document.createElement('div');
+  const model = buildToday(DAY, [], TODAY, at(9, 0), () => []);
+  for (const bad of [1, true, {}]) {
+    assert.throws(() => renderTodayView(host, model, { onOpen() {}, onToggleDone() {}, justTicked: bad }), /justTicked/);
+  }
+});
+
+// --- the "N DONE · M LEFT" count (rewards concept 2, Alex 2026-10-26) -------
+// renderTally draws today.js's tally into Today's head. null: empty and
+// hidden (until the first tick). Upper case is styles.css's, not the text's.
+// What the line reads: its parts' text, joined as the browser joins them.
+const shown = (node) => node.children.map((c) => c.textContent).join('');
+const tallyNode = () => {
+  const node = document.createElement('p');
+  node.hidden = true;
+  return node;
+};
+
+test('the count: null leaves it empty and hidden', () => {
+  const node = tallyNode();
+  renderTally(node, null);
+  assert.equal(node.hidden, true);
+  assert.equal(node.children.length, 0);
+});
+
+test('the count: "2 done · 3 left", the done part bold and the left part its own span', () => {
+  const node = tallyNode();
+  renderTally(node, { done: 2, left: 3 });
+  assert.equal(node.hidden, false);
+  assert.equal(shown(node), '2 done · 3 left');
+  assert.equal(node.children[0].tagName, 'B');
+  assert.equal(node.children[0].textContent, '2 done');
+  assert.ok(byClass(node, 'today-tally-left').some((s) => s.textContent === '3 left'));
+});
+
+test('the count: "All 5 done" only when nothing is left', () => {
+  const node = tallyNode();
+  renderTally(node, { done: 5, left: 0 });
+  assert.equal(node.hidden, false);
+  assert.equal(shown(node), 'All 5 done');
+  assert.equal(node.children.length, 1);
+  assert.equal(node.children[0].tagName, 'B');
+  renderTally(node, { done: 4, left: 1 });
+  assert.equal(shown(node), '4 done · 1 left', 'one left is not all done');
+});
+
+test('the count: a re-render replaces the text, and null hides it again', () => {
+  const node = tallyNode();
+  renderTally(node, { done: 1, left: 1 });
+  renderTally(node, { done: 2, left: 0 });
+  assert.equal(shown(node), 'All 2 done');
+  renderTally(node, null);
+  assert.equal(node.hidden, true);
+  assert.equal(node.children.length, 0);
 });

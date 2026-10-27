@@ -1929,7 +1929,10 @@ function deleteControlFor(root, title) {
     for (const c of el.children) {
       if (hit) return;
       const chain = [...ancestors, el];
-      if (c.tagName === 'BUTTON' && c._classes.has('item-open') && (c.textContent || '').includes(title)) {
+      // allText, not the button's own textContent: the row a tick just
+      // marked holds its title in a .tick-strike span (rewards concept 1),
+      // and a real button's textContent includes its descendants too.
+      if (c.tagName === 'BUTTON' && c._classes.has('item-open') && allText(c).includes(title)) {
         for (let i = chain.length - 1; i >= 0 && !hit; i--) {
           hit = chain[i].children.find((s) => s._classes.has('delete') || s._classes.has('day-del')) || null;
         }
@@ -6100,6 +6103,47 @@ test('Today: an overdue to-do ticked on Today stays in Overdue, struck through, 
   }
 });
 
+// Rewards concept 2 (Alex, 2026-10-26): "N DONE · M LEFT" in Today's head,
+// hidden until the first tick, "All N done" once Overdue and To do today are
+// both fully ticked. Painted on every render, through the real app.
+test('Today: the done/left count is hidden until a tick, counts each tick, and says "All 2 done" at the end', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
+  const node = () => globalThis.document.getElementById('today-tally');
+  const shown = () => node().children.map((c) => c.textContent).join('');
+  const tick = (title, on) => {
+    const box = checkboxFor(todayBody(), title);
+    assert.ok(box, `fixture check: ${title} has a checkbox`);
+    box.checked = on;
+    fire(box, 'change');
+  };
+  try {
+    seed([
+      record({ id: 'rw-late', type: 'due', title: 'rw Essay', date: '2026-10-19' }),
+      record({ id: 'rw-task', type: 'task', title: 'rw Call bank', date: '2026-10-21' }),
+      record({ id: 'rw-soon', type: 'task', title: 'rw Next week', date: '2026-10-24' }),
+    ]);
+    click(globalThis.document.getElementById('tab-today'));
+    assert.ok(node(), 'fixture check: index.html has #today-tally');
+    assert.equal(node().hidden, true, 'hidden before the first tick');
+    tick('rw Call bank', true);
+    assert.equal(node().hidden, false);
+    assert.equal(shown(), '1 done · 1 left');
+    tick('rw Essay', true);
+    assert.equal(shown(), 'All 2 done', 'a to-do dated later is not counted');
+    tick('rw Essay', false);
+    assert.equal(shown(), '1 done · 1 left');
+    tick('rw Call bank', false);
+    assert.equal(node().hidden, true, 'hidden again with nothing ticked');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+});
+
 test('Today: a tick on Today is saved, and the row stays, struck through, until tomorrow', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
@@ -6223,6 +6267,123 @@ test('Today: a delete waiting for its Undo is already gone from Today, and Undo 
     await resetMockTimers(t);
   }
   seed([]);
+});
+
+// Rewards concept 1 (Alex, 2026-10-26): the render right after a tick marks
+// that row `tick-just` on Today and on To-do, where the row lands; every later
+// render (here a tab switch) marks none. An untick and a failed save mark none.
+const rowWith = (box, cls) => {
+  let n = box.parentNode;
+  while (n && !n._classes.has(cls)) n = n.parentNode;
+  assert.ok(n, `fixture check: the box is inside a ${cls}`);
+  return n;
+};
+const justRows = (root) => {
+  const out = [];
+  const walk = (n) => { for (const c of n.children) { if (c._classes.has('tick-just')) out.push(c); walk(c); } };
+  walk(root);
+  return out;
+};
+
+test('the tick moment: a tick on Today marks its row once; the next render, and an untick, mark none', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const today = localISO(new Date());
+  seed([
+    record({ id: 'rw-a', type: 'task', title: 'rw First', date: today }),
+    record({ id: 'rw-b', type: 'task', title: 'rw Second', date: today }),
+  ]);
+  try {
+    click(globalThis.document.getElementById('tab-today'));
+    assert.equal(justRows(todayBody()).length, 0, 'fixture check: none before a tick');
+    const box = checkboxFor(todayBody(), 'rw First');
+    box.checked = true;
+    fire(box, 'change');
+    const landed = checkboxFor(todayBody(), 'rw First');
+    assert.deepEqual(justRows(todayBody()), [rowWith(landed, 'today-row')], 'the ticked row, where it landed');
+    assert.match(allText(todayBody()), /rw Second[\s\S]*rw First/, 'fixture check: it moved below the undone one');
+    click(globalThis.document.getElementById('tab-todo'));
+    click(globalThis.document.getElementById('tab-today'));
+    assert.equal(justRows(todayBody()).length, 0, 'a later render plays nothing');
+    assert.equal(justRows(todoList()).length, 0);
+    const again = checkboxFor(todayBody(), 'rw First');
+    again.checked = false;
+    fire(again, 'change');
+    assert.equal(justRows(todayBody()).length, 0, 'an untick plays nothing');
+  } finally {
+    if (restore) click(restore);
+  }
+  seed([]);
+});
+
+test('the tick moment: a tick on the To-do page marks its row there', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  seed([record({ id: 'rw-t', type: 'task', title: 'rw On the list', date: '2099-07-09' })]);
+  try {
+    click(globalThis.document.getElementById('tab-todo'));
+    const box = checkboxFor(todoList(), 'rw On the list');
+    box.checked = true;
+    fire(box, 'change');
+    assert.deepEqual(justRows(todoList()), [rowWith(checkboxFor(todoList(), 'rw On the list'), 'todo-row')]);
+  } finally {
+    if (restore) click(restore);
+  }
+  seed([]);
+});
+
+test('the tick moment: a tick that fails to save marks no row', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'rw-q', type: 'task', title: 'rw Quota', date: '2099-07-09' })]);
+  const real = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = (k, v) => {
+    if (k === 'plaenicke.items') { const e = new Error('The quota has been exceeded.'); e.name = 'QuotaExceededError'; throw e; }
+    return real(k, v);
+  };
+  try {
+    const box = checkboxFor(todoList(), 'rw Quota');
+    box.checked = true;
+    fire(box, 'change');
+  } finally {
+    localStorage.setItem = real;
+  }
+  assert.equal(storedById('rw-q').done, false, 'fixture check: not saved');
+  assert.equal(justRows(todoList()).length, 0);
+  assert.equal(justRows(todayBody()).length, 0);
+  clearMessage();
+  seed([]);
+});
+
+// Task 1 review (2026-10-26): the count is painted by every render, not only
+// a tick's. A to-do ticked today arrives here with no tick on this device (as
+// a sync or a reload brings it), and a delete waiting for its Undo takes its
+// struck row, and its count, away until Undo.
+test('Today: the done/left count follows every render: a stored tick shows it, a pending delete takes it away, Undo restores it', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const today = localISO(new Date());
+  const node = () => globalThis.document.getElementById('today-tally');
+  const shown = () => node().children.map((c) => c.textContent).join('');
+  seed([
+    record({ id: 'rw-done', type: 'task', title: 'rw Ticked elsewhere', date: today, done: true, updatedAt: new Date().toISOString() }),
+    record({ id: 'rw-open', type: 'task', title: 'rw Still open', date: today }),
+  ]);
+  enableMockTimers(t, { apis: ['setTimeout'] });
+  try {
+    assert.equal(node().hidden, false, 'no tick on this device, and the count shows');
+    assert.equal(shown(), '1 done · 1 left');
+    click(deleteControlFor(todoList(), 'rw Ticked elsewhere'));
+    assert.equal(node().hidden, true, 'its struck row is gone, and so is its count');
+    click(toastHost().querySelector('.toast-undo'));
+    assert.equal(shown(), '1 done · 1 left');
+  } finally {
+    await resetMockTimers(t);
+  }
+  seed([]);
+  assert.equal(node().hidden, true, 'an empty day: hidden');
 });
 
 test('Today: a calendar event is shown by its title; the calendar\'s link never reaches the page', async () => {
