@@ -108,7 +108,7 @@ One pure function in a new `js/today.js` builds every section, called as `buildT
 - **Calendar** opens on its last-used sub-view (Day by default); arrows and `openDay` (`app.js:846`) work as now.
 - **The switcher fits 5 segments** at iPhone width, so adding 3-day later changes no layout; checked in stage 3c.
 - **`focusOpener` (`app.js:599-606`)** learns Today's list in 3b ~~and keeps `els.listView`~~ (Superseded 2026-10-22: List is removed — § 8 stage 3d result.)
-- **Geometry:** bar fixed at the bottom, 56 px + `env(safe-area-inset-bottom)`; body bottom padding `56px + 72px + inset`. The toast moves from `bottom: 16px + inset` (`styles.css:606`) to `56px + 12px + inset`, `right: 88px`, clearing the capture button (56 px, `right: 16px`, `bottom: 56px + 16px + inset`). The narrower toast must still fit its text and Undo.
+- **Geometry:** bar fixed at the bottom, 56 px + `env(safe-area-inset-bottom)`; body bottom padding `56px + 72px + inset` (**2026-10-26: now `56px + 80px + inset`.** The toast's top is 130-134px up (bottom 68px + 62-66px tall), which the 128px band left under it by 2-6px; 136px clears it. Alex approved: "yes".). The toast moves from `bottom: 16px + inset` (`styles.css:606`) to `56px + 12px + inset`, `right: 88px`, clearing the capture button (56 px, `right: 16px`, `bottom: 56px + 16px + inset`). The narrower toast must still fit its text and Undo.
 - **Layers:** content 0 < tab bar 5 < capture button 6 < capture box 8 < settings backdrop 10 < item sheet 15 < toast 20 (existing 10/15/20 unchanged, `styles.css:351,614,625`).
 
 ## 5. Visual foundation — Claude's call — confirm

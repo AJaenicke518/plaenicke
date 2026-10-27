@@ -270,7 +270,21 @@ test('the sheet top bar is sticky, so Save stays reachable while the form scroll
 // styles.css, the toast's top is 130-134px up, so it can still cover the
 // last 2-6px of the last row (see the comment on body's padding-bottom).
 test('body leaves room at the bottom for the tab bar, the capture button and the toast', () => {
-  assert.equal(declOf('body', 'padding-bottom'), 'calc(56px + 72px + env(safe-area-inset-bottom))');
+  assert.equal(declOf('body', 'padding-bottom'), 'calc(56px + 80px + env(safe-area-inset-bottom))');
+});
+
+// 2026-10-26 (Alex approved): the band grew 72px -> 80px so the toast clears
+// the last row. Both are measured up from the viewport bottom, so the
+// safe-area inset cancels. Toast top = .toast bottom (56 + 12 = 68px) + its
+// height (62px one-line, 66px two-line) = 130-134px. The body padding
+// (56 + 80 = 136px) must be at least that.
+test('the body padding clears the toast\'s top edge (computed from styles.css)', () => {
+  const sum = (v) => [...v.matchAll(/(\d+)px/g)].reduce((n, m) => n + Number(m[1]), 0);
+  const pad = sum(declOf('body', 'padding-bottom'));
+  const toastBottom = sum(declOf('.toast', 'bottom'));
+  for (const toastHeight of [62, 66]) {
+    assert.ok(pad >= toastBottom + toastHeight, `${pad}px < ${toastBottom + toastHeight}px`);
+  }
 });
 
 // --- Task 4a review O1, O2, O3 ----------------------------------------------
@@ -433,6 +447,19 @@ for (const theme of [':root', '[data-theme="dark"]']) {
   });
 }
 
+// 2026-10-26: --muted carries 13px labels (Today labels, hints, past rows), so
+// it needs 4.5:1 on both surfaces in both themes. It was 3.45 / 3.82 (light)
+// and 4.70 / 4.19 (dark, card failing).
+for (const theme of [':root', '[data-theme="dark"]']) {
+  test(`${theme}: --muted reads at WCAG AA (4.5:1) on --bg and on --card`, () => {
+    const fg = declOf(theme, '--muted');
+    for (const surface of ['--bg', '--card']) {
+      const ratio = contrast(fg, declOf(theme, surface));
+      assert.ok(ratio >= 4.5, `${theme} ${surface}: ${ratio.toFixed(2)} < 4.5`);
+    }
+  });
+}
+
 test('contrast() reproduces the spec\'s computed ratios (fixture check on the helper)', () => {
   assert.equal(contrast('#9c5418', '#f4f1ea').toFixed(2), '5.04');
   assert.equal(contrast('#9c5418', '#fffdf8').toFixed(2), '5.59');
@@ -544,7 +571,10 @@ for (const [sel, size] of Object.entries(CALENDAR_SIZES)) {
 // page's list (wlist-, stage 3 Commit 3) is a new screen under the grid; the
 // grid itself (week-) keeps its compact sizes. The capture box (capture-,
 // stage 4) is the spec's third new screen.
-const NEW_SCREEN = /\.(today-|tab-|cal-switch|wlist-|capture-|sheet-tags?(?![\w-]))/;
+// The 3-day view's day headings and its "All day" label are labels in the
+// Week list's style (2026-10-26); its blocks keep Day's compact sizes, so only
+// those two selectors are allowed, not all of tday-.
+const NEW_SCREEN = /\.(today-|tab-|cal-switch|wlist-|capture-|tday-head(?![\w-])|tday-allday-label(?![\w-])|sheet-tags?(?![\w-]))/;
 test('only the new screens read the new type scale', () => {
   const readers = [];
   for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
@@ -572,68 +602,119 @@ test('the grey iOS tap highlight is off exactly where .pressed replaces it', () 
   assert.equal(declOf('html', '-webkit-tap-highlight-color'), null, 'links and checkboxes keep the native highlight');
 });
 
-// Feedback on touch-down means instantly. Stage 4's capture box is the one
-// animation in the app (spec § 5: "Nothing else animates"), and it carries
-// the prefers-reduced-motion override.
-//
-// The body of the top-level at-rule whose prelude is exactly `prelude`
-// (`@media (prefers-reduced-motion: reduce)`, `@keyframes capture-grow`), so
-// a test can read declarations inside it alone. Throws when there is none.
-function atRuleBody(prelude, source = css) {
+// Feedback on touch-down means instantly.
+test('press state is instant', () => {
+  assert.equal(declOf('button.pressed', 'transition'), null);
+  assert.equal(declOf('[data-press].pressed', 'transition'), null);
+});
+
+// Every style rule with the at-rule it sits in: { at, sel, body }. `at` is the
+// enclosing @media prelude, or null at the top level. rulesOf flattens at-rules
+// and drops their preludes, so it cannot say where a rule sits (plan review
+// I2). @keyframes blocks are returned whole as { at: '@keyframes name' }, never
+// read as rules with selectors like `from`.
+function rulesInContext(source, at = null) {
+  const out = [];
   let depth = 0;
   let start = 0;
+  let prelude = '';
   let bodyStart = 0;
-  let current = '';
   for (let i = 0; i < source.length; i += 1) {
     if (source[i] === '{') {
-      if (depth === 0) { current = source.slice(start, i).trim(); bodyStart = i + 1; }
+      if (depth === 0) { prelude = source.slice(start, i).trim(); bodyStart = i + 1; }
       depth += 1;
     } else if (source[i] === '}') {
       depth -= 1;
+      if (depth < 0) throw new Error(`unbalanced braces at ${i}`);
       if (depth === 0) {
-        if (current === prelude) return source.slice(bodyStart, i);
+        const body = source.slice(bodyStart, i);
+        if (prelude.startsWith('@keyframes')) out.push({ at: prelude, sel: null, body });
+        else if (prelude.startsWith('@')) out.push(...rulesInContext(body, prelude.replace(/\s+/g, ' ')));
+        else out.push({ at, sel: prelude, body });
         start = i + 1;
       }
     }
   }
-  throw new Error(`styles.css has no ${prelude} block`);
+  if (depth !== 0) throw new Error('unbalanced braces at end of source');
+  return out;
 }
-const CAPTURE_KEYFRAMES = ['capture-fade-in', 'capture-fade-out', 'capture-grow', 'capture-shrink'];
+const NO_PREFERENCE = '@media (prefers-reduced-motion: no-preference)';
 
-test('press state is instant, nothing transitions, and the only animation is the capture panel\'s', () => {
-  assert.equal(declOf('button.pressed', 'transition'), null);
-  assert.equal(declOf('[data-press].pressed', 'transition'), null);
-  assert.doesNotMatch(css, /(^|[;{\s])transition(-[a-z-]+)?\s*:/);
-  const animated = rulesOf(css)
-    .filter(({ body }) => /(^|[;{\s])animation(-[a-z-]+)?\s*:/.test(body))
-    .map(({ sel }) => sel.replace(/\s+/g, ' '));
-  assert.deepEqual([...new Set(animated)].sort(), [
-    '.capture-box.closing .capture-panel', '.capture-box.closing.fade .capture-panel', '.capture-panel',
-  ]);
-  assert.deepEqual([...css.matchAll(/@keyframes\s+([\w-]+)/g)].map((m) => m[1]).sort(), CAPTURE_KEYFRAMES);
+test('rulesInContext keeps each rule\'s @media and reads @keyframes whole (fixture check on the helper)', () => {
+  const src = '.a { color: red; } @media (prefers-reduced-motion: no-preference) { .b { animation: x 1s; } } @keyframes x { from { opacity: 0; } to { opacity: 1; } }';
+  const rules = rulesInContext(src);
+  assert.deepEqual(rules.map((r) => [r.at, r.sel]), [[null, '.a'], [NO_PREFERENCE, '.b'], ['@keyframes x', null]]);
 });
 
-test('the capture panel grows from the button\'s corner in 250ms and shrinks back; with the keyboard up it fades', () => {
-  assert.equal(declOf('.capture-panel', 'animation'), 'capture-grow 250ms ease-out');
+// Rewards concept 1 (Alex, 2026-10-26) is the first motion in the app, and it
+// respects Reduce Motion by construction: every animation and transition sits
+// inside a no-preference block, so with Reduce Motion on nothing moves and the
+// page is what it was before. The only keyframes are the tick moment's and
+// the capture box's (stage 4, merged 2026-10-26).
+const CAPTURE_KEYFRAMES = ['capture-fade-out', 'capture-grow', 'capture-shrink'];
+test('every animation is inside a reduced-motion no-preference block; the only keyframes are the tick moment\'s and the capture box\'s', () => {
+  let moving = 0;
+  const keyframes = [];
+  for (const { at, sel, body } of rulesInContext(css)) {
+    if (sel === null) { keyframes.push(at.replace('@keyframes ', '')); continue; }
+    if (/(^|[;{\s])(transition|animation)(-[a-z-]+)?\s*:/.test(body)) {
+      moving += 1;
+      assert.equal(at, NO_PREFERENCE, `${sel} moves outside a no-preference block`);
+    }
+  }
+  assert.ok(moving >= 3, `fixture check: ${moving} rules that move`);
+  assert.deepEqual(keyframes.sort(), [...CAPTURE_KEYFRAMES, 'tick-draw', 'tick-pop', 'tick-wash'].sort());
+});
+
+// The mockup's motion: a ~0.9 s fading wash, a 260 ms pop of the box, and the
+// strike drawn left to right in 320 ms. The wash is an inset shadow in the
+// --tick-glow token (both themes), so a To-do card fades back to its own
+// ground. The title's line-through is turned off on the element that carries
+// it, at one class more than the .done rule (plan review C1), so the drawn
+// line replaces it rather than doubling it.
+test('the tick moment: wash, pop and drawn strike, in tokens, replacing the line-through on the element that carries it', () => {
+  const tick = rulesInContext(css).filter((r) => r.at === NO_PREFERENCE);
+  const decl = (selector, prop) => declOf(selector, prop, tick.map((r) => `${r.sel} {${r.body}}`).join('\n'));
+  assert.match(decl('.tick-just', 'animation'), /^tick-wash 900ms ease-out$/);
+  assert.equal(decl('.tick-just .today-check', 'animation'), 'tick-pop 260ms ease-out');
+  assert.equal(decl('.tick-just .todo-tick input', 'animation'), 'tick-pop 260ms ease-out');
+  assert.equal(decl('.tick-strike', 'animation'), 'tick-draw 320ms 60ms ease-out both');
+  assert.equal(decl('.tick-strike', 'background'), 'linear-gradient(currentColor, currentColor) no-repeat 0 58% / 100% 1.5px');
+  assert.equal(decl('.today-row.done.tick-just .today-text', 'text-decoration'), 'none');
+  assert.equal(decl('.todo-row.done.tick-just .item-open', 'text-decoration'), 'none');
+  assert.equal(declOf('.today-row.done .today-text', 'text-decoration'), 'line-through', 'fixture check: the rule it overrides');
+  assert.equal(declOf('.todo-row.done .item-open', 'text-decoration'), 'line-through', 'fixture check: the rule it overrides');
+  const wash = rulesInContext(css).find((r) => r.at === '@keyframes tick-wash');
+  assert.match(wash.body, /from\s*\{\s*box-shadow: inset 0 0 0 100vmax var\(--tick-glow\);\s*\}/);
+  assert.match(wash.body, /to\s*\{\s*box-shadow: inset 0 0 0 100vmax transparent;\s*\}/);
+  assert.equal(declOf(':root', '--tick-glow'), 'rgba(138, 90, 59, 0.14)');
+  assert.equal(declOf('[data-theme="dark"]', '--tick-glow'), 'rgba(143, 167, 200, 0.18)');
+});
+
+// Stage 4's capture box (spec § 5): it grows from the button in 250 ms and
+// shrinks back, and with the keyboard up it fades. Like every motion here
+// since rewards, it sits inside the no-preference block, so with Reduce Motion
+// on the box does not move at all (the spec's "only fades" predates that rule;
+// the controller ruled the rule applies, 2026-10-26).
+test('the capture panel grows from the button\'s corner in 250ms and shrinks back; with the keyboard up it fades; only without Reduce Motion', () => {
+  const moving = rulesInContext(css).filter((r) => r.at === NO_PREFERENCE);
+  const decl = (selector, prop) => declOf(selector, prop, moving.map((r) => `${r.sel} {${r.body}}`).join('\n'));
+  assert.equal(decl('.capture-panel', 'animation'), 'capture-grow 250ms ease-out');
+  assert.equal(decl('.capture-box.closing .capture-panel', 'animation'), 'capture-shrink 250ms ease-out forwards');
+  assert.equal(decl('.capture-box.closing.fade .capture-panel', 'animation-name'), 'capture-fade-out');
   assert.equal(declOf('.capture-panel', 'transform-origin'), 'bottom right');
-  assert.equal(declOf('.capture-box.closing .capture-panel', 'animation'), 'capture-shrink 250ms ease-out forwards');
-  assert.equal(declOf('.capture-box.closing.fade .capture-panel', 'animation-name'), 'capture-fade-out');
   // transform and opacity only (spec § 5).
   for (const name of CAPTURE_KEYFRAMES) {
-    for (const { body } of rulesOf(atRuleBody(`@keyframes ${name}`))) {
-      for (const decl of body.split(';')) {
-        const i = decl.indexOf(':');
+    const frames = rulesInContext(css).find((r) => r.at === `@keyframes ${name}`);
+    assert.ok(frames, `no @keyframes ${name}`);
+    for (const { body } of rulesOf(frames.body)) {
+      for (const d of body.split(';')) {
+        const i = d.indexOf(':');
         if (i < 0) continue;
-        assert.ok(['transform', 'opacity'].includes(decl.slice(0, i).trim()), `${name} animates ${decl.trim()}`);
+        assert.ok(['transform', 'opacity'].includes(d.slice(0, i).trim()), `${name} animates ${d.trim()}`);
       }
     }
   }
-});
-
-test('under reduced motion the capture panel only fades', () => {
-  const reduced = atRuleBody('@media (prefers-reduced-motion: reduce)');
-  assert.equal(declOf('.capture-panel', 'animation-name', reduced), 'capture-fade-in');
-  assert.equal(declOf('.capture-box.closing .capture-panel', 'animation-name', reduced), 'capture-fade-out');
 });
 
 // --- home-screen stage 3b: the guessed-series line on the sheet (spec § 2.4) --
@@ -677,6 +758,25 @@ test('the next event\'s "in N" is in the accent; a finished event is greyed; a t
   assert.equal(declOf('.today-rel', 'color'), 'var(--accent)');
   assert.equal(declOf('.today-row.past .today-open', 'color'), 'var(--muted)');
   assert.equal(declOf('.today-row.done .today-text', 'text-decoration'), 'line-through');
+});
+
+// Rewards concept 2 (Alex, 2026-10-26): the count reads like the date beside
+// it, done in the accent and left in ink. It sets no display, so the `hidden`
+// attribute (the browser's [hidden] rule) can hide it (plan review I3).
+test('the done/left count: the date\'s capitals, right-aligned, done in the accent, left in ink', () => {
+  assert.equal(declOf('.today-head', 'justify-content'), 'space-between', 'fixture check: a right-hand slot');
+  assert.equal(declOf('.today-tally', 'font-family'), 'var(--sans)');
+  assert.equal(declOf('.today-tally', 'font-size'), 'var(--text-label)');
+  assert.equal(declOf('.today-tally', 'letter-spacing'), 'var(--label-tracking)');
+  assert.equal(declOf('.today-tally', 'text-transform'), 'uppercase');
+  assert.equal(declOf('.today-tally', 'color'), 'var(--muted)');
+  assert.equal(declOf('.today-tally', 'text-align'), 'right');
+  assert.equal(declOf('.today-tally', 'white-space'), 'nowrap');
+  assert.equal(declOf('.today-tally', 'font-variant-numeric'), 'tabular-nums');
+  assert.equal(declOf('.today-tally b', 'color'), 'var(--accent)');
+  assert.equal(declOf('.today-tally-left', 'color'), 'var(--ink)');
+  assert.equal(declOf('.today-tally', 'display'), null, 'a display here would defeat hidden');
+  assert.equal(declOf('.today-tally[hidden]', 'display'), 'none', 'and hidden is guarded, as .cal-switch[hidden] is');
 });
 
 // Final fixes 2, C3: an event over 12 h away keeps an EMPTY "in N" span (so
@@ -1083,4 +1183,133 @@ test('nothing shows under the sticky actions row: the row, not the panel, has th
 
 test('the capture panel\'s shadow uses the --shade token', () => {
   assert.match(declOf('.capture-panel', 'box-shadow'), /var\(--shade\)/);
+});
+
+// --- per-series visibility (option A, 2026-10-26) ----------------------------
+// The sheet's switch is a 44px-tall tap target that draws a 51x31 track; the
+// track takes the accent only while aria-checked is "true", so its colour is
+// the state a screen reader hears. Tokens only, so dark mode follows. No
+// motion: the stylesheet declares none yet (see "press state is instant").
+test('vis: the sheet switch is a 44px target drawing a track that is accent only when on', () => {
+  assert.ok(ruleExists('.sheet .sheet-switch'), 'outranks .sheet button and the global button chip');
+  assert.ok(px(declOf('.sheet .sheet-switch', 'min-height')) >= 44);
+  assert.equal(declOf('.sheet .sheet-switch', 'background'), 'transparent');
+  assert.equal(declOf('.sheet .sheet-switch', 'padding'), '0');
+  assert.equal(declOf('.sheet-switch::before', 'background'), 'var(--line)');
+  assert.equal(declOf('.sheet-switch[aria-checked="true"]::before', 'background'), 'var(--accent)');
+  assert.equal(declOf('.sheet-switch::after', 'background'), 'var(--card)');
+  assert.notEqual(declOf('.sheet-switch[aria-checked="true"]::after', 'left'), null, 'the knob moves when on');
+});
+
+test('vis: switch rows are at least 44px; an empty error takes no space; the note is muted', () => {
+  assert.ok(px(declOf('.sheet-switch-row', 'min-height')) >= 44);
+  assert.equal(declOf('.sheet-vis-error:empty', 'display'), 'none');
+  assert.equal(declOf('.sheet-vis-error', 'color'), 'var(--danger)');
+  assert.equal(declOf('.sheet-vis-note', 'color'), 'var(--muted)');
+  assert.equal(declOf('.sheet-switch-sub', 'color'), 'var(--muted)');
+});
+
+test('vis: the hidden rows in Settings and their Show buttons are at least 44px', () => {
+  assert.ok(px(declOf('.feed-hidden-row', 'min-height')) >= 44);
+  assert.ok(px(declOf('.feed-hidden-row button', 'min-height')) >= 44);
+  assert.equal(declOf('.feed-hidden-where', 'color'), 'var(--muted)');
+  assert.equal(declOf('.feed-hidden-error', 'color'), 'var(--danger)');
+});
+
+test('vis: every new rule colours with tokens only, so dark mode follows', () => {
+  const rules = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)]
+    .filter(([, sel]) => /\.(feed-hidden|sheet-vis|sheet-switch)/.test(sel));
+  assert.ok(rules.length >= 10, `fixture check: found ${rules.length} rules`);
+  for (const [, sel, body] of rules) {
+    assert.doesNotMatch(body, /#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(/, sel.trim());
+  }
+  assert.equal(declOf('.feed-hidden-row button', 'background'), 'var(--bg)');
+  assert.equal(declOf('.feed-hidden-row button', 'color'), 'var(--ink)');
+});
+
+// --- the 3-day view (option A, Alex 2026-10-26) -----------------------------
+// Three columns of Day's grid. The headings and the All-day strip sit above a
+// grid that scrolls inside itself, as Day's does, so they stay in view; the
+// three parts share one column template so the columns line up.
+test('3-day: headings, All-day strip and grid share one column template: a gutter and three equal columns', () => {
+  for (const sel of ['.tday-heads', '.tday-allday', '.tday-grid']) {
+    assert.equal(declOf(sel, 'display'), 'grid', sel);
+    assert.equal(declOf(sel, 'grid-template-columns'), '36px repeat(3, minmax(0, 1fr))', sel);
+  }
+});
+
+test('3-day: the grid scrolls inside itself, as Day\'s does', () => {
+  assert.equal(declOf('.tday-grid', 'max-height'), declOf('.day-grid', 'max-height'));
+  assert.equal(declOf('.tday-grid', 'overflow-y'), 'auto');
+  assert.equal(declOf('.tday-col', 'position'), 'relative');
+  assert.equal(declOf('.tday-col', 'min-width'), '0');
+});
+
+test('3-day: a day heading is a quiet 44px button, the weekday over the day number', () => {
+  assert.equal(declOf('.tday-head', 'min-height'), '44px');
+  assert.equal(declOf('.tday-head', 'background'), 'transparent');
+  assert.equal(declOf('.tday-head', 'border-radius'), '0');
+  assert.equal(declOf('.tday-head', 'color'), 'var(--muted)');
+  assert.equal(declOf('.tday-head b', 'display'), 'block', 'or "Mon" and "26" run together as "Mon26"');
+  assert.equal(declOf('.tday-head b', 'color'), 'var(--ink)');
+  assert.equal(declOf('.tday-head.today b', 'background'), 'var(--today)');
+  assert.equal(declOf('.tday-head.today b', 'color'), 'var(--accent-ink)');
+});
+
+// Day's blocks pad 18px on the right for the ×, which 3-day has none of; in
+// a ~100px column that is a fifth of the width.
+test('3-day: a block drops Day\'s room for the ×, and its time and title wrap so a short block still shows the title', () => {
+  assert.equal(declOf('.tday-block', 'padding-right'), '3px');
+  assert.equal(declOf('.tday-block .item-open', 'flex-wrap'), 'wrap');
+  assert.equal(declOf('.tday-block .item-open', 'overflow-wrap'), 'anywhere');
+  assert.equal(declOf('.tday-time', 'font-variant-numeric'), 'tabular-nums');
+});
+
+test('3-day: an All-day chip is a 44px target in its type colour; a done one is struck through', () => {
+  assert.ok(Number.parseFloat(declOf('.item-open', 'min-height')) >= 44, 'fixture check');
+  assert.equal(declOf('.tday-chip', 'min-height'), null, 'it keeps .item-open\'s 44px minimum');
+  assert.equal(declOf('.tday-chip', 'background'), 'var(--type, var(--type-general))');
+  assert.equal(declOf('.tday-chip', 'color'), 'var(--on-type)');
+  assert.equal(declOf('.tday-chip.done', 'text-decoration'), 'line-through');
+});
+
+test('3-day: the hour labels and blocks keep Day\'s compact sizes', () => {
+  assert.equal(declOf('.tday-hour', 'font-size'), '0.65rem');
+  assert.equal(declOf('.tday-hour', 'height'), '48px', 'HOUR_PX in js/threedayview.js');
+  assert.equal(declOf('.tday-block', 'font-size'), '0.7rem');
+  assert.equal(declOf('.tday-chip', 'font-size'), '0.7rem');
+  assert.equal(declOf('.tday-head', 'font-size'), '11px', 'a 13px label with tracking crowds a ~100px column');
+  assert.equal(declOf('.tday-allday-label', 'font-size'), '10px', 'it sits in the 36px gutter');
+});
+
+test('every 3-day colour is a token', () => {
+  let seen = 0;
+  for (const { sel, body } of rulesOf(css)) {
+    if (!/\.tday/.test(sel)) continue;
+    for (const decl of body.split(';')) {
+      const i = decl.indexOf(':');
+      if (i < 0) continue;
+      const prop = decl.slice(0, i).trim();
+      const value = decl.slice(i + 1).trim();
+      if (!/^(color|background|border(?!-radius))/.test(prop) || value === 'transparent' || value === 'none' || value === '0') continue;
+      seen += 1;
+      assert.match(value, /var\(--/, `${sel.trim()} { ${prop}: ${value} }`);
+      assert.doesNotMatch(value, /#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i, `${sel.trim()} { ${prop}: ${value} }`);
+    }
+  }
+  assert.ok(seen >= 5, `fixture check: ${seen} colour declarations`);
+});
+
+// The 3-day overrides win over .item-open, .day-block and Day's open button
+// only by coming LATER at equal specificity (Task 3 review). Moving the
+// section up would pass every value check above and undo all of them.
+test('3-day: the overrides come after the rules they override', () => {
+  const at = (selector) => {
+    const i = rulesOf(css).findIndex(({ sel }) => sel.split(',').map((x) => x.trim().replace(/\s+/g, ' ')).includes(selector));
+    assert.ok(i >= 0, `fixture check: ${selector} exists`);
+    return i;
+  };
+  assert.ok(at('.tday-chip') > at('.item-open'));
+  assert.ok(at('.tday-block') > at('.day-block'));
+  assert.ok(at('.tday-block .item-open') > at('.day-block .item-open'));
 });

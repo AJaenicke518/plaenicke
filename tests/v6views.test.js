@@ -267,6 +267,38 @@ test('an Ideas re-render replaces the previous rows', () => {
   assert.doesNotMatch(allText(el), /t-a/);
 });
 
+// The tick moment (rewards concept 1, Alex 2026-10-26) plays on the To-do
+// page too: the just-ticked row, and only it, gets `tick-just`, and its title
+// button's text is wrapped in a `tick-strike` span (the whole "<day> — <title>",
+// which is what the static strike covers).
+const tickedClasses = (el) => rows(el).map((li) => li._classes.has('tick-just'));
+const strikeSpans = (li) => findAll(li, 'SPAN').filter((s) => s._classes.has('tick-strike'));
+
+test('the To-do tick moment: only the just-ticked, done row gets tick-just and a strike span', () => {
+  const el = host();
+  renderTodoView(el, [todo('a'), todo('b', { done: true, title: 'Ticked', date: '2026-08-30' })],
+    { todayISO: TODAY, onOpen() {}, onDelete() {}, onToggleDone() {}, justTicked: 'b' });
+  assert.deepEqual(tickedClasses(el), [false, true]);
+  const [, b] = rows(el);
+  const open = findAll(b, 'BUTTON').find((x) => x._classes.has('item-open'));
+  assert.equal(open.textContent, '', 'the text is in the span, once');
+  assert.equal(open.children.length, 1);
+  assert.equal(strikeSpans(b)[0].textContent, 'Today — Ticked');
+  assert.equal(strikeSpans(rows(el)[0]).length, 0);
+});
+
+test('the To-do tick moment: no id, or an undone row\'s id, draws it nowhere; a bad id throws', () => {
+  for (const justTicked of [undefined, null, 'a', 'gone']) {
+    const el = host();
+    renderTodoView(el, [todo('a'), todo('b', { done: true })],
+      { todayISO: TODAY, onOpen() {}, onDelete() {}, onToggleDone() {}, justTicked });
+    assert.deepEqual(tickedClasses(el), [false, false], String(justTicked));
+    assert.equal(rows(el).flatMap(strikeSpans).length, 0, String(justTicked));
+  }
+  assert.throws(() => renderTodoView(host(), [todo('a')],
+    { todayISO: TODAY, onOpen() {}, onDelete() {}, onToggleDone() {}, justTicked: 7 }), /justTicked/);
+});
+
 // No silent fallback to raw ISO dates: a caller that forgets todayISO would
 // otherwise render every row as "2026-09-01 — …" with nothing failing.
 test('renderTodoView refuses to render without todayISO', () => {

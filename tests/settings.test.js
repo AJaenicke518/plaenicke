@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
 import { makeFakeDocument, makeFakeWindow, allText } from './fake-dom.js';
 import {
@@ -105,6 +106,53 @@ test('settings: cycling a feed\'s color does not discard a feed that arrived in 
 
   const stored = loadFeeds();
   assert.deepEqual(stored.map((f) => f.id).sort(), ['feedA', 'feedC']);
+});
+
+// The Show/Hide toggle names its calendar for assistive tech, which otherwise
+// hears a row of identical "Show" or "Hide" buttons. The name only: a feed URL
+// is a capability token and is never displayed or announced.
+test('settings: the toggle is named "Show <calendar name>" or "Hide <calendar name>", never its URL', () => {
+  const work = {
+    id: 'feedW', url: 'https://calendar.example.com/private-s3cr3tT0ken/basic.ics', name: 'Work',
+    color: 'var(--feed-palette-2)', hidden: true, updatedAt: '2026-07-01T00:00:00.000Z',
+  };
+  const home = {
+    id: 'feedH', url: 'webcal://p01-caldav.example.com/published/2/h0meT0ken', name: 'Home',
+    color: 'var(--feed-palette-3)', hidden: true, updatedAt: '2026-07-01T00:00:00.000Z',
+  };
+  const school = {
+    id: 'feedS', url: 'https://school.example.com/feed/sch00lT0ken.ics', name: 'School',
+    color: 'var(--feed-palette-4)', hidden: false, updatedAt: '2026-07-01T00:00:00.000Z',
+  };
+  const { host } = openPanel([work, school, home]);
+  const hide = findButtonByText(host, 'Hide');
+  assert.ok(hide, 'fixture check: the visible calendar has a Hide button');
+  assert.equal(hide.getAttribute('aria-label'), 'Hide School');
+  const shows = host.querySelectorAll('button').filter((b) => b.textContent === 'Show');
+  assert.equal(shows.length, 2, 'fixture check: one Show button per hidden calendar');
+  assert.deepEqual(shows.map((b) => b.getAttribute('aria-label')), ['Show Work', 'Show Home']);
+  for (const b of [...shows, hide]) {
+    const label = b.getAttribute('aria-label');
+    for (const secret of ['s3cr3tT0ken', 'h0meT0ken', 'sch00lT0ken', 'example.com', 'https:', 'webcal:']) {
+      assert.ok(!label.includes(secret), `the label carries no part of a feed URL (${secret})`);
+    }
+  }
+});
+
+test('settings: hiding a calendar re-renders its toggle as "Show <name>", and showing it as "Hide <name>"', () => {
+  const work = {
+    id: 'feedW', url: 'https://calendar.example.com/private-s3cr3tT0ken/basic.ics', name: 'Work',
+    color: 'var(--feed-palette-2)', hidden: false, updatedAt: '2026-07-01T00:00:00.000Z',
+  };
+  const { host } = openPanel([work]);
+  findButtonByText(host, 'Hide').click();
+  const show = findButtonByText(host, 'Show');
+  assert.ok(show, 'fixture check: the toggle now reads Show');
+  assert.equal(show.getAttribute('aria-label'), 'Show Work');
+  show.click();
+  const hide = findButtonByText(host, 'Hide');
+  assert.ok(hide, 'fixture check: the toggle reads Hide again');
+  assert.equal(hide.getAttribute('aria-label'), 'Hide Work');
 });
 
 // --- synced mutations vs per-device view preferences (spec 6.3) ------------
@@ -813,4 +861,115 @@ test('settings: a control drawn after the panel opened is inside the Tab order; 
   input.focus();
   assert.equal(pressTab(), true, 'with the last button hidden, the input is the last stop');
   assert.equal(document.activeElement, findButtonByText(host, 'Light'));
+});
+
+// --- per-series visibility: "Hidden on this device" (option A, 2026-10-26) ---
+//
+// A series hidden from both places has no row left to tap, so Settings lists
+// every hidden series under its calendar with a Show button. Device-local:
+// Show is a VIEW change, never a synced one, and writes only
+// plaenicke.seriesVisibility.
+
+const VIS_KEY = 'plaenicke.seriesVisibility';
+const visFeed = (id, name) => ({
+  id, url: `https://example.com/private/${id}-SECRET-TOKEN-9/basic.ics`, name, color: 'var(--feed-palette-1)',
+  hidden: false, updatedAt: '2026-07-01T00:00:00.000Z',
+});
+const seedVis = (map) => () => localStorage.setItem(VIS_KEY, JSON.stringify(map));
+const byClassAll = (el, cls) => {
+  const out = [];
+  const walk = (n) => { for (const c of n.children) { if (c._classes.has(cls)) out.push(c); walk(c); } };
+  walk(el);
+  return out;
+};
+const VIS_MAP = {
+  fA: {
+    lab: { calendar: false, list: false, title: 'MECH 2100 Lab' },
+    clst: { calendar: true, list: false, title: 'CLST 1300' },
+    exam: { calendar: false, list: true, title: 'Exam' },
+  },
+};
+
+test('settings: each calendar lists the series hidden on this device, by title, saying where', () => {
+  const { host } = openPanel([visFeed('fA', 'LMU Classes'), visFeed('fB', 'Home')], seedVis(VIS_MAP));
+  const blocks = byClassAll(host, 'feed-hidden');
+  assert.equal(blocks.length, 1, 'only a calendar with something hidden gets the list');
+  const rows = byClassAll(host, 'feed-row');
+  assert.ok(byClassAll(rows[0], 'feed-hidden').length === 1 && byClassAll(rows[1], 'feed-hidden').length === 0,
+    'and it is under its own calendar');
+  assert.equal(byClassAll(blocks[0], 'feed-hidden-head')[0].textContent, 'Hidden on this device (3)');
+  assert.deepEqual(byClassAll(blocks[0], 'feed-hidden-row').map((r) => [
+    byClassAll(r, 'feed-hidden-name')[0].textContent, byClassAll(r, 'feed-hidden-where')[0].textContent,
+  ]), [['CLST 1300', 'from Today & lists'], ['Exam', 'from calendar'], ['MECH 2100 Lab', 'everywhere']]);
+  const show = byClassAll(blocks[0], 'feed-hidden-row')[0].children.find((c) => c.tagName === 'BUTTON');
+  assert.equal(show.textContent, 'Show');
+  assert.equal(show.type, 'button');
+  assert.equal(show.disabled, false, 'the fake click ignores disabled; a browser does not');
+  assert.equal(show.getAttribute('aria-label'), 'Show CLST 1300 again');
+  // The order the mockup draws: status, shape line, the hidden list, then the actions.
+  const kids = rows[0].children;
+  assert.ok(kids.indexOf(blocks[0]) < kids.indexOf(byClassAll(rows[0], 'feed-actions')[0]), 'above the actions');
+  assert.ok(!allText(host).includes('SECRET-TOKEN-9'), 'a feed URL is never rendered');
+});
+
+test('settings: Show puts the series back, writes only the visibility key, and is a view change, never synced', () => {
+  const { host, notified } = openPanel([visFeed('fA', 'LMU Classes')], seedVis(VIS_MAP));
+  notified.length = 0;
+  const before = [...localStorage.store.entries()].filter(([k]) => k !== VIS_KEY);
+  const row = byClassAll(host, 'feed-hidden-row')[2];
+  assert.equal(byClassAll(row, 'feed-hidden-name')[0].textContent, 'MECH 2100 Lab', 'fixture check');
+  row.children.find((c) => c.tagName === 'BUTTON').click();
+  assert.deepEqual(Object.keys(JSON.parse(localStorage.getItem(VIS_KEY)).fA).sort(), ['clst', 'exam'],
+    'that series is shown again, on both surfaces');
+  assert.deepEqual([...localStorage.store.entries()].filter(([k]) => k !== VIS_KEY), before,
+    'every other key, plaenicke.feeds included, is byte-identical');
+  assert.deepEqual(notified, ['view'], 'the app re-renders; nothing is pushed');
+  assert.equal(byClassAll(host, 'feed-hidden-head')[0].textContent, 'Hidden on this device (2)', 'the list redraws');
+});
+
+test('settings: showing the last hidden series removes the list', () => {
+  const { host } = openPanel([visFeed('fA', 'LMU Classes')],
+    seedVis({ fA: { lab: { calendar: false, list: false, title: 'Lab' } } }));
+  findButtonByText(byClassAll(host, 'feed-hidden')[0], 'Show').click();
+  assert.equal(byClassAll(host, 'feed-hidden').length, 0);
+});
+
+test('settings: a Show that cannot be saved says so on its calendar and changes nothing', () => {
+  const { host, notified } = openPanel([visFeed('fA', 'LMU Classes')], seedVis(VIS_MAP));
+  notified.length = 0;
+  const realSet = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = (k, v) => {
+    if (k === VIS_KEY) { const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; }
+    realSet(k, v);
+  };
+  const orig = console.error;
+  console.error = () => {};
+  try {
+    findButtonByText(byClassAll(host, 'feed-hidden')[0], 'Show').click();
+  } finally {
+    console.error = orig;
+    localStorage.setItem = realSet;
+  }
+  assert.deepEqual(JSON.parse(localStorage.getItem(VIS_KEY)), VIS_MAP, 'nothing changed');
+  assert.equal(byClassAll(host, 'feed-hidden-head')[0].textContent, 'Hidden on this device (3)');
+  const err = byClassAll(host, 'feed-hidden-error')[0];
+  assert.equal(err.textContent, "CLST 1300 couldn't be shown again: this device is out of storage.");
+  assert.equal(err.getAttribute('role'), 'alert');
+  assert.deepEqual(notified, [], 'nothing re-rendered elsewhere, nothing synced');
+});
+
+test('settings: an untitled series is named "Untitled event"', () => {
+  const { host } = openPanel([visFeed('fA', 'LMU Classes')],
+    seedVis({ fA: { x: { calendar: false, list: false, title: '' } } }));
+  assert.equal(byClassAll(host, 'feed-hidden-name')[0].textContent, 'Untitled event');
+});
+
+test('settings.js uses visibility.js only to read the list and to Show; Remove never touches it', () => {
+  const code = readFileSync(new URL('../js/settings.js', import.meta.url), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  const imp = code.match(/import\s*\{([^}]*)\}\s*from\s*'\.\/visibility\.js'/);
+  assert.ok(imp, 'fixture check: settings.js imports visibility.js');
+  assert.deepEqual(imp[1].split(',').map((s) => s.trim()).filter(Boolean).sort(),
+    ['UnlinkedCalendarError', 'hiddenSeriesFor', 'loadVisibility', 'showSeries']);
+  assert.ok(!/setSeriesVisibility|SERIES_VISIBILITY|seriesVisibility/.test(code));
 });

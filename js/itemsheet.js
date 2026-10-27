@@ -94,8 +94,64 @@ function typeSelect(current) {
   return sel;
 }
 
+// The two per-series switches on a feed event's sheet (option A, Alex
+// 2026-10-26). The sheet only draws them and reports a tap: app.js decides
+// whether the series may be hidden at all (js/visibility.js canHideSeries)
+// and writes the choice, device-local and never synced. The switch moves
+// only once onVisibilityChange says the write landed; a failure keeps it as
+// it was and shows the reason in the block.
+//
+// The words follow what the switch really does. `visibility.every` (app.js:
+// the calendar holds more than one occurrence of this uid) says "every", since
+// one switch covers them all, a monthly series included. The list switch's
+// sub-label names the upcoming lists only for a series that can be in them:
+// a daily or weekly series (`recurring`) never is (today.js upcomingRows).
+const VIS_SWITCHES = [
+  { surface: 'calendar', label: 'On the calendar', sub: () => 'Day, Week and Month', aria: 'on the calendar' },
+  {
+    surface: 'list', label: 'On Today and in lists', aria: 'on Today and in lists',
+    sub: (item) => (item.recurring === true
+      ? 'Today’s events and the “Next” line'
+      : 'Today’s events, upcoming lists and the “Next” line'),
+  },
+];
+
+function visibilityBlock(item, visibility, onVisibilityChange, focusables) {
+  const block = el('div', 'sheet-vis');
+  const name = item.title || 'Untitled event';
+  block.appendChild(el('p', 'sheet-vis-head', visibility.every ? `Show every ${name}` : `Show ${name}`));
+  const error = el('p', 'sheet-vis-error', '');
+  error.setAttribute('role', 'alert');
+  const state = { calendar: visibility.calendar, list: visibility.list };
+  for (const s of VIS_SWITCHES) {
+    const row = el('div', 'sheet-switch-row');
+    const text = el('span', 'sheet-switch-text');
+    text.append(el('span', 'sheet-switch-label', s.label), el('small', 'sheet-switch-sub', s.sub(item)));
+    const sw = button('sheet-switch');
+    sw.setAttribute('role', 'switch');
+    sw.setAttribute('aria-checked', String(state[s.surface]));
+    sw.setAttribute('aria-label', `Show ${name} ${s.aria}`);
+    sw.addEventListener('click', () => {
+      const res = onVisibilityChange(s.surface, !state[s.surface]);
+      if (!res || typeof res.ok !== 'boolean' || (!res.ok && typeof res.error !== 'string')) {
+        throw new Error('openItemSheet: onVisibilityChange must return { ok: true } or { ok: false, error }');
+      }
+      if (!res.ok) { error.textContent = res.error; return; }
+      error.textContent = '';
+      state[s.surface] = !state[s.surface];
+      sw.setAttribute('aria-checked', String(state[s.surface]));
+    });
+    row.append(text, sw);
+    block.appendChild(row);
+    focusables.push(sw);
+  }
+  block.append(error, el('p', 'sheet-vis-note', 'On this device only. Undo it here or in Settings → Linked calendars.'));
+  return block;
+}
+
 export function openItemSheet(host, item, {
   today, calendarName = null, googleDayUrl = null, onSave, onDelete, onClose,
+  visibility = null, onVisibilityChange,
 } = {}) {
   const isExternal = item.external === true;
   // Every check happens BEFORE the host is touched or a listener registered:
@@ -105,6 +161,13 @@ export function openItemSheet(host, item, {
   // midnight, so a quick move asks for today when it is tapped.
   if (typeof today !== 'function') throw new Error('openItemSheet: today must be a function');
   if (typeof onClose !== 'function') throw new Error('openItemSheet: onClose must be a function');
+  if (visibility !== null) {
+    if (typeof visibility !== 'object' || typeof visibility.calendar !== 'boolean' || typeof visibility.list !== 'boolean'
+      || typeof visibility.every !== 'boolean') {
+      throw new Error('openItemSheet: visibility must be { calendar, list, every } booleans');
+    }
+    if (typeof onVisibilityChange !== 'function') throw new Error('openItemSheet: onVisibilityChange must be a function');
+  }
   if (!isExternal) {
     // A type the select does not list renders with NO option selected; the
     // browser shows the first one while the record holds the real value, and
@@ -218,6 +281,7 @@ export function openItemSheet(host, item, {
     // (home-screen spec § 2.4). An RRULE series carries no label.
     if (item.guessedSeries === true) sheet.appendChild(el('p', 'sheet-repeat', 'Repeats weekly (guessed)'));
     if (calendarName) sheet.appendChild(el('p', 'sheet-source', `From ${calendarName}`));
+    if (visibility !== null) sheet.appendChild(visibilityBlock(item, visibility, onVisibilityChange, focusables));
     if (googleDayUrl) {
       const a = el('a', 'sheet-google', 'Open in Google Calendar');
       a.href = googleDayUrl;

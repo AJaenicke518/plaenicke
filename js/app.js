@@ -1,7 +1,11 @@
 import {
   loadItems, saveItems, loadFeeds, loadFeedCache, addTombstone,
-  saveTombstones, recordLaunch, STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY,
+  saveTombstones, recordLaunch, STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY, SERIES_VISIBILITY_KEY, QuotaError,
 } from './storage.js';
+import {
+  loadVisibility, filterBySurface, isShown, canHideSeries, setSeriesVisibility, CALENDAR, LISTS,
+  UnlinkedCalendarError,
+} from './visibility.js';
 import { followToday, formatDayLabel } from './freshness.js';
 import {
   makeItem, sortItemsByDate, isScheduled, isTodo, isTodoType, isIdea, sortIdeasNewestFirst,
@@ -14,6 +18,7 @@ import { buildMonthGrid, groupItemsByDate, monthCellSummary, chronoFirst, itemTy
 import { startOfWeek, addDays, formatTime, weekLabel } from './timegrid.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
 import { renderDayView } from './dayview.js';
+import { renderThreeDayView } from './threedayview.js';
 import { renderWeekView } from './weekview.js';
 import { buildWeekList, renderWeekList } from './weeklist.js';
 import { renderPreview } from './preview.js';
@@ -31,8 +36,8 @@ import { renderSyncStatus, syncWriteStarted, syncWriteSettled } from './linkui.j
 import { WORKER_URL } from './config.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
 import { installPress } from './press.js';
-import { buildToday, relativeLabel, NEXT_DAYS, LOOKAHEAD_DAYS, tickedToday } from './today.js';
-import { renderTodayView } from './todayview.js';
+import { buildToday, relativeLabel, NEXT_DAYS, LOOKAHEAD_DAYS, tickedToday, tally } from './today.js';
+import { renderTodayView, renderTally } from './todayview.js';
 import { createCapture } from './capture.js';
 
 const els = {
@@ -56,6 +61,12 @@ const els = {
   showMonth: document.getElementById('show-month'),
   showWeek: document.getElementById('show-week'),
   showDay: document.getElementById('show-day'),
+  show3day: document.getElementById('show-3day'),
+  threeDayView: document.getElementById('three-day-view'),
+  threeDayLabel: document.getElementById('three-day-label'),
+  threeDayBody: document.getElementById('three-day-body'),
+  prev3day: document.getElementById('prev-3day'),
+  next3day: document.getElementById('next-3day'),
   weekView: document.getElementById('week-view'),
   weekLabel: document.getElementById('week-label'),
   weekGrid: document.getElementById('week-grid'),
@@ -79,6 +90,7 @@ const els = {
   todayView: document.getElementById('today-view'),
   todayBody: document.getElementById('today-body'),
   todayDate: document.getElementById('today-date'),
+  todayTally: document.getElementById('today-tally'),
   // Home-screen stage 3c — the tab bar, the tab title and Calendar's switcher.
   tabToday: document.getElementById('tab-today'),
   tabCalendar: document.getElementById('tab-calendar'),
@@ -120,6 +132,10 @@ let items = loadItems();
 let viewMonth = new Date();
 let viewDay = toISO(new Date());
 let viewWeekStart = startOfWeek(viewDay);
+// The 3-day view's first day: its own cursor, not Day's (option A, Alex
+// 2026-10-26). It starts on today and follows today as viewDay does; opening
+// a day in Day view does not move it.
+let viewThreeDayStart = viewDay;
 // What app.js believed "today" was the last time it looked. iOS resumes a
 // home-screen web app instead of reloading it, so the cursors above would
 // otherwise stay on the day the app was first opened. refreshForToday() moves
@@ -139,6 +155,11 @@ let feedCache = loadFeedCache();
 // stampFromFeeds). Fed by every fetch this page makes: each background batch
 // and Settings' own Sync and Add calendar (onFeedFetched below).
 const failedFeedIds = new Set();
+// Which feed series this device hides, and where (js/visibility.js; option A,
+// 2026-10-26). DEVICE-LOCAL, NEVER SYNCED: nothing in this file that touches
+// it calls scheduleSync. Re-read at the top of every render(), so a write from
+// the sheet, from Settings or from another tab is never shown stale.
+let visibility = loadVisibility();
 
 // Deletes offered for Undo (edit-items Task 4b). A pending id is still in
 // `items` and in storage — nothing is written until commitDelete — but it is
@@ -164,10 +185,13 @@ function liveItems() { return items.filter((it) => !pendingDeletes.has(it.id)); 
 //
 // External feed instances carry no `type`, so isScheduled passes them through
 // — by design, not by accident: a feed event is always a scheduled thing.
+//
+// Month and Day read the CALENDAR surface: a series hidden from the calendar
+// on this device (js/visibility.js) is left out here.
 function visibleItems(start, end) {
   return [
     ...liveItems().filter(isScheduled),
-    ...instancesForRange(feeds, feedCache, start, end, deviceTz),
+    ...filterBySurface(instancesForRange(feeds, feedCache, start, end, deviceTz), visibility, CALENDAR),
   ];
 }
 
@@ -720,12 +744,23 @@ function openItem(item) {
   if (activeToast) activeToast.dismiss();
   let calendarName = null;
   let googleDayUrl = null;
+  let vis = null;
   if (item.external) {
     const feed = feeds.find((f) => f.id === item.feedId);
     calendarName = feed ? feed.name : 'a linked calendar';
     if (feed && isGoogleHost(feed.url)) {
       const [y, m, d] = item.date.split('-').map(Number);
       googleDayUrl = `https://calendar.google.com/calendar/r/day/${y}/${m}/${d}`;
+    }
+    // The two per-series switches, except on a guessed series (controller
+    // ruling 3): there each meeting has its own uid, and a switch would hide
+    // one meeting while looking as if it hid the class.
+    if (canHideSeries(item)) {
+      vis = {
+        calendar: isShown(visibility, item, CALENDAR),
+        list: isShown(visibility, item, LISTS),
+        every: seriesHasMany(item),
+      };
     }
   }
   // openItemSheet validates BEFORE touching the host (an unknown type, a
@@ -741,6 +776,8 @@ function openItem(item) {
       onSave: (p) => editItem(item.id, p, { openedType: item.type }),
       onDelete: () => requestDelete(item.id),
       onClose: () => focusOpener(item.id),
+      visibility: vis,
+      onVisibilityChange: (surface, shown) => changeSeriesVisibility(item, surface, shown),
     });
   } catch (e) {
     // The reason is for a developer (e.g. "Unknown type: x"), not the user.
@@ -750,6 +787,43 @@ function openItem(item) {
   // Opening a sheet stops a listen and keeps its text (spec § 3 step 4).
   // Last, after the sheet is up: nothing here may stop it opening.
   capture.stopAndKeep();
+}
+
+// Whether one switch covers more than this occurrence: the calendar holds
+// several ParsedEvents with this uid (overrides, duplicates), or a rule. Not
+// `recurring`, which is DAILY/WEEKLY only: a monthly series is one switch
+// over every month too.
+function seriesHasMany(item) {
+  const entry = feedCache[item.feedId];
+  const evs = entry && Array.isArray(entry.events) ? entry.events.filter((ev) => ev.uid === item.uid) : [];
+  return evs.length > 1 || evs.some((ev) => typeof ev.rrule === 'string');
+}
+
+// The sheet's switch tap. Writes plaenicke.seriesVisibility ONLY, through
+// js/visibility.js, and NEVER schedules a sync: the choice is per device
+// (Alex, 2026-10-19; option A, 2026-10-26). The write's result and the
+// render's are reported apart, as handleToggleDone does for a tick: a hide
+// that saved is never reported as failed because the screen did not redraw.
+function changeSeriesVisibility(item, surface, shown) {
+  try {
+    setSeriesVisibility({ feedId: item.feedId, uid: item.uid, title: item.title || 'Untitled event' }, surface, shown);
+  } catch (e) {
+    // In words for the two causes a user can meet; anything else is a bug,
+    // logged by name and shown as one.
+    console.error('plaenicke: a visibility change was not saved', e && e.name);
+    if (e instanceof UnlinkedCalendarError) {
+      return { ok: false, error: 'This calendar is no longer linked on this device, so this can’t be changed.' };
+    }
+    if (e instanceof QuotaError) return { ok: false, error: 'This device is out of storage, so that wasn’t saved.' };
+    return { ok: false, error: `That wasn’t saved (${e && e.name ? e.name : 'error'}).` };
+  }
+  try {
+    render();
+  } catch (e) {
+    setMessage(TICK_SAVED_RENDER_FAILED);
+    console.error('plaenicke: render after a visibility change failed', e && e.name);
+  }
+  return { ok: true };
 }
 
 // Is this feed Google's own? The link is offered only for a host of exactly
@@ -777,7 +851,8 @@ function isGoogleHost(url) {
 // where the browser puts it.
 function focusOpener(id) {
   const pages = [
-    [els.todayView, els.todayBody], [els.dayView, els.dayBody], [els.weekView, els.weekList],
+    [els.todayView, els.todayBody], [els.dayView, els.dayBody], [els.threeDayView, els.threeDayBody],
+    [els.weekView, els.weekList],
     [els.todoView, els.todoList], [els.ideasView, els.ideaList],
   ];
   const shown = pages.find(([section]) => !section.hidden);
@@ -822,6 +897,14 @@ function toggleDoneKeepingFocus(container, rowClass) {
   };
 }
 
+// The tick moment (rewards concept 1, Alex 2026-10-26): the id of the item a
+// tick just marked done, set only for the one render() that follows a saved
+// tick and cleared in its finally, so no later render (a sync, a tab switch)
+// plays it again. An untick and a failed save never set it. Module state,
+// never stored. The row plays where it lands (controller ruling): nothing
+// holds the reorder.
+let justTicked = null;
+
 const TICK_SAVED_RENDER_FAILED = "Saved, but the screen couldn't update — reload.";
 
 function handleToggleDone(id, done) {
@@ -839,11 +922,14 @@ function handleToggleDone(id, done) {
   // not report the tick as failed, and must not be retried (it would throw
   // again). The error is rethrown, not swallowed: the user is told to reload
   // and the error still reaches the console.
+  justTicked = done === true ? id : null;
   try {
     render();
   } catch (e) {
     setMessage(TICK_SAVED_RENDER_FAILED);
     throw e;
+  } finally {
+    justTicked = null;
   }
 }
 
@@ -931,13 +1017,40 @@ function renderWeek() {
   els.weekLabel.textContent = weekLabel(viewWeekStart, end);
   // One expansion for the whole week: the grid merges it with the own items
   // (as visibleItems does) and the list takes the slice it lists.
+  // The grid is the calendar surface and the list the list surface
+  // (js/visibility.js), so each takes its own filter of the one expansion.
   const weekInsts = instancesForRange(feeds, feedCache, viewWeekStart, end, deviceTz);
+  const gridInsts = filterBySurface(weekInsts, visibility, CALENDAR);
+  const listInsts = filterBySurface(weekInsts, visibility, LISTS);
   renderWeekView(els.weekGrid, viewWeekStart,
-    groupItemsByDate(sortItemsByDate([...liveItems().filter(isScheduled), ...weekInsts])), todayISO,
+    groupItemsByDate(sortItemsByDate([...liveItems().filter(isScheduled), ...gridInsts])), todayISO,
     { onSelectDay: openDay });
   const list = buildWeekList(liveItems(),
-    (from, to) => weekInsts.filter((i) => i.date >= from && i.date <= to), viewWeekStart, todayISO);
+    (from, to) => listInsts.filter((i) => i.date >= from && i.date <= to), viewWeekStart, todayISO);
   renderWeekList(els.weekList, list, { onOpen: openItem, onSelectDay: openDay });
+}
+
+// Three columns of Day's grid (option A, Alex 2026-10-26). visibleItems, as
+// Day reads it: own scheduled items plus every visible feed's instances for
+// the three days, repeating ones included, so the classes show.
+let lastThreeDayRendered = null;
+
+function renderThreeDay() {
+  const end = addDays(viewThreeDayStart, 2);
+  els.threeDayLabel.textContent = weekLabel(viewThreeDayStart, end);
+  const visible = !els.threeDayView.hidden;
+  renderThreeDayView(els.threeDayBody, viewThreeDayStart,
+    groupItemsByDate(sortItemsByDate(visibleItems(viewThreeDayStart, end))), toISO(new Date()), {
+      onOpen: openItem,
+      onSelectDay: openDay,
+      // Scroll to 07:00 when the window changed or the page has just come
+      // back into view; otherwise keep the grid where the user left it. A
+      // grid drawn while hidden holds no scroll position (a browser reports
+      // 0), so a hidden render forgets the window: without that, returning
+      // to Calendar on the same window opened the grid at midnight.
+      autoScroll: visible && viewThreeDayStart !== lastThreeDayRendered,
+    });
+  lastThreeDayRendered = visible ? viewThreeDayStart : null;
 }
 
 let lastDayRendered = null;
@@ -954,18 +1067,20 @@ function renderDay() {
     onDelete: requestDelete,
     // Auto-scroll to 07:00 only on a genuine day change while visible; otherwise
     // dayview.js restores the grid's own prior scrollTop (see its `prev` capture).
-    // A hidden day-view has scrollTop 0, so lastDayRendered must not advance while hidden —
-    // otherwise the first visible open of a day would skip auto-scroll and land at midnight.
+    // A grid drawn while hidden holds no scroll position (a browser reports 0), so a hidden
+    // render FORGETS the day rather than only not advancing it. Every showView re-renders
+    // every page: leaving Day re-draws its grid hidden, and coming back to the same day
+    // would otherwise skip auto-scroll and restore that 0, opening the grid at midnight.
     autoScroll: visible && viewDay !== lastDayRendered,
   });
-  if (visible) lastDayRendered = viewDay;
+  lastDayRendered = visible ? viewDay : null;
 }
 
 function renderTodos() {
   const todayISO = toISO(new Date());
   renderTodoView(els.todoList, todoItems(todayISO), {
     todayISO, onOpen: openItem, onDelete: requestDelete,
-    onToggleDone: toggleDoneKeepingFocus(els.todoList, 'todo-row'),
+    onToggleDone: toggleDoneKeepingFocus(els.todoList, 'todo-row'), justTicked,
   });
 }
 
@@ -995,18 +1110,25 @@ function renderToday() {
   const now = new Date();
   const todayISO = toISO(now);
   els.todayDate.textContent = now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+  // Every section of Today is the list surface, the look-ahead included, so
+  // a series hidden from lists is not the "Next:" line either (ruling 1).
   const today = buildToday(
     liveItems(),
-    instancesForRange(feeds, feedCache, todayISO, addDays(todayISO, NEXT_DAYS), deviceTz),
+    filterBySurface(instancesForRange(feeds, feedCache, todayISO, addDays(todayISO, NEXT_DAYS), deviceTz), visibility, LISTS),
     todayISO,
     minutesNow(now),
-    () => instancesForRange(feeds, feedCache, addDays(todayISO, 1), addDays(todayISO, LOOKAHEAD_DAYS), deviceTz),
+    () => filterBySurface(
+      instancesForRange(feeds, feedCache, addDays(todayISO, 1), addDays(todayISO, LOOKAHEAD_DAYS), deviceTz),
+      visibility, LISTS,
+    ),
   );
+  // The head's "N DONE · M LEFT" (rewards concept 2), from the same rows.
+  renderTally(els.todayTally, tally(today));
   if (todayISO !== todayRenderedFor) laterOpen = false;
   todayRenderedFor = todayISO;
   todayRelative = renderTodayView(els.todayBody, today, {
     onOpen: openItem, onToggleDone: toggleDoneKeepingFocus(els.todayBody, 'today-row'),
-    laterOpen, onToggleLater: toggleLater,
+    laterOpen, onToggleLater: toggleLater, justTicked,
   }).relative;
 }
 
@@ -1085,7 +1207,8 @@ function syncTodayTick() {
 // resume. It returns at once when the day has not changed.
 function render() {
   refreshForToday();
-  renderToday(); renderCalendar(); renderWeek(); renderDay(); renderTodos(); renderIdeas();
+  visibility = loadVisibility();
+  renderToday(); renderCalendar(); renderWeek(); renderThreeDay(); renderDay(); renderTodos(); renderIdeas();
 }
 
 // The tab bar (home-screen spec § 4): Today | Calendar | To-do | Ideas.
@@ -1093,17 +1216,17 @@ function render() {
 // last used there (Day until another is picked; this session only). List was
 // a fourth until stage 3d (Alex, 2026-10-22: "you can get rid of the list
 // view").
-const CALENDAR_VIEWS = ['day', 'week', 'month'];
+const CALENDAR_VIEWS = ['day', '3day', 'week', 'month'];
 const TAB_TITLES = { today: 'Today', calendar: 'Calendar', todo: 'To-do', ideas: 'Ideas' };
 let lastCalendarView = 'day';
 
 function showView(which) {
   const views = {
-    today: els.todayView, month: els.calView, week: els.weekView, day: els.dayView,
+    today: els.todayView, month: els.calView, week: els.weekView, '3day': els.threeDayView, day: els.dayView,
     todo: els.todoView, ideas: els.ideasView,
   };
   const tabs = { today: els.tabToday, calendar: els.tabCalendar, todo: els.tabTodo, ideas: els.tabIdeas };
-  const segments = { day: els.showDay, week: els.showWeek, month: els.showMonth };
+  const segments = { day: els.showDay, '3day': els.show3day, week: els.showWeek, month: els.showMonth };
   const tab = CALENDAR_VIEWS.includes(which) ? 'calendar' : which;
   if (tab === 'calendar') lastCalendarView = which;
   for (const [name, el] of Object.entries(views)) el.hidden = name !== which;
@@ -1152,6 +1275,7 @@ els.tabIdeas.addEventListener('click', () => showView('ideas'));
 els.showMonth.addEventListener('click', () => showView('month'));
 els.showWeek.addEventListener('click', () => showView('week'));
 els.showDay.addEventListener('click', () => showView('day'));
+els.show3day.addEventListener('click', () => showView('3day'));
 els.ideaAdd.addEventListener('click', handleIdeaAdd);
 
 // The capture button and its box (home-screen spec § 3, js/capture.js). It
@@ -1187,6 +1311,8 @@ els.prevDay.addEventListener('click', () => stepFrom(viewDay, (v) => { viewDay =
 els.nextDay.addEventListener('click', () => stepFrom(viewDay, (v) => { viewDay = addDays(v, 1); }));
 els.prevWeek.addEventListener('click', () => stepFrom(viewWeekStart, (v) => { viewWeekStart = addDays(v, -7); }));
 els.nextWeek.addEventListener('click', () => stepFrom(viewWeekStart, (v) => { viewWeekStart = addDays(v, 7); }));
+els.prev3day.addEventListener('click', () => stepFrom(viewThreeDayStart, (v) => { viewThreeDayStart = addDays(v, -3); }));
+els.next3day.addEventListener('click', () => stepFrom(viewThreeDayStart, (v) => { viewThreeDayStart = addDays(v, 3); }));
 
 render();
 syncTodayTick();
@@ -1423,6 +1549,9 @@ function scheduleSync() {
 // Standard, Web Storage, setItem steps). tests/apply.test.js runs the loop.
 const CROSS_TAB_KEYS = [STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY];
 window.addEventListener('storage', (e) => {
+  // Series visibility is device-local, not synced data: another tab's hide is
+  // shown here (render() re-reads it) and NO sync is scheduled.
+  if (e.key === SERIES_VISIBILITY_KEY) { render(); return; }
   if (!CROSS_TAB_KEYS.includes(e.key)) return;
   items = loadItems();
   feeds = loadFeeds();
@@ -1441,6 +1570,7 @@ function refreshForToday() {
   const today = toISO(new Date());
   if (today === lastToday) return;
   viewDay = followToday(viewDay, lastToday, today);
+  viewThreeDayStart = followToday(viewThreeDayStart, lastToday, today);
   viewWeekStart = followToday(viewWeekStart, startOfWeek(lastToday), startOfWeek(today));
   const shownMonth = toISO(viewMonth).slice(0, 7);
   if (followToday(shownMonth, lastToday.slice(0, 7), today.slice(0, 7)) !== shownMonth) {

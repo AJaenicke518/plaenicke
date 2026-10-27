@@ -11,12 +11,17 @@
 import { itemTypeClass } from './calendar.js';
 import { formatDayLabel } from './freshness.js';
 
-export function renderTodoView(container, todos, { todayISO, onOpen, onDelete, onToggleDone }) {
+// justTicked: the tick moment (rewards concept 1, Alex 2026-10-26), as on
+// Today (js/todayview.js): the id of the item a tick just marked done, for the
+// one render after the tick, else null. That row, if done, gets `tick-just`
+// and its title button's text goes in <span class="tick-strike">.
+export function renderTodoView(container, todos, { todayISO, onOpen, onDelete, onToggleDone, justTicked = null }) {
   // Required, not defaulted: without it every row would silently fall back to
   // a raw ISO date, and "Today"/"Tomorrow" are computed against it.
   if (!/^\d{4}-\d{2}-\d{2}$/.test(todayISO || '')) throw new Error('renderTodoView requires todayISO');
   // Required too: a missing one would render titles that do nothing on tap.
   if (typeof onOpen !== 'function') throw new Error('renderTodoView requires onOpen');
+  if (justTicked !== null && typeof justTicked !== 'string') throw new Error('renderTodoView: justTicked must be an id or null');
   container.innerHTML = '';
 
   if (todos.length === 0) {
@@ -63,7 +68,17 @@ export function renderTodoView(container, todos, { todayISO, onOpen, onDelete, o
     open.className = 'item-open';
     // How app.js finds this button again to return focus to it.
     open.setAttribute('data-item-id', it.id);
-    open.textContent = `${formatDayLabel(it.date, todayISO)} — ${it.title}`;
+    const label = `${formatDayLabel(it.date, todayISO)} — ${it.title}`;
+    const just = it.done === true && it.id === justTicked;
+    if (just) {
+      li.classList.add('tick-just');
+      const strike = document.createElement('span');
+      strike.className = 'tick-strike';
+      strike.textContent = label;
+      open.appendChild(strike);
+    } else {
+      open.textContent = label;
+    }
     open.addEventListener('click', () => onOpen(it));
     main.appendChild(open);
 
