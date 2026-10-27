@@ -185,15 +185,6 @@ header h1 { font-size: 1.7rem; font-style: italic; font-weight: 700; margin: 16p
 
 .text-row { display: flex; gap: 8px; align-items: stretch; }
 .text-row #entry-text { flex: 1; }
-#mic-btn {
-  flex: 0 0 auto;
-  background: var(--card);
-  border: 1px solid var(--line);
-  color: var(--ink);
-  font-size: 1.2rem;
-  padding: 0 14px;
-}
-#mic-btn.listening { background: var(--danger); border-color: var(--danger); color: var(--accent-ink); }
 
 .hint { color: var(--muted); font-size: 0.8rem; margin: 8px 0 0; }
 

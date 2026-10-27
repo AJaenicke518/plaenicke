@@ -17,7 +17,7 @@ import { renderDayView } from './dayview.js';
 import { renderWeekView } from './weekview.js';
 import { buildWeekList, renderWeekList } from './weeklist.js';
 import { renderPreview } from './preview.js';
-import { isVoiceSupported, dictate } from './voice.js';
+import { isVoiceSupported, listen, errorKind } from './voice.js';
 import { initSettings } from './settings.js';
 import { instancesForRange, syncStale, applyRemoteFeeds } from './feeds.js';
 import { openItemSheet } from './itemsheet.js';
@@ -33,10 +33,10 @@ import { fetchWithTimeout } from './fetchtimeout.js';
 import { installPress } from './press.js';
 import { buildToday, relativeLabel, NEXT_DAYS, LOOKAHEAD_DAYS, tickedToday } from './today.js';
 import { renderTodayView } from './todayview.js';
+import { createCapture } from './capture.js';
 
 const els = {
   text: document.getElementById('entry-text'),
-  mic: document.getElementById('mic-btn'),
   date: document.getElementById('entry-date'),
   time: document.getElementById('entry-time'),
   end: document.getElementById('entry-end'),
@@ -86,6 +86,16 @@ const els = {
   tabIdeas: document.getElementById('tab-ideas'),
   tabTitle: document.getElementById('tab-title'),
   calSwitch: document.getElementById('cal-switch'),
+  // Home-screen stage 4 — the capture button and its box.
+  captureBtn: document.getElementById('capture-btn'),
+  captureBox: document.getElementById('capture-box'),
+  captureText: document.getElementById('capture-text'),
+  captureAdd: document.getElementById('capture-add'),
+  captureCancel: document.getElementById('capture-cancel'),
+  captureClose: document.getElementById('capture-close'),
+  captureType: document.getElementById('capture-type'),
+  captureMessage: document.getElementById('capture-message'),
+  capturePreview: document.getElementById('capture-preview'),
 };
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
@@ -104,6 +114,7 @@ function messageLine(el) {
   };
 }
 const topLine = messageLine(els.message);
+const captureLine = messageLine(els.captureMessage);
 
 let items = loadItems();
 let viewMonth = new Date();
@@ -177,22 +188,6 @@ function todoItems(todayISO) {
 }
 
 function ideaItems() { return sortIdeasNewestFirst(liveItems().filter(isIdea)); }
-
-// In-app dictation — only surface the mic where the browser supports it.
-// (On iPhone, the keyboard's own mic is always available regardless.)
-if (els.mic && isVoiceSupported()) {
-  els.mic.hidden = false;
-  let listening = false;
-  els.mic.addEventListener('click', () => {
-    if (listening) return;
-    dictate({
-      onStart: () => { listening = true; els.mic.classList.add('listening'); setMessage('Listening — speak now.'); },
-      onResult: (text) => { els.text.value = text; },
-      onEnd: () => { listening = false; els.mic.classList.remove('listening'); if (els.text.value) setMessage('Got it — tap Add.'); },
-      onError: () => { listening = false; els.mic.classList.remove('listening'); setMessage("Didn't catch that — try again or type it."); },
-    });
-  });
-}
 
 // onFeedsChanged: settings.js's DOM glue (Task 8) mutates feeds/feedCache
 // only through storage.js/feeds.js, then calls this so app.js reloads its
@@ -315,8 +310,20 @@ const topTarget = {
   preview: els.preview,
   unavailable: 'Smart add is unavailable — pick a date below and tap Add to add it manually.',
   onAdded() {},
+  onSuperseded() {},
 };
-const TARGETS = [topTarget];
+// The capture box has no date row, so its failure names the top box's.
+// `capture` is created below; these run only after an Add, long after.
+const captureTarget = {
+  field: els.captureText,
+  dates: null,
+  line: captureLine,
+  preview: els.capturePreview,
+  unavailable: 'Smart add is unavailable — use the box at the top with a date to add it.',
+  onAdded() { capture.added(); },
+  onSuperseded() { capture.released(); },
+};
+const TARGETS = [topTarget, captureTarget];
 
 // A new capture closes any open preview, in EVERY box (spec § 3 step 8), and
 // that box's line says so. A preview is open while its container has content
@@ -331,6 +338,28 @@ function closePreviews() {
     t.preview.innerHTML = '';
     t.line.set(PREVIEW_CLOSED);
   }
+}
+
+// Makes the smart add in flight superseded, as a newer Add would: its reply,
+// whenever it comes, changes nothing (spec § 3 step 7: the capture box's
+// Cancel). The same text can then be sent again: the duplicate guard above
+// only holds for the current generation. The request itself is not aborted,
+// so it may still spend credit (spec § 8, Later). Only the capture box calls
+// this, and only while its latch is set; a newer Add from the top box
+// releases that latch at once (supersedePending), so its Cancel can never
+// reach the top box's request.
+function cancelAdd() {
+  addGeneration += 1;
+}
+
+// A newer Add (either box, manual or smart) is about to supersede the smart
+// add in flight. Its reply will change nothing, so its box is told NOW, not
+// when the reply comes up to SMART_ADD_TIMEOUT_MS later: its "Thinking…" goes
+// (if still showing) and the capture box drops its adding latch. Without this
+// a request superseded from the OTHER box left "Thinking…" up, and the
+// capture box's Cancel then cancelled the NEWER request (DA I1).
+function supersedePending() {
+  if (pendingSmart && pendingSmart.generation === addGeneration) pendingSmart.release();
 }
 
 // Resolves to how it ended: 'refused' (validation; nothing started),
@@ -351,6 +380,7 @@ async function handleAdd(target) {
     // nothing and leaves a pending smart add alone; a landed one supersedes it
     // and closes any open preview.
     if (!field.value.trim()) { line.set('For manual add, type a title and pick a date.'); return 'refused'; }
+    supersedePending();
     addGeneration += 1;
     closePreviews();
     return handleManualAdd();
@@ -360,13 +390,14 @@ async function handleAdd(target) {
   if (!raw) { line.set('Type something first.'); return 'refused'; }
   if (pendingSmart && pendingSmart.generation === addGeneration
     && pendingSmart.target === target && pendingSmart.raw === raw) return 'duplicate';
+  supersedePending();
   const generation = ++addGeneration;
-  pendingSmart = { generation, raw, target };
   // An earlier request's preview must not stay confirmable under a new one.
   closePreviews();
   line.set('Thinking…');
   const thinking = line.token();
   const say = (t) => { if (line.token() === thinking) line.set(t); };
+  pendingSmart = { generation, raw, target, release: () => { say(''); target.onSuperseded(); } };
   // Only clear the box if it still holds what was sent: text typed while
   // waiting (or reviewing) is the user's next entry.
   const clearSentText = () => { if (field.value.trim() === raw) field.value = ''; };
@@ -671,6 +702,8 @@ function commitDelete(id) {
 // (CLAUDE.md, "Feed URLs are unrecoverable"). isGoogleHost reads the URL here,
 // in app.js, and only its yes/no verdict crosses into the sheet.
 function openItem(item) {
+  // Opening a sheet stops a listen and keeps its text (spec § 3 step 4).
+  capture.stopAndKeep();
   // Only the latest action can be undone, and an Undo left sitting over the
   // sheet's own buttons is a mis-tap waiting to happen. Dismissing settles
   // the toast (for a delete, that commits it).
@@ -1093,6 +1126,27 @@ els.showMonth.addEventListener('click', () => showView('month'));
 els.showWeek.addEventListener('click', () => showView('week'));
 els.showDay.addEventListener('click', () => showView('day'));
 els.ideaAdd.addEventListener('click', handleIdeaAdd);
+
+// The capture button and its box (home-screen spec § 3, js/capture.js). It
+// adds through handleAdd with the capture box's own target, so its messages
+// go to #capture-message and its preview to #capture-preview.
+const capture = createCapture({
+  els: {
+    button: els.captureBtn, box: els.captureBox, field: els.captureText, add: els.captureAdd,
+    cancel: els.captureCancel, close: els.captureClose, typeInstead: els.captureType, preview: els.capturePreview,
+  },
+  line: captureLine,
+  voice: { isVoiceSupported, listen, errorKind },
+  // The home-screen app and a Safari tab need different words when voice is
+  // refused (spec § 3).
+  isStandalone: () => navigator.standalone === true,
+  submit: () => handleAdd(captureTarget),
+  cancelSubmit: cancelAdd,
+  closePreviews,
+});
+// Opening Settings stops a listen and keeps its text (spec § 3 step 4).
+// settings.js's own listener on this button opens or closes the panel.
+els.settingsBtn.addEventListener('click', () => { capture.stopAndKeep(); });
 // An arrow steps from what is ON SCREEN (batch-F review, Important 1). It
 // remembers the cursor the user can see, lets refreshForToday catch the OTHER
 // cursors and lastToday up with the clock, then sets this one to the shown
@@ -1440,6 +1494,8 @@ document.addEventListener('visibilitychange', () => {
   // pending check: with the loop first, the toast's later onExpire would
   // commit the same id again with a later deletedAt (Task 4b review, item 5).
   if (document.visibilityState === 'hidden') {
+    // A listen stops and keeps its text; nothing is added (spec § 3 step 4).
+    capture.stopAndKeep();
     if (activeToast) activeToast.dismiss();
     for (const id of [...pendingDeletes]) commitDelete(id);
     syncTodayTick();
