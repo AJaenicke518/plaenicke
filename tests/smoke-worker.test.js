@@ -16,8 +16,9 @@ import assert from 'node:assert/strict';
 const smoke = await import('../scripts/smoke-worker.mjs');
 const fetchesDuringImport = offlineFetchCalls();
 const {
-  PHRASES, EXPECTED_ORIGIN, checkResult, runSmoke, formatTable, isMain, MAIN_FETCH,
+  PHRASES, EXPECTED_ORIGIN, checkResult, runSmoke, formatTable, isMain, MAIN_FETCH, checkVersion, runAll,
 } = smoke;
+import { VERSION } from '../worker/src/version.js';
 
 import { ITEM_TYPES } from '../worker/src/prompt.js';
 import { ALLOWED_ORIGIN } from '../worker/src/cors.js';
@@ -322,4 +323,91 @@ test('formatTable prints one row per phrase with PASS/FAIL and a summary', () =>
   assert.ok(lines.some((l) => /PASS/.test(l) && /event/.test(l)));
   assert.ok(lines.some((l) => /FAIL/.test(l) && /task/.test(l) && /coerced/.test(l)));
   assert.match(out, /1\/2 passed/);
+});
+
+// --- checkVersion --------------------------------------------------------------
+// The free pre-flight: it GETs /version, which never reaches Claude, so a stale
+// edge is caught before any phrase spends credits.
+
+function versionFetch(status, body) {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status });
+  };
+  return { calls, fetchImpl };
+}
+
+test('checkVersion GETs url/version once and passes when it equals the expected version', async () => {
+  const w = versionFetch(200, { version: VERSION });
+  const r = await checkVersion({ fetchImpl: w.fetchImpl, url: 'https://w.test', expected: VERSION });
+  assert.equal(r.pass, true);
+  assert.equal(w.calls.length, 1);
+  assert.equal(w.calls[0].url, 'https://w.test/version');
+  assert.ok(!w.calls[0].init || !w.calls[0].init.method || w.calls[0].init.method === 'GET');
+});
+
+test('checkVersion fails on an old deploy, naming both versions', async () => {
+  const w = versionFetch(200, { version: 'worker-OLD' });
+  const r = await checkVersion({ fetchImpl: w.fetchImpl, url: 'https://w.test', expected: VERSION });
+  assert.equal(r.pass, false);
+  assert.ok(r.failures.some((f) => f.includes('worker-OLD') && f.includes(VERSION)));
+});
+
+test('checkVersion fails on a Worker without /version (404), bad JSON, a missing field, and a thrown fetch', async () => {
+  const cases = [
+    versionFetch(404, { error: 'not_found' }).fetchImpl,
+    versionFetch(200, 'not json').fetchImpl,
+    versionFetch(200, {}).fetchImpl,
+    async () => { throw new Error('offline'); },
+  ];
+  for (const fetchImpl of cases) {
+    const r = await checkVersion({ fetchImpl, url: 'https://w.test', expected: VERSION });
+    assert.equal(r.pass, false);
+    assert.ok(r.failures.length > 0);
+  }
+});
+
+test('checkVersion has no default fetch, url or expected version', async () => {
+  const ok = async () => new Response('{}');
+  await assert.rejects(checkVersion({ url: 'https://w.test', expected: VERSION }), /fetchImpl/);
+  await assert.rejects(checkVersion({ fetchImpl: ok, expected: VERSION }), /url/);
+  await assert.rejects(checkVersion({ fetchImpl: ok, url: 'https://w.test' }), /expected/);
+});
+
+test('checkVersion fails on a non-200 status even when the body carries the right version', async () => {
+  const r = await checkVersion({ fetchImpl: versionFetch(500, { version: VERSION }).fetchImpl, url: 'https://w.test', expected: VERSION });
+  assert.equal(r.pass, false);
+  assert.ok(r.failures.some((f) => /500/.test(f)));
+});
+
+// --- runAll: the ordering that protects the credits -----------------------------
+
+test('runAll makes ZERO phrase POSTs when the deployed version is wrong', async () => {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    return new Response(JSON.stringify({ version: 'worker-OLD' }), { status: 200 });
+  };
+  const out = await runAll({ fetchImpl, url: 'https://w.test', today: TODAY, expected: VERSION });
+  assert.equal(out.ok, false);
+  assert.equal(out.results, null);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://w.test/version');
+  assert.ok(calls.every((c) => !c.init || c.init.method !== 'POST'));
+});
+
+test('runAll checks the version first, then runs every phrase once', async () => {
+  const order = [];
+  const w = fakeWorker(goodAnswer);
+  const fetchImpl = async (url, init) => {
+    order.push(new URL(url).pathname);
+    if (new URL(url).pathname === '/version') return new Response(JSON.stringify({ version: VERSION }));
+    return w.fetchImpl(url, init);
+  };
+  const out = await runAll({ fetchImpl, url: 'https://w.test', today: TODAY, expected: VERSION });
+  assert.equal(out.ok, true);
+  assert.equal(order[0], '/version');
+  assert.equal(order.length, 1 + PHRASES.length);
+  assert.equal(out.results.length, PHRASES.length);
 });
