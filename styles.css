@@ -552,6 +552,88 @@ button[data-press].pressed { opacity: 1; }
 .other-tasks { margin-top: 12px; }
 .other-tasks h3 { font-size: 0.9rem; font-style: italic; margin: 0 0 6px; }
 
+/* ---------- 3-day (option A, Alex 2026-10-26) ----------
+   Three columns of Day's grid (js/threedayview.js, HOUR_PX = 48). The
+   headings and the All-day strip sit above a grid that scrolls inside itself,
+   as Day's does, so they stay in view; all three share one column template
+   so the columns line up. Blocks reuse .day-block/.day-pin and override only
+   what a ~100px column needs. */
+.tday-heads, .tday-allday, .tday-grid {
+  display: grid;
+  grid-template-columns: 36px repeat(3, minmax(0, 1fr));
+  background: var(--card);
+  border: 1px solid var(--line);
+}
+.tday-heads { border-bottom-color: var(--grid-line); border-radius: 6px 6px 0 0; }
+.tday-allday { border-top: none; }
+.tday-grid {
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.tday-head {
+  min-height: 44px;
+  width: 100%;
+  padding: 4px 0;
+  background: transparent;
+  border: none;
+  border-left: 1px solid var(--grid-line);
+  border-radius: 0;
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: 11px;
+  letter-spacing: var(--label-tracking);
+  text-transform: uppercase;
+  line-height: 1.2;
+  text-align: center;
+}
+.tday-head b {
+  display: block;
+  width: 28px;
+  margin: 2px auto 0;
+  border-radius: var(--radius-round);
+  font-size: 17px;
+  line-height: 28px;
+  letter-spacing: 0;
+  color: var(--ink);
+}
+.tday-head.today b { background: var(--today); color: var(--accent-ink); }
+.tday-allday-label {
+  padding: 6px 4px 0 0;
+  font-family: var(--sans);
+  font-size: 10px;
+  text-align: right;
+  color: var(--muted);
+}
+.tday-cell { min-width: 0; padding: 2px; border-left: 1px solid var(--grid-line); }
+.tday-chip {
+  display: block;
+  margin-bottom: 2px;
+  padding: 3px 4px;
+  border-radius: 4px;
+  background: var(--type, var(--type-general));
+  color: var(--on-type);
+  font-size: 0.7rem;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.tday-chip.done { text-decoration: line-through; }
+.tday-hour {
+  height: 48px;
+  padding-right: 4px;
+  border-top: 1px solid var(--grid-line);
+  font-size: 0.65rem;
+  color: var(--muted);
+  text-align: right;
+  white-space: nowrap;
+}
+.tday-col { position: relative; min-width: 0; border-left: 1px solid var(--grid-line); }
+.tday-col .hour-line { position: absolute; left: 0; right: 0; height: 0; border-top: 1px solid var(--grid-line); }
+.tday-block { padding: 2px 3px 2px 4px; font-size: 0.7rem; }
+.tday-block .item-open { flex-wrap: wrap; align-content: flex-start; column-gap: 3px; overflow-wrap: anywhere; }
+.tday-time { font-variant-numeric: tabular-nums; opacity: 0.85; }
+
 /* ---------- settings ---------- */
 .settings-backdrop {
   position: fixed; inset: 0;

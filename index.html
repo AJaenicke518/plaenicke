@@ -69,10 +69,11 @@
   <section id="preview" hidden></section>
 
   <!-- Calendar's switcher (spec § 4), shown on the Calendar tab only. List
-       was removed in stage 3d (Alex, 2026-10-22); 3-day joins after Day
-       once it is built (question 5). -->
+       was removed in stage 3d (Alex, 2026-10-22); 3-day sits after Day,
+       beside Week (Alex, 2026-10-26). -->
   <div id="cal-switch" class="cal-switch" role="group" aria-label="Calendar view" hidden>
     <button id="show-day" type="button" aria-pressed="false">Day</button>
+    <button id="show-3day" type="button" aria-pressed="false">3-day</button>
     <button id="show-week" type="button" aria-pressed="false">Week</button>
     <button id="show-month" type="button" aria-pressed="false">Month</button>
   </div>
@@ -109,6 +110,17 @@
     </div>
     <div id="week-grid" class="week-grid"></div>
     <section id="week-list" class="today-section wlist"></section>
+  </section>
+
+  <!-- The 3-day view (option A, Alex 2026-10-26): js/threedayview.js draws
+       three columns of Day's hour grid into #three-day-body. -->
+  <section id="three-day-view" hidden>
+    <div class="cal-controls">
+      <button id="prev-3day" type="button" aria-label="Previous 3 days">&larr;</button>
+      <span id="three-day-label"></span>
+      <button id="next-3day" type="button" aria-label="Next 3 days">&rarr;</button>
+    </div>
+    <div id="three-day-body"></div>
   </section>
 
   <section id="day-view" hidden>

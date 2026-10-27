@@ -569,7 +569,10 @@ for (const [sel, size] of Object.entries(CALENDAR_SIZES)) {
 // (Commit 1b), now the 16px row scale (2026-10-25). The List's tags moved into the sheet. The Week
 // page's list (wlist-, stage 3 Commit 3) is a new screen under the grid; the
 // grid itself (week-) keeps its compact sizes.
-const NEW_SCREEN = /\.(today-|tab-|cal-switch|wlist-|sheet-tags?(?![\w-]))/;
+// The 3-day view's day headings and its "All day" label are labels in the
+// Week list's style (2026-10-26); its blocks keep Day's compact sizes, so only
+// those two selectors are allowed, not all of tday-.
+const NEW_SCREEN = /\.(today-|tab-|cal-switch|wlist-|tday-head(?![\w-])|tday-allday-label(?![\w-])|sheet-tags?(?![\w-]))/;
 test('only the new screens read the new type scale', () => {
   const readers = [];
   for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
@@ -1083,4 +1086,91 @@ test('vis: every new rule colours with tokens only, so dark mode follows', () =>
   }
   assert.equal(declOf('.feed-hidden-row button', 'background'), 'var(--bg)');
   assert.equal(declOf('.feed-hidden-row button', 'color'), 'var(--ink)');
+});
+
+// --- the 3-day view (option A, Alex 2026-10-26) -----------------------------
+// Three columns of Day's grid. The headings and the All-day strip sit above a
+// grid that scrolls inside itself, as Day's does, so they stay in view; the
+// three parts share one column template so the columns line up.
+test('3-day: headings, All-day strip and grid share one column template: a gutter and three equal columns', () => {
+  for (const sel of ['.tday-heads', '.tday-allday', '.tday-grid']) {
+    assert.equal(declOf(sel, 'display'), 'grid', sel);
+    assert.equal(declOf(sel, 'grid-template-columns'), '36px repeat(3, minmax(0, 1fr))', sel);
+  }
+});
+
+test('3-day: the grid scrolls inside itself, as Day\'s does', () => {
+  assert.equal(declOf('.tday-grid', 'max-height'), declOf('.day-grid', 'max-height'));
+  assert.equal(declOf('.tday-grid', 'overflow-y'), 'auto');
+  assert.equal(declOf('.tday-col', 'position'), 'relative');
+  assert.equal(declOf('.tday-col', 'min-width'), '0');
+});
+
+test('3-day: a day heading is a quiet 44px button, the weekday over the day number', () => {
+  assert.equal(declOf('.tday-head', 'min-height'), '44px');
+  assert.equal(declOf('.tday-head', 'background'), 'transparent');
+  assert.equal(declOf('.tday-head', 'border-radius'), '0');
+  assert.equal(declOf('.tday-head', 'color'), 'var(--muted)');
+  assert.equal(declOf('.tday-head b', 'display'), 'block', 'or "Mon" and "26" run together as "Mon26"');
+  assert.equal(declOf('.tday-head b', 'color'), 'var(--ink)');
+  assert.equal(declOf('.tday-head.today b', 'background'), 'var(--today)');
+  assert.equal(declOf('.tday-head.today b', 'color'), 'var(--accent-ink)');
+});
+
+// Day's blocks pad 18px on the right for the ×, which 3-day has none of; in
+// a ~100px column that is a fifth of the width.
+test('3-day: a block drops Day\'s room for the ×, and its time and title wrap so a short block still shows the title', () => {
+  assert.equal(declOf('.tday-block', 'padding-right'), '3px');
+  assert.equal(declOf('.tday-block .item-open', 'flex-wrap'), 'wrap');
+  assert.equal(declOf('.tday-block .item-open', 'overflow-wrap'), 'anywhere');
+  assert.equal(declOf('.tday-time', 'font-variant-numeric'), 'tabular-nums');
+});
+
+test('3-day: an All-day chip is a 44px target in its type colour; a done one is struck through', () => {
+  assert.ok(Number.parseFloat(declOf('.item-open', 'min-height')) >= 44, 'fixture check');
+  assert.equal(declOf('.tday-chip', 'min-height'), null, 'it keeps .item-open\'s 44px minimum');
+  assert.equal(declOf('.tday-chip', 'background'), 'var(--type, var(--type-general))');
+  assert.equal(declOf('.tday-chip', 'color'), 'var(--on-type)');
+  assert.equal(declOf('.tday-chip.done', 'text-decoration'), 'line-through');
+});
+
+test('3-day: the hour labels and blocks keep Day\'s compact sizes', () => {
+  assert.equal(declOf('.tday-hour', 'font-size'), '0.65rem');
+  assert.equal(declOf('.tday-hour', 'height'), '48px', 'HOUR_PX in js/threedayview.js');
+  assert.equal(declOf('.tday-block', 'font-size'), '0.7rem');
+  assert.equal(declOf('.tday-chip', 'font-size'), '0.7rem');
+  assert.equal(declOf('.tday-head', 'font-size'), '11px', 'a 13px label with tracking crowds a ~100px column');
+  assert.equal(declOf('.tday-allday-label', 'font-size'), '10px', 'it sits in the 36px gutter');
+});
+
+test('every 3-day colour is a token', () => {
+  let seen = 0;
+  for (const { sel, body } of rulesOf(css)) {
+    if (!/\.tday/.test(sel)) continue;
+    for (const decl of body.split(';')) {
+      const i = decl.indexOf(':');
+      if (i < 0) continue;
+      const prop = decl.slice(0, i).trim();
+      const value = decl.slice(i + 1).trim();
+      if (!/^(color|background|border(?!-radius))/.test(prop) || value === 'transparent' || value === 'none' || value === '0') continue;
+      seen += 1;
+      assert.match(value, /var\(--/, `${sel.trim()} { ${prop}: ${value} }`);
+      assert.doesNotMatch(value, /#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i, `${sel.trim()} { ${prop}: ${value} }`);
+    }
+  }
+  assert.ok(seen >= 5, `fixture check: ${seen} colour declarations`);
+});
+
+// The 3-day overrides win over .item-open, .day-block and Day's open button
+// only by coming LATER at equal specificity (Task 3 review). Moving the
+// section up would pass every value check above and undo all of them.
+test('3-day: the overrides come after the rules they override', () => {
+  const at = (selector) => {
+    const i = rulesOf(css).findIndex(({ sel }) => sel.split(',').map((x) => x.trim().replace(/\s+/g, ' ')).includes(selector));
+    assert.ok(i >= 0, `fixture check: ${selector} exists`);
+    return i;
+  };
+  assert.ok(at('.tday-chip') > at('.item-open'));
+  assert.ok(at('.tday-block') > at('.day-block'));
+  assert.ok(at('.tday-block .item-open') > at('.day-block .item-open'));
 });

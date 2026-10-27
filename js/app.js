@@ -18,6 +18,7 @@ import { buildMonthGrid, groupItemsByDate, monthCellSummary, chronoFirst, itemTy
 import { startOfWeek, addDays, formatTime, weekLabel } from './timegrid.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
 import { renderDayView } from './dayview.js';
+import { renderThreeDayView } from './threedayview.js';
 import { renderWeekView } from './weekview.js';
 import { buildWeekList, renderWeekList } from './weeklist.js';
 import { renderPreview } from './preview.js';
@@ -60,6 +61,12 @@ const els = {
   showMonth: document.getElementById('show-month'),
   showWeek: document.getElementById('show-week'),
   showDay: document.getElementById('show-day'),
+  show3day: document.getElementById('show-3day'),
+  threeDayView: document.getElementById('three-day-view'),
+  threeDayLabel: document.getElementById('three-day-label'),
+  threeDayBody: document.getElementById('three-day-body'),
+  prev3day: document.getElementById('prev-3day'),
+  next3day: document.getElementById('next-3day'),
   weekView: document.getElementById('week-view'),
   weekLabel: document.getElementById('week-label'),
   weekGrid: document.getElementById('week-grid'),
@@ -100,6 +107,10 @@ let items = loadItems();
 let viewMonth = new Date();
 let viewDay = toISO(new Date());
 let viewWeekStart = startOfWeek(viewDay);
+// The 3-day view's first day: its own cursor, not Day's (option A, Alex
+// 2026-10-26). It starts on today and follows today as viewDay does; opening
+// a day in Day view does not move it.
+let viewThreeDayStart = viewDay;
 // What app.js believed "today" was the last time it looked. iOS resumes a
 // home-screen web app instead of reloading it, so the cursors above would
 // otherwise stay on the day the app was first opened. refreshForToday() moves
@@ -736,7 +747,8 @@ function isGoogleHost(url) {
 // where the browser puts it.
 function focusOpener(id) {
   const pages = [
-    [els.todayView, els.todayBody], [els.dayView, els.dayBody], [els.weekView, els.weekList],
+    [els.todayView, els.todayBody], [els.dayView, els.dayBody], [els.threeDayView, els.threeDayBody],
+    [els.weekView, els.weekList],
     [els.todoView, els.todoList], [els.ideasView, els.ideaList],
   ];
   const shown = pages.find(([section]) => !section.hidden);
@@ -914,6 +926,29 @@ function renderWeek() {
   renderWeekList(els.weekList, list, { onOpen: openItem, onSelectDay: openDay });
 }
 
+// Three columns of Day's grid (option A, Alex 2026-10-26). visibleItems, as
+// Day reads it: own scheduled items plus every visible feed's instances for
+// the three days, repeating ones included, so the classes show.
+let lastThreeDayRendered = null;
+
+function renderThreeDay() {
+  const end = addDays(viewThreeDayStart, 2);
+  els.threeDayLabel.textContent = weekLabel(viewThreeDayStart, end);
+  const visible = !els.threeDayView.hidden;
+  renderThreeDayView(els.threeDayBody, viewThreeDayStart,
+    groupItemsByDate(sortItemsByDate(visibleItems(viewThreeDayStart, end))), toISO(new Date()), {
+      onOpen: openItem,
+      onSelectDay: openDay,
+      // Scroll to 07:00 when the window changed or the page has just come
+      // back into view; otherwise keep the grid where the user left it. A
+      // grid drawn while hidden holds no scroll position (a browser reports
+      // 0), so a hidden render forgets the window: without that, returning
+      // to Calendar on the same window opened the grid at midnight.
+      autoScroll: visible && viewThreeDayStart !== lastThreeDayRendered,
+    });
+  lastThreeDayRendered = visible ? viewThreeDayStart : null;
+}
+
 let lastDayRendered = null;
 
 function renderDay() {
@@ -1069,7 +1104,7 @@ function syncTodayTick() {
 function render() {
   refreshForToday();
   visibility = loadVisibility();
-  renderToday(); renderCalendar(); renderWeek(); renderDay(); renderTodos(); renderIdeas();
+  renderToday(); renderCalendar(); renderWeek(); renderThreeDay(); renderDay(); renderTodos(); renderIdeas();
 }
 
 // The tab bar (home-screen spec § 4): Today | Calendar | To-do | Ideas.
@@ -1077,17 +1112,17 @@ function render() {
 // last used there (Day until another is picked; this session only). List was
 // a fourth until stage 3d (Alex, 2026-10-22: "you can get rid of the list
 // view").
-const CALENDAR_VIEWS = ['day', 'week', 'month'];
+const CALENDAR_VIEWS = ['day', '3day', 'week', 'month'];
 const TAB_TITLES = { today: 'Today', calendar: 'Calendar', todo: 'To-do', ideas: 'Ideas' };
 let lastCalendarView = 'day';
 
 function showView(which) {
   const views = {
-    today: els.todayView, month: els.calView, week: els.weekView, day: els.dayView,
+    today: els.todayView, month: els.calView, week: els.weekView, '3day': els.threeDayView, day: els.dayView,
     todo: els.todoView, ideas: els.ideasView,
   };
   const tabs = { today: els.tabToday, calendar: els.tabCalendar, todo: els.tabTodo, ideas: els.tabIdeas };
-  const segments = { day: els.showDay, week: els.showWeek, month: els.showMonth };
+  const segments = { day: els.showDay, '3day': els.show3day, week: els.showWeek, month: els.showMonth };
   const tab = CALENDAR_VIEWS.includes(which) ? 'calendar' : which;
   if (tab === 'calendar') lastCalendarView = which;
   for (const [name, el] of Object.entries(views)) el.hidden = name !== which;
@@ -1136,6 +1171,7 @@ els.tabIdeas.addEventListener('click', () => showView('ideas'));
 els.showMonth.addEventListener('click', () => showView('month'));
 els.showWeek.addEventListener('click', () => showView('week'));
 els.showDay.addEventListener('click', () => showView('day'));
+els.show3day.addEventListener('click', () => showView('3day'));
 els.ideaAdd.addEventListener('click', handleIdeaAdd);
 // An arrow steps from what is ON SCREEN (batch-F review, Important 1). It
 // remembers the cursor the user can see, lets refreshForToday catch the OTHER
@@ -1150,6 +1186,8 @@ els.prevDay.addEventListener('click', () => stepFrom(viewDay, (v) => { viewDay =
 els.nextDay.addEventListener('click', () => stepFrom(viewDay, (v) => { viewDay = addDays(v, 1); }));
 els.prevWeek.addEventListener('click', () => stepFrom(viewWeekStart, (v) => { viewWeekStart = addDays(v, -7); }));
 els.nextWeek.addEventListener('click', () => stepFrom(viewWeekStart, (v) => { viewWeekStart = addDays(v, 7); }));
+els.prev3day.addEventListener('click', () => stepFrom(viewThreeDayStart, (v) => { viewThreeDayStart = addDays(v, -3); }));
+els.next3day.addEventListener('click', () => stepFrom(viewThreeDayStart, (v) => { viewThreeDayStart = addDays(v, 3); }));
 
 render();
 syncTodayTick();
@@ -1407,6 +1445,7 @@ function refreshForToday() {
   const today = toISO(new Date());
   if (today === lastToday) return;
   viewDay = followToday(viewDay, lastToday, today);
+  viewThreeDayStart = followToday(viewThreeDayStart, lastToday, today);
   viewWeekStart = followToday(viewWeekStart, startOfWeek(lastToday), startOfWeek(today));
   const shownMonth = toISO(viewMonth).slice(0, 7);
   if (followToday(shownMonth, lastToday.slice(0, 7), today.slice(0, 7)) !== shownMonth) {
