@@ -4,7 +4,7 @@
 
 **What it is:** spec § 3. A 56 px round mic button bottom-right on every page. Tap: the capture box grows out of it and listens, with the words appearing live. Tap again: it stops and adds through smart add. Tap the words: you type instead. The top add box stays as it was; its small mic and `dictate()` are gone, leaving one mic.
 
-## Commits (on cfe7913, then main 013af41 merged in)
+## Commits (on cfe7913; main 013af41, then origin/main b3a2e72 merged in)
 
 | SHA | What | Fresh review |
 |---|---|---|
@@ -19,9 +19,13 @@
 | 8f94691 | Task 6: the button wired into app.js; `#mic-btn`/`dictate()` retired | Approved |
 | fd39562 | Polish round: the Minor findings ruled APPLY | covered by the whole-branch review |
 | 6194eb5 | Docs: plan execution record; spec § 8 stage 4 result | — |
-| 139d619 | Merge of `main` 013af41; `CACHE` v6-14 | fresh merge review (below) |
+| 139d619 | Merge of `main` 013af41; `CACHE` v6-14 | fresh merge review: Approved |
+| 0bfbcd9, f1dff03 | This report | — |
+| 5dd59b5 | Alex's answers: Return in the capture box adds; the box's Add hides while its own preview is open | fresh review (with the merge): 1 Important, fixed in f2d5b4a |
+| a21de1c | Merge of `origin/main` b3a2e72 (release v6-14); `CACHE` v6-15, `CACHE_ON_MAIN` v6-14 | the same review: merge correct |
+| f2d5b4a | Fix: Return over its own preview sends nothing unless edited; IME keyCode 229; Reduce Motion close | fresh review: Approved (its Minor, a test that could not tell a trimmed comparison from an untrimmed one, fixed in the next commit; mutant G5 killed) |
 
-Gate on the merged tree (139d619): `# tests 1612`, `# pass 1612`, `# fail 0`, `# cancelled 0` (baseline cfe7913: 1530).
+Gate on the final tree (HEAD): `# tests 1736`, `# pass 1736`, `# fail 0`, `# cancelled 0` (baseline cfe7913: 1530).
 
 ## How it was built
 
@@ -49,6 +53,23 @@ Gate on the merged tree (139d619): `# tests 1612`, `# pass 1612`, `# fail 0`, `#
    - After the merge, the wiring and polish mutants were re-run on the merged tree; all were killed.
    - The review found no correctness defect in the stage 4 code.
 
+## Alex's answers (2026-10-26) and the release merge
+
+- **Return in the capture box adds** ("add the item"), through the same path as the box's Add: listening stops first, then the adding latch. It never inserts a newline, and does nothing while an input method is composing a word (including Safari's keyCode 229). Mutants R1–R5, G3.
+- **The box's Add is hidden while its own preview is open** (controller ruling). "Add all" is then the one confirm, so the same text cannot be re-sent as a second paid request. It comes back when the preview closes (a newer Add, its Cancel, a new listen), is confirmed, or the box closes. Mutants H1–H8.
+- **Review finding (Important), fixed in f2d5b4a:** Return got around the hidden Add. With the preview open and the text unchanged, it re-sent the same text. Now Return does nothing then; edited text still adds. Mutants G1, G2.
+- **Merge of `origin/main` b3a2e72 (v6-14)**, both sides kept:
+  - `CACHE` is v6-15 and `CACHE_ON_MAIN` v6-14.
+  - The capture box's motion now sits inside `@media (prefers-reduced-motion: no-preference)`, the rule rewards made app-wide (controller ruling). With Reduce Motion on, the box no longer fades; it appears and goes without moving, and a closing box is hidden at once. Spec § 5 said "only fades"; the newer app-wide rule wins.
+  - The 80 px band (56 + 80), measured in Chrome at 390×844 with a two-line toast:
+    - box 532–708 px (top–bottom);
+    - toast 710–776 px, 16–302 px across;
+    - round button 716–772 px, 318–374 px across;
+    - tab bar from 788 px.
+
+    Nothing overlaps.
+  - The 3-day view and the visibility switches open items through the same path, so a listen stops when they do.
+
 ## Alex's phone checklist (none of this is verified by the tests)
 
 On the iPhone home-screen app, unless noted.
@@ -63,7 +84,7 @@ On the iPhone home-screen app, unless noted.
 8. × with the keyboard up: the box fades where it is, rather than shrinking toward a hidden button or jumping first.
 9. In a Safari tab, not the home-screen app, a refusal says "Voice works in the home-screen app."
 10. With mic permission off: "Microphone permission is off — Settings → plaenicke.", and "Type instead" brings up the keyboard.
-11. The box grows from the button in 250 ms and shrinks back. With Reduce Motion on, it only fades.
+11. The box grows from the button in 250 ms and shrinks back. With Reduce Motion on, it does not move at all.
 12. The button clears the home indicator and the tab bar, and the Undo toast still fits beside it.
 13. Pressing the round button scales it instantly and it never sticks.
 14. Dark mode: the button, the box and its text all read well.
@@ -75,7 +96,8 @@ On the iPhone home-screen app, unless noted.
 18. The very first listen: the iOS microphone and speech prompts do not end it.
 19. Typing in the box: it moves above the keyboard without an ugly jump. Editing a preview field also keeps it above the keyboard.
 20. "Settings → plaenicke" is a real path to the microphone switch.
-21. With a preview open in the capture box, its Add sits below "Add all". The box's Add re-sends the text as a new, paid request and brings the preview back; "Add all" adds the items. Do these read clearly? (whole-branch review)
+21. With a preview open in the capture box, the box's own Add is hidden and "Add all" is the only confirm. Return does nothing until the text is edited. Does that read clearly?
+26. Return in the capture box adds, and the iOS keyboard's return key works the same. Typing a word with predictive text or dictation, then Return, does not add half a word.
 22. Capture box open, then the Ideas box or the top box focused with the keyboard up: does the capture box cover the field being typed into? (whole-branch review)
 23. Typing in the box, then wanting the mic: the keyboard covers the round button. Is it clear to dismiss the keyboard first?
 24. While listening, the empty message line leaves a small gap under the words. Is that acceptable?
@@ -83,18 +105,16 @@ On the iPhone home-screen app, unless noted.
 
 ## Open questions for Alex (each with my recommendation)
 
+Questions 2 and 4 are answered (above). Still open:
+
 1. **No "Added." after a capture.** Success closes the box (spec § 3: "Success closes the box"), so the message is never seen; the new item appearing on the page is the only feedback. *Recommendation:* keep it as it is, and refine through use. If the item is off-screen (a date next month), a short toast "Added: …" is the natural next step.
-2. **Return in the capture field.** It makes a new line; it does not add. In the top box, return adds. *Recommendation:* make return add, with Add/Cancel still there, because voice-first capture rarely needs a second line. It is a one-line change once you say so.
+2. ~~Return in the capture field~~ — answered: Return adds.
 3. **A top-box smart add overtaken by a capture just goes quiet.** Its "Thinking…" clears and its text stays, with no message. *Recommendation:* fine as it is; it is rare.
-4. **The capture box's Add while its own preview is open** (checklist 21) sends the text again as a new paid request. *Recommendation:* hide the box's Add while its own preview is open, so "Add all" is the only confirm. I did not do this because it changes what you see and the spec does not settle it.
+4. ~~The capture box's Add while its own preview is open~~ — answered: it is hidden.
 
 ## Note for whoever assembles the release
 
-At the time of writing, the main checkout is on a branch named `release-v6-14` (dc8764d), which merges other workstreams (three-day-view, visibility). That branch still has `CACHE = 'plaenicke-v6-13'`.
-
-This branch already sets `CACHE` to `plaenicke-v6-14` and `CACHE_ON_MAIN` to `plaenicke-v6-13`. If stage 4 goes into that release, merging it gives one v6-14 bump, which is correct for a single release. If stage 4 ships separately, after v6-14, it needs its own bump.
-
-In either case, re-run `npm test` on the merged tree. `js/app.js`, `index.html`, `styles.css` and `tests/apply.test.js` may conflict with the other workstreams.
+The branch is merged up to `origin/main` b3a2e72 (v6-14) and bumps `CACHE` to `plaenicke-v6-15`. If `main` moves again before this ships, merge again, re-pin `CACHE_ON_MAIN` and re-run the gate.
 
 ## Known limits, by design or deferred
 

@@ -642,6 +642,7 @@ test('Return with this box\'s preview open and the text unchanged sends nothing;
   fx.settle('preview');
   await tick();
   fx.els.preview.appendChild(new FakeElement('div'));
+  fx.els.field.value = 'two things friday '; // a trailing space is not an edit
   const ev = keydown(fx.els.field, { key: 'Enter' });
   assert.equal(ev.defaultPrevented, true, 'still no newline');
   assert.equal(fx.submits, 1, 'no second paid request for the same text');
