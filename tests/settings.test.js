@@ -857,6 +857,7 @@ test('settings: each calendar lists the series hidden on this device, by title, 
   const show = byClassAll(blocks[0], 'feed-hidden-row')[0].children.find((c) => c.tagName === 'BUTTON');
   assert.equal(show.textContent, 'Show');
   assert.equal(show.type, 'button');
+  assert.equal(show.disabled, false, 'the fake click ignores disabled; a browser does not');
   assert.equal(show.getAttribute('aria-label'), 'Show CLST 1300 again');
   // The order the mockup draws: status, shape line, the hidden list, then the actions.
   const kids = rows[0].children;
@@ -905,7 +906,7 @@ test('settings: a Show that cannot be saved says so on its calendar and changes 
   assert.deepEqual(JSON.parse(localStorage.getItem(VIS_KEY)), VIS_MAP, 'nothing changed');
   assert.equal(byClassAll(host, 'feed-hidden-head')[0].textContent, 'Hidden on this device (3)');
   const err = byClassAll(host, 'feed-hidden-error')[0];
-  assert.match(err.textContent, /couldn.t be shown again/i);
+  assert.equal(err.textContent, "CLST 1300 couldn't be shown again: this device is out of storage.");
   assert.equal(err.getAttribute('role'), 'alert');
   assert.deepEqual(notified, [], 'nothing re-rendered elsewhere, nothing synced');
 });
@@ -921,6 +922,7 @@ test('settings.js uses visibility.js only to read the list and to Show; Remove n
     .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
   const imp = code.match(/import\s*\{([^}]*)\}\s*from\s*'\.\/visibility\.js'/);
   assert.ok(imp, 'fixture check: settings.js imports visibility.js');
-  assert.deepEqual(imp[1].split(',').map((s) => s.trim()).filter(Boolean).sort(), ['hiddenSeriesFor', 'loadVisibility', 'showSeries']);
+  assert.deepEqual(imp[1].split(',').map((s) => s.trim()).filter(Boolean).sort(),
+    ['UnlinkedCalendarError', 'hiddenSeriesFor', 'loadVisibility', 'showSeries']);
   assert.ok(!/setSeriesVisibility|SERIES_VISIBILITY|seriesVisibility/.test(code));
 });

@@ -13,7 +13,7 @@ import { resolveTheme, THEME_KEY } from './theme.js';
 import {
   syncFeed, feedStatus, removeFeed, webcalToHttps, inferName, feedShape, describeFeedShape,
 } from './feeds.js';
-import { loadFeeds, saveFeeds, loadFeedCache, loadLaunches } from './storage.js';
+import { loadFeeds, saveFeeds, loadFeedCache, loadLaunches, QuotaError } from './storage.js';
 import { describeLaunches } from './freshness.js';
 import { initLinkUI } from './linkui.js';
 import { uid } from './uid.js';
@@ -21,7 +21,9 @@ import { nowISO } from './dateparse.js';
 import { lock } from './scrolllock.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
 import { FEED_PALETTE } from './palette.js';
-import { loadVisibility, hiddenSeriesFor, showSeries } from './visibility.js';
+import {
+  loadVisibility, hiddenSeriesFor, showSeries, UnlinkedCalendarError,
+} from './visibility.js';
 
 const CHOICES = ['light', 'dark', 'auto'];
 
@@ -335,7 +337,10 @@ export function initSettings({
           try {
             showSeries(feed.id, r.uid);
           } catch (err) {
-            hiddenErrors[feed.id] = `${name} couldn't be shown again: ${err && err.message ? err.message : err}`;
+            let why = `an error (${err && err.name ? err.name : 'unknown'})`;
+            if (err instanceof QuotaError) why = 'this device is out of storage';
+            else if (err instanceof UnlinkedCalendarError) why = 'this calendar is no longer linked on this device';
+            hiddenErrors[feed.id] = `${name} couldn't be shown again: ${why}.`;
             console.error('plaenicke: showing a hidden series failed', err && err.name);
             renderCalendars();
             return;

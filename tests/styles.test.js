@@ -950,3 +950,14 @@ test('vis: the hidden rows in Settings and their Show buttons are at least 44px'
   assert.equal(declOf('.feed-hidden-where', 'color'), 'var(--muted)');
   assert.equal(declOf('.feed-hidden-error', 'color'), 'var(--danger)');
 });
+
+test('vis: every new rule colours with tokens only, so dark mode follows', () => {
+  const rules = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)]
+    .filter(([, sel]) => /\.(feed-hidden|sheet-vis|sheet-switch)/.test(sel));
+  assert.ok(rules.length >= 10, `fixture check: found ${rules.length} rules`);
+  for (const [, sel, body] of rules) {
+    assert.doesNotMatch(body, /#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(/, sel.trim());
+  }
+  assert.equal(declOf('.feed-hidden-row button', 'background'), 'var(--bg)');
+  assert.equal(declOf('.feed-hidden-row button', 'color'), 'var(--ink)');
+});
