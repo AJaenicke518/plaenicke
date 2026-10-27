@@ -20,6 +20,7 @@ const ASSETS = [
   'js/linkui.js', 'js/ideas.js', 'js/todoview.js', 'js/ideasview.js', 'js/freshness.js', 'js/edit.js', 'js/toast.js', 'js/itemsheet.js',
   'js/scrolllock.js', 'js/fetchtimeout.js', 'js/palette.js', 'js/press.js', 'js/today.js', 'js/todayview.js', 'js/weeklist.js',
   'js/visibility.js', 'js/threedayview.js', 'js/viewport.js', 'js/capture.js',
+  'js/typechips.js',
   'icons/icon-192.png', 'icons/icon-512.png',
 ];
 

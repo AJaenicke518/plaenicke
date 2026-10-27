@@ -61,6 +61,9 @@
       <input id="entry-end" type="time" hidden />
       <button id="add-btn" type="button">Add</button>
     </div>
+    <!-- The manual add's type chips (js/typechips.js builds them). Shown only
+         while a date is picked: with no date the sentence goes to smart add. -->
+    <div id="entry-types" class="type-chips" hidden></div>
     <p class="hint">Pick a date (and optional time) to add manually — smart add handles plain sentences.</p>
     <p id="message" class="message" role="status"></p>
   </section>

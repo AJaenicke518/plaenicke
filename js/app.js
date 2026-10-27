@@ -39,12 +39,14 @@ import { installPress } from './press.js';
 import { buildToday, relativeLabel, NEXT_DAYS, LOOKAHEAD_DAYS, tickedToday, tally } from './today.js';
 import { renderTodayView, renderTally } from './todayview.js';
 import { createCapture } from './capture.js';
+import { createTypeChips, PRIMARY_TYPES, MORE_TYPES } from './typechips.js';
 
 const els = {
   text: document.getElementById('entry-text'),
   date: document.getElementById('entry-date'),
   time: document.getElementById('entry-time'),
   end: document.getElementById('entry-end'),
+  types: document.getElementById('entry-types'),
   add: document.getElementById('add-btn'),
   message: document.getElementById('message'),
   preview: document.getElementById('preview'),
@@ -290,15 +292,36 @@ export function addItems(list) {
   scheduleSync();
 }
 
-// Manual add: title box + date box, type is always event. Works with no network.
-function handleManualAdd() {
+// The manual add's type chips (option A, Alex 2026-10-26; js/typechips.js).
+// The row shows only while a date is picked, since only the manual path reads
+// it; whenever it hides it goes back to Event, so a choice the user can no
+// longer see is never brought back or saved. Run on the date box's input and
+// change, after a manual add clears the date, and on pageshow, which fires on
+// every load too: a browser that restores the date box's value, or a page
+// back from the back/forward cache, brings a date back with no input event.
+// Before that first pageshow the row is hidden by index.html.
+const typeChips = createTypeChips(els.types);
+const OFFERED_TYPES = [...PRIMARY_TYPES, ...MORE_TYPES];
+function syncTypeRow() {
+  const show = Boolean(els.date.value);
+  if (!show) typeChips.reset();
+  els.types.hidden = !show;
+}
+
+// Manual add: title box + date box, saved as the type the chips hold (Event
+// unless the user picked another). Works with no network.
+function handleManualAdd(type) {
   const title = els.text.value.trim();
   const date = els.date.value;
   if (!title || !date) { setMessage('For manual add, type a title and pick a date.'); return 'refused'; }
+  // Never saved as a type the chips do not offer: makeItem would quietly turn
+  // a missing one into 'general', which no page treats as a to-do.
+  if (!OFFERED_TYPES.includes(type)) { setMessage(`Manual add: unknown type ${type}`); return 'failed'; }
   try {
-    addItems([{ title, date, type: 'event', time: els.time.value || null, endTime: els.end.value || null }]);
+    addItems([{ title, date, type, time: els.time.value || null, endTime: els.end.value || null }]);
   } catch (e) { setMessage(e.message); return 'failed'; }
   els.text.value = ''; els.date.value = ''; els.time.value = ''; els.end.value = ''; els.end.hidden = true;
+  syncTypeRow(); // the date is now empty: hides the chips and puts them back on Event
   setMessage('Added.');
   return 'added';
 }
@@ -330,6 +353,8 @@ let pendingSmart = null;
 const topTarget = {
   field: els.text,
   dates: { date: els.date, time: els.time, end: els.end },
+  // Read only on the manual path (a date picked), never by smart add.
+  type: typeChips,
   line: topLine,
   preview: els.preview,
   unavailable: 'Smart add is unavailable — pick a date below and tap Add to add it manually.',
@@ -342,6 +367,7 @@ const topTarget = {
 const captureTarget = {
   field: els.captureText,
   dates: null,
+  type: null,
   line: captureLine,
   preview: els.capturePreview,
   unavailable: 'Smart add is unavailable — use the box at the top with a date to add it.',
@@ -411,7 +437,7 @@ async function handleAdd(target) {
     supersedePending();
     addGeneration += 1;
     closePreviews();
-    return handleManualAdd();
+    return handleManualAdd(target.type.value());
   }
 
   const raw = field.value.trim();
@@ -1266,6 +1292,9 @@ function openDay(dateISO) {
 }
 
 els.time.addEventListener('input', () => { els.end.hidden = !els.time.value; if (!els.time.value) els.end.value = ''; });
+els.date.addEventListener('input', syncTypeRow);
+els.date.addEventListener('change', syncTypeRow);
+window.addEventListener('pageshow', syncTypeRow);
 els.add.addEventListener('click', () => { handleAdd(topTarget); });
 els.text.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleAdd(topTarget); });
 els.tabToday.addEventListener('click', () => showView('today'));

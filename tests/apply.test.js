@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
 import {
-  makeFakeDocument, makeFakeWindow, mountIds, indexHtmlIds, allText, fire,
+  makeFakeDocument, makeFakeWindow, mountIds, indexHtmlIds, allText, fire, findAll,
 } from './fake-dom.js';
 import { SCHEMA_VERSION, toWire } from '../js/merge.js';
 import { localState } from '../js/sync.js';
@@ -798,6 +798,153 @@ test('manual add creates an event: on the calendar, not on the To-do page', asyn
   assert.ok(row, 'a manual add shows on the calendar (its Day page)');
   assert.ok(row._classes.has('type-event'), 'in event colours');
   assert.doesNotMatch(allText(todoList()), /Manual dinner/, 'an event is not a to-do');
+  seed([]);
+});
+
+// --- manual add chooses a type (option A, Alex 2026-10-26) ------------------
+//
+// Chips under the date row (js/typechips.js): Event / Deadline / To-do, and
+// More for Start and Milestone. They show only while a date is picked, Event
+// is the default, and a landed manual Add or a cleared date puts them back on
+// Event. Only the manual path reads them. app.js is imported once for the
+// whole file, so every test here leaves the date empty (which resets the
+// chips) in `finally`, and the earlier "manual add creates an event" test
+// cannot see a choice left behind.
+const entryTypes = () => globalThis.document.getElementById('entry-types');
+const typeChip = (type) => findAll(entryTypes(), 'BUTTON').find((b) => b.dataset.type === type);
+const moreChip = () => findAll(entryTypes(), 'BUTTON').find((b) => b.dataset.more === 'true');
+const pressedTypes = () => findAll(entryTypes(), 'BUTTON')
+  .filter((b) => b.dataset.type && b.getAttribute('aria-pressed') === 'true').map((b) => b.dataset.type);
+function pickDate(value, event = 'input') {
+  const date = globalThis.document.getElementById('entry-date');
+  date.value = value;
+  fire(date, event);
+}
+function chooseType(type) {
+  if (typeChip(type).hidden) click(moreChip());
+  click(typeChip(type));
+}
+function clearAddBox() {
+  const doc = globalThis.document;
+  doc.getElementById('entry-text').value = '';
+  doc.getElementById('entry-time').value = '';
+  doc.getElementById('entry-end').value = '';
+  pickDate('');
+}
+
+test('manual type: the chips show only while a date is picked', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    clearAddBox(); // this test must not depend on what an earlier one left in the box
+    assert.equal(entryTypes().hidden, true, 'no date: no chips (the sentence goes to smart add)');
+    assert.ok(typeChip('event'), 'fixture check: app.js built the chips into #entry-types');
+    pickDate(far(0));
+    assert.equal(entryTypes().hidden, false, 'a picked date shows them');
+    assert.deepEqual(pressedTypes(), ['event'], 'Event is the default');
+    pickDate('');
+    assert.equal(entryTypes().hidden, true, 'a cleared date hides them');
+    pickDate(far(0), 'change');
+    assert.equal(entryTypes().hidden, false, 'a change event alone shows them too (the picker\'s Done)');
+  } finally {
+    clearAddBox();
+  }
+});
+
+// The fake DOM ignores index.html's `hidden` (mountIds builds bare divs), so
+// the page's first state is read from the markup: hidden until the first
+// pageshow (which fires on every load) reads the date box.
+test('manual type: index.html starts the chip row hidden', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const tag = html.match(/<div id="entry-types"[^>]*>/);
+  assert.ok(tag, 'fixture check: #entry-types');
+  assert.match(tag[0], /\shidden[\s>]/);
+});
+
+test('manual type: a date already in the box when the page is shown again shows the chips', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    globalThis.document.getElementById('entry-date').value = far(0); // restored, with no input event
+    assert.equal(entryTypes().hidden, true, 'fixture check: nothing has told app.js yet');
+    for (const fn of globalThis.window._listeners.pageshow || []) fn({ persisted: true });
+    assert.equal(entryTypes().hidden, false, 'pageshow re-reads the date box');
+  } finally {
+    clearAddBox();
+  }
+});
+
+test('manual type: a manual Add saves the chosen type, then the chips go back to Event and hide', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const timers = installManualTimers();
+  try {
+    for (const type of ['due', 'task', 'start', 'milestone', 'event']) {
+      doc.getElementById('entry-text').value = `Typed ${type}`;
+      pickDate(far(1));
+      chooseType(type);
+      assert.deepEqual(pressedTypes(), [type], `fixture check: ${type} is the one pressed`);
+      click(doc.getElementById('add-btn'));
+      assert.equal(messageText(), 'Added.');
+      const saved = loadItems().find((it) => it.title === `Typed ${type}`);
+      assert.ok(saved, `${type}: saved`);
+      assert.equal(saved.type, type, `${type}: saved as the chosen type, not event`);
+      assert.equal(entryTypes().hidden, true, `${type}: the date is cleared, so the chips hide`);
+      assert.deepEqual(pressedTypes(), ['event'], `${type}: the choice resets to Event after Add`);
+      assert.equal(typeChip('start').hidden, true, `${type}: Start and Milestone fold back behind More`);
+    }
+    assert.match(allText(todoList()), /Typed due/, 'a Deadline added by hand reaches the To-do page');
+    assert.match(allText(todoList()), /Typed task/, 'so does a To-do');
+    assert.doesNotMatch(allText(todoList()), /Typed event/, 'an Event does not');
+  } finally {
+    timers.restore();
+    clearAddBox();
+  }
+  seed([]);
+});
+
+test('manual type: a refused manual Add (no title) keeps the choice; clearing the date resets it', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  try {
+    doc.getElementById('entry-text').value = '';
+    pickDate(far(1));
+    chooseType('due');
+    click(doc.getElementById('add-btn'));
+    assert.match(messageText(), /type a title and pick a date/, 'fixture check: refused');
+    assert.deepEqual(pressedTypes(), ['due'], 'nothing was added, so the choice stays');
+    assert.equal(loadItems().length, 0);
+    pickDate('');
+    pickDate(far(1));
+    assert.deepEqual(pressedTypes(), ['event'], 'a choice that was hidden is never brought back');
+  } finally {
+    clearAddBox();
+  }
+});
+
+test('manual type: with no date, smart add keeps the Worker\'s type', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const net = smartAddFetch(async () => smartReply([{ title: 'Essay', date: '2099-06-01', type: 'task' }]));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('essay due june first');
+    fire(doc.getElementById('entry-date'), 'input');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.deepEqual(net.posts, ['essay due june first'], 'no date: it went to smart add');
+    assert.deepEqual(loadItems().map((it) => it.type), ['task'], 'the Worker picked To-do; the chips (Event) did not overrule it');
+  } finally {
+    timers.restore();
+    net.restore();
+    clearAddBox();
+  }
   seed([]);
 });
 
@@ -8491,6 +8638,41 @@ test('capture: its Add is hidden while its preview is open, and back when a top-
     timers.restore();
     net.restore();
     voice.restore();
+  }
+  seed([]);
+});
+
+// Manual type (option A): the capture box has no date row, so it never takes
+// the manual path, even with a date and a type chosen up in the top box.
+test('capture: never reaches the manual path, whatever the top box\'s date row and type chips hold', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const voice = withVoice();
+  const net = smartAddFetch(async () => smartReply([{ title: 'Dentist', date: '2099-05-15', type: 'event' }]));
+  const timers = installManualTimers();
+  try {
+    doc.getElementById('entry-text').value = 'Top box draft';
+    pickDate(far(2));
+    chooseType('due');
+    click(capEl('capture-btn'));
+    voice.last().say('dentist on may 15');
+    click(capEl('capture-btn'));
+    await settle();
+    assert.deepEqual(net.posts, ['dentist on may 15'], 'the capture box went to smart add');
+    assert.deepEqual(loadItems().map((it) => [it.title, it.type]), [['Dentist', 'event']],
+      'saved with the Worker\'s type, not the top box\'s Deadline or its date');
+    assert.equal(doc.getElementById('entry-date').value, far(2), 'the top box\'s date is untouched');
+    assert.equal(doc.getElementById('entry-text').value, 'Top box draft', 'and its text');
+    assert.deepEqual(pressedTypes(), ['due'], 'and its choice');
+    timers.fire(250);
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
+    voice.restore();
+    clearAddBox();
   }
   seed([]);
 });

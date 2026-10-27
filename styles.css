@@ -204,6 +204,30 @@ header h1 { font-size: 1.7rem; font-style: italic; font-weight: 700; margin: 16p
   color: var(--ink);
 }
 
+/* The manual add's type chips (option A, Alex 2026-10-26; js/typechips.js).
+   The selected state is read from aria-pressed, so what the eye sees and what
+   a screen reader hears cannot drift apart. [hidden] is restated: an author
+   display beats the browser's own [hidden] rule. */
+.type-chips { margin-top: 10px; }
+.type-chips[hidden] { display: none; }
+.type-chip-group { display: flex; flex-wrap: wrap; gap: 6px; }
+/* A 24% basis: Event, Deadline, To-do and More share one row at 375px, and
+   once More opens, Start and Milestone take a second row in two halves
+   (measured in Chrome at 375px: five chips do not fit one row at this size). */
+.type-chip {
+  flex: 1 1 24%;
+  min-width: max-content;
+  min-height: 44px;
+  font-size: 0.9rem;
+  padding: 6px 10px;
+  background: var(--card);
+  color: var(--ink);
+  border: 1px solid var(--line);
+}
+.type-chip[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.type-chip.type-more { flex: 0 0 auto; color: var(--muted); }
+.type-chip[hidden] { display: none; }
+
 button {
   font-size: 1rem;
   font-family: inherit;
