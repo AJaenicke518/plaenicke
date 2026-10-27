@@ -7848,3 +7848,41 @@ test('vis: a calendar removed while its sheet is open: the switch stays put, say
   }
   resume();
 });
+
+// Integration (release-v6-14): visibility and the 3-day view were built on
+// separate branches. A series hidden from the calendar must leave 3-day too,
+// while another series on the same days stays; a list-only hide leaves it on.
+test('vis + 3-day: a series hidden from the calendar is not in the 3-day view; a shown series on the same days is', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 22, 9, 0).getTime() });
+  try {
+    seed([]);
+    seedVisFeed();
+    click(doc.getElementById('show-3day'));
+    assert.equal(labelText('three-day-label'), '10/22 – 10/24', 'fixture check: the window starts Thu Oct 22');
+    assert.deepEqual(threeDayColumns(), [['vis Class'], ['vis Quiz', 'vis Class'], []],
+      'fixture check: Thu the class; Fri the quiz and the class');
+
+    click(openControlFor(threeDayBody(), 'vis Quiz'));
+    toggleMeasured('calendar');
+    closeSheet();
+    assert.deepEqual(threeDayColumns(), [['vis Class'], ['vis Class'], []],
+      'the calendar-hidden quiz is gone from 3-day; the class on the same day stays');
+
+    click(openControlFor(threeDayBody(), 'vis Class'));
+    toggleMeasured('list');
+    closeSheet();
+    assert.deepEqual(threeDayColumns(), [['vis Class'], ['vis Class'], []],
+      'a list-only hide leaves the class on 3-day');
+  } finally {
+    forceCloseSheet();
+    unseedVis();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
