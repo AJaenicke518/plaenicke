@@ -13,7 +13,7 @@ import {
 import { normalizeIdea } from './ideas.js';
 import { renderTodoView } from './todoview.js';
 import { renderIdeasView } from './ideasview.js';
-import { toISO, nowISO } from './dateparse.js';
+import { toISO, nowISO, localStamp } from './dateparse.js';
 import { buildMonthGrid, groupItemsByDate, monthCellSummary, chronoFirst, itemTypeClass } from './calendar.js';
 import { startOfWeek, addDays, formatTime, weekLabel } from './timegrid.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
@@ -263,8 +263,9 @@ initSettings({
 function setMessage(t) { topLine.set(t); }
 
 export function addItems(list) {
-  // createdAt stays a local calendar date (toISO) — sortItemsByDate depends
-  // on its current format. updatedAt is a full-precision UTC instant
+  // createdAt is the local date and time (localStamp), so same-day ideas list
+  // newest first; sortItemsByDate compares only its day (js/items.js
+  // createdDay), as it did when createdAt was the date alone. updatedAt is a full-precision UTC instant
   // (nowISO), matching feed updatedAt and tombstone deletedAt so sync's
   // last-write-wins comparisons are all apples-to-apples.
   //
@@ -275,7 +276,7 @@ export function addItems(list) {
   // so the model's own split never matters and nothing can lose words. It is
   // idempotent and a no-op on every other type.
   const made = list.map((it) => makeItem(normalizeIdea(it), {
-    id: uid(), createdAt: toISO(new Date()), updatedAt: nowISO(),
+    id: uid(), createdAt: localStamp(new Date()), updatedAt: nowISO(),
   }));
   // A failed save must not leave the new records in `items`: app.js saves
   // from that array, so the next successful save of ANY item would quietly
