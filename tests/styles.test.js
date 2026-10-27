@@ -981,6 +981,18 @@ test('layers: tab bar 5 < capture button 6 < capture box 8 < settings 10 < item 
   assert.equal(zIndexOf('.toast'), 20);
 });
 
+// Daily fixes 2026-10-27, item 1. Settings locks the page scroll
+// (js/scrolllock.js), so a panel taller than the screen — several calendars
+// plus the hidden-series list — could not be scrolled to its end. The
+// backdrop itself scrolls, contains the scroll so iOS does not hand it to the
+// locked page, and keeps the last section clear of the home indicator.
+test('the Settings backdrop scrolls, so a tall panel can be read to its end', () => {
+  assert.equal(declOf('.settings-backdrop', 'overflow-y'), 'auto');
+  assert.equal(declOf('.settings-backdrop', 'overscroll-behavior'), 'contain');
+  assert.match(declOf('.settings-backdrop', 'padding-bottom') || '', /env\(safe-area-inset-bottom\)/);
+  assert.equal(declOf('.settings-backdrop', 'padding-top'), '15vh', 'the panel still opens below the top');
+});
+
 test('the toast sits above the tab bar and clears the capture button\'s corner', () => {
   assert.equal(declOf('.toast', 'bottom'), 'calc(56px + 12px + env(safe-area-inset-bottom))');
   assert.equal(declOf('.toast', 'right'), '88px');
