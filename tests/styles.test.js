@@ -544,7 +544,7 @@ test('fontShorthandSize reads the size out of a font shorthand', () => {
 test('no rule that targets a form control sets a font-size under 16px', () => {
   const offenders = [];
   let seen = 0;
-  for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+  for (const { sel, body } of rulesOf(css)) { // opens @media blocks (review 2026-10-27)
     const selectors = sel.split(',').map((x) => x.trim().replace(/\s+/g, ' '));
     if (!selectors.some((s) => CONTROL_SELECTOR.test(s))) continue;
     seen += 1;
