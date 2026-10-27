@@ -38,8 +38,9 @@ let headingSeq = 0;
 // What the type select SHOWS for each of preview.js's TYPES (sweep U11). The
 // values stay exactly TYPES; only the text is human. A type added to TYPES
 // without a label here makes openItemSheet refuse to open (checked with the
-// other preconditions), rather than show a raw value.
-const TYPE_LABELS = {
+// other preconditions), rather than show a raw value. EXPORTED for the manual
+// add's type chips (js/typechips.js), so the labels are written down once.
+export const TYPE_LABELS = {
   due: 'Deadline', start: 'Start', milestone: 'Milestone', event: 'Event',
   general: 'General', task: 'To-do', idea: 'Idea',
 };
