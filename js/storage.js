@@ -265,7 +265,14 @@ export function loadAuth() {
   return typeof v === 'string' && v ? v : null;
 }
 
-export function saveAuth(code) { localStorage.setItem(AUTH_KEY, code); }
+export function saveAuth(code) {
+  try {
+    localStorage.setItem(AUTH_KEY, code);
+  } catch (err) {
+    if (err && err.name === 'QuotaExceededError') throw new QuotaError('Auth code exceeded storage quota');
+    throw err;
+  }
+}
 export function clearAuth() { localStorage.removeItem(AUTH_KEY); }
 
 // EXPORTED, and it is the ONLY copy. saveSyncState merges over the CURRENT
