@@ -107,10 +107,10 @@ test('settings: cycling a feed\'s color does not discard a feed that arrived in 
   assert.deepEqual(stored.map((f) => f.id).sort(), ['feedA', 'feedC']);
 });
 
-// A hidden calendar's "Show" button names its calendar for assistive tech,
-// which otherwise hears a row of identical "Show" buttons. The name only:
-// a feed URL is a capability token and is never displayed or announced.
-test('settings: a hidden calendar\'s Show button is named "Show <calendar name>", never its URL', () => {
+// The Show/Hide toggle names its calendar for assistive tech, which otherwise
+// hears a row of identical "Show" or "Hide" buttons. The name only: a feed URL
+// is a capability token and is never displayed or announced.
+test('settings: the toggle is named "Show <calendar name>" or "Hide <calendar name>", never its URL', () => {
   const work = {
     id: 'feedW', url: 'https://calendar.example.com/private-s3cr3tT0ken/basic.ics', name: 'Work',
     color: 'var(--feed-palette-2)', hidden: true, updatedAt: '2026-07-01T00:00:00.000Z',
@@ -126,11 +126,11 @@ test('settings: a hidden calendar\'s Show button is named "Show <calendar name>"
   const { host } = openPanel([work, school, home]);
   const hide = findButtonByText(host, 'Hide');
   assert.ok(hide, 'fixture check: the visible calendar has a Hide button');
-  assert.equal(hide.getAttribute('aria-label'), null, 'a Hide button is not announced as "Show …"');
+  assert.equal(hide.getAttribute('aria-label'), 'Hide School');
   const shows = host.querySelectorAll('button').filter((b) => b.textContent === 'Show');
   assert.equal(shows.length, 2, 'fixture check: one Show button per hidden calendar');
   assert.deepEqual(shows.map((b) => b.getAttribute('aria-label')), ['Show Work', 'Show Home']);
-  for (const b of shows) {
+  for (const b of [...shows, hide]) {
     const label = b.getAttribute('aria-label');
     for (const secret of ['s3cr3tT0ken', 'h0meT0ken', 'sch00lT0ken', 'example.com', 'https:', 'webcal:']) {
       assert.ok(!label.includes(secret), `the label carries no part of a feed URL (${secret})`);
@@ -138,7 +138,7 @@ test('settings: a hidden calendar\'s Show button is named "Show <calendar name>"
   }
 });
 
-test('settings: hiding a calendar re-renders its toggle as "Show <name>", and showing it drops the label', () => {
+test('settings: hiding a calendar re-renders its toggle as "Show <name>", and showing it as "Hide <name>"', () => {
   const work = {
     id: 'feedW', url: 'https://calendar.example.com/private-s3cr3tT0ken/basic.ics', name: 'Work',
     color: 'var(--feed-palette-2)', hidden: false, updatedAt: '2026-07-01T00:00:00.000Z',
@@ -151,7 +151,7 @@ test('settings: hiding a calendar re-renders its toggle as "Show <name>", and sh
   show.click();
   const hide = findButtonByText(host, 'Hide');
   assert.ok(hide, 'fixture check: the toggle reads Hide again');
-  assert.equal(hide.getAttribute('aria-label'), null);
+  assert.equal(hide.getAttribute('aria-label'), 'Hide Work');
 });
 
 // --- synced mutations vs per-device view preferences (spec 6.3) ------------

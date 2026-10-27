@@ -369,7 +369,7 @@ export function initSettings({
           toggle.type = 'button';
           toggle.textContent = feed.hidden ? 'Show' : 'Hide';
           // Names the calendar for assistive tech (feed.name — never its URL).
-          if (feed.hidden) toggle.setAttribute('aria-label', `Show ${feed.name}`);
+          toggle.setAttribute('aria-label', `${feed.hidden ? 'Show' : 'Hide'} ${feed.name}`);
           toggle.disabled = isBusy();
           toggle.addEventListener('click', () => {
             reapplyFeedField(feed.id, (f) => ({ hidden: !f.hidden }));
