@@ -126,15 +126,30 @@ test('live words fill the field and grow it, border included', () => {
   assert.equal(fx.els.field.style.height, '74px');
 });
 
-test('a listen while this box\'s own preview is open is a new capture: the old text is not its prefix', () => {
+test('a listen while this box\'s own preview is open is a new capture: the old text is not its prefix', async () => {
   const fx = setup();
   listening(fx, 'two things on friday');
-  fx.voice.current.opts.onEnd();
+  tap(fx.els.button); // stop and add
+  fx.settle('preview');
+  await tick();
   fx.els.preview.appendChild(new FakeElement('div'));
   tap(fx.els.button);
   assert.equal(fx.voice.current.opts.prefix, '');
   assert.equal(fx.els.field.value, '');
   assert.equal(fx.previews, 2, 'and the preview is closed');
+});
+
+test('a listen over its own preview keeps text the user changed since the preview opened', async () => {
+  const fx = setup();
+  listening(fx, 'two things friday');
+  tap(fx.els.button); // stop and add
+  fx.settle('preview');
+  await tick();
+  fx.els.preview.appendChild(new FakeElement('div'));
+  fx.els.field.value = 'two things friday and the dentist at 3';
+  tap(fx.els.button);
+  assert.equal(fx.voice.current.opts.prefix, 'two things friday and the dentist at 3', 'an edit is the next entry, never wiped');
+  assert.equal(fx.els.field.value, 'two things friday and the dentist at 3');
 });
 
 test('released() drops the latch at once and adds nothing', async () => {
@@ -253,6 +268,48 @@ for (const [standalone, text] of [[false, M.safari], [true, M.permission]]) {
     assert.equal(fx.capture.state().refused, true);
   });
 }
+
+test('after a refusal, a tap on the round button focuses the field and hides Type instead', () => {
+  const fx = setup();
+  listening(fx);
+  fx.voice.current.opts.onError('not-allowed');
+  assert.equal(fx.els.typeInstead.hidden, false, 'fixture check');
+  tap(fx.els.button);
+  assert.equal(fx.els.typeInstead.hidden, true);
+  assert.equal(globalThis.document.activeElement, fx.els.field);
+});
+
+test('a submit that rejects says so on the line, clears the latch, and logs the error', async (t) => {
+  globalThis.document.activeElement = null;
+  const make = (tag) => new FakeElement(tag);
+  const els = {
+    button: make('button'), box: make('div'), field: make('textarea'), add: make('button'),
+    cancel: make('button'), close: make('button'), typeInstead: make('button'), preview: make('section'),
+  };
+  const message = make('p');
+  let reject;
+  const capture = createCapture({
+    els,
+    line: { set(text) { message.textContent = text || ''; } },
+    voice: { isVoiceSupported: () => false, listen() { throw new Error('unused'); }, errorKind },
+    isStandalone: () => false,
+    submit: () => new Promise((_, r) => { reject = r; }),
+    cancelSubmit() {}, closePreviews() {},
+    later: () => ({}), clearLater() {}, follow: () => () => {},
+  });
+  const logged = t.mock.method(console, 'error', () => {});
+  tap(els.button); // no voice: typing mode
+  els.field.value = 'lunch';
+  tap(els.add);
+  assert.equal(capture.state().adding, true, 'fixture check');
+  reject(new Error('boom'));
+  await tick();
+  assert.equal(message.textContent, 'Could not add: boom');
+  assert.equal(capture.state().adding, false);
+  assert.equal(els.button.disabled, false);
+  assert.equal(logged.mock.callCount(), 1, 'logged, not swallowed');
+  assert.equal(logged.mock.calls[0].arguments[1].message, 'boom');
+});
 
 test('no-speech, audio-capture and network say try again, with no Type instead and no focus', () => {
   for (const code of ['no-speech', 'audio-capture', 'network']) {

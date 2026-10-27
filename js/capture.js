@@ -67,6 +67,7 @@ export function createCapture({
   let session = null; // voice.js's session while listening
   let adding = null; // a fresh token while a smart add thinks, else null
   let refused = false; // voice refused once: later taps this session type instead
+  let previewText = null; // the text that produced this box's open preview
   let closeTimer = null;
   let stopFollow = null;
 
@@ -167,8 +168,10 @@ export function createCapture({
     els.typeInstead.hidden = true;
     // A listen while this box's own preview is open is a NEW capture (spec
     // § 3 step 8): the text that made the preview goes with it, or it would
-    // be the new listen's prefix and be sent again (DA I2).
-    if (els.preview.children.length > 0) els.field.value = '';
+    // be the new listen's prefix and be sent again (DA I2). Only while the
+    // field still holds that text: an edit made since is the next entry and
+    // is kept, as handleAdd's clearSentText keeps it (Task 4 review).
+    if (els.preview.children.length > 0 && els.field.value.trim() === previewText) els.field.value = '';
     // After clearing the line: closing this box's own preview says so here.
     closePreviews();
     const s = voice.listen({
@@ -199,8 +202,15 @@ export function createCapture({
     const token = {};
     adding = token;
     setAdding(true);
+    const sent = els.field.value.trim();
     try {
-      await submit();
+      const outcome = await submit();
+      if (outcome === 'preview') previewText = sent;
+    } catch (err) {
+      // handleAdd reports its own failures; reaching here is a bug. Say so,
+      // and rethrow so the click handler logs it (zero fallback).
+      if (adding === token) line.set(`Could not add: ${err && err.message ? err.message : err}`);
+      throw err;
     } finally {
       // Only this add's own latch: a Cancel and a newer add may have come since.
       if (adding === token) { adding = null; setAdding(false); }
@@ -227,10 +237,14 @@ export function createCapture({
     closeTimer = later(finishClose, CLOSE_MS);
   }
 
+  // add() rethrows what handleAdd did not handle; a click handler has no one
+  // to rethrow to, so it is logged (and the line already says so).
+  const logFailure = (err) => { console.error('capture: add failed', err); };
+
   function tapButton() {
     if (adding !== null) return;
     if (mode === 'listening') {
-      add({ spoken: true }); // stops the listen first
+      add({ spoken: true }).catch(logFailure); // stops the listen first
       return;
     }
     open();
@@ -243,6 +257,7 @@ export function createCapture({
     if (refused) {
       setMode('typing');
       line.set(refusedText());
+      els.typeInstead.hidden = true;
       focusField();
       return;
     }
@@ -250,7 +265,7 @@ export function createCapture({
   }
 
   els.button.addEventListener('click', tapButton);
-  els.add.addEventListener('click', () => { add(); });
+  els.add.addEventListener('click', () => { add().catch(logFailure); });
   els.cancel.addEventListener('click', cancel);
   els.close.addEventListener('click', close);
   els.typeInstead.addEventListener('click', () => {
