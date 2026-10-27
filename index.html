@@ -50,25 +50,12 @@
        there is a problem. -->
   <p id="sync-indicator" class="sync-indicator" role="status" hidden></p>
 
-  <section class="add-box">
-    <div class="text-row">
-      <input id="entry-text" type="text" autocomplete="off"
-             placeholder="e.g. physics assignment due July second" />
-    </div>
-    <div class="add-row">
-      <input id="entry-date" type="date" />
-      <input id="entry-time" type="time" />
-      <input id="entry-end" type="time" hidden />
-      <button id="add-btn" type="button">Add</button>
-    </div>
-    <!-- The manual add's type chips (js/typechips.js builds them). Shown only
-         while a date is picked: with no date the sentence goes to smart add. -->
-    <div id="entry-types" class="type-chips" hidden></div>
-    <p class="hint">Pick a date (and optional time) to add manually — smart add handles plain sentences.</p>
-    <p id="message" class="message" role="status"></p>
-  </section>
+  <!-- The status line (capture date row, 2026-10-27): every message that is
+       not about the capture box. Empty, it takes no space (styles.css
+       :empty); it is never hidden, so it stays a live region that is read out
+       when it fills. A tab switch clears it (js/app.js switchTab). -->
+  <p id="status-line" class="status-line" role="status"></p>
 
-  <section id="preview" hidden></section>
 
   <!-- Calendar's switcher (spec § 4), shown on the Calendar tab only. List
        was removed in stage 3d (Alex, 2026-10-22); 3-day sits after Day,
@@ -134,8 +121,8 @@
     <div id="day-body"></div>
   </section>
 
-  <!-- To-do (V6 § 5). No add box: to-dos are captured by voice through the
-       main entry box and classified by the model. -->
+  <!-- To-do (V6 § 5). No add box: to-dos are captured through the capture
+       box and classified by the model, or typed with a date and To-do. -->
   <section id="todo-view" hidden>
     <ul id="todo-list"></ul>
   </section>
@@ -170,6 +157,20 @@
     <div class="capture-panel" role="region" aria-label="Capture">
       <textarea id="capture-text" class="capture-text" rows="2" autocomplete="off"
                 placeholder="Say it, or tap here to type"></textarea>
+      <!-- The date row (mockup C2, Alex 2026-10-27), driven by js/capture.js:
+           shown only when the user types, or after a failed smart add. A
+           picked date makes Add a manual add (no smart add, works offline).
+           Each label wraps its input, so the word shows while an iOS date box
+           is empty. -->
+      <div id="capture-when" class="cap-when-wrap" hidden>
+        <div class="cap-when">
+          <label class="cap-field"><span>Date</span><input id="capture-date" type="date" /></label>
+          <label class="cap-field"><span>Time</span><input id="capture-time" type="time" /></label>
+        </div>
+        <!-- The type chips (js/typechips.js): shown only while a date is
+             picked; with no date the sentence goes to smart add. -->
+        <div id="capture-types" class="type-chips cap-types" hidden></div>
+      </div>
       <p id="capture-message" class="message" role="status"></p>
       <button id="capture-type" class="capture-type" type="button" hidden>Type instead</button>
       <section id="capture-preview" class="capture-preview" hidden></section>

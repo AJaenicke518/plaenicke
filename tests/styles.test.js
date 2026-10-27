@@ -486,7 +486,7 @@ test('spacing and radii are theme-independent: dark mode never redefines them', 
 // Every form control and button rule that sets a corner. Containers (cards,
 // panels, list rows, the day grid) keep their own radius.
 const CONTROL_RULES = [
-  'button', '.icon-btn', '#entry-text', '#entry-date', '#entry-time', '#entry-end',
+  'button', '.icon-btn', '.cap-field', '.cap-field input',
   '.feed-add input', '.link-ui input', '.preview-row input', '.preview-row select',
   '.idea-add textarea', '.sheet input', '.sheet select', '.sheet textarea',
 ];
@@ -508,7 +508,7 @@ test('the item sheet uses the sheet radius on its top corners', () => {
 // control added later with a small size fails here without being listed.
 // (The item sheet's three are pinned by the edit-items tests above.)
 const INPUT_RULES = [
-  '#entry-text', '#entry-date', '#entry-time', '#entry-end', '.idea-add textarea',
+  '.cap-field input', '.idea-add textarea',
   '.feed-add input', '.link-ui input', '.preview-row input', '.preview-row select',
   '.capture-text',
 ];
@@ -521,7 +521,7 @@ for (const sel of INPUT_RULES) {
   });
 }
 
-const CONTROL_SELECTOR = /(^|[\s>+~])(input|select|textarea)\b|#entry-|#idea-text|\.link-(code|token)-/;
+const CONTROL_SELECTOR = /(^|[\s>+~])(input|select|textarea)\b|#idea-text|\.link-(code|token)-/;
 test('no rule that targets a form control sets a font-size under 16px', () => {
   const offenders = [];
   let seen = 0;
@@ -574,7 +574,7 @@ for (const [sel, size] of Object.entries(CALENDAR_SIZES)) {
 // The 3-day view's day headings and its "All day" label are labels in the
 // Week list's style (2026-10-26); its blocks keep Day's compact sizes, so only
 // those two selectors are allowed, not all of tday-.
-const NEW_SCREEN = /\.(today-|tab-|cal-switch|wlist-|capture-|tday-head(?![\w-])|tday-allday-label(?![\w-])|sheet-tags?(?![\w-]))/;
+const NEW_SCREEN = /\.(today-|tab-|cal-switch|wlist-|capture-|cap-(when|field)|status-line|tday-head(?![\w-])|tday-allday-label(?![\w-])|sheet-tags?(?![\w-]))/;
 test('only the new screens read the new type scale', () => {
   const readers = [];
   for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
@@ -1342,4 +1342,23 @@ test('the selected chip is drawn from aria-pressed, in the accent tokens', () =>
   assert.equal(declOf(sel, 'background'), 'var(--accent)');
   assert.equal(declOf(sel, 'color'), 'var(--accent-ink)');
   assert.equal(declOf(sel, 'border-color'), 'var(--accent)');
+});
+
+// --- capture date row (2026-10-27) -------------------------------------------
+test('the status line collapses when empty without leaving the accessibility tree', () => {
+  assert.ok(ruleExists('.status-line:empty'), 'no :empty rule');
+  for (const prop of ['margin', 'padding', 'border']) assert.equal(declOf('.status-line:empty', prop), '0', `${prop} 0 when empty`);
+  assert.equal(declOf('.status-line:empty', 'display'), null, 'never display: none (a live region must stay)');
+  assert.equal(declOf('.status-line', 'display'), null);
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const tag = html.match(/<p id="status-line"[^>]*>([^<]*)<\/p>/);
+  assert.ok(tag, 'fixture check: #status-line in index.html');
+  assert.match(tag[0], /role="status"/);
+  assert.doesNotMatch(tag[0], /\shidden[\s>]/, 'never hidden');
+  assert.equal(tag[1], '', 'empty, with no whitespace, so :empty matches');
+});
+
+test('the capture date row restates [hidden] and its fields are 44px targets', () => {
+  assert.equal(declOf('.cap-when-wrap[hidden]', 'display'), 'none');
+  assert.equal(declOf('.cap-field', 'min-height'), '44px');
 });

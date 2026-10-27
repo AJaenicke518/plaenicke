@@ -165,50 +165,28 @@ header h1 { font-size: 1.7rem; font-style: italic; font-weight: 700; margin: 16p
   min-height: 44px;
 }
 
-/* ---------- add box ---------- */
-.add-box {
+/* ---------- status line (capture date row, 2026-10-27) ---------- */
+/* Every message not about the capture box (was the top add box's #message).
+   Empty, it takes no space: no margin, padding or border. Never display:
+   none, which would take the live region out of the accessibility tree and a
+   region that comes back already filled is often not read out. */
+.status-line {
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  font-family: var(--sans);
+  font-size: var(--text-label);
+  color: var(--ink);
   background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 14px;
-  margin-bottom: 16px;
-  box-shadow: 0 1px 0 var(--line);
-}
-
-#entry-text {
-  width: 100%;
-  font-size: 1rem;
-  font-family: inherit;
-  padding: 12px;
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
-  background: var(--card);
-  color: var(--ink);
 }
-
-.text-row { display: flex; gap: 8px; align-items: stretch; }
-.text-row #entry-text { flex: 1; }
-
-.hint { color: var(--muted); font-size: 0.8rem; margin: 8px 0 0; }
-
-.add-row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
-#entry-date, #entry-time, #entry-end {
-  flex: 1;
-  min-width: 90px;
-  font-size: 1rem;
-  font-family: inherit;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-  background: var(--card);
-  color: var(--ink);
-}
+.status-line:empty { margin: 0; padding: 0; border: 0; }
 
 /* The manual add's type chips (option A, Alex 2026-10-26; js/typechips.js).
    The selected state is read from aria-pressed, so what the eye sees and what
    a screen reader hears cannot drift apart. [hidden] is restated: an author
    display beats the browser's own [hidden] rule. */
-.type-chips { margin-top: 10px; }
+.type-chips { margin-top: var(--space-2); }
 .type-chips[hidden] { display: none; }
 .type-chip-group { display: flex; flex-wrap: wrap; gap: 6px; }
 /* A 24% basis: Event, Deadline, To-do and More share one row at 375px, and
@@ -827,7 +805,6 @@ button[data-press].pressed { opacity: 1; }
 
 /* ---------- preview (restyled) ---------- */
 
-#preview { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 14px; margin-bottom: 16px; }
 /* Stacked per-item card: title full-width, then date/type/times wrapping below.
    Five controls in one row measure ~112px too wide for an iPhone — don't regress this. */
 .preview-row { border-bottom: 1px solid var(--line); padding-bottom: 8px; margin-bottom: 10px; }
@@ -1211,6 +1188,43 @@ button[data-press].pressed { opacity: 1; }
 .capture-actions .cancel { background: var(--card); color: var(--ink); border: 1px solid var(--line); }
 .capture-type { min-height: 44px; margin-top: var(--space-2); }
 .capture-preview { margin-top: var(--space-3); }
+/* The capture box's date row (mockup C2): date and optional time side by
+   side, the chips under them once a date is picked. Each .cap-field is a
+   label wrapping its input, so "Date" shows while an iOS date box is empty.
+   16px inputs, 44px targets. [hidden] is restated: an author display beats
+   the browser's own [hidden] rule. */
+.cap-when-wrap[hidden] { display: none; }
+.cap-when { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); margin-top: var(--space-2); }
+.cap-field {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 var(--space-2) 0 var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--card);
+}
+.cap-field span {
+  font-family: var(--sans);
+  font-size: var(--text-label);
+  letter-spacing: var(--label-tracking);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.cap-field input {
+  flex: 1;
+  min-width: 0;
+  min-height: 42px;
+  font-size: 16px;
+  font-family: var(--sans);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--ink);
+}
 
 /* ---------- the tick moment (rewards concept 1, Alex 2026-10-26) ----------
    The render right after a tick marks that row .tick-just (Today and To-do;
