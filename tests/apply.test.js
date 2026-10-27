@@ -7380,7 +7380,7 @@ test('vis: a calendar removed while its sheet is open: the switch stays put, say
     console.error = origError;
     assert.equal(switchFor('list').getAttribute('aria-checked'), 'true', 'nothing saved, so the switch did not move');
     const err = sheetHost().querySelector('.sheet-vis-error');
-    assert.equal(err.textContent, 'This calendar is no longer linked on this device, so this can’t be changed. Close and reopen.');
+    assert.equal(err.textContent, 'This calendar is no longer linked on this device, so this can’t be changed.');
     assert.equal(localStorage.getItem(VIS_KEY), null, 'nothing stored');
   } finally {
     console.error = origError;

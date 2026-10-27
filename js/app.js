@@ -696,7 +696,7 @@ function changeSeriesVisibility(item, surface, shown) {
     // logged by name and shown as one.
     console.error('plaenicke: a visibility change was not saved', e && e.name);
     if (e instanceof UnlinkedCalendarError) {
-      return { ok: false, error: 'This calendar is no longer linked on this device, so this can’t be changed. Close and reopen.' };
+      return { ok: false, error: 'This calendar is no longer linked on this device, so this can’t be changed.' };
     }
     if (e instanceof QuotaError) return { ok: false, error: 'This device is out of storage, so that wasn’t saved.' };
     return { ok: false, error: `That wasn’t saved (${e && e.name ? e.name : 'error'}).` };
