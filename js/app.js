@@ -321,8 +321,7 @@ function handleManualAdd(type) {
     addItems([{ title, date, type, time: els.time.value || null, endTime: els.end.value || null }]);
   } catch (e) { setMessage(e.message); return 'failed'; }
   els.text.value = ''; els.date.value = ''; els.time.value = ''; els.end.value = ''; els.end.hidden = true;
-  typeChips.reset();
-  syncTypeRow();
+  syncTypeRow(); // the date is now empty: hides the chips and puts them back on Event
   setMessage('Added.');
   return 'added';
 }

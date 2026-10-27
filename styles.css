@@ -192,6 +192,17 @@ header h1 { font-size: 1.7rem; font-style: italic; font-weight: 700; margin: 16p
 .hint { color: var(--muted); font-size: 0.8rem; margin: 8px 0 0; }
 
 .add-row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+#entry-date, #entry-time, #entry-end {
+  flex: 1;
+  min-width: 90px;
+  font-size: 1rem;
+  font-family: inherit;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--card);
+  color: var(--ink);
+}
 
 /* The manual add's type chips (option A, Alex 2026-10-26; js/typechips.js).
    The selected state is read from aria-pressed, so what the eye sees and what
@@ -216,17 +227,6 @@ header h1 { font-size: 1.7rem; font-style: italic; font-weight: 700; margin: 16p
 .type-chip[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .type-chip.type-more { flex: 0 0 auto; color: var(--muted); }
 .type-chip[hidden] { display: none; }
-#entry-date, #entry-time, #entry-end {
-  flex: 1;
-  min-width: 90px;
-  font-size: 1rem;
-  font-family: inherit;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-  background: var(--card);
-  color: var(--ink);
-}
 
 button {
   font-size: 1rem;

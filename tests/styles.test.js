@@ -1341,4 +1341,5 @@ test('the selected chip is drawn from aria-pressed, in the accent tokens', () =>
   const sel = '.type-chip[aria-pressed="true"]';
   assert.equal(declOf(sel, 'background'), 'var(--accent)');
   assert.equal(declOf(sel, 'color'), 'var(--accent-ink)');
+  assert.equal(declOf(sel, 'border-color'), 'var(--accent)');
 });

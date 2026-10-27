@@ -836,6 +836,7 @@ test('manual type: the chips show only while a date is picked', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
   try {
+    clearAddBox(); // this test must not depend on what an earlier one left in the box
     assert.equal(entryTypes().hidden, true, 'no date: no chips (the sentence goes to smart add)');
     assert.ok(typeChip('event'), 'fixture check: app.js built the chips into #entry-types');
     pickDate(far(0));
