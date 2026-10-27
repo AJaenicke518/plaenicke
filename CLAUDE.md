@@ -18,7 +18,7 @@ A personal calendar/to-do PWA. Vanilla ES modules — **no framework, no build s
 ## Deploying
 
 - **There is no CI workflow. GitHub Pages serves `main` directly, so merging to `main` IS the deploy.** Treat a merge as a production release.
-- The Worker deploys separately via `wrangler`. Expect **~20s of edge propagation** — the first smoke test after a deploy can hit the old version and look like a broken release.
+- The Worker deploys separately via `wrangler`. Expect **~20s of edge propagation**. **Bump `worker/src/version.js` by hand on every Worker deploy**, then confirm with `curl -s <WORKER_URL>/version` (free). `npm run smoke:worker` checks `/version` first and makes no paid calls on a mismatch, so it can no longer pass against the old deploy — unless the bump was forgotten.
 
 ## Before you touch sync
 
