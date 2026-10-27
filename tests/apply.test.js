@@ -6819,6 +6819,73 @@ test('a tick whose render throws after the save still schedules its sync, and th
   seed([]);
 });
 
+// Stage 3 round-2 re-review leftover (3): handleToggleDone's catch assumed
+// setDone had restored the record. When the save succeeded and render() then
+// threw, it showed the render error as though the tick had failed, and its
+// second render rethrew. A tick that saved is not reported as failed: the
+// message says it saved and asks for a reload. The render error still
+// reaches the caller (no swallow), and render is not run a second time.
+test('a tick that saved but whose render throws says it saved, rethrows the render error, and renders once', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'lo3-saved', type: 'task', title: 'lo3 render throws', date: '2099-01-01' })]);
+  clearMessage();
+  const dateEl = globalThis.document.getElementById('today-date');
+  const unbreak = () => { delete dateEl.textContent; dateEl.textContent = ''; };
+  let renders = 0;
+  try {
+    const box = checkboxFor(todoList(), 'lo3 render throws');
+    box.checked = true;
+    Object.defineProperty(dateEl, 'textContent', {
+      configurable: true, get: () => '', set: () => { renders += 1; throw new Error('lo3 render failed'); },
+    });
+    assert.throws(() => fire(box, 'change'), /lo3 render failed/, 'the render error surfaces');
+  } finally {
+    unbreak();
+  }
+  assert.equal(storedById('lo3-saved').done, true, 'fixture check: the save succeeded');
+  assert.equal(messageText(), "Saved, but the screen couldn't update — reload.",
+    'a tick that saved is not reported as failed');
+  assert.equal(renders, 1, 'render is not run a second time');
+  clearMessage();
+  seed([]);
+});
+
+// Stage 3 leftovers follow-up (2026-10-26): a tick on a box whose item is
+// gone (sync removed it before the box was re-rendered). setDone's
+// `idx < 0` returns quietly: nothing is saved, no error is shown, and
+// handleToggleDone still re-renders from `items`, so the stale box goes away.
+test('a tick on a box whose item is gone saves nothing, shows no error, and re-renders', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'lo3-gone', type: 'task', title: 'lo3 gone', date: '2099-01-01' })]);
+  const box = checkboxFor(todoList(), 'lo3 gone');
+  assert.ok(box, 'fixture check: the box is shown');
+  seed([]);
+  clearMessage();
+  const sentinel = globalThis.document.createElement('div');
+  todoList().appendChild(sentinel);
+  box.checked = true;
+  // Count writes, not stored contents: a save of the same [] that seed([])
+  // stored would leave loadItems() unchanged.
+  const real = localStorage.setItem.bind(localStorage);
+  let itemWrites = 0;
+  localStorage.setItem = (k, v) => {
+    if (k === 'plaenicke.items') itemWrites += 1;
+    return real(k, v);
+  };
+  try {
+    assert.doesNotThrow(() => fire(box, 'change'), 'a missing item is not an error');
+  } finally {
+    localStorage.setItem = real;
+  }
+  assert.equal(messageText(), '', 'no error is shown');
+  assert.equal(itemWrites, 0, 'nothing is saved');
+  assert.ok(!todoList().children.includes(sentinel), 'the page was re-rendered from items');
+  clearMessage();
+  seed([]);
+});
+
 // Final fixes 2, C4: a tick re-renders every page, so the checkbox that had
 // focus is gone and keyboard focus fell to the page. After a tick on Today,
 // focus goes to the NEW box in the row for the same item, found the way
@@ -6920,6 +6987,44 @@ test('To-do: a tick from a box without focus moves no focus', async () => {
   }
   seed([]);
 });
+
+// Stage 3 round-2 re-review leftover (1): toggleDoneKeepingFocus moves focus
+// only when the focused box belongs to the row that was ticked (`=== id`).
+// Under the mutant "any owner" (`!== null`) every earlier test still passed:
+// they tick the focused row, or focus something that is not a box. Here row
+// Y's box has focus and row X is ticked; focus must not move to X's box.
+for (const [page, tab, list, date] of [
+  ['Today', 'tab-today', () => todayBody(), () => localISO(new Date())],
+  ['To-do', 'tab-todo', () => todoList(), () => '2099-01-01'],
+]) {
+  test(`${page}: ticking row X while row Y's box has focus does not move focus to X's box`, async () => {
+    installFakeLocalStorage();
+    await import('../js/app.js');
+    const restore = visiblePageButton();
+    const doc = globalThis.document;
+    seed([
+      record({ id: 'lo1-x', type: 'task', title: 'lo1 Row X', date: date() }),
+      record({ id: 'lo1-y', type: 'task', title: 'lo1 Row Y', date: date() }),
+    ]);
+    try {
+      click(doc.getElementById(tab));
+      const boxY = checkboxFor(list(), 'lo1 Row Y');
+      const boxX = checkboxFor(list(), 'lo1 Row X');
+      assert.ok(boxX && boxY, 'fixture check: both rows show a box');
+      boxY.focus();
+      boxX.checked = true;
+      fire(boxX, 'change');
+      const againX = checkboxFor(list(), 'lo1 Row X');
+      assert.ok(againX && againX !== boxX, 'fixture check: the tick re-rendered row X, which still shows');
+      assert.notEqual(doc.activeElement, againX, 'focus must not move to the ticked row\'s box');
+      assert.equal(doc.activeElement, boxY, 'focus is left where the user put it');
+    } finally {
+      doc.activeElement = null;
+      if (restore) click(restore);
+    }
+    seed([]);
+  });
+}
 
 // --- stage 4: a stale preview cannot be confirmed (home-screen spec § 3 step 8)
 //
