@@ -2,7 +2,7 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { makeFakeDocument, findAll } from './fake-dom.js';
-import { createTypeChips, PRIMARY_TYPES, MORE_TYPES } from '../js/typechips.js';
+import { createTypeChips, assertOffered, PRIMARY_TYPES, MORE_TYPES } from '../js/typechips.js';
 import { TYPE_LABELS } from '../js/itemsheet.js';
 import { TYPES } from '../js/preview.js';
 
@@ -77,13 +77,18 @@ test('Start and Milestone are hidden until More; More reveals them and hides its
   assert.equal(more.getAttribute('aria-expanded'), 'false');
   for (const t of MORE_TYPES) assert.equal(chipFor(host, t).hidden, true, `${t} hidden before More`);
   for (const t of PRIMARY_TYPES) assert.equal(chipFor(host, t).hidden, false, `${t} shown`);
+  more.focus();
   more.click();
   for (const t of MORE_TYPES) assert.equal(chipFor(host, t).hidden, false, `${t} shown after More`);
+  assert.equal(globalThis.document.activeElement, chipFor(host, 'start'),
+    'focus moves to Start, since the focused More just hid itself');
   assert.equal(more.getAttribute('aria-expanded'), 'true');
   assert.equal(more.hidden, true, 'More hides itself, so a selected Start or Milestone can never be folded away');
   chipFor(host, 'milestone').click();
   assert.equal(chips.value(), 'milestone');
   assert.deepEqual(pressed(host), ['milestone']);
+  assert.equal(chipFor(host, 'milestone').hidden, false, 'a selected Milestone stays in sight');
+  assert.equal(more.hidden, true, 'and More stays gone');
 });
 
 test('reset() goes back to Event and folds More away again', () => {
@@ -105,25 +110,75 @@ test('a second createTypeChips on the same host replaces the chips, never double
   assert.equal(buttons(host).filter((b) => b.dataset.type === 'event').length, 1);
 });
 
-// NO FIFTH COPY OF THE TYPE LIST (CLAUDE.md, "copied FOUR times"). The labels
-// live in itemsheet.js's TYPE_LABELS, and the chips read them from there. A
-// label literal anywhere else in js/ is a new copy that would drift: this
-// scan fails on it. 'Event', 'Start' and 'To-do' are ordinary words used
-// elsewhere (a field label, a tab title), so the scan takes the two labels
-// that only ever name a type.
+// The chip text is READ from TYPE_LABELS when the chips are built, not merely
+// equal to it today: change the table and the chips follow.
+test('the chips read their text from itemsheet.js TYPE_LABELS at build time', () => {
+  const saved = TYPE_LABELS.due;
+  try {
+    TYPE_LABELS.due = 'Relabelled';
+    const { host } = mount();
+    assert.equal(chipFor(host, 'due').textContent, 'Relabelled');
+  } finally {
+    TYPE_LABELS.due = saved;
+  }
+});
+
+test('assertOffered throws on a type it does not know, or one with no label (no raw-value chip)', () => {
+  assert.throws(() => assertOffered(['event', 'nope'], TYPES, TYPE_LABELS), /nope is not a known type/);
+  assert.throws(() => assertOffered(['event'], TYPES, { due: 'x' }), /no label for type event/);
+  assert.doesNotThrow(() => assertOffered([...PRIMARY_TYPES, ...MORE_TYPES], TYPES, TYPE_LABELS));
+});
+
+// NO FIFTH COPY OF THE TYPE LIST (CLAUDE.md, "copied FOUR times"). Two scans
+// over every file under js/ (recursively) and index.html:
+// - LABELS: only itemsheet.js may spell Deadline or Milestone, the two labels
+//   that only ever name a type ('Event', 'Start' and 'To-do' are ordinary
+//   words used elsewhere: a field label, a tab title). Comments are NOT
+//   stripped, so no string containing '//' can hide a copy; a comment that
+//   quotes a label has to be reworded.
+// - VALUES: no string-literal list holding three or more of TYPES' values,
+//   outside the known holders: preview.js (TYPES), items.js (TODO_TYPES) and
+//   typechips.js (the offered subset).
+// What they cannot see: a label built by concatenation, or a relabelled
+// copy written as a map with fewer than three values. A reviewer still has to.
+function sourcesUnder(dirUrl, out = []) {
+  for (const ent of readdirSync(dirUrl, { withFileTypes: true })) {
+    if (ent.isDirectory()) sourcesUnder(new URL(`${ent.name}/`, dirUrl), out);
+    else if (ent.name.endsWith('.js')) out.push({ name: ent.name, src: readFileSync(new URL(ent.name, dirUrl), 'utf8') });
+  }
+  return out;
+}
+const SOURCES = [
+  ...sourcesUnder(new URL('../js/', import.meta.url)),
+  { name: 'index.html', src: readFileSync(new URL('../index.html', import.meta.url), 'utf8') },
+];
+
 test('the type labels are written down once: only itemsheet.js spells Deadline or Milestone', () => {
-  const dir = new URL('../js/', import.meta.url);
+  assert.ok(SOURCES.length >= 30, `fixture check: scanned only ${SOURCES.length} files`);
+  const label = /['"`>](Deadline|Milestone)['"`<]/;
   const offenders = [];
-  let scanned = 0;
-  for (const name of readdirSync(dir).filter((n) => n.endsWith('.js'))) {
-    scanned += 1;
-    const src = readFileSync(new URL(name, dir), 'utf8').replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  for (const { name, src } of SOURCES) {
     if (name === 'itemsheet.js') {
-      assert.match(src, /['"]Deadline['"]/, 'fixture check: the scan can see the real table');
+      assert.match(src, label, 'fixture check: the scan can see the real table');
       continue;
     }
-    if (/['"`]Deadline['"`]|['"`]Milestone['"`]/.test(src)) offenders.push(name);
+    if (label.test(src)) offenders.push(name);
   }
-  assert.ok(scanned >= 30, `fixture check: scanned only ${scanned} files`);
+  assert.deepEqual(offenders, []);
+});
+
+test('no new list of type values: only preview.js, items.js and typechips.js hold three or more', () => {
+  const holders = new Set(['preview.js', 'items.js', 'typechips.js']);
+  const lists = (src) => [...src.matchAll(/\[([^[\]]*)\]/g)]
+    .map((m) => [...m[1].matchAll(/['"`]([a-z]+)['"`]/g)].map((x) => x[1]).filter((v) => TYPES.includes(v)))
+    .filter((vals) => new Set(vals).size >= 3);
+  const offenders = [];
+  for (const { name, src } of SOURCES) {
+    if (holders.has(name)) {
+      if (name === 'preview.js') assert.ok(lists(src).length >= 1, 'fixture check: the scan can see TYPES');
+      continue;
+    }
+    if (lists(src).length) offenders.push(name);
+  }
   assert.deepEqual(offenders, []);
 });

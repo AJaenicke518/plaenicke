@@ -32,11 +32,17 @@ function chip(value) {
 // Builds the chips into `host`, replacing whatever it held. Returns
 // { value(), reset() }: value() is the selected type's value; reset() selects
 // Event again and folds Start and Milestone back behind More.
-export function createTypeChips(host) {
-  for (const t of [...PRIMARY_TYPES, ...MORE_TYPES]) {
-    if (!TYPES.includes(t)) throw new Error(`createTypeChips: ${t} is not a known type`);
-    if (!Object.prototype.hasOwnProperty.call(TYPE_LABELS, t)) throw new Error(`createTypeChips: no label for type ${t}`);
+// Throws unless every offered value is a known type with a label. Exported
+// so the guard itself is tested (tests/typechips.test.js).
+export function assertOffered(offered, known, labels) {
+  for (const t of offered) {
+    if (!known.includes(t)) throw new Error(`createTypeChips: ${t} is not a known type`);
+    if (!Object.prototype.hasOwnProperty.call(labels, t)) throw new Error(`createTypeChips: no label for type ${t}`);
   }
+}
+
+export function createTypeChips(host) {
+  assertOffered([...PRIMARY_TYPES, ...MORE_TYPES], TYPES, TYPE_LABELS);
 
   host.innerHTML = '';
   const group = document.createElement('div');
@@ -68,7 +74,12 @@ export function createTypeChips(host) {
   for (const b of chips) {
     b.addEventListener('click', () => { selected = b.dataset.type; paint(); });
   }
-  more.addEventListener('click', () => { fold(true); });
+  // The focused More hides itself, so focus moves to the first chip it
+  // revealed; otherwise a keyboard or screen-reader user lands on <body>.
+  more.addEventListener('click', () => {
+    fold(true);
+    chips.find((b) => b.dataset.type === MORE_TYPES[0]).focus();
+  });
 
   group.append(...chips, more);
   host.appendChild(group);
