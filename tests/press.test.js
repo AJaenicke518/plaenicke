@@ -30,15 +30,28 @@ function el(tag, { parent = null, press = false, disabled = false } = {}) {
   };
 }
 
+// EventTarget's capture flag: a boolean, or an options object's `capture`.
+function captureOf(opts) { return typeof opts === 'boolean' ? opts : Boolean(opts && opts.capture); }
+
 function fakeRoot() {
   const listeners = {};
   const options = {};
   return {
     listeners,
     options,
-    addEventListener(type, fn, opts) { (listeners[type] ||= []).push(fn); options[type] = opts; },
-    removeEventListener(type, fn) { listeners[type] = (listeners[type] || []).filter((f) => f !== fn); },
-    fire(type, ev) { for (const fn of listeners[type] || []) fn({ pointerId: 1, isPrimary: true, button: 0, clientX: 0, clientY: 0, ...ev }); },
+    // As the DOM does: a listener is matched by type, function AND capture
+    // flag, so a removal without the capture option it was added with removes
+    // nothing. (The first version of this fake matched on the function alone,
+    // so an uninstall that forgot `capture: true` still passed.)
+    addEventListener(type, fn, opts) {
+      (listeners[type] ||= []).push({ fn, capture: captureOf(opts) });
+      options[type] = opts;
+    },
+    removeEventListener(type, fn, opts) {
+      const capture = captureOf(opts);
+      listeners[type] = (listeners[type] || []).filter((l) => !(l.fn === fn && l.capture === capture));
+    },
+    fire(type, ev) { for (const { fn } of listeners[type] || []) fn({ pointerId: 1, isPrimary: true, button: 0, clientX: 0, clientY: 0, ...ev }); },
   };
 }
 
@@ -161,4 +174,44 @@ test('press: uninstall removes every listener and clears a press in progress', (
   uninstall();
   assert.ok(!b.classList.contains('pressed'));
   for (const type of PRESS_EVENTS) assert.equal(root.listeners[type].length, 0, type);
+});
+
+// Daily fixes 2026-10-27: uninstall must remove with the same capture flag it
+// added with, or the browser keeps every listener. The fake now matches on
+// the flag, so this fails if uninstall drops `capture: true`.
+test('press: uninstall removes the capture-phase listeners — a later touch presses nothing', () => {
+  const { root, uninstall } = setup();
+  for (const type of PRESS_EVENTS) {
+    assert.equal(root.listeners[type].length, 1, `fixture check: ${type} is installed once`);
+    assert.equal(root.listeners[type][0].capture, true, `fixture check: ${type} is a capture listener`);
+  }
+  uninstall();
+  for (const type of PRESS_EVENTS) assert.equal(root.listeners[type].length, 0, type);
+  const b = el('button');
+  root.fire('pointerdown', { target: b });
+  assert.ok(!b.classList.contains('pressed'), 'nothing is listening any more');
+});
+
+test('press: the fake root matches removals on the capture flag, as the DOM does', () => {
+  const root = fakeRoot();
+  const fn = () => {};
+  root.addEventListener('pointerdown', fn, { capture: true });
+  root.removeEventListener('pointerdown', fn, { passive: true });
+  root.removeEventListener('pointerdown', fn, false);
+  assert.equal(root.listeners.pointerdown.length, 1, 'a bubble-phase removal leaves the capture listener');
+  root.removeEventListener('pointerdown', fn, true);
+  assert.equal(root.listeners.pointerdown.length, 0);
+});
+
+// Daily fixes 2026-10-27: only the pointer that pressed can end the press —
+// pointerleave included. A second finger leaving the pressed button must not
+// clear the first finger's press.
+test('press: another pointer leaving the pressed element does not end the press', () => {
+  const { root } = setup();
+  const b = el('button');
+  root.fire('pointerdown', { target: b, pointerId: 7 });
+  root.fire('pointerleave', { target: b, pointerId: 8 });
+  assert.ok(b.classList.contains('pressed'), 'pointer 8 never pressed it');
+  root.fire('pointerleave', { target: b, pointerId: 7 });
+  assert.ok(!b.classList.contains('pressed'), 'pointer 7 leaving ends it');
 });

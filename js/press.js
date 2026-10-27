@@ -49,8 +49,9 @@ export function installPress(root) {
     },
     pointerup(e) { if (pressed && e.pointerId === pointerId) clear(); },
     pointercancel(e) { if (pressed && e.pointerId === pointerId) clear(); },
-    // Leaving a child of the pressed element is not leaving it.
-    pointerleave(e) { if (pressed && e.target === pressed) clear(); },
+    // Leaving a child of the pressed element is not leaving it, and another
+    // pointer leaving the pressed element is not this press ending.
+    pointerleave(e) { if (pressed && e.pointerId === pointerId && e.target === pressed) clear(); },
   };
 
   const opts = { capture: true, passive: true };
