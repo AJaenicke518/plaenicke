@@ -946,8 +946,8 @@ button[data-press].pressed { opacity: 1; }
 /* ---------- the tick moment (rewards concept 1, Alex 2026-10-26) ----------
    The render right after a tick marks that row .tick-just (Today and To-do;
    js/todayview.js, js/todoview.js) and wraps its title text in .tick-strike.
-   About a third of a second: a wash of the accent over the row, a pop of the
-   box, and the strike drawn left to right across the text. It plays where
+   A wash of the accent over the row that fades out over 900 ms, a 260 ms pop of the
+   box, and the strike drawn left to right across the text in 320 ms. It plays where
    the row lands. Every rule is inside no-preference, so with Reduce Motion
    on the page is exactly what it was: the span is plain inline text and the
    row's own line-through strikes it. The wash is an inset shadow, not a
