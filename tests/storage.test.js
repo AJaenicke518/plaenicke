@@ -395,6 +395,23 @@ test('saveSyncState converts a quota failure to QuotaError', () => {
   assert.throws(() => saveSyncState({ version: 1 }), (e) => e.name === 'QuotaError');
 });
 
+// sync-safety 2026-10-27: saveAuth was the one writer that let the raw
+// DOMException through, so a quota failure while linking named itself
+// differently from every other storage failure.
+test('saveAuth converts a quota failure to QuotaError', () => {
+  const ls = installFakeLocalStorage();
+  ls.setItem = () => { const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; };
+  assert.throws(() => saveAuth('code'), (e) => e.name === 'QuotaError');
+});
+
+test('saveAuth rethrows a non-quota failure unchanged', () => {
+  const ls = installFakeLocalStorage();
+  const blocked = new Error('blocked');
+  blocked.name = 'SecurityError';
+  ls.setItem = () => { throw blocked; };
+  assert.throws(() => saveAuth('code'), (e) => e === blocked);
+});
+
 // saveSyncState must merge over the CURRENT persisted state, not the zero
 // state: a caller doing a routine partial update (e.g. {version, lastSyncedAt}
 // after a sync) must not silently reset adoptionPending to false and lift

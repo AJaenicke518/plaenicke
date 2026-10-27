@@ -262,7 +262,7 @@ async function syncOnceExclusive(deps) {
     // loadSyncState().version — so "apply before advancing the cursor"
     // guards a write-only field. The real non-atomicity is inside applyState
     // itself (app.js's applySyncedState makes three separate writes).
-    merged = applyState(merged) || merged;
+    merged = applyState(merged, now()) || merged;
     // From here the local write HAS happened, so everything below reports a
     // device that has already changed.
     applied = true;
@@ -353,7 +353,7 @@ async function syncOnceExclusive(deps) {
       // already true. A second assignment would be dead — and dead code that
       // no mutant can reach is exactly what makes a flag look tested when it
       // is not.
-      merged = applyState(merged) || merged;
+      merged = applyState(merged, now()) || merged;
     } catch (err) {
       // A local apply failure is NOT 'undecryptable' — the remote data was
       // read fine. Same condition as the main path gets the same label.
