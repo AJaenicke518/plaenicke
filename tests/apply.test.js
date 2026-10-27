@@ -1582,6 +1582,35 @@ test('resuming leaves a Day view the user moved elsewhere where they put it', as
   assert.equal(dayLabel.textContent, labelFor(new Date()), 'restored for later tests');
 });
 
+// Every showView re-renders every page, so leaving Day re-draws its grid while
+// the page is hidden. A browser reports scrollTop 0 for a hidden grid, and the
+// fake keeps whatever was written, so the test writes 0 the way the browser
+// would. Day used to keep "this day was already shown" across that hidden
+// render, so coming back skipped the 7 AM scroll and restored the 0: the grid
+// opened at midnight (reproduced in Chrome on main, 2026-10-26).
+test('Day: coming back to Calendar opens the grid at 7 AM again, not at midnight', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  const grid = () => dayBody().querySelector('.day-grid');
+  try {
+    click(doc.getElementById('show-day'));
+    assert.equal(doc.getElementById('day-view').hidden, false, 'fixture check: Day is showing');
+    grid().scrollTop = 600;
+    seed([]); // a re-render while Day stays visible keeps the user's place
+    assert.equal(grid().scrollTop, 600, 'a visible re-render keeps the scroll');
+    click(doc.getElementById('tab-today'));
+    assert.equal(doc.getElementById('day-view').hidden, true, 'fixture check: Day is hidden');
+    grid().scrollTop = 0; // drawn while hidden: what a browser reports
+    click(doc.getElementById('tab-calendar'));
+    assert.equal(doc.getElementById('day-view').hidden, false, 'fixture check: Calendar opened on Day');
+    assert.equal(grid().scrollTop, 7 * 48);
+  } finally {
+    if (restore) click(restore);
+  }
+});
+
 test('resuming re-fetches calendar feeds whose cache is stale', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
