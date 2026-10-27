@@ -127,6 +127,12 @@ export class FakeElement {
     globalThis.document.activeElement = this;
     globalThis.document.lastFocusOptions = options;
   }
+
+  // As a browser does: only the focused element gives focus up. Fires no
+  // event, as focus() fires none here; a test that needs one fires it.
+  blur() {
+    if (globalThis.document.activeElement === this) globalThis.document.activeElement = null;
+  }
 }
 
 export function makeFakeDocument() {
