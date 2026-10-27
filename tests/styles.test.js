@@ -522,6 +522,25 @@ for (const sel of INPUT_RULES) {
 }
 
 const CONTROL_SELECTOR = /(^|[\s>+~])(input|select|textarea)\b|#entry-|#idea-text|\.link-(code|token)-/;
+
+// The size in a `font:` shorthand: the length before the family (and before
+// an optional `/line-height`). A CSS-wide keyword (`font: inherit`, which the
+// sheet and Ideas box use) names no size of its own and returns CSS_WIDE;
+// those rules set font-size on the next line, which the scan reads. Anything
+// else with no readable size returns null and is reported, never skipped.
+const CSS_WIDE = Symbol('css-wide keyword');
+function fontShorthandSize(value) {
+  if (/^(inherit|initial|unset|revert|revert-layer)$/i.test(value)) return CSS_WIDE;
+  const m = /(?:^|\s)(\d*\.?\d+[a-z%]+)(?:\/\S+)?\s/i.exec(value);
+  return m ? m[1] : null;
+}
+
+test('fontShorthandSize reads the size out of a font shorthand', () => {
+  assert.equal(fontShorthandSize('14px x'), '14px');
+  assert.equal(fontShorthandSize('italic 600 0.8rem/1.2 Georgia, serif'), '0.8rem');
+  assert.equal(fontShorthandSize('inherit'), CSS_WIDE);
+  assert.equal(fontShorthandSize('menu'), null, 'a system font has no readable size, so it is reported');
+});
 test('no rule that targets a form control sets a font-size under 16px', () => {
   const offenders = [];
   let seen = 0;
@@ -531,9 +550,19 @@ test('no rule that targets a form control sets a font-size under 16px', () => {
     seen += 1;
     for (const decl of body.split(';')) {
       const i = decl.indexOf(':');
-      if (i < 0 || decl.slice(0, i).trim().toLowerCase() !== 'font-size') continue;
+      if (i < 0) continue;
+      const prop = decl.slice(0, i).trim().toLowerCase();
       const value = decl.slice(i + 1).trim();
-      if (px(value) < 16) offenders.push(`${sel.trim()}: ${value}`);
+      if (prop === 'font-size') {
+        if (px(value) < 16) offenders.push(`${sel.trim()}: ${value}`);
+      } else if (prop === 'font') {
+        // The shorthand sets a size too (daily fixes 2026-10-27): `font: 14px x`
+        // zooms the page exactly as `font-size: 14px` does.
+        const size = fontShorthandSize(value);
+        if (size === CSS_WIDE) continue;
+        if (size === null) offenders.push(`${sel.trim()}: font: ${value} (no readable size)`);
+        else if (px(size) < 16) offenders.push(`${sel.trim()}: font: ${value}`);
+      }
     }
   }
   assert.ok(seen >= 10, `fixture check: the scan found only ${seen} control rules`);
