@@ -6847,7 +6847,11 @@ test('a tick whose render throws after the save still schedules its sync, and th
     unbreak();
     assert.equal(storedById('ff2-c9').done, true, 'fixture check: the save succeeded');
     t.mock.timers.tick(2000);
-    for (let i = 0; i < 50; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    // Poll for the PUT, never a fixed count of turns: between the GET and the
+    // PUT, syncOnce decrypts, merges and encrypts through WebCrypto, which
+    // completes on the thread pool. A fixed 50 turns ran out with only the GET
+    // sent in 4 of 90 runs under load (2026-10-26).
+    await drainUntil(() => requests.some((r) => r.url.includes('/data') && r.method === 'PUT'));
   } finally {
     unbreak();
     await resetMockTimers(t);
