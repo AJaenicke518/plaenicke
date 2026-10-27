@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 const smoke = await import('../scripts/smoke-worker.mjs');
 const fetchesDuringImport = offlineFetchCalls();
 const {
-  PHRASES, EXPECTED_ORIGIN, checkResult, runSmoke, formatTable, isMain, MAIN_FETCH, checkVersion,
+  PHRASES, EXPECTED_ORIGIN, checkResult, runSmoke, formatTable, isMain, MAIN_FETCH, checkVersion, runAll,
 } = smoke;
 import { VERSION } from '../worker/src/version.js';
 
@@ -373,4 +373,41 @@ test('checkVersion has no default fetch, url or expected version', async () => {
   await assert.rejects(checkVersion({ url: 'https://w.test', expected: VERSION }), /fetchImpl/);
   await assert.rejects(checkVersion({ fetchImpl: ok, expected: VERSION }), /url/);
   await assert.rejects(checkVersion({ fetchImpl: ok, url: 'https://w.test' }), /expected/);
+});
+
+test('checkVersion fails on a non-200 status even when the body carries the right version', async () => {
+  const r = await checkVersion({ fetchImpl: versionFetch(500, { version: VERSION }).fetchImpl, url: 'https://w.test', expected: VERSION });
+  assert.equal(r.pass, false);
+  assert.ok(r.failures.some((f) => /500/.test(f)));
+});
+
+// --- runAll: the ordering that protects the credits -----------------------------
+
+test('runAll makes ZERO phrase POSTs when the deployed version is wrong', async () => {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    return new Response(JSON.stringify({ version: 'worker-OLD' }), { status: 200 });
+  };
+  const out = await runAll({ fetchImpl, url: 'https://w.test', today: TODAY, expected: VERSION });
+  assert.equal(out.ok, false);
+  assert.equal(out.results, null);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://w.test/version');
+  assert.ok(calls.every((c) => !c.init || c.init.method !== 'POST'));
+});
+
+test('runAll checks the version first, then runs every phrase once', async () => {
+  const order = [];
+  const w = fakeWorker(goodAnswer);
+  const fetchImpl = async (url, init) => {
+    order.push(new URL(url).pathname);
+    if (new URL(url).pathname === '/version') return new Response(JSON.stringify({ version: VERSION }));
+    return w.fetchImpl(url, init);
+  };
+  const out = await runAll({ fetchImpl, url: 'https://w.test', today: TODAY, expected: VERSION });
+  assert.equal(out.ok, true);
+  assert.equal(order[0], '/version');
+  assert.equal(order.length, 1 + PHRASES.length);
+  assert.equal(out.results.length, PHRASES.length);
 });

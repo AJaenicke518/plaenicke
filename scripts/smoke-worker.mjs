@@ -34,7 +34,9 @@
 // worker/src/version.js in THIS checkout. A mismatch means the edge is still
 // serving the old deploy (or the checkout is not the deployed commit): it stops
 // BEFORE spending credits. There is still no retry: wait ~20 s after the deploy
-// and run it again. Against a Worker deployed before /version existed, the
+// and run it again. LIMIT: this proves the edge serves what version.js says; if a
+// Worker change ships without bumping VERSION, the old deploy passes it.
+// Against a Worker deployed before /version existed, the
 // check fails with a 404.
 //
 // Phrases come from worker/src/prompt.js's own instruction examples, on the
@@ -169,6 +171,16 @@ export async function runSmoke({ fetchImpl, url, today, phrases = PHRASES } = {}
   return results;
 }
 
+// The ordering that protects the credits: version first, and phrases only if it
+// matches. Returns { ok, version, results } with results null when the version
+// check failed (no phrase was sent).
+export async function runAll({ fetchImpl, url, today, expected, phrases = PHRASES } = {}) {
+  const version = await checkVersion({ fetchImpl, url, expected });
+  if (!version.pass) return { ok: false, version, results: null };
+  const results = await runSmoke({ fetchImpl, url, today, phrases });
+  return { ok: results.every((r) => r.pass), version, results };
+}
+
 export function formatTable(results) {
   const rows = results.map((r) => [
     r.pass ? 'PASS' : 'FAIL',
@@ -204,17 +216,16 @@ export const MAIN_FETCH = fetchWithTimeout;
 
 async function main() {
   const today = toISO(new Date());
-  console.log(`smoke:worker -> ${WORKER_URL} (today ${today}; ${PHRASES.length} Claude calls)`);
-  const v = await checkVersion({ fetchImpl: MAIN_FETCH, url: WORKER_URL, expected: VERSION });
-  if (!v.pass) {
-    console.log(`VERSION CHECK FAILED (no Claude calls made): ${v.failures.join('; ')}`);
+  console.log(`smoke:worker -> ${WORKER_URL} (today ${today})`);
+  const out = await runAll({ fetchImpl: MAIN_FETCH, url: WORKER_URL, today, expected: VERSION });
+  if (!out.version.pass) {
+    console.log(`VERSION CHECK FAILED (no Claude calls made): ${out.version.failures.join('; ')}`);
     process.exitCode = 1;
     return;
   }
-  console.log(`version ${v.got} confirmed`);
-  const results = await runSmoke({ fetchImpl: MAIN_FETCH, url: WORKER_URL, today });
-  console.log(formatTable(results));
-  process.exitCode = results.every((r) => r.pass) ? 0 : 1;
+  console.log(`version ${out.version.got} confirmed; ${PHRASES.length} Claude calls`);
+  console.log(formatTable(out.results));
+  process.exitCode = out.ok ? 0 : 1;
 }
 
 if (isMain()) await main();

@@ -13,11 +13,14 @@ async function withFetch(stub, fn) {
   try { return await fn(); } finally { globalThis.fetch = original; }
 }
 
+const CHANNELS = ['log', 'info', 'warn', 'error', 'debug'];
 async function captureLog(fn) {
-  const original = console.log;
+  const originals = CHANNELS.map((c) => console[c]);
   const lines = [];
-  console.log = (...args) => lines.push(args.join(' '));
-  try { return { result: await fn(), lines }; } finally { console.log = original; }
+  for (const c of CHANNELS) console[c] = (...args) => lines.push(args.join(' '));
+  try { return { result: await fn(), lines }; } finally {
+    CHANNELS.forEach((c, i) => { console[c] = originals[i]; });
+  }
 }
 
 function smartAdd(text) {
@@ -68,9 +71,12 @@ test('smart-add logs Claude latency in ms and status — and no user text, reply
     stop_reason: 'end_turn',
     content: [{ type: 'text', text: JSON.stringify({ needsReview: false, note: replyMarker, items: [] }) }],
   }), { status: 200 });
-  const { lines } = await captureLog(() => withFetch(stub, () => worker.fetch(smartAdd(userText), ENV)));
+  const delayed = async () => { await new Promise((r) => setTimeout(r, 40)); return stub(); };
+  const { lines } = await captureLog(() => withFetch(delayed, () => worker.fetch(smartAdd(userText), ENV)));
   assert.equal(lines.length, 1);
   assert.match(lines[0], /^smart-add claude_ms=\d+ status=200$/);
+  const ms = Number(/claude_ms=(\d+)/.exec(lines[0])[1]);
+  assert.ok(ms >= 30 && ms < 5000, `claude_ms ${ms} is not a duration`);
   const all = lines.join('\n');
   for (const frag of ['Zorblax', 'dentist', replyMarker, ENV.ANTHROPIC_API_KEY]) {
     assert.ok(!all.includes(frag), `log leaked ${frag}`);
@@ -78,9 +84,11 @@ test('smart-add logs Claude latency in ms and status — and no user text, reply
 });
 
 test('smart-add logs the upstream status on an error reply, and unreachable on a throw', async () => {
-  const bad = await captureLog(() => withFetch(async () => new Response('{}', { status: 529 }),
+  const bad = await captureLog(() => withFetch(async () => new Response('UPSTREAM-BODY-4410', { status: 529 }),
     () => worker.fetch(smartAdd('call mom'), ENV)));
+  assert.equal(bad.lines.length, 1);
   assert.match(bad.lines[0], /^smart-add claude_ms=\d+ status=529$/);
+  assert.ok(!bad.lines.join('\n').includes('UPSTREAM-BODY-4410') && !bad.lines.join('\n').includes('call mom'));
   const down = await captureLog(() => withFetch(async () => { throw new Error('call mom down'); },
     () => worker.fetch(smartAdd('call mom'), ENV)));
   assert.match(down.lines[0], /^smart-add claude_ms=\d+ status=unreachable$/);
@@ -90,4 +98,14 @@ test('smart-add logs the upstream status on an error reply, and unreachable on a
 test('smart-add logs nothing when it never reaches Claude (empty text)', async () => {
   const { lines } = await captureLog(() => worker.fetch(smartAdd('   '), ENV));
   assert.deepEqual(lines, []);
+});
+
+test('an unparseable 200 body from Claude logs no fragment of that body', async () => {
+  const { result: res, lines } = await captureLog(() => withFetch(
+    async () => new Response('REPLY secret text', { status: 200 }),
+    () => worker.fetch(smartAdd('call mom'), ENV)));
+  assert.equal(res.status, 502);
+  assert.deepEqual(await res.json(), { error: 'unparseable_model_output' });
+  assert.ok(!lines.join('\n').includes('secret'), lines.join('\n'));
+  assert.ok(!lines.join('\n').includes('REPLY'));
 });

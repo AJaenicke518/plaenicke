@@ -6,6 +6,7 @@
 //   env.DB                — D1 binding, the sync store and the device table
 //
 // There is no passphrase: POST / is deliberately public (see handleSmartAdd).
+// GET /version is public too: a static deploy marker, no env, no Claude, no D1.
 import { buildRequestBody } from './prompt.js';
 import { normalizeClaudeJson } from './normalize.js';
 import { handleFeed } from './feed.js';
@@ -71,7 +72,14 @@ async function handleSmartAdd(request, env) {
 
   if (!claudeRes.ok) return json({ error: 'upstream_error', status: claudeRes.status }, 502);
 
-  const data = await claudeRes.json();
+  // Its own try: a JSON.parse failure message quotes a fragment of the body,
+  // and the outer catch logs err.message.
+  let data;
+  try {
+    data = await claudeRes.json();
+  } catch {
+    return json({ error: 'unparseable_model_output' }, 502);
+  }
   if (data.stop_reason === 'refusal') return json({ error: 'refused' }, 422);
   if (data.stop_reason === 'max_tokens') return json({ error: 'too_long' }, 413);
 
