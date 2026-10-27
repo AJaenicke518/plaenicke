@@ -1101,9 +1101,36 @@ test('the Ideas box captures a short thought as an idea dated today', async () =
   assert.equal(idea.notes, null, 'a short thought needs no separate body');
   assert.equal(idea.done, false);
   assert.match(idea.date, /^\d{4}-\d{2}-\d{2}$/, "an idea's date is its capture date and is NEVER null");
-  assert.equal(idea.date, idea.createdAt, 'the capture date IS today');
+  assert.equal(idea.createdAt.slice(0, 10), idea.date, 'the capture date IS today (createdAt is that local day plus the time)');
   assert.equal(ideaText().value, '', 'the box must clear so the next thought does not append to this one');
   assert.match(allText(ideaList()), /standing desk/);
+});
+
+// Daily fixes 2026-10-27, item 2: two thoughts captured the same day list
+// newest first. createdAt used to be the date alone, so they tied and the
+// order fell to the random id. Ids are made ascending here so that the old
+// tie-break would put A first: the failure is deterministic, not a coin flip.
+test('the Ideas page lists two same-day ideas newest first', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  let n = 0;
+  t.mock.method(globalThis.crypto, 'randomUUID', () => `00000000-0000-4000-8000-${String(++n).padStart(12, '0')}`);
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 27, 9, 0, 0).getTime() });
+  try {
+    ideaText().value = 'Idea A first thought';
+    click(ideaAdd());
+    t.mock.timers.tick(5 * 60 * 1000);
+    ideaText().value = 'Idea B five minutes later';
+    click(ideaAdd());
+  } finally {
+    t.mock.timers.reset();
+  }
+  const stored = loadItems();
+  assert.equal(stored.length, 2);
+  assert.ok(stored[0].id < stored[1].id, 'fixture check: A has the smaller id');
+  assert.equal(stored[0].date, stored[1].date, 'fixture check: same capture day');
+  assert.match(allText(ideaList()), /Idea B five minutes later[\s\S]*Idea A first thought/, 'B, captured later, is listed first');
 });
 
 test('the Ideas box keeps the complete text of a long thought in notes', async () => {

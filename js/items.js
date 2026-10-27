@@ -73,13 +73,27 @@ export function isTodo(it) { return isTodoType(it) && it.done !== true; }
 export function isTodoType(it) { return TODO_TYPES.has(it.type); }
 
 // Ideas are ordered newest-first: an idea's `date` is when it was captured, so
-// nothing else about it is chronological. Tie-broken by id so two renders of
-// the same set never disagree.
+// nothing else about it is chronological. createdAt is compared whole: since
+// 2026-10-27 it carries the local capture time, so same-day ideas order by
+// when (a date-only createdAt from before then sorts below that day's stamped
+// ones). Tie-broken by id so two renders of the same set never disagree.
 export function sortIdeasNewestFirst(items) {
   return [...items].sort((a, b) => {
     if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? 1 : -1;
     return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   });
+}
+
+// createdDay: the key sortItemsByDate compares createdAt by. New own records
+// carry a local stamp 'YYYY-MM-DDTHH:MM:SS.sss' (js/dateparse.js localStamp);
+// compared whole, it would sort an item added today AFTER that day's all-day
+// feed events (whose createdAt is '<date>T00:00', js/feeds.js) and order two
+// same-day records by clock instead of title. Its day alone reproduces exactly
+// the order the date-only createdAt gave. Only that exact shape is cut: a
+// date-only stamp and a feed instance's stamp are compared as they are.
+const LOCAL_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}$/;
+function createdDay(it) {
+  return typeof it.createdAt === 'string' && LOCAL_STAMP.test(it.createdAt) ? it.createdAt.slice(0, 10) : it.createdAt;
 }
 
 export function sortItemsByDate(items) {
@@ -91,7 +105,8 @@ export function sortItemsByDate(items) {
       if (bt === null) return 1;
       return at < bt ? -1 : 1;
     }
-    if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? -1 : 1;
+    const ac = createdDay(a), bc = createdDay(b);
+    if (ac !== bc) return ac < bc ? -1 : 1;
     return a.title.localeCompare(b.title);
   });
 }
