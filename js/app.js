@@ -91,6 +91,20 @@ const els = {
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
 
+// A message line, with a token bumped by EVERY message on it, so a smart add
+// can tell whether the "Thinking…" it set is still the one on screen (see
+// handleAdd). Each capture box has its own line (home-screen spec § 3): the
+// top box's #message, which also carries every message unrelated to capture,
+// and from stage 4 the capture box's #capture-message.
+function messageLine(el) {
+  let token = 0;
+  return {
+    set(text) { token += 1; el.textContent = text || ''; },
+    token: () => token,
+  };
+}
+const topLine = messageLine(els.message);
+
 let items = loadItems();
 let viewMonth = new Date();
 let viewDay = toISO(new Date());
@@ -224,10 +238,8 @@ initSettings({
   applyState: applySyncedState,
 });
 
-// messageToken is bumped by EVERY message, so a smart add can tell whether
-// the "Thinking…" it set is still the one on screen (see handleAdd).
-let messageToken = 0;
-function setMessage(t) { messageToken += 1; els.message.textContent = t || ''; }
+// The top box's line: Ideas, ticks, deletes, edits and the top box's own adds.
+function setMessage(t) { topLine.set(t); }
 
 export function addItems(list) {
   // createdAt stays a local calendar date (toISO) — sortItemsByDate depends
@@ -263,12 +275,13 @@ export function addItems(list) {
 function handleManualAdd() {
   const title = els.text.value.trim();
   const date = els.date.value;
-  if (!title || !date) { setMessage('For manual add, type a title and pick a date.'); return; }
+  if (!title || !date) { setMessage('For manual add, type a title and pick a date.'); return 'refused'; }
   try {
     addItems([{ title, date, type: 'event', time: els.time.value || null, endTime: els.end.value || null }]);
-  } catch (e) { setMessage(e.message); return; }
+  } catch (e) { setMessage(e.message); return 'failed'; }
   els.text.value = ''; els.date.value = ''; els.time.value = ''; els.end.value = ''; els.end.hidden = true;
   setMessage('Added.');
+  return 'added';
 }
 
 // Which Add is the latest. parseViaWorker can take up to SMART_ADD_TIMEOUT_MS
@@ -280,83 +293,131 @@ function handleManualAdd() {
 // pending smart add alone.
 //
 // Whether a CURRENT request may still change the message is separate: only
-// if the message is still the "Thinking…" it set (messageToken). Another
-// action's message — the Ideas box's "Kept." — is left alone, while the
-// request still adds its items (the Ideas box does not cancel them). The one
-// exception is a failed save of those items: that is shown regardless, since
-// nothing else would tell the user the capture was lost.
+// if its box's line still shows the "Thinking…" it set (the line's token).
+// Another action's message — the Ideas box's "Kept." — is left alone, while
+// the request still adds its items (the Ideas box does not cancel them). The
+// one exception is a failed save of those items: that is shown regardless,
+// since nothing else would tell the user the capture was lost.
 let addGeneration = 0;
-// The trimmed text and generation of the smart add in flight, so a second Add
-// of the same text sends no second (paid) request.
+// The box, trimmed text and generation of the smart add in flight, so a second
+// Add of the same text from the same box sends no second (paid) request.
 let pendingSmart = null;
 
-async function handleAdd() {
-  if (els.time.value && !els.date.value) {
-    setMessage('Add a date to use that time, or clear the time to use smart add.');
-    return;
+// THE BOXES THAT ADD (home-screen spec § 3). handleAdd keeps one logic and
+// takes the box it was called from: its field, its date row (null for a box
+// without one: smart add only), its message line, its preview container, its
+// "unavailable" text (each names the way that box's user can still add), and
+// what to do once an add from it has landed.
+const topTarget = {
+  field: els.text,
+  dates: { date: els.date, time: els.time, end: els.end },
+  line: topLine,
+  preview: els.preview,
+  unavailable: 'Smart add is unavailable — pick a date below and tap Add to add it manually.',
+  onAdded() {},
+};
+const TARGETS = [topTarget];
+
+// A new capture closes any open preview, in EVERY box (spec § 3 step 8), and
+// that box's line says so. A preview is open while its container has content
+// (renderPreview fills it; every close empties it). Called by every Add that
+// passes validation, before its own message, so in the box that started it
+// the newer message replaces this one.
+const PREVIEW_CLOSED = 'Preview closed — nothing was added from it.';
+function closePreviews() {
+  for (const t of TARGETS) {
+    if (t.preview.children.length === 0) continue;
+    t.preview.hidden = true;
+    t.preview.innerHTML = '';
+    t.line.set(PREVIEW_CLOSED);
+  }
+}
+
+// Resolves to how it ended: 'refused' (validation; nothing started),
+// 'duplicate' (the same text from the same box is already in flight),
+// 'added', 'preview', 'empty', 'failed', or 'superseded' (a newer Add, or a
+// Cancel, came first, so this request changed nothing).
+async function handleAdd(target) {
+  const { field, dates, line } = target;
+  if (dates && dates.time.value && !dates.date.value) {
+    line.set('Add a date to use that time, or clear the time to use smart add.');
+    return 'refused';
   }
   // If a date is picked, treat Add as an explicit MANUAL add — no Worker needed.
-  // This is the always-available fallback (works offline and on iPhone).
-  if (els.date.value) {
+  // This is the always-available fallback (works offline and on iPhone). Only
+  // the top box has a date row.
+  if (dates && dates.date.value) {
     // Refused here, before the bump, so a refused manual add (no title) starts
     // nothing and leaves a pending smart add alone; a landed one supersedes it
-    // and closes any preview that request opened.
-    if (!els.text.value.trim()) { setMessage('For manual add, type a title and pick a date.'); return; }
+    // and closes any open preview.
+    if (!field.value.trim()) { line.set('For manual add, type a title and pick a date.'); return 'refused'; }
     addGeneration += 1;
-    els.preview.hidden = true;
-    els.preview.innerHTML = '';
-    handleManualAdd();
-    return;
+    closePreviews();
+    return handleManualAdd();
   }
 
-  const raw = els.text.value.trim();
-  if (!raw) { setMessage('Type something first.'); return; }
-  if (pendingSmart && pendingSmart.generation === addGeneration && pendingSmart.raw === raw) return;
+  const raw = field.value.trim();
+  if (!raw) { line.set('Type something first.'); return 'refused'; }
+  if (pendingSmart && pendingSmart.generation === addGeneration
+    && pendingSmart.target === target && pendingSmart.raw === raw) return 'duplicate';
   const generation = ++addGeneration;
-  pendingSmart = { generation, raw };
+  pendingSmart = { generation, raw, target };
   // An earlier request's preview must not stay confirmable under a new one.
-  els.preview.hidden = true;
-  els.preview.innerHTML = '';
-  setMessage('Thinking…');
-  const thinking = messageToken;
-  const say = (t) => { if (messageToken === thinking) setMessage(t); };
+  closePreviews();
+  line.set('Thinking…');
+  const thinking = line.token();
+  const say = (t) => { if (line.token() === thinking) line.set(t); };
   // Only clear the box if it still holds what was sent: text typed while
   // waiting (or reviewing) is the user's next entry.
-  const clearSentText = () => { if (els.text.value.trim() === raw) els.text.value = ''; };
+  const clearSentText = () => { if (field.value.trim() === raw) field.value = ''; };
 
   let result;
   try {
     result = await parseViaWorker(raw);
   } catch (e) {
-    if (generation !== addGeneration) return;
+    if (generation !== addGeneration) return 'superseded';
     pendingSmart = null;
     if (e.message === 'too_long') say('That was a lot at once — try adding fewer items in one go.');
-    else say('Smart add is unavailable — pick a date below and tap Add to add it manually.');
-    return;
+    else say(target.unavailable);
+    return 'failed';
   }
-  if (generation !== addGeneration) return;
+  if (generation !== addGeneration) return 'superseded';
   pendingSmart = null;
 
   const flow = decideFlow(result);
-  if (flow === 'empty') { say("I couldn't find anything to add — try rephrasing."); return; }
+  if (flow === 'empty') { say("I couldn't find anything to add — try rephrasing."); return 'empty'; }
   if (flow === 'direct') {
     try {
       addItems(result.items);
-    } catch (e) { setMessage(e.message); return; }
+    } catch (e) { line.set(e.message); return 'failed'; }
     clearSentText();
     say('Added.');
-    return;
+    target.onAdded();
+    return 'added';
   }
   say('Review the items below.');
-  renderPreview(els.preview, result.items, {
+  renderPreview(target.preview, result.items, {
     onConfirm: (confirmed) => {
-      try { addItems(confirmed); } catch (e) { setMessage(e.message); return false; }
+      // A preview's confirm checks its request is still the newest (spec § 3
+      // step 8). A newer Add closed this preview, but a button of it can still
+      // be tapped (a tap already on its way). false: renderPreview then leaves
+      // the container alone, which may now hold the NEWER request's preview.
+      if (generation !== addGeneration) { line.set(PREVIEW_CLOSED); return false; }
+      try { addItems(confirmed); } catch (e) { line.set(e.message); return false; }
       clearSentText();
-      setMessage('Added.');
+      line.set('Added.');
+      target.onAdded();
       return true;
     },
-    onCancel: () => setMessage('Cancelled.'),
+    // The same check for its Cancel: a stale Cancel changes nothing, and
+    // returns false so renderPreview leaves the container alone (DA M5).
+    onCancel: () => {
+      if (generation !== addGeneration) return false;
+      line.set('Cancelled.');
+      return true;
+    },
   });
+  return 'preview';
 }
 
 function deleteItem(id) {
@@ -1022,8 +1083,8 @@ function openDay(dateISO) {
 }
 
 els.time.addEventListener('input', () => { els.end.hidden = !els.time.value; if (!els.time.value) els.end.value = ''; });
-els.add.addEventListener('click', handleAdd);
-els.text.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleAdd(); });
+els.add.addEventListener('click', () => { handleAdd(topTarget); });
+els.text.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleAdd(topTarget); });
 els.tabToday.addEventListener('click', () => showView('today'));
 els.tabCalendar.addEventListener('click', () => showView(lastCalendarView));
 els.tabTodo.addEventListener('click', () => showView('todo'));

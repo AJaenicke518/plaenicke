@@ -6920,3 +6920,62 @@ test('To-do: a tick from a box without focus moves no focus', async () => {
   }
   seed([]);
 });
+
+// --- stage 4: a stale preview cannot be confirmed (home-screen spec § 3 step 8)
+//
+// Every Add closes every open preview, but a button of a closed preview can
+// still be tapped (a tap already on its way when the newer Add landed). Its
+// confirm checks that its request is still the newest and refuses otherwise,
+// and it must leave the container alone: by then it may hold the NEWER
+// request's preview.
+test('smart add: a preview from a superseded request cannot be confirmed or cancelled, and the newer preview is left alone', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const preview = doc.getElementById('preview');
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('two things on may 1');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    held[0](previewReply([
+      { title: 'Old one', date: '2099-05-01', type: 'task' },
+      { title: 'Old two', date: '2099-05-01', type: 'task' },
+    ]));
+    await settle();
+    const [staleAddAll, staleCancel] = preview.querySelector('.preview-actions').children;
+    assert.equal(staleAddAll.textContent, 'Add all', 'fixture check: the old preview\'s Add all');
+    assert.equal(staleCancel.textContent, 'Cancel', 'fixture check: and its Cancel');
+    typeIntoAddBox('two other things on may 2');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.equal(preview.children.length, 0, 'fixture check: the newer Add closed the old preview');
+    held[1](previewReply([
+      { title: 'New one', date: '2099-05-02', type: 'task' },
+      { title: 'New two', date: '2099-05-02', type: 'task' },
+    ]));
+    await settle();
+    const newer = preview.children.length;
+    assert.ok(newer > 0, 'fixture check: the newer preview is open');
+
+    click(staleAddAll);
+    assert.deepEqual(loadItems().map((it) => it.title), [], 'nothing from the stale preview is added');
+    assert.equal(messageText(), 'Preview closed — nothing was added from it.');
+    assert.equal(preview.children.length, newer, 'the newer preview is untouched');
+    assert.equal(preview.hidden, false);
+
+    click(staleCancel);
+    assert.equal(preview.children.length, newer, 'a stale Cancel leaves the newer preview too');
+    assert.equal(preview.hidden, false);
+    assert.equal(messageText(), 'Preview closed — nothing was added from it.', 'and says nothing new');
+  } finally {
+    timers.restore();
+    net.restore();
+    preview.hidden = true;
+    preview.innerHTML = '';
+  }
+  seed([]);
+});

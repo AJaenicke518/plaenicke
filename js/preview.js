@@ -86,7 +86,13 @@ export function renderPreview(container, items, { onConfirm, onCancel }) {
   const cancel = document.createElement('button');
   cancel.className = 'cancel';
   cancel.textContent = 'Cancel';
-  cancel.addEventListener('click', () => { container.hidden = true; container.innerHTML = ''; onCancel(); });
+  // onCancel returning false (a stale preview's Cancel, js/app.js) leaves the
+  // container alone: by then it may hold a newer preview.
+  cancel.addEventListener('click', () => {
+    if (onCancel() === false) return;
+    container.hidden = true;
+    container.innerHTML = '';
+  });
   actions.append(add, cancel);
   container.appendChild(actions);
 }
