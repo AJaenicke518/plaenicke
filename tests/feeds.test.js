@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   syncFeed, syncStale, feedStatus, instancesForRange, removeFeed,
-  webcalToHttps, inferName, applyRemoteFeeds, feedShape, describeFeedShape,
+  webcalToHttps, inferName, applyRemoteFeeds, feedShape, describeFeedShape, seriesComputations,
 } from '../js/feeds.js';
 import {
   loadFeeds, saveFeeds, loadFeedCache, saveFeedCache, loadTombstones,
@@ -1343,4 +1343,78 @@ test('instancesForRange: a uid shared by several events, or carrying a rule, giv
   const out = instancesForRange([RFEED], cacheFor({ feedR: events }), '2026-08-24', '2026-08-30', 'UTC');
   assert.ok(out.length >= 5, 'fixture check');
   for (const i of out) assert.equal(i.spanKey, i.id, `${i.uid} ${i.date}`);
+});
+
+// --- the series memo (render-perf, 2026-10-27) --------------------------------
+//
+// instancesForRange runs ~6 times per render, and the heuristic's grouping of
+// a large no-RRULE feed was ~41 % of a render at 4x CPU throttling. The series
+// work (seriesIndex + spanKeyUids) is memoized per `entry.events` ARRAY and
+// targetTz. Every cache writer builds a new events array (syncFeed, the quota
+// prune, loadFeedCache's JSON.parse), so a refetch invalidates the memo by
+// itself. The memo never changes WHAT is computed — only how often.
+
+test('series memo: repeated calls, and a fresh copy of the same events, give identical instances', () => {
+  const heuristic = [
+    ...canvasWeekly('Stats 101', '2026-08-24', 4, '1000'),
+    pe({ uid: 'midterm', title: 'Midterm', form: 'TZID', tzid: TZ_LA, value: '20260916T100000', duration: 'PT2H' }),
+  ];
+  const rule = [
+    pe({ uid: 'w', value: '20260824T170000Z', rrule: 'FREQ=WEEKLY' }),
+    pe({ uid: 'one', value: '20260915T170000Z', duration: 'PT1H' }),
+  ];
+  const cache = cacheFor({ feedR: heuristic, feedS: rule });
+  const first = instancesForRange([RFEED, SFEED], cache, '2026-09-14', '2026-09-20', TZ_LA);
+  assert.ok(first.some((i) => i.guessedSeries) && first.some((i) => i.recurring && !i.guessedSeries), 'fixture check');
+  assert.deepEqual(instancesForRange([RFEED, SFEED], cache, '2026-09-14', '2026-09-20', TZ_LA), first);
+  const copy = cacheFor({ feedR: structuredClone(heuristic), feedS: structuredClone(rule) });
+  assert.deepEqual(instancesForRange([RFEED, SFEED], copy, '2026-09-14', '2026-09-20', TZ_LA), first);
+});
+
+// The memo is used: seriesComputations() counts the times the series work
+// actually ran. Same array and zone: once, however many calls. A new array
+// (a refetch, a reload) or another zone: once more.
+test('series memo: computed once per events array and zone, not once per call', () => {
+  const events = canvasWeekly('Stats 101', '2026-08-24', 4, '1000');
+  const cache = cacheFor({ feedR: events });
+  const before = seriesComputations();
+  for (let k = 0; k < 6; k += 1) instancesForRange([RFEED], cache, '2026-09-14', '2026-09-20', TZ_LA);
+  assert.equal(seriesComputations() - before, 1, 'six calls, one computation');
+  instancesForRange([RFEED], cacheFor({ feedR: [...events] }), '2026-09-14', '2026-09-20', TZ_LA);
+  assert.equal(seriesComputations() - before, 2, 'a new array is computed again');
+  instancesForRange([RFEED], cache, '2026-09-14', '2026-09-20', 'UTC');
+  assert.equal(seriesComputations() - before, 3, 'another zone is computed again');
+});
+
+test('series memo: a refetch that replaces the cache entry is never answered from the memo', async () => {
+  resetStorage();
+  saveFeeds([FEED_A]);
+  const weekly = (n) => icsWith(...Array.from({ length: n }, (_, i) => vevent({
+    uid: `m${i}`, summary: 'Meeting', dtstart: `${weeksAfter('2026-08-24', 3 - i)}T170000Z`,
+    dtend: `${weeksAfter('2026-08-24', 3 - i)}T175000Z`,
+  })));
+  const now = () => new Date('2026-09-14T12:00:00.000Z');
+  const on14 = (cache) => instancesForRange([FEED_A], cache, '2026-09-14', '2026-09-14', 'UTC')
+    .map((i) => [i.uid, i.recurring, i.guessedSeries]);
+
+  assert.equal((await syncFeed(FEED_A, { fetchImpl: async () => fakeOkResponse(weekly(4)), now })).ok, true);
+  const snapshot = loadFeedCache(); // as app.js holds it: one object, rendered many times
+  for (let k = 0; k < 3; k += 1) assert.deepEqual(on14(snapshot), [['m0', true, true]]);
+  assert.equal((await syncFeed(FEED_A, { fetchImpl: async () => fakeOkResponse(weekly(2)), now })).ok, true);
+  assert.deepEqual(on14(loadFeedCache()), [['m0', false, false]], 'two weeks after the refetch: no longer a series');
+  assert.equal((await syncFeed(FEED_A, { fetchImpl: async () => fakeOkResponse(weekly(4)), now })).ok, true);
+  assert.deepEqual(on14(loadFeedCache()), [['m0', true, true]], 'and back');
+});
+
+// A UTC-stamped 10:00 Pacific class is 17:00Z before 1 Nov 2026 and 18:00Z
+// after it: read in Los Angeles, four Mondays are one series; read in UTC they
+// are two groups of two weeks, neither a series.
+test('series memo: the zone is part of the key — the same array in another zone is recomputed', () => {
+  const events = ['20261019T170000Z', '20261026T170000Z', '20261102T180000Z', '20261109T180000Z']
+    .map((value, i) => pe({ uid: `stats-${i}`, title: 'Stats 101', value, duration: 'PT50M' }));
+  const cache = cacheFor({ feedR: events });
+  const on9 = (tz) => instancesForRange([RFEED], cache, '2026-11-09', '2026-11-09', tz).map((i) => i.recurring);
+  assert.deepEqual(on9(TZ_LA), [true]);
+  assert.deepEqual(on9('UTC'), [false]);
+  assert.deepEqual(on9(TZ_LA), [true]);
 });
