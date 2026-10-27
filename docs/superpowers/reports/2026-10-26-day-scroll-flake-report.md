@@ -1,4 +1,4 @@
-# Day scroll on return, two flaky tests, and the Show label: build report
+# Day scroll on return, two flaky tests, and the Show/Hide label: build report
 
 Date: 2026-10-26. Branch: `day-scroll-and-flake`, cut from `main` at 013af41. Not pushed or merged, and `CACHE` was not bumped.
 Plan: `docs/superpowers/plans/2026-10-26-day-scroll-and-flake.md` (84d526e).
@@ -10,12 +10,14 @@ Plan: `docs/superpowers/plans/2026-10-26-day-scroll-and-flake.md` (84d526e).
 | 1 | Day view opened at 12 AM when you came back to it | faa054d | apply: "Day: coming back to Calendar opens the grid at 7 AM again, not at midnight" |
 | 2 | Flaky "drainUntil gives up even when Date is frozen" | 0a9f4e1, 264c140 | the same test, now timed |
 | 3 | Flaky "a tick whose render throws after the save still schedules its sync" (added by the controller) | e4ec119 | the same test |
-| 4 | A hidden calendar's Show button names its calendar (added by the controller) | d107827, 3ab6db1 | settings: two new tests |
+| 4 | The Show/Hide toggle names its calendar (added by the controller; Hide after ruling Q2) | d107827, 3ab6db1, 1dc9e33 | settings: two new tests |
+| 5 | CLAUDE.md names each test file's poll helper (controller ruling) | 5b89f4a | — |
 
 Files changed:
 - `js/app.js`: one line in `renderDay`, plus its comment.
 - `js/settings.js`: one line, plus a comment.
 - `tests/apply.test.js` and `tests/settings.test.js`.
+- `CLAUDE.md`: one sentence in the test section.
 - The plan.
 
 ## 1. Day view at 12 AM on return
@@ -125,28 +127,35 @@ A sync left over from an earlier test was ruled out: no offline fetch was made d
 
 For comparison, the tree with the first flake fixed but this one not yet fixed failed 0 of 120 runs (d107827, 8 busy processes). The cleanest comparison is main against main with only this fix, under the same load: 4/90 then 0/90.
 
-## 4. The Show button's accessible name
+## 4. The Show/Hide button's accessible name
 
-`js/settings.js` gives the toggle `aria-label="Show <feed.name>"` only when the calendar is hidden. A visible calendar's Hide button is unchanged.
+`js/settings.js` gives the toggle `aria-label="Show <feed.name>"` when the calendar is hidden and `aria-label="Hide <feed.name>"` when it is visible. Show came first (d107827). Hide followed in 1dc9e33, after the controller ruled yes on open question 2.
 
 **No URL in the label.** The label uses `feed.name` only:
 - When a calendar is added, a name that looks like a link is refused (`settings.js:522`).
 - An empty name falls back to `inferName`, which returns only Google, iCloud, Outlook, Canvas or Calendar.
 
-**Tests (written first; both failed with no label):**
-- Two hidden calendars and one visible one. The Show labels are "Show Work" and "Show Home". The Hide button has no label. No label contains a token, host or scheme from any feed URL.
-- Hide, then Show. The re-rendered toggle is "Show Work", and then a Hide button with no label.
+**Tests (written first; each step failed on the code before it):**
+- Two hidden calendars and one visible one. The labels are "Show Work", "Show Home" and "Hide School". No label contains a token, host or scheme from any feed URL.
+- Hide, then Show. The re-rendered toggle is "Show Work", and then "Hide Work".
 
-**Mutants killed (7 of 7):**
+At d107827 the Hide button was asserted to have no label. 1dc9e33 changed those assertions to the Hide label first; both tests failed (null label) until the fix.
+
+**Mutants killed (8 of 8, against the final code):**
 - no label
+- Show only (the code at d107827)
+- Hide only
+- the words swapped
 - the URL in place of the name
 - the name plus the URL
-- a bare "Show"
+- the verb alone
 - the first feed's name on every row
-- the label on every toggle, Hide included
-- the label on visible calendars only
 
-The reviewer also killed a lower-case label, the name without "Show", and `feed.id`.
+Against d107827, 7 of 7 were killed, and the Show-label reviewer killed 3 more: a lower-case label, the name without "Show", and `feed.id`.
+
+## 5. CLAUDE.md: the poll helper's name
+
+The syncOnce note said "poll (`settleUntil`)". `apply.test.js` has no `settleUntil`; its helper is `drainUntil` (`tests/apply.test.js:1074`). `settleUntil` is defined in `tests/linkui.test.js:785` and also in `tests/sync.test.js:1014`. The controller's ruling named only linkui.test.js, but both files have it. The note now names the helper for each file.
 
 ## Review
 
@@ -156,6 +165,7 @@ The reviewer also killed a lower-case label, the name without "Show", and `feed.
 | Task 1, faa054d | fresh Opus | No Critical or Important. 5 of 6 mutants killed. Its M5 (`autoScroll` without `visible &&`) survives because, under the new rule, it behaves the same in a browser. Left as is. |
 | Task 2, 0a9f4e1 | fresh Opus | No Critical or Important. Minor 1 (upper bound too loose) fixed in 264c140. Minor 2 (a comment justified by a test that does not exist) fixed in 264c140. |
 | Show label, d107827 | fresh Sonnet | No Critical or Important. Minor (the re-render path was untested) fixed in 3ab6db1. |
+| Hide label (1dc9e33) and CLAUDE.md (5b89f4a) | **none**: added after the whole-branch review, on the controller's ruling | Mutation-checked by me (8 of 8). No independent reviewer saw these two commits. |
 | Whole branch, 013af41..e4ec119 | fresh Opus | No Critical or Important. See below. |
 
 **Plan review adjudication:**
@@ -212,16 +222,13 @@ Each needs the same treatment as item 3: diagnostics, then a fix.
 
 ## Gate
 
-`npm test` on the tree of e4ec119 (the last code commit): `# tests 1538`, `# pass 1538`, `# fail 0`, `# cancelled 0`. The baseline on main was 1535; this branch adds 3 tests. The commit that adds this report changes only the report.
+`npm test` on the tree of 5b89f4a (the last code commit): `# tests 1538`, `# pass 1538`, `# fail 0`, `# cancelled 0`. The baseline on main was 1535; this branch adds 3 tests. The commit that updates this report changes only the report.
 
-## Open questions for Alex
+## Open questions: the controller's rulings
 
-1. **Should Day remember where you scrolled when you leave it and come back?** Today: Day → Week (or Today) → Day opens at 7 AM. Before this fix it opened at 12 AM, so in practice no position was ever kept. Keeping the position would mean saving `scrollTop` in `showView` before Day is hidden.
-   **Recommendation: leave it at 7 AM.** That matches the 3-day branch, and it is less code.
-2. **Should the Hide button also name its calendar ("Hide Work")?** The controller asked for Show only. Right now a screen reader hears a row of plain "Hide" buttons, which is the same problem.
-   **Recommendation: yes, as a one-line follow-up.**
-3. **Should the other sync-test flakes listed above be taken on next?** They block commits at random under load.
-   **Recommendation: yes, one at a time, with diagnostics as in item 3.** Also correct CLAUDE.md's `settleUntil` reference so it points to each file's own helper.
+1. **Should Day remember where you scrolled when you leave it and come back?** Ruled: keep 7 AM. No change.
+2. **Should the Hide button also name its calendar?** Ruled: yes. Done in 1dc9e33.
+3. **Should the other sync-test flakes be taken on?** Ruled: yes, by a separate lead, not on this branch. The CLAUDE.md helper-name fix is done here (5b89f4a).
 
 ## What I'd do differently
 
