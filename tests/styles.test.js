@@ -1320,3 +1320,25 @@ test('with Reduce Motion on, a closing capture box is hidden at once', () => {
   const reduce = rulesInContext(css).filter((r) => r.at === '@media (prefers-reduced-motion: reduce)');
   assert.equal(declOf('.capture-box.closing', 'visibility', reduce.map((r) => `${r.sel} {${r.body}}`).join('\n')), 'hidden');
 });
+
+// --- manual add's type chips (option A, Alex 2026-10-26) --------------------
+// The fake DOM ignores CSS, so these are the only guard on what the phone
+// shows. `display: flex` on the row would beat the browser's own
+// [hidden] { display: none } (the .cal-switch lesson), so the row and every
+// chip must restate it.
+test('the type chip row and its chips really hide when hidden', () => {
+  assert.equal(declOf('.type-chips[hidden]', 'display'), 'none');
+  assert.equal(declOf('.type-chip[hidden]', 'display'), 'none');
+});
+
+test('a type chip is at least 44px tall, in the token colours', () => {
+  assert.ok(px(declOf('.type-chip', 'min-height')) >= 44, 'a 44px tap target');
+  assert.equal(declOf('.type-chip', 'background'), 'var(--card)');
+  assert.equal(declOf('.type-chip', 'color'), 'var(--ink)');
+});
+
+test('the selected chip is drawn from aria-pressed, in the accent tokens', () => {
+  const sel = '.type-chip[aria-pressed="true"]';
+  assert.equal(declOf(sel, 'background'), 'var(--accent)');
+  assert.equal(declOf(sel, 'color'), 'var(--accent-ink)');
+});
