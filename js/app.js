@@ -13,7 +13,7 @@ import {
 import { normalizeIdea } from './ideas.js';
 import { renderTodoView } from './todoview.js';
 import { renderIdeasView } from './ideasview.js';
-import { toISO, nowISO } from './dateparse.js';
+import { toISO, nowISO, localStamp } from './dateparse.js';
 import { buildMonthGrid, groupItemsByDate, monthCellSummary, chronoFirst, itemTypeClass } from './calendar.js';
 import { startOfWeek, addDays, formatTime, weekLabel } from './timegrid.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
@@ -263,8 +263,9 @@ initSettings({
 function setMessage(t) { topLine.set(t); }
 
 export function addItems(list) {
-  // createdAt stays a local calendar date (toISO) — sortItemsByDate depends
-  // on its current format. updatedAt is a full-precision UTC instant
+  // createdAt is the local date and time (localStamp), so same-day ideas list
+  // newest first; sortItemsByDate compares only its day (js/items.js
+  // createdDay), as it did when createdAt was the date alone. updatedAt is a full-precision UTC instant
   // (nowISO), matching feed updatedAt and tombstone deletedAt so sync's
   // last-write-wins comparisons are all apples-to-apples.
   //
@@ -275,7 +276,7 @@ export function addItems(list) {
   // so the model's own split never matters and nothing can lose words. It is
   // idempotent and a no-op on every other type.
   const made = list.map((it) => makeItem(normalizeIdea(it), {
-    id: uid(), createdAt: toISO(new Date()), updatedAt: nowISO(),
+    id: uid(), createdAt: localStamp(new Date()), updatedAt: nowISO(),
   }));
   // A failed save must not leave the new records in `items`: app.js saves
   // from that array, so the next successful save of ANY item would quietly
@@ -1445,13 +1446,20 @@ backgroundSyncFeeds(feeds);
 //
 // There is no discard path. It existed only for the linking flow's "Replace
 // this device", which was removed on 2026-10-19: every caller is re-merged.
-export function applySyncedState(state) {
+//
+// `now` is sync.js's clock, passed in (sync-safety, 2026-10-27). It must be a
+// valid Date; anything else throws before any read or write. There is no
+// `new Date()` default: a caller that forgot the clock fails loudly.
+export function applySyncedState(state, now) {
+  if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
+    throw new TypeError('applySyncedState needs a valid Date for now');
+  }
   const live = localState();
   // keepRemoteTombstones: `state` is already pruned, and every tombstone in it
   // is one the first merge kept — including one that suppressed a record only
   // the server held, which live storage never had. Re-pruning here dropped
   // it and pushed the deletion away (js/merge.js, prune()).
-  const written = merge(live, state, new Date(), { keepRemoteTombstones: true });
+  const written = merge(live, state, now, { keepRemoteTombstones: true });
   // Save BEFORE assigning, as addItems does: app.js saves from `items`, so a
   // failed write (QuotaError) that had already replaced it would render
   // records storage does not hold and have the next save of ANY item persist
@@ -1471,11 +1479,24 @@ export function applySyncedState(state) {
   // exactly equal to written.tombstones, so a deletion pulled from another
   // device keeps its original deletedAt. Swap these two
   // lines and every such deletion is re-stamped with this device's clock.
-  const { added } = applyRemoteFeeds(written.feeds);
-  saveTombstones(written.tombstones);
-  feeds = loadFeeds();
-  feedCache = loadFeedCache();
-  render();
+  //
+  // FINALLY, then rethrow (sync-safety, 2026-10-27). By here `items` is saved
+  // and assigned, and applyRemoteFeeds may have written feeds (and its own
+  // tombstones) before either write below throws (QuotaError). Without the
+  // finally the page kept the pre-sync feeds and never re-rendered, so it
+  // showed neither what storage now holds nor what it held before. The throw
+  // still propagates to sync.js, which records it as lastError. The order of
+  // the writes above and inside the try is unchanged. Newly pulled feeds are
+  // fetched (below) only on success.
+  let added;
+  try {
+    ({ added } = applyRemoteFeeds(written.feeds));
+    saveTombstones(written.tombstones);
+  } finally {
+    feeds = loadFeeds();
+    feedCache = loadFeedCache();
+    render();
+  }
   // Newly pulled feeds must actually be fetched — otherwise a freshly linked
   // device shows the right subscriptions with zero events until a full page
   // reload (backgroundSyncFeeds above only ran once, over the load-time feed

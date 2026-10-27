@@ -658,6 +658,46 @@ function spanKeyUids(events) {
 }
 
 // ---------------------------------------------------------------------------
+// The series memo (render-perf, 2026-10-27)
+// ---------------------------------------------------------------------------
+
+// instancesForRange runs about six times per render (Today twice, Month,
+// Week, 3-day, Day), and seriesIndex's heuristic reads every event's zone-
+// converted start: on a 1,500-event no-RRULE feed that was ~41 % of a render
+// at 4x CPU throttling (docs/superpowers/reports/2026-10-27-render-perf-report.md).
+//
+// Keyed on the `entry.events` ARRAY plus the zone, because both decide the
+// answer: the heuristic reads weekday and start time in targetTz, and app.js's
+// deviceTz can change without the cache being reloaded.
+//
+// CONTRACT: a feed's events are REPLACED, never edited in place. Every writer
+// does that today — syncFeed stores parseICS's new array, the quota prune
+// builds a new one, and loadFeedCache JSON-parses fresh arrays and objects,
+// so a refetch invalidates the memo by itself. Code that pushed into, or
+// edited an event of, an array already rendered would be answered stale.
+//
+// The cached Sets never leave instancesForRange (read with .has only), so no
+// caller can corrupt them. A WeakMap lets a replaced array, and its entry, be
+// collected. One zone per array: a different zone recomputes and replaces.
+const seriesMemo = new WeakMap();
+let seriesComputeCount = 0;
+
+// seriesComputations: how many times the series work actually ran. For tests
+// (tests/feeds.test.js pins that the memo is used); nothing else reads it.
+export function seriesComputations() { return seriesComputeCount; }
+
+function seriesFor(events, targetTz) {
+  const hit = seriesMemo.get(events);
+  if (hit && hit.targetTz === targetTz) return hit;
+  // Computed in full before it is stored: a throw stores nothing, and
+  // instancesForRange skips the feed exactly as it did before the memo.
+  const entry = { targetTz, series: seriesIndex(events, targetTz), spanUids: spanKeyUids(events) };
+  seriesComputeCount += 1;
+  seriesMemo.set(events, entry);
+  return entry;
+}
+
+// ---------------------------------------------------------------------------
 // instancesForRange
 // ---------------------------------------------------------------------------
 
@@ -711,8 +751,7 @@ export function instancesForRange(feeds, cache, start, end, targetTz) {
     let spanUids;
     try {
       expanded = expandEvents(entry.events, start, end, targetTz);
-      series = seriesIndex(entry.events, targetTz);
-      spanUids = spanKeyUids(entry.events);
+      ({ series, spanUids } = seriesFor(entry.events, targetTz));
     } catch (err) {
       // Skipping keeps one bad feed from blanking every other calendar, but a
       // silent skip is indistinguishable from an empty calendar. Log the error

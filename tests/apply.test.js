@@ -239,6 +239,33 @@ globalThis.window = makeFakeWindow();
 globalThis.document = makeFakeDocument();
 mountIds(globalThis.document, indexHtmlIds(readFileSync(new URL('../index.html', import.meta.url), 'utf8')));
 
+// EVERY TEST ENDS WITH NO REAL SYNC TIMER ARMED. app.js's scheduleSync arms a
+// real setTimeout(runSync, 2000) whenever a test writes under real timers (a
+// tick, a capture, an add). Left pending, it fires 2 s later inside whatever
+// test is running then — under load, a sync test, against its fetch stub and
+// manual timers (see "a real sync timer a test leaves armed" below). Tracked
+// here, by the function app.js passes, and cancelled after each test. Installed
+// before the first import of app.js; installManualTimers and MockTimers save
+// and restore whatever setTimeout is current, which is this one.
+const untrackedSetTimeout = globalThis.setTimeout;
+const untrackedClearTimeout = globalThis.clearTimeout;
+const realSyncTimers = new Set();
+globalThis.setTimeout = function trackingSetTimeout(fn, ms, ...args) {
+  if (typeof fn !== 'function' || fn.name !== 'runSync') return untrackedSetTimeout(fn, ms, ...args);
+  const handle = untrackedSetTimeout((...a) => { realSyncTimers.delete(handle); fn(...a); }, ms, ...args);
+  realSyncTimers.add(handle);
+  return handle;
+};
+globalThis.clearTimeout = function trackingClearTimeout(handle) {
+  realSyncTimers.delete(handle);
+  return untrackedClearTimeout(handle);
+};
+const pendingRealSyncTimers = () => [...realSyncTimers];
+afterEach(() => {
+  for (const handle of realSyncTimers) untrackedClearTimeout(handle);
+  realSyncTimers.clear();
+});
+
 const item = (id, updatedAt) => ({ id, title: `t-${id}`, date: '2026-08-02', time: null, updatedAt });
 const state = (o = {}) => ({ schemaVersion: SCHEMA_VERSION, items: [], feeds: [], tombstones: [], ...o });
 
@@ -286,7 +313,7 @@ test('applySyncedState keeps a record written after the state was computed', asy
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
   saveItems([item('a', '2026-08-01T00:00:00.000Z'), item('added-late', '2026-08-03T00:00:00.000Z')]);
-  const written = applySyncedState(state({ items: [item('a', '2026-08-01T00:00:00.000Z')] }));
+  const written = applySyncedState(state({ items: [item('a', '2026-08-01T00:00:00.000Z')] }), new Date());
   assert.ok(written.items.some((i) => i.id === 'added-late'), 'a concurrent add must not be destroyed');
   assert.ok(loadItems().some((i) => i.id === 'added-late'));
 });
@@ -304,7 +331,7 @@ test('applySyncedState honours a tombstone written after the state was computed'
   const written = applySyncedState(state({
     items: [item('a', '2026-08-01T00:00:00.000Z')],
     tombstones: [remoteTombstone],
-  }));
+  }), new Date());
   assert.deepEqual(written.items, [], 'a concurrent delete must not be undone');
   const storedTombstones = loadTombstones();
   assert.ok(storedTombstones.some((t) => t.id === 'a'), 'the pre-existing local tombstone must survive');
@@ -315,7 +342,7 @@ test('applySyncedState honours a tombstone written after the state was computed'
 test('applySyncedState returns what it wrote', async () => {
   installFakeLocalStorage();
   const { applySyncedState } = await import('../js/app.js');
-  const written = applySyncedState(state({ items: [item('a', '2026-08-01T00:00:00.000Z')] }));
+  const written = applySyncedState(state({ items: [item('a', '2026-08-01T00:00:00.000Z')] }), new Date());
   assert.deepEqual(written.items.map((i) => i.id), loadItems().map((i) => i.id));
 });
 
@@ -386,7 +413,7 @@ test('applySyncedState always re-merges live storage, whatever options it is pas
   };
   saveItems([item('live-only', '2026-08-01T00:00:00.000Z')]);
   saveFeeds([feedX]);
-  const written = applySyncedState(state({ items: [item('remote-only', '2026-08-01T00:00:00.000Z')] }), { replace: true });
+  const written = applySyncedState(state({ items: [item('remote-only', '2026-08-01T00:00:00.000Z')] }), new Date(), { replace: true });
   assert.deepEqual(written.items.map((i) => i.id).sort(), ['live-only', 'remote-only']);
   assert.deepEqual(loadItems().map((i) => i.id).sort(), ['live-only', 'remote-only']);
   assert.deepEqual(loadFeeds().map((f) => f.id), ['feedX'], 'a local calendar is never discarded');
@@ -409,7 +436,7 @@ test('applySyncedState keeps a feed that exists only locally through an ordinary
     updatedAt: '2026-07-01T00:00:00.000Z',
   };
   saveFeeds([feedX]);
-  applySyncedState(state({ feeds: [] }));
+  applySyncedState(state({ feeds: [] }), new Date());
   assert.deepEqual(loadFeeds().map((f) => f.id), ['feedX']);
 });
 
@@ -434,7 +461,7 @@ test('applySyncedState fetches a feed the device has never seen before, immediat
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url) => { calls.push(String(url)); return { ok: true, text: async () => '' }; };
   try {
-    applySyncedState(state({ feeds: [newFeed] }));
+    applySyncedState(state({ feeds: [newFeed] }), new Date());
     // backgroundSyncFeeds's fetch call happens synchronously up to its own
     // first await inside syncFeed — this tick is a safety margin only, not
     // load-bearing for the assertion below.
@@ -1101,9 +1128,36 @@ test('the Ideas box captures a short thought as an idea dated today', async () =
   assert.equal(idea.notes, null, 'a short thought needs no separate body');
   assert.equal(idea.done, false);
   assert.match(idea.date, /^\d{4}-\d{2}-\d{2}$/, "an idea's date is its capture date and is NEVER null");
-  assert.equal(idea.date, idea.createdAt, 'the capture date IS today');
+  assert.equal(idea.createdAt.slice(0, 10), idea.date, 'the capture date IS today (createdAt is that local day plus the time)');
   assert.equal(ideaText().value, '', 'the box must clear so the next thought does not append to this one');
   assert.match(allText(ideaList()), /standing desk/);
+});
+
+// Daily fixes 2026-10-27, item 2: two thoughts captured the same day list
+// newest first. createdAt used to be the date alone, so they tied and the
+// order fell to the random id. Ids are made ascending here so that the old
+// tie-break would put A first: the failure is deterministic, not a coin flip.
+test('the Ideas page lists two same-day ideas newest first', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  let n = 0;
+  t.mock.method(globalThis.crypto, 'randomUUID', () => `00000000-0000-4000-8000-${String(++n).padStart(12, '0')}`);
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 27, 9, 0, 0).getTime() });
+  try {
+    ideaText().value = 'Idea A first thought';
+    click(ideaAdd());
+    t.mock.timers.tick(5 * 60 * 1000);
+    ideaText().value = 'Idea B five minutes later';
+    click(ideaAdd());
+  } finally {
+    t.mock.timers.reset();
+  }
+  const stored = loadItems();
+  assert.equal(stored.length, 2);
+  assert.ok(stored[0].id < stored[1].id, 'fixture check: A has the smaller id');
+  assert.equal(stored[0].date, stored[1].date, 'fixture check: same capture day');
+  assert.match(allText(ideaList()), /Idea B five minutes later[\s\S]*Idea A first thought/, 'B, captured later, is listed first');
 });
 
 test('the Ideas box keeps the complete text of a long thought in notes', async () => {
@@ -1244,6 +1298,37 @@ test('drainUntil gives up even when Date is frozen', { timeout: 10000 }, async (
   } finally {
     t.mock.timers.reset();
   }
+});
+
+// A test that schedules a sync under REAL timers leaves app.js's 2 s
+// setTimeout(runSync) behind it. Idle, those fire after the last linked test.
+// Under load the file is slower, and they fired INSIDE whichever sync test was
+// running 2 s later, against its fetch stub and manual timers: an extra
+// GET/PUT, or a read whose deadline was a manual timer nobody fires, which
+// left syncInFlight true for the rest of the file (2026-10-27, traced in every
+// failing run of 120 at 40 parallel). The file cancels any left pending when
+// each test ends. These two tests pin that, in this order.
+let leftoverSyncTimer = null;
+test('a real sync timer a test leaves armed is seen by the tracker', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const before = new Set(pendingRealSyncTimers());
+  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.items' });
+  // If app.js renames runSync, or arms its debounce some other way, the
+  // tracker stops seeing it and this fails, rather than the file silently
+  // going back to leaking timers.
+  const armed = pendingRealSyncTimers().filter((h) => !before.has(h));
+  assert.equal(armed.length, 1, "app.js's debounced sync timer is tracked");
+  [leftoverSyncTimer] = armed;
+  assert.equal(before.size, 0, 'no earlier test left one armed');
+});
+
+test('...and is cancelled when that test ends, so it cannot fire inside a later one', () => {
+  assert.ok(leftoverSyncTimer, 'fixture check: the previous test left one armed');
+  assert.equal(pendingRealSyncTimers().length, 0, 'nothing is still tracked');
+  // Node marks a Timeout it will never run as destroyed.
+  assert.equal(leftoverSyncTimer._destroyed, true, 'the timer itself was cleared');
+  leftoverSyncTimer = null;
 });
 
 test('runSync gives up on an account read that never answers, and reports it as offline', async () => {
@@ -1595,7 +1680,7 @@ test('a pulled feed tombstone keeps its original deletedAt through applySyncedSt
   saveFeeds([{ id: 'order-feed', url: 'https://example.com/order.ics', name: 'Order', color: 'var(--feed-palette-1)', hidden: false, updatedAt: '2026-07-01T00:00:00.000Z' }]);
   saveTombstones([]);
   const pulled = { id: 'order-feed', kind: 'feed', deletedAt: '2026-08-05T00:00:00.000Z' };
-  applySyncedState(state({ feeds: [], tombstones: [pulled] }));
+  applySyncedState(state({ feeds: [], tombstones: [pulled] }), new Date());
   assert.deepEqual(loadFeeds().map((f) => f.id), [], 'fixture check: the pulled tombstone removed the feed');
   assert.deepEqual(loadTombstones().filter((x) => x.id === 'order-feed'), [pulled],
     'the stored tombstone must keep the other device\'s deletedAt, not be re-stamped here');
@@ -1623,7 +1708,7 @@ test('an apply whose items write runs out of storage writes no feeds and no tomb
       items: [record({ id: 'first-item', title: 'First item', date: '2099-06-05' })],
       feeds: [],
       tombstones: [pulled],
-    }));
+    }), new Date());
   } catch (e) {
     thrown = e;
   } finally {
@@ -2803,7 +2888,7 @@ test('edit: a sync carrying an older copy of the record keeps the edit, in stora
     sheetHost().querySelector('.sheet-title').value = 'After the edit';
     click(sheetHost().querySelector('.sheet-save'));
     t.mock.timers.tick(5000);
-    applySyncedState(state({ items: [original] }));
+    applySyncedState(state({ items: [original] }), new Date());
     assert.equal(storedById('edit-lww').title, 'After the edit', 'storage keeps the edit');
     assert.match(allText(dayOf(far(0))), /After the edit/, 'and so does the screen');
     assert.doesNotMatch(allText(dayOf(far(0))), /Before the edit/);
@@ -2830,7 +2915,7 @@ test('review: Undo of an item the other device deleted meanwhile says so', async
     applySyncedState(state({
       items: [],
       tombstones: [{ id: 'rv-remote', kind: 'item', deletedAt: '2099-12-31T00:00:00.000Z' }],
-    }));
+    }), new Date());
     const undo = toastHost().querySelector('.toast-undo');
     assert.ok(undo, 'fixture check: the delete toast is still showing');
     click(undo);
@@ -2863,7 +2948,7 @@ test('review4c: an Undo survives a sync that returns the already-pushed edit', a
     const pushed = { ...storedById('rv4-bump') };
     t.mock.timers.tick(1000);
     click(toastHost().querySelector('.toast-undo'));
-    applySyncedState(state({ items: [pushed] }));
+    applySyncedState(state({ items: [pushed] }), new Date());
     assert.equal(storedById('rv4-bump').title, 'R orig', 'the undo must win over the edit it undid');
   } finally {
     forceCloseSheet();
@@ -2884,7 +2969,7 @@ test('review4c: an Undo that cannot be applied says why', async (t) => {
     click(openControlFor(dayOf(far(0)), 'Gone soon'));
     sheetHost().querySelector('.sheet-title').value = 'Gone soon, renamed';
     click(sheetHost().querySelector('.sheet-save'));
-    applySyncedState(state({ items: [], tombstones: [{ id: 'rv4-gone', kind: 'item', deletedAt: '2999-01-01T00:00:00.000Z' }] }));
+    applySyncedState(state({ items: [], tombstones: [{ id: 'rv4-gone', kind: 'item', deletedAt: '2999-01-01T00:00:00.000Z' }] }), new Date());
     click(toastHost().querySelector('.toast-undo'));
     assert.match(messageText(), /no longer exists/);
   } finally {
@@ -2998,7 +3083,7 @@ test('sweep S: an edit of a record stamped in the future survives a sync of the 
     sheetHost().querySelector('.sheet-title').value = 'Skewed after';
     click(sheetHost().querySelector('.sheet-save'));
     t.mock.timers.tick(5000);
-    applySyncedState(state({ items: [original] }));
+    applySyncedState(state({ items: [original] }), new Date());
     assert.equal(storedById('sS-skew-edit').title, 'Skewed after', 'the edit must not lose to the copy it replaced');
     assert.match(allText(dayOf(far(0))), /Skewed after/);
   } finally {
@@ -3021,7 +3106,7 @@ test('sweep S: a tick of a to-do stamped in the future survives a sync of the or
     const box = checkboxFor(todoList(), 'Skewed tick');
     box.checked = true;
     fire(box, 'change');
-    applySyncedState(state({ items: [original] }));
+    applySyncedState(state({ items: [original] }), new Date());
     assert.equal(storedById('sS-skew-tick').done, true, 'the tick must not lose to the copy it replaced');
   } finally {
     t.mock.timers.tick(5000);
@@ -3044,7 +3129,7 @@ test('sweep S: an Undo in the same millisecond as its edit survives a sync of th
     click(sheetHost().querySelector('.sheet-save'));
     const pushed = { ...storedById('sS-skew-undo') };
     click(toastHost().querySelector('.toast-undo'));
-    applySyncedState(state({ items: [pushed] }));
+    applySyncedState(state({ items: [pushed] }), new Date());
     assert.equal(storedById('sS-skew-undo').title, 'Undo skew orig', 'the undo must win over the edit it undid');
   } finally {
     forceCloseSheet();
@@ -3067,7 +3152,7 @@ test('sweep S: a delete of a record stamped in the future stays deleted after a 
     click(deleteControlFor(dayOf(far(0)), 'Skewed delete'));
     t.mock.timers.tick(5000);
     assert.ok(tombstoned('sS-skew-del'), 'fixture check: the delete committed');
-    applySyncedState(state({ items: [original] }));
+    applySyncedState(state({ items: [original] }), new Date());
     assert.ok(!stored('sS-skew-del'), 'the deleted item must not come back');
     assert.doesNotMatch(allText(dayOf(far(0))), /Skewed delete/);
   } finally {
@@ -3091,7 +3176,7 @@ test('sweep S: Undo keeps a field a sync changed since the edit, restores the re
     sheetHost().querySelector('.sheet-title').value = 'mine';
     sheetHost().querySelector('.sheet-date').value = far(1);
     click(sheetHost().querySelector('.sheet-save'));
-    applySyncedState(state({ items: [{ ...storedById('sS-undo-theirs'), title: 'theirs', updatedAt: S_AHEAD }] }));
+    applySyncedState(state({ items: [{ ...storedById('sS-undo-theirs'), title: 'theirs', updatedAt: S_AHEAD }] }), new Date());
     assert.equal(storedById('sS-undo-theirs').title, 'theirs', 'fixture check: the newer sync landed');
     click(toastHost().querySelector('.toast-undo'));
     const r = storedById('sS-undo-theirs');
@@ -3120,7 +3205,7 @@ test('sweep S: Undo with every edited field changed since writes nothing and say
     click(openControlFor(dayOf(far(0)), 'Undo none base'));
     sheetHost().querySelector('.sheet-title').value = 'mine only';
     click(sheetHost().querySelector('.sheet-save'));
-    applySyncedState(state({ items: [{ ...storedById('sS-undo-none'), title: 'theirs only', updatedAt: S_AHEAD }] }));
+    applySyncedState(state({ items: [{ ...storedById('sS-undo-none'), title: 'theirs only', updatedAt: S_AHEAD }] }), new Date());
     const before = rawStored();
     click(toastHost().querySelector('.toast-undo'));
     assert.equal(rawStored(), before, 'nothing to restore, so nothing is written');
@@ -3145,7 +3230,7 @@ test('sweep S: saving a sheet whose item changed type underneath it is refused',
   enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
   try {
     click(openControlFor(dayOf(far(0)), 'Type under'));
-    applySyncedState(state({ items: [{ ...storedById('sS-type-under'), type: 'due', updatedAt: S_AHEAD }] }));
+    applySyncedState(state({ items: [{ ...storedById('sS-type-under'), type: 'due', updatedAt: S_AHEAD }] }), new Date());
     const before = rawStored();
     sheetHost().querySelector('.sheet-title').value = 'Type under, renamed';
     click(sheetHost().querySelector('.sheet-save'));
@@ -3547,7 +3632,7 @@ test('sweep D: two quick resumes fetch each calendar once, and a feed pulled mea
     await settle();
     assert.equal(fetchesOf('sD-g1'), 1, 'the second resume must not start a second fetch of the same calendar');
     // A feed this device learns about from a sync while that fetch is in flight.
-    applySyncedState(state({ feeds: [sdFeed('sD-g2')] }));
+    applySyncedState(state({ feeds: [sdFeed('sD-g2')] }), new Date());
     await releaseAll();
     assert.equal(fetchesOf('sD-g1'), 1, 'and it is not fetched again once the first fetch lands');
     assert.equal(fetchesOf('sD-g2'), 1, 'a feed pulled during the fetch is fetched once it settles, not dropped');
@@ -3925,7 +4010,7 @@ test('sF: an Undo across the idea line with a field changed since is refused who
     sheetHost().querySelector('.sheet-type').value = 'task';
     click(sheetHost().querySelector('.sheet-save'));
     assert.equal(storedById('sF-boat').type, 'task', 'fixture check: the switch landed');
-    applySyncedState(state({ items: [{ ...storedById('sF-boat'), title: 'THEIR TITLE', updatedAt: S_AHEAD }] }));
+    applySyncedState(state({ items: [{ ...storedById('sF-boat'), title: 'THEIR TITLE', updatedAt: S_AHEAD }] }), new Date());
     assert.equal(storedById('sF-boat').title, 'THEIR TITLE', 'fixture check: the newer sync landed');
     const before = rawStored();
     click(toastHost().querySelector('.toast-undo'));
@@ -3962,7 +4047,7 @@ test('sF: an Undo back across the idea line is refused when the idea text change
     assert.equal(storedById('sF-toidea').type, 'idea', 'fixture check: the switch landed');
     applySyncedState(state({
       items: [{ ...storedById('sF-toidea'), notes: 'sF call Bob on Friday instead', updatedAt: S_AHEAD }],
-    }));
+    }), new Date());
     const before = rawStored();
     click(toastHost().querySelector('.toast-undo'));
     assert.equal(rawStored(), before, 'nothing is written');
@@ -3999,7 +4084,7 @@ test('sF: an Undo whose rebuild would change a skipped field is refused', async 
     click(sheetHost().querySelector('.sheet-save'));
     assert.equal(storedById('sF-ideakeep').notes, mine, 'fixture check: the edit landed');
     assert.equal(storedById('sF-ideakeep').title, 'sF idea mine is the first sentence.', 'fixture check: title derived');
-    applySyncedState(state({ items: [{ ...storedById('sF-ideakeep'), title: 'THEIR IDEA TITLE', updatedAt: S_AHEAD }] }));
+    applySyncedState(state({ items: [{ ...storedById('sF-ideakeep'), title: 'THEIR IDEA TITLE', updatedAt: S_AHEAD }] }), new Date());
     const before = rawStored();
     click(toastHost().querySelector('.toast-undo'));
     assert.equal(storedById('sF-ideakeep').title, 'THEIR IDEA TITLE', 'their title survives');
@@ -4029,7 +4114,7 @@ test('sF: an Undo keeps both times when a sync changed the end since', async (t)
     click(openControlFor(dayOf(far(0)), 'sF timed'));
     sheetHost().querySelector('.sheet-time').value = '08:00';
     click(sheetHost().querySelector('.sheet-save'));
-    applySyncedState(state({ items: [{ ...storedById('sF-times'), endTime: '11:00', updatedAt: S_AHEAD }] }));
+    applySyncedState(state({ items: [{ ...storedById('sF-times'), endTime: '11:00', updatedAt: S_AHEAD }] }), new Date());
     const before = rawStored();
     click(toastHost().querySelector('.toast-undo'));
     const r = storedById('sF-times');
@@ -4066,7 +4151,7 @@ test('sF: a filtered Undo that fails validation says it could not be undone', as
     click(sheetHost().querySelector('.sheet-save'));
     applySyncedState(state({
       items: [{ ...storedById('sF-val'), notes: 'n theirs', time: '11:00', endTime: '10:00', updatedAt: S_AHEAD }],
-    }));
+    }), new Date());
     assert.equal(storedById('sF-val').time, '11:00', 'fixture check: the out-of-order record landed');
     const before = rawStored();
     click(toastHost().querySelector('.toast-undo'));
@@ -4235,7 +4320,7 @@ test('sF: a fetch that never answers is aborted, the batch moves on, and it is n
     resume();
     await settle();
     assert.equal(fetchesOf('sF-hang').length, 1, 'fixture check: the hung calendar is being fetched');
-    applySyncedState(state({ feeds: [sdFeed('sF-hang'), sdFeed('sF-next'), sdFeed('sF-queued')] }));
+    applySyncedState(state({ feeds: [sdFeed('sF-hang'), sdFeed('sF-next'), sdFeed('sF-queued')] }), new Date());
     await settle();
     t.mock.timers.tick(60000);
     for (let i = 0; i < 5; i += 1) await settle();
@@ -4439,7 +4524,7 @@ test('sF3: a download whose body never arrives is failed at the timeout, and the
   try {
     resume();
     for (let i = 0; i < 4; i += 1) await settle();
-    applySyncedState(state({ feeds: [sdFeed('sF3-body'), sdFeed('sF3-queued')] }));
+    applySyncedState(state({ feeds: [sdFeed('sF3-body'), sdFeed('sF3-queued')] }), new Date());
     await settle();
     assert.equal(fetchesOf('sF3-queued'), 0, 'fixture check: queued behind the stalled download');
     t.mock.timers.tick(20000);
@@ -8697,4 +8782,117 @@ test('capture: a refusal in the home-screen app points to Settings and offers Ty
     voice.restore();
   }
   seed([]);
+});
+
+// --- sync-safety (2026-10-27): a failed apply still shows what it wrote -----
+//
+// applySyncedState saves and assigns `items` first, then writes feeds and
+// tombstones. If one of those later writes throws (here: the tombstones key is
+// out of storage), the items are already saved and assigned, and the feeds
+// may be. Before the fix the page kept showing the pre-sync state: `feeds` and
+// `feedCache` were never reloaded and render() never ran. The page is read
+// WITHOUT navigating: any navigation re-renders from `items` and would hide a
+// missing render.
+test('sync-safety: a tombstone write that runs out of storage still renders the pulled records, and records QuotaError', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const { encKey } = await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  seed([]);
+  // The feed cache already holds an event for the feed about to be pulled, and
+  // app.js holds no feeds: the event can show only once `feeds` is reloaded.
+  saveFeeds([]);
+  localStorage.setItem('plaenicke.feedCache', JSON.stringify({
+    'ss-pulled': {
+      fetchedAt: new Date().toISOString(),
+      events: [{
+        uid: 'ss-e1', title: 'Pulled feed event', form: 'DATE',
+        dtstart: { value: far(0).replace(/-/g, ''), tzid: null },
+        dtend: null, duration: null, rrule: null, exdates: [], recurrenceId: null,
+      }],
+      skipped: [],
+    },
+  }));
+  reloadFromStorage('plaenicke.feeds');
+  assert.doesNotMatch(allText(dayOf(far(0))), /Pulled item|Pulled feed event/, 'fixture check: nothing pulled is shown yet');
+  const blob = await encryptBlob(encKey, state({
+    items: [record({ id: 'ss-item', title: 'Pulled item', date: far(0) })],
+    feeds: [{ id: 'ss-pulled', url: 'https://example.com/ss-pulled.ics', name: 'Pulled', updatedAt: '2026-08-01T00:00:00.000Z' }],
+  }));
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, opts = {}) => {
+    const method = (opts && opts.method) || 'GET';
+    requests.push(method);
+    if (method === 'GET') return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 3, blob }) });
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 4 }) });
+  };
+  const realSet = localStorage.setItem.bind(localStorage);
+  let refused = 0;
+  localStorage.setItem = (k, v) => {
+    // Refuse ONCE: a later tombstones write (from anything render() reaches)
+    // then succeeds, so a QuotaError in lastError can only be this one.
+    if (k === 'plaenicke.syncTombstones' && refused === 0) {
+      refused += 1;
+      const e = new Error('full');
+      e.name = 'QuotaExceededError';
+      throw e;
+    }
+    return realSet(k, v);
+  };
+  const timers = installManualTimers();
+  try {
+    saveSyncState({ ...loadSyncState(), lastError: null }); // so the wait below sees THIS sync's failure
+    for (const fn of globalThis.window._listeners.online) fn();
+    await drainUntil(() => loadSyncState().lastError === 'QuotaError');
+    await drain();
+  } finally {
+    localStorage.setItem = realSet;
+    timers.restore();
+    globalThis.fetch = originalFetch;
+  }
+  try {
+    assert.equal(refused, 1, 'fixture check: the apply reached the tombstones write, once');
+    assert.equal(loadSyncState().lastError, 'QuotaError', 'sync.js records the storage failure');
+    assert.deepEqual(requests, ['GET'], 'nothing is pushed after a failed apply');
+    assert.ok(loadFeeds().some((f) => f.id === 'ss-pulled'), 'fixture check: the feed write landed before the tombstones write');
+    const shown = allText(dayBody()); // no navigation: this is what the last render() left
+    assert.match(shown, /Pulled item/, 'the pulled item, saved before the failure, is on screen');
+    assert.match(shown, /Pulled feed event/, 'the pulled feed, saved before the failure, is on screen');
+  } finally {
+    saveFeeds([]);
+    localStorage.removeItem('plaenicke.feedCache');
+    reloadFromStorage('plaenicke.feeds');
+    seed([]);
+  }
+});
+
+// applySyncedState merges on the clock it is handed (sync.js passes its own
+// `now`). prune() cuts at min(now, newest stamp in the data) - 90 days, so a
+// clock earlier than the data is observable: a bare local tombstone from
+// 2020-01-01 survives a 2020-01-11 clock and is pruned by today's.
+test('sync-safety: applySyncedState merges on the clock it is given', async () => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  seed([]);
+  saveTombstones([{ id: 'ss-old', kind: 'item', deletedAt: '2020-01-01T00:00:00.000Z' }]);
+  try {
+    const written = applySyncedState(
+      state({ items: [record({ id: 'ss-new', updatedAt: '2020-07-19T00:00:00.000Z' })] }),
+      new Date('2020-01-11T00:00:00.000Z'),
+    );
+    assert.ok(written.tombstones.some((t) => t.id === 'ss-old'), 'the injected clock decides the prune, not new Date()');
+  } finally {
+    seed([]);
+  }
+});
+
+test('sync-safety: applySyncedState refuses to run without a valid clock, before writing anything', async () => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  seed([]);
+  for (const bad of [undefined, new Date('nope'), '2026-10-27T00:00:00.000Z', Date.now()]) {
+    assert.throws(() => applySyncedState(state({ items: [record({ id: 'ss-noclock' })] }), bad), TypeError, String(bad));
+  }
+  assert.deepEqual(loadItems(), [], 'nothing was written');
 });

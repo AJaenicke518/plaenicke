@@ -276,6 +276,35 @@ test('sortIdeasNewestFirst is newest-first, deterministic, and does not mutate i
     'the answer must not depend on input order');
 });
 
+// Daily fixes 2026-10-27, item 2: new records carry createdAt as a local
+// YYYY-MM-DDTHH:MM:SS.sss, so two ideas captured the same day order by when.
+test('sortIdeasNewestFirst orders same-day ideas by capture time, and old date-only ones still by day', () => {
+  const idea = (id, createdAt) => ({ id, title: id, type: 'idea', createdAt, date: createdAt.slice(0, 10) });
+  const input = [
+    idea('a', '2026-10-27T09:00:00.000'),
+    idea('b', '2026-10-27T09:05:00.000'),
+    idea('old', '2026-10-26'),
+    idea('older-today-format', '2026-10-27'),
+  ];
+  assert.deepEqual(sortIdeasNewestFirst(input).map((i) => i.id), ['b', 'a', 'older-today-format', 'old']);
+});
+
+// The longer stamp must NOT reorder the calendar pages. sortItemsByDate (and
+// feeds.js's compareInstances) reach createdAt only on equal date and time;
+// there a date-only own createdAt was a prefix of a feed instance's
+// "<date>T<time|00:00>" and sorted first, and two own records made the same
+// day fell through to title. Both stay so: the comparison uses the stamp's day.
+test('sortItemsByDate: a same-day stamp keeps the old order against feed events and other own items', () => {
+  const own = (id, title, createdAt) => ({ id, title, date: '2026-10-27', time: null, createdAt });
+  const feed = { id: 'f', title: 'All-day feed event', date: '2026-10-27', time: null, createdAt: '2026-10-27T00:00', external: true };
+  const sorted = sortItemsByDate([feed, own('z', 'Zebra', '2026-10-27T08:00:00.000'), own('a', 'Apple', '2026-10-27T09:15:00.000')]);
+  assert.deepEqual(sorted.map((i) => i.id), ['a', 'z', 'f'],
+    'own items added on the day still precede that day\'s all-day feed events, and tie on title as before');
+  // and an earlier creation day still wins, as it always did
+  const earlier = own('e', 'Zz later title', '2026-10-20T23:00:00.000');
+  assert.deepEqual(sortItemsByDate([own('a', 'Apple', '2026-10-27T09:15:00.000'), earlier]).map((i) => i.id), ['e', 'a']);
+});
+
 // Today's "To do today" keeps a ticked to-do until tomorrow (home-screen spec
 // § 2.3), so it asks the type question without isTodo's `done` half.
 test('isTodoType is the four to-do types, done or not', () => {

@@ -40,6 +40,11 @@ export function getLink() {
 
 export function isLinked() { return getLink() !== null; }
 
+// CALLERS MUST CHECK isLinked() FIRST. linkWithCode writes the cursor (gate
+// raised) before the credential, so a failed saveAuth leaves adoptionPending
+// TRUE on a device that is NOT linked. That state is inert only because every
+// consumer (syncOnce, runSync) gates on the link before reading this. Read on
+// its own, it would report an adoption for a device with no account.
 export function isAdoptionPending() { return loadSyncState().adoptionPending === true; }
 
 export function clearAdoptionPending() {

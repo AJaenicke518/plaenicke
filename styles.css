@@ -655,6 +655,12 @@ button[data-press].pressed { opacity: 1; }
   background: var(--scrim);
   display: flex; align-items: flex-start; justify-content: center;
   padding-top: 15vh;
+  /* The page behind is scroll-locked (js/scrolllock.js), so a panel taller
+     than the screen scrolls here, inside the backdrop, and keeps its last
+     section clear of the home indicator. */
+  padding-bottom: calc(24px + env(safe-area-inset-bottom));
+  overflow-y: auto;
+  overscroll-behavior: contain;
   z-index: 10;
 }
 .settings-panel {
