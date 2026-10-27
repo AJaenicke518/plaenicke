@@ -43,9 +43,10 @@ The memoized Sets are never handed out of `instancesForRange` (only read with
 
 1. Same results: for a heuristic feed and a rule feed, repeated calls return
    deep-equal instances to the first call. (Guards correctness, not memo.)
-2. Keyed on identity: after a first call, editing the SAME array in place does
-   not change the flags; a call with a NEW array of the edited events does.
-   Fails before the change (no memo -> in-place edit is seen).
+2. (Revised after the devil's-advocate review: the original in-place-edit
+   probe made stale output required behaviour.) A test-only counter,
+   `seriesComputations()`, shows the work runs once per array and zone:
+   six calls on one array = 1; a new array +1; another zone +1.
 3. Refetch replaces the entry: `syncFeed` with a changed ICS, then
    `loadFeedCache()`, yields the new flags (never stale).
 4. Zone is part of the key: same array, different `targetTz`, recomputes.
