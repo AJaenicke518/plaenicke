@@ -200,8 +200,11 @@ header h1 { font-size: 1.7rem; font-style: italic; font-weight: 700; margin: 16p
 .type-chips { margin-top: 10px; }
 .type-chips[hidden] { display: none; }
 .type-chip-group { display: flex; flex-wrap: wrap; gap: 6px; }
+/* A 24% basis: Event, Deadline, To-do and More share one row at 375px, and
+   once More opens, Start and Milestone take a second row in two halves
+   (measured in Chrome at 375px: five chips do not fit one row at this size). */
 .type-chip {
-  flex: 1 1 0;
+  flex: 1 1 24%;
   min-width: max-content;
   min-height: 44px;
   font-size: 0.9rem;
