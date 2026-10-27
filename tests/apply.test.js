@@ -1069,8 +1069,7 @@ async function drain() {
 // the frozen case, and the cap made that case cost whatever 200 000
 // setImmediate turns cost at the time: about 3 s on an idle machine, over the
 // test's 10 s timeout under load (cancelled, 2026-10-26). setImmediate is never
-// replaced by installManualTimers, so this works inside one. The clock is
-// taken once here so a test that stubs `performance` cannot stop the wait.
+// replaced by installManualTimers, so this works inside one.
 const monotonicNow = performance.now.bind(performance);
 async function drainUntil(pred, ms = 2000) {
   const end = monotonicNow() + ms;
@@ -1092,7 +1091,7 @@ test('drainUntil gives up even when Date is frozen', { timeout: 10000 }, async (
     const elapsed = performance.now() - start;
     assert.ok(polls > 1, 'fixture check: it polled');
     assert.ok(elapsed >= 50, `it waited the full 50 ms (waited ${elapsed.toFixed(0)} ms)`);
-    assert.ok(elapsed < 1000, `it gave up at 50 ms of real time, not after a poll count (waited ${elapsed.toFixed(0)} ms)`);
+    assert.ok(elapsed < 500, `it gave up at 50 ms of real time, not after a poll count (waited ${elapsed.toFixed(0)} ms)`);
   } finally {
     t.mock.timers.reset();
   }
