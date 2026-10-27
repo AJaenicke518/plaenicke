@@ -23,7 +23,7 @@ Nothing is stored, synced or migrated. `sync.js`, `merge.js`, `ics.js`, `schemaV
 6. **Success closes the box only when its field is empty.** Text typed while it was thinking is the next entry, so the box stays open with it (the existing `clearSentText` rule).
 7. **The duplicate guard is per box.** A second Add of the same text from the same box still sends nothing; the same words from the other box are a new capture and are sent (newest wins).
 8. **A superseded request clears its own "Thinking…"** if that is still on its box's line. With two lines, a request superseded from the other box would otherwise leave "Thinking…" up for good.
-9. **A stale preview's confirm** says "Preview closed — nothing was added from it." and leaves the container alone (it may hold the newer preview).
+9. **A stale preview's confirm** leaves the container alone (it may hold the newer preview). *As executed (polish round):* it is silent, like a stale Cancel — closing the preview already said "Preview closed — nothing was added from it.", and writing on the newer request's line would swallow that request's own message.
 10. **Messages, verbatim from the spec where it gives them;** the spec's "Preview closed — nothing was added from it" gains a full stop like its neighbours. No "Listening…" text: the live words and the stop square say it; a new listen clears the line. Placeholder: "Say it, or tap here to type".
 11. **The button hides by CSS alone** (`#settings-host:not(:empty) ~ .capture-btn`, same for `#sheet-host`): each host is empty exactly when its panel is closed.
 12. **Focus for the keyboard:** inside the tap, `readOnly = false`, then `blur()`, then `focus()` — the tap has already focused the read-only field, and `focus()` on a focused field does not raise the iOS keyboard. **Speculative, phone check.**
@@ -31,7 +31,7 @@ Nothing is stored, synced or migrated. `sync.js`, `merge.js`, `ics.js`, `schemaV
 14. **Icons:** inline SVG, a mic and a stop square, in `currentColor` on the accent.
 15. **Service worker:** `CACHE` → `plaenicke-v6-13`; `CACHE_ON_MAIN` re-pinned to main's `plaenicke-v6-12` (it was stale at `-v6-11`).
 16. **A superseded box is told at once** (review I1). When a newer Add from either box (manual or smart) supersedes a smart add in flight, that request's box is told immediately: its "Thinking…" goes (only if still showing) and the capture box drops its adding latch and Cancel. So the capture box's Cancel or × can only ever cancel its own request. This replaces the first draft's "clear Thinking… when the superseded reply finally arrives".
-17. **A listen while this box's own preview is open starts from an empty field** (review I2): spec § 3 step 8 calls it a new capture with "nothing was added from it", so the previewed text does not become the new listen's prefix. After Cancel, a failure or recognition ending, the next listen still appends (spec step 5).
+17. **A listen while this box's own preview is open starts from an empty field** (review I2): spec § 3 step 8 calls it a new capture with "nothing was added from it", so the previewed text does not become the new listen's prefix. After Cancel, a failure or recognition ending, the next listen still appends (spec step 5). *As executed (Task 4 fix round):* only while the field still holds exactly the text that produced the preview; an edit made since is kept and becomes the prefix.
 18. **Add is always reachable** (review I3): the field grows to at most 120 px (five lines), then scrolls; × moved into the actions row (× left, Cancel/Add right), which is the panel's last child and `position: sticky; bottom: 0`; the preview sits above it.
 19. **`.typing` follows any keyboard-raising control in the box** (review I4): the field (not while read-only) or a preview input/select, via `focusin`/`focusout` on the box; moving focus between two of them keeps it. It stays on while the box closes, so a close with the keyboard up fades in place instead of jumping first (review M1).
 20. **A closing box lets taps through** (`pointer-events: none`, review M2); **the textarea's height includes its border** (review M3); **a `SpeechRecognition` constructor that throws reports `start-failed`** like `start()` (review M4); **a stale preview's Cancel is refused like its confirm**, through a small `js/preview.js` change: `onCancel` returning `false` leaves the container alone (review M5). The capture box's Cancel is styled secondary and × uses the 20 px title size (review M16).
@@ -692,8 +692,8 @@ print('ok')
 | V5 joined with no space | `` return `${prefix} ${spoken}`; `` → `` return `${prefix}${spoken}`; `` | `each result shows prefix …`, `composeText joins …` |
 | V6 an error does not detach | delete `detach();` in `onerror` | `an error is reported once …` |
 | V7 service-not-allowed is retry | `REFUSED_ERRORS = ['not-allowed']` | `errorKind: …` |
-| V8 a reused recognizer | `const rec = new SR();` → `const rec = (globalThis.__rec \|\|= new SR());` | `each listen makes a NEW recognizer …` (and others) |
-| V9 interim dropped | `else interim += r[0].transcript;` → `else interim += '';` | `each result shows prefix …`, `composeText joins …` |
+| V8 a reused recognizer | inside the try: `rec = new SR();` → `rec = (globalThis.__rec \|\|= new SR());` (corrected during execution: the first table quoted the pre-review line) | `each listen makes a NEW recognizer …` (and others) |
+| V9 interim dropped | `else interim += r[0].transcript;` → `else interim += '';` | `each result shows prefix …`, `composeText joins …`, `stop detaches first …` |
 | V10 constructor outside the try | the `let rec; try { rec = new SR(); } catch { … }` block → `const rec = new SR();` | `a constructor that throws reports start-failed …` |
 
 - [ ] **Step 6: Gate and commit.** Expected: `# tests 1547`, `# fail 0`, `# cancelled 0`. Message: `Stage 4: listen() in voice.js — a new recognizer per listen, live words, stop-and-detach`, body naming spec § 3 and the 2026-10-20 spike's findings, then your Co-Authored-By line. Files: `js/voice.js tests/voice.test.js`.
@@ -1954,7 +1954,7 @@ print('ok')
 | K10 stopAndKeep adds | `stopAndKeep() { if (stopListening()) { line.set(M.stopped); add(); } }` | `stopAndKeep stops a listen …` |
 | K11 a tap on the text does not stop | delete `stopListening();` in the field's click listener | `tapping the text while listening …` |
 | K13 x keeps the request | delete `if (adding !== null) cancel();` in `close()` | `x during Thinking discards the request` |
-| K14 not read-only while listening | `els.field.readOnly = next === 'listening';` → `= false;` | `a tap opens the box …`, `x with the keyboard up …` |
+| K14 not read-only while listening | `els.field.readOnly = next === 'listening';` → `= false;` | `a tap opens the box …`, `the box drops to the keyboard while …` (corrected during execution) |
 | K15 empty spoken text submitted | delete the `if (spoken && !els.field.value.trim())` line | `a tap while listening with nothing heard …` |
 | K16 capture.js missing from ASSETS | `'js/viewport.js', 'js/capture.js',` → `'js/viewport.js',` | serviceworker `every js/ module is precached …` |
 | K17 grow leaves out the border | `scrollHeight + offsetHeight - clientHeight` → `scrollHeight` | `live words fill the field and grow it, border included` |
@@ -3011,6 +3011,15 @@ print('ok')
 
 ---
 
+## Execution record (added after execution, 2026-10-26)
+
+What ran differs from the tasks above in these places; the code on the branch is the reference.
+
+- **Table corrections:** V8's plant text quoted the pre-review constructor line; K14 also fails `the box drops to the keyboard while …` rather than `x with the keyboard up …`; V9 also fails `stop detaches first …`; S8 also fails `Add stays reachable …`. The rows above are corrected.
+- **Task 4 fix round (bacb623),** from its fresh review: a listen over its own preview clears the field only while it still holds the text that produced the preview (an edit made since is kept; decision 17 narrowed); after a refusal, a tap on the round button hides "Type instead"; a submit that rejects says "Could not add: …", clears the latch and is logged with `console.error` (the click handlers catch it; `node:test` counts an unhandled rejection as a failure). +3 tests, K25–K29.
+- **Polish round,** from the per-task reviews: the panel's bottom padding moves onto the sticky actions row (content showed under it); the panel shadow uses `--shade`; **a stale preview's confirm is silent**, like a stale Cancel (decision 9 amended: writing on the newer request's line swallowed its own "Added."); a test pins the catch path's own-latch guard; `capture.stopAndKeep()` runs last on backgrounding and in `openItem`; Task 6's manual-release test releases its held requests; the SHEET_MAX_SHARE comment is re-wrapped. +3 tests, Q1–Q5.
+- **Totals:** Task 6 gate 1604 (the plan's 1601 + the fix round's 3); after the polish round 1607.
+
 ## Task 7 (lead, docs only): record the result
 
 Append a "Stage 4 result" paragraph to spec § 8 (what shipped, the decisions above, the phone checklist below, still unverified on the phone). No code.
@@ -3035,7 +3044,7 @@ Append a "Stage 4 result" paragraph to spec § 8 (what shipped, the decisions ab
 14. Dark mode: the button, box and its text read correctly.
 15. "Thinking…" → Cancel → the late reply adds nothing.
 16. A long dictation: the field grows to five lines then scrolls; Add stays visible at the box's bottom.
-17. Continuous mode: no repeated words in the live text after pauses (review M11, speculative — WebKit has repeated finals before).
+17. Continuous mode: no repeated words in the live text after pauses (review M11, speculative — WebKit has repeated finals before), and no words run together across pauses ("buy milkand eggs"): `composeText` joins finals as the browser sends them (Task 2 review, speculative).
 18. The very first listen: the iOS microphone and speech-recognition prompts do not end the listen (if they hide the page, the listen stops and keeps its words: review M12).
 19. Typing in the box: the box moves from above the round button to above the keyboard without an ugly jump (review M13); with a preview open, editing a preview field also keeps the box above the keyboard (decision 19).
 20. "Settings → plaenicke" is a real path to the microphone switch for the home-screen app (review M10, speculative; the wording is the spec's).
