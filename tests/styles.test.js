@@ -270,7 +270,21 @@ test('the sheet top bar is sticky, so Save stays reachable while the form scroll
 // styles.css, the toast's top is 130-134px up, so it can still cover the
 // last 2-6px of the last row (see the comment on body's padding-bottom).
 test('body leaves room at the bottom for the tab bar, the capture button and the toast', () => {
-  assert.equal(declOf('body', 'padding-bottom'), 'calc(56px + 72px + env(safe-area-inset-bottom))');
+  assert.equal(declOf('body', 'padding-bottom'), 'calc(56px + 80px + env(safe-area-inset-bottom))');
+});
+
+// 2026-10-26 (Alex approved): the band grew 72px -> 80px so the toast clears
+// the last row. Both are measured up from the viewport bottom, so the
+// safe-area inset cancels. Toast top = .toast bottom (56 + 12 = 68px) + its
+// height (62px one-line, 66px two-line) = 130-134px. The body padding
+// (56 + 80 = 136px) must be at least that.
+test('the body padding clears the toast\'s top edge (computed from styles.css)', () => {
+  const sum = (v) => [...v.matchAll(/(\d+)px/g)].reduce((n, m) => n + Number(m[1]), 0);
+  const pad = sum(declOf('body', 'padding-bottom'));
+  const toastBottom = sum(declOf('.toast', 'bottom'));
+  for (const toastHeight of [62, 66]) {
+    assert.ok(pad >= toastBottom + toastHeight, `${pad}px < ${toastBottom + toastHeight}px`);
+  }
 });
 
 // --- Task 4a review O1, O2, O3 ----------------------------------------------
@@ -430,6 +444,19 @@ for (const theme of [':root', '[data-theme="dark"]']) {
   });
   test(`${theme}: --overdue-start is not --danger`, () => {
     assert.notEqual(declOf(theme, '--overdue-start').toLowerCase(), declOf(theme, '--danger').toLowerCase());
+  });
+}
+
+// 2026-10-26: --muted carries 13px labels (Today labels, hints, past rows), so
+// it needs 4.5:1 on both surfaces in both themes. It was 3.45 / 3.82 (light)
+// and 4.70 / 4.19 (dark, card failing).
+for (const theme of [':root', '[data-theme="dark"]']) {
+  test(`${theme}: --muted reads at WCAG AA (4.5:1) on --bg and on --card`, () => {
+    const fg = declOf(theme, '--muted');
+    for (const surface of ['--bg', '--card']) {
+      const ratio = contrast(fg, declOf(theme, surface));
+      assert.ok(ratio >= 4.5, `${theme} ${surface}: ${ratio.toFixed(2)} < 4.5`);
+    }
   });
 }
 
