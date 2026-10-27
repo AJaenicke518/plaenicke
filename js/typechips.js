@@ -29,9 +29,6 @@ function chip(value) {
   return b;
 }
 
-// Builds the chips into `host`, replacing whatever it held. Returns
-// { value(), reset() }: value() is the selected type's value; reset() selects
-// Event again and folds Start and Milestone back behind More.
 // Throws unless every offered value is a known type with a label. Exported
 // so the guard itself is tested (tests/typechips.test.js).
 export function assertOffered(offered, known, labels) {
@@ -41,6 +38,9 @@ export function assertOffered(offered, known, labels) {
   }
 }
 
+// Builds the chips into `host`, replacing whatever it held. Returns
+// { value(), reset() }: value() is the selected type's value; reset() selects
+// Event again and folds Start and Milestone back behind More.
 export function createTypeChips(host) {
   assertOffered([...PRIMARY_TYPES, ...MORE_TYPES], TYPES, TYPE_LABELS);
 

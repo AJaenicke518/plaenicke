@@ -8642,7 +8642,6 @@ test('capture: its Add is hidden while its preview is open, and back when a top-
   seed([]);
 });
 
-// LAST of the capture tests: a refusal lasts the session (js/capture.js).
 // Manual type (option A): the capture box has no date row, so it never takes
 // the manual path, even with a date and a type chosen up in the top box.
 test('capture: never reaches the manual path, whatever the top box\'s date row and type chips hold', async () => {
@@ -8678,6 +8677,7 @@ test('capture: never reaches the manual path, whatever the top box\'s date row a
   seed([]);
 });
 
+// LAST of the capture tests: a refusal lasts the session (js/capture.js).
 test('capture: a refusal in the home-screen app points to Settings and offers Type instead', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
