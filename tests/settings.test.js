@@ -138,6 +138,22 @@ test('settings: a hidden calendar\'s Show button is named "Show <calendar name>"
   }
 });
 
+test('settings: hiding a calendar re-renders its toggle as "Show <name>", and showing it drops the label', () => {
+  const work = {
+    id: 'feedW', url: 'https://calendar.example.com/private-s3cr3tT0ken/basic.ics', name: 'Work',
+    color: 'var(--feed-palette-2)', hidden: false, updatedAt: '2026-07-01T00:00:00.000Z',
+  };
+  const { host } = openPanel([work]);
+  findButtonByText(host, 'Hide').click();
+  const show = findButtonByText(host, 'Show');
+  assert.ok(show, 'fixture check: the toggle now reads Show');
+  assert.equal(show.getAttribute('aria-label'), 'Show Work');
+  show.click();
+  const hide = findButtonByText(host, 'Hide');
+  assert.ok(hide, 'fixture check: the toggle reads Hide again');
+  assert.equal(hide.getAttribute('aria-label'), null);
+});
+
 // --- synced mutations vs per-device view preferences (spec 6.3) ------------
 //
 // The panel's seven notification sites are NOT interchangeable. Two of them
