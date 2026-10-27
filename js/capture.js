@@ -288,9 +288,15 @@ export function createCapture({
   // the box's Add: stop-and-detach first, then the adding latch. Never a
   // newline, while thinking too. Not mid-composition: an IME's Return
   // confirms the composed word.
+  // keyCode 229: Safari can report the Return that confirms a composition
+  // with isComposing false. With this box's own preview open and the text
+  // unchanged, Return sends nothing: "Add all" is the confirm, and re-sending
+  // the same text is the second paid request the hidden Add exists to stop.
+  // An edit made since is the next entry and adds (merge review, 2026-10-26).
   els.field.addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter' || e.isComposing) return;
+    if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
+    if (previewOpen && els.field.value.trim() === previewText) return;
     add().catch(logFailure);
   });
   // .typing lowers the box to just above the keyboard (styles.css) while any

@@ -631,3 +631,30 @@ test('x with a preview open resets the box\'s Add for the next opening', async (
   tap(fx.els.button);
   assert.equal(fx.els.add.hidden, false);
 });
+
+// Merge review, 2026-10-26: with this box's own preview open, Return on the
+// unchanged text must not re-send it (the hidden Add's whole point); an edit
+// made since is the next entry and adds, as everywhere else in the box.
+test('Return with this box\'s preview open and the text unchanged sends nothing; an edit still adds', async () => {
+  const fx = setup();
+  listening(fx, 'two things friday');
+  tap(fx.els.button);
+  fx.settle('preview');
+  await tick();
+  fx.els.preview.appendChild(new FakeElement('div'));
+  const ev = keydown(fx.els.field, { key: 'Enter' });
+  assert.equal(ev.defaultPrevented, true, 'still no newline');
+  assert.equal(fx.submits, 1, 'no second paid request for the same text');
+  fx.els.field.value = 'two things friday and the dentist';
+  keydown(fx.els.field, { key: 'Enter' });
+  assert.equal(fx.submits, 2, 'an edit is a new capture');
+});
+
+test('Return that confirms an IME composition reported as keyCode 229 does nothing', () => {
+  const fx = setup();
+  listening(fx, 'x');
+  fx.voice.current.opts.onEnd();
+  const ev = keydown(fx.els.field, { key: 'Enter', keyCode: 229 });
+  assert.equal(ev.defaultPrevented, false);
+  assert.equal(fx.submits, 0);
+});

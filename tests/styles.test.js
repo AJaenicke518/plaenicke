@@ -1313,3 +1313,10 @@ test('3-day: the overrides come after the rules they override', () => {
   assert.ok(at('.tday-block') > at('.day-block'));
   assert.ok(at('.tday-block .item-open') > at('.day-block .item-open'));
 });
+
+// Merge review, 2026-10-26: with Reduce Motion on nothing animates, so a
+// closing box would sit there inert for CLOSE_MS; it is hidden at once.
+test('with Reduce Motion on, a closing capture box is hidden at once', () => {
+  const reduce = rulesInContext(css).filter((r) => r.at === '@media (prefers-reduced-motion: reduce)');
+  assert.equal(declOf('.capture-box.closing', 'visibility', reduce.map((r) => `${r.sel} {${r.body}}`).join('\n')), 'hidden');
+});
