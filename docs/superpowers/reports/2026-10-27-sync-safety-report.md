@@ -56,7 +56,18 @@ DA review (opus, on 845fa6c): 0 Critical, 2 Important, 2 Minor.
 - Minor, noted: the saveAuth translation changes the link-error text in linkui.js:718.
   Nothing matches on that text.
 
-Independent run-the-code review of 7d393af: **PENDING at report time** (see the status at the end).
+Independent run-the-code review of 7d393af (opus, fresh): **CLEAN**, 0 Critical / 0 Important.
+- 14 mutants, full `npm test` each, tree verified clean after each. 12 killed. Survivors:
+  dropping only the feedCache reload (not observable: render reads the cache only for feeds
+  in `feeds`, same gap as before), and sync.js passing `new Date()` instead of `now()`
+  (identical in production).
+- Differential against 845fa6c under a fixed clock, driving the real syncOnce and
+  applySyncedState: success path and 409-retry path byte-identical (result, written state,
+  decrypted PUT bodies, all stored keys, screen). Three failure cases (tombstones write,
+  addTombstone inside removeFeed, feeds write): stored keys and lastError identical; only the
+  screen differs, and the new code shows what storage holds. **Sync writes and merges are unchanged.**
+- The flake did not reproduce in 76 runs (serial and parallel). The new tests run after
+  #70 and cannot cause it. Suspect: drainUntil's 2 s limit under load (unconfirmed).
 
 ## Item 2 — nextStamp at the maximum Date (BLOCKED, not built)
 
@@ -87,9 +98,7 @@ the link first. Reviewed, and safe to release.
 
 ## Status for release
 - Item 3: reviewed, safe.
-- Item 1: built, gated, lead mutation-checked. The independent run-the-code review was not
-  finished when this report was written. **Do not ship 7d393af unless that review is
-  recorded as clean.**
+- Item 1: reviewed (DA + independent run-the-code review, clean), gated. Safe to release.
 - Item 2: blocked on Alex.
 
 ## Retro
