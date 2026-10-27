@@ -483,6 +483,7 @@ test('the item sheet uses the sheet radius on its top corners', () => {
 const INPUT_RULES = [
   '#entry-text', '#entry-date', '#entry-time', '#entry-end', '.idea-add textarea',
   '.feed-add input', '.link-ui input', '.preview-row input', '.preview-row select',
+  '.capture-text',
 ];
 for (const sel of INPUT_RULES) {
   test(`${sel} is at least 16px`, () => {
@@ -541,8 +542,9 @@ for (const [sel, size] of Object.entries(CALENDAR_SIZES)) {
 // The sheet's tag chips are the one other reader: first the 13px label scale
 // (Commit 1b), now the 16px row scale (2026-10-25). The List's tags moved into the sheet. The Week
 // page's list (wlist-, stage 3 Commit 3) is a new screen under the grid; the
-// grid itself (week-) keeps its compact sizes.
-const NEW_SCREEN = /\.(today-|tab-|cal-switch|wlist-|sheet-tags?(?![\w-]))/;
+// grid itself (week-) keeps its compact sizes. The capture box (capture-,
+// stage 4) is the spec's third new screen.
+const NEW_SCREEN = /\.(today-|tab-|cal-switch|wlist-|capture-|sheet-tags?(?![\w-]))/;
 test('only the new screens read the new type scale', () => {
   const readers = [];
   for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
@@ -570,14 +572,68 @@ test('the grey iOS tap highlight is off exactly where .pressed replaces it', () 
   assert.equal(declOf('html', '-webkit-tap-highlight-color'), null, 'links and checkboxes keep the native highlight');
 });
 
-// Feedback on touch-down means instantly. And stage 2 adds no motion at all,
-// so nothing needs a prefers-reduced-motion override yet: stage 4's capture
-// box is the first animation, and it must add that override and change this.
-test('press state is instant, and the stylesheet declares no motion yet', () => {
+// Feedback on touch-down means instantly. Stage 4's capture box is the one
+// animation in the app (spec § 5: "Nothing else animates"), and it carries
+// the prefers-reduced-motion override.
+//
+// The body of the top-level at-rule whose prelude is exactly `prelude`
+// (`@media (prefers-reduced-motion: reduce)`, `@keyframes capture-grow`), so
+// a test can read declarations inside it alone. Throws when there is none.
+function atRuleBody(prelude, source = css) {
+  let depth = 0;
+  let start = 0;
+  let bodyStart = 0;
+  let current = '';
+  for (let i = 0; i < source.length; i += 1) {
+    if (source[i] === '{') {
+      if (depth === 0) { current = source.slice(start, i).trim(); bodyStart = i + 1; }
+      depth += 1;
+    } else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        if (current === prelude) return source.slice(bodyStart, i);
+        start = i + 1;
+      }
+    }
+  }
+  throw new Error(`styles.css has no ${prelude} block`);
+}
+const CAPTURE_KEYFRAMES = ['capture-fade-in', 'capture-fade-out', 'capture-grow', 'capture-shrink'];
+
+test('press state is instant, nothing transitions, and the only animation is the capture panel\'s', () => {
   assert.equal(declOf('button.pressed', 'transition'), null);
   assert.equal(declOf('[data-press].pressed', 'transition'), null);
-  assert.doesNotMatch(css, /(^|[;{\s])(transition|animation)(-[a-z-]+)?\s*:/);
-  assert.doesNotMatch(css, /@keyframes/);
+  assert.doesNotMatch(css, /(^|[;{\s])transition(-[a-z-]+)?\s*:/);
+  const animated = rulesOf(css)
+    .filter(({ body }) => /(^|[;{\s])animation(-[a-z-]+)?\s*:/.test(body))
+    .map(({ sel }) => sel.replace(/\s+/g, ' '));
+  assert.deepEqual([...new Set(animated)].sort(), [
+    '.capture-box.closing .capture-panel', '.capture-box.closing.fade .capture-panel', '.capture-panel',
+  ]);
+  assert.deepEqual([...css.matchAll(/@keyframes\s+([\w-]+)/g)].map((m) => m[1]).sort(), CAPTURE_KEYFRAMES);
+});
+
+test('the capture panel grows from the button\'s corner in 250ms and shrinks back; with the keyboard up it fades', () => {
+  assert.equal(declOf('.capture-panel', 'animation'), 'capture-grow 250ms ease-out');
+  assert.equal(declOf('.capture-panel', 'transform-origin'), 'bottom right');
+  assert.equal(declOf('.capture-box.closing .capture-panel', 'animation'), 'capture-shrink 250ms ease-out forwards');
+  assert.equal(declOf('.capture-box.closing.fade .capture-panel', 'animation-name'), 'capture-fade-out');
+  // transform and opacity only (spec § 5).
+  for (const name of CAPTURE_KEYFRAMES) {
+    for (const { body } of rulesOf(atRuleBody(`@keyframes ${name}`))) {
+      for (const decl of body.split(';')) {
+        const i = decl.indexOf(':');
+        if (i < 0) continue;
+        assert.ok(['transform', 'opacity'].includes(decl.slice(0, i).trim()), `${name} animates ${decl.trim()}`);
+      }
+    }
+  }
+});
+
+test('under reduced motion the capture panel only fades', () => {
+  const reduced = atRuleBody('@media (prefers-reduced-motion: reduce)');
+  assert.equal(declOf('.capture-panel', 'animation-name', reduced), 'capture-fade-in');
+  assert.equal(declOf('.capture-box.closing .capture-panel', 'animation-name', reduced), 'capture-fade-out');
 });
 
 // --- home-screen stage 3b: the guessed-series line on the sheet (spec § 2.4) --
@@ -816,8 +872,10 @@ test('the tab bar is fixed at the bottom, 56px plus the home-indicator inset', (
   assert.equal(declOf('.tab-bar', 'border-top'), '1px solid var(--line)');
 });
 
-test('layers: tab bar 5 < settings 10 < item sheet 15 < toast 20 (spec § 4)', () => {
+test('layers: tab bar 5 < capture button 6 < capture box 8 < settings 10 < item sheet 15 < toast 20 (spec § 4)', () => {
   assert.equal(zIndexOf('.tab-bar'), 5);
+  assert.equal(zIndexOf('.capture-btn'), 6);
+  assert.equal(zIndexOf('.capture-box'), 8);
   assert.equal(zIndexOf('.settings-backdrop'), 10);
   assert.equal(zIndexOf('.sheet-backdrop'), 15);
   assert.equal(zIndexOf('.toast'), 20);
@@ -918,4 +976,99 @@ test('no tag-chip rule carries a hex literal', () => {
     assert.ok(m.length, sel);
     for (const [, , body] of m) assert.doesNotMatch(body, /#[0-9a-fA-F]{3,8}\b/, sel);
   }
+});
+
+// --- home-screen stage 4: the capture button and box (spec § 3, § 4, § 5) ---
+const indexHtml = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+
+test('the capture button is a 56px accent circle, 16px from the right and 16px above the tab bar', () => {
+  assert.equal(declOf('.capture-btn', 'position'), 'fixed');
+  assert.equal(declOf('.capture-btn', 'right'), '16px');
+  assert.equal(declOf('.capture-btn', 'bottom'), 'calc(56px + 16px + env(safe-area-inset-bottom))');
+  assert.equal(declOf('.capture-btn', 'width'), '56px');
+  assert.equal(declOf('.capture-btn', 'height'), '56px');
+  assert.equal(declOf('.capture-btn', 'border-radius'), 'var(--radius-round)');
+  assert.equal(declOf('.capture-btn', 'background'), 'var(--accent)');
+  assert.equal(declOf('.capture-btn', 'color'), 'var(--accent-ink)');
+  assert.equal(declOf('.capture-btn', 'box-shadow'), null, 'shadows are for the box, sheets and the toast only');
+});
+
+test('pressed, the capture button scales instead of dimming', () => {
+  assert.equal(declOf('.capture-btn.pressed', 'transform'), 'scale(0.94)');
+  assert.equal(declOf('.capture-btn.pressed', 'opacity'), '1');
+});
+
+test('listening, the capture button shows a stop square instead of the mic', () => {
+  assert.equal(declOf('.capture-btn .icon-stop', 'display'), 'none');
+  assert.equal(declOf('.capture-btn.listening .icon-mic', 'display'), 'none');
+  assert.equal(declOf('.capture-btn.listening .icon-stop', 'display'), 'block');
+});
+
+test('the capture button is not shown while Settings or the item sheet is open', () => {
+  assert.equal(declOf('#settings-host:not(:empty) ~ .capture-btn', 'display'), 'none');
+  assert.equal(declOf('#sheet-host:not(:empty) ~ .capture-btn', 'display'), 'none');
+});
+
+// `~` matches a LATER sibling only, so the rules above depend on the order.
+test('index.html puts the capture button after both hosts, as siblings in body', () => {
+  const at = (needle) => {
+    const i = indexHtml.indexOf(needle);
+    assert.ok(i >= 0, `index.html has no ${needle}`);
+    return i;
+  };
+  const btn = at('<button id="capture-btn" class="capture-btn" type="button"');
+  assert.ok(btn > at('<div id="settings-host"></div>'));
+  assert.ok(btn > at('<div id="sheet-host"></div>'));
+  assert.ok(at('<script type="module" src="js/app.js"></script>') > btn);
+  assert.match(indexHtml, /<div id="capture-box" class="capture-box" hidden>/, 'the box starts hidden');
+});
+
+test('the capture box sits just above the button, and 8px above the keyboard while typing', () => {
+  assert.equal(declOf('.capture-box', '--capture-lift'), 'calc(56px + 16px + 56px + 8px + env(safe-area-inset-bottom))');
+  assert.equal(declOf('.capture-box', 'bottom'), 'var(--capture-lift)');
+  assert.equal(declOf('.capture-box.typing', '--capture-lift'), '8px');
+  assert.equal(declOf('.capture-box', 'position'), 'fixed');
+  assert.equal(declOf('.capture-box', 'left'), '16px');
+  assert.equal(declOf('.capture-box', 'right'), '16px');
+  assert.equal(declOf('.capture-box', 'max-height'), '50dvh');
+  assert.equal(declOf('.capture-box[hidden]', 'display'), 'none');
+});
+
+test('the capture panel has the sheet radius and a shadow, and scrolls inside itself', () => {
+  assert.equal(declOf('.capture-panel', 'border-radius'), 'var(--radius-sheet)');
+  assert.notEqual(declOf('.capture-panel', 'box-shadow'), null);
+  assert.equal(declOf('.capture-panel', 'overflow-y'), 'auto');
+  assert.equal(declOf('.capture-panel', 'overscroll-behavior'), 'contain');
+  assert.equal(declOf('.capture-panel', 'min-height'), '0');
+});
+
+test('every capture control is a 44px target', () => {
+  assert.ok(px(declOf('.capture-close', 'min-width')) >= 44);
+  assert.ok(px(declOf('.capture-actions button', 'min-height')) >= 44, 'x, Cancel and Add are all in this row');
+  assert.ok(px(declOf('.capture-type', 'min-height')) >= 44);
+  assert.match(indexHtml, /<div class="capture-actions">\s*<button id="capture-close"/, 'x is in the actions row');
+});
+
+// Add must stay reachable in a box that may be ~200px tall with the keyboard
+// up (DA I3): the field stops growing at five lines, and the actions row is
+// the panel's last child, stuck to its bottom edge.
+test('Add stays reachable: the field stops growing, and the actions row sticks to the bottom', () => {
+  assert.equal(declOf('.capture-text', 'max-height'), '120px');
+  assert.equal(declOf('.capture-text', 'overflow-y'), 'auto');
+  assert.equal(declOf('.capture-actions', 'position'), 'sticky');
+  assert.equal(declOf('.capture-actions', 'bottom'), '0');
+  assert.equal(declOf('.capture-actions', 'background'), 'var(--card)', 'opaque, so scrolled content does not show through');
+  const panel = indexHtml.slice(indexHtml.indexOf('<div class="capture-panel"'), indexHtml.indexOf('<button id="capture-btn"'));
+  assert.ok(panel.lastIndexOf('<div class="capture-actions">') > panel.indexOf('id="capture-preview"'),
+    'the actions row comes after the preview');
+});
+
+test('a closing capture box lets taps through to the page', () => {
+  assert.equal(declOf('.capture-box.closing', 'pointer-events'), 'none');
+});
+
+test('the capture box\'s Cancel is secondary, like the preview\'s and the sheet\'s', () => {
+  assert.match(indexHtml, /<button id="capture-cancel" class="cancel" type="button" hidden>Cancel<\/button>/);
+  assert.equal(declOf('.capture-actions .cancel', 'background'), 'var(--card)');
+  assert.equal(declOf('.capture-actions .cancel', 'border'), '1px solid var(--line)');
 });

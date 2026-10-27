@@ -145,6 +145,39 @@
   <div id="settings-host"></div>
   <!-- The item sheet (js/itemsheet.js) mounts here. -->
   <div id="sheet-host"></div>
+  <!-- The capture box and its round button (home-screen spec § 3), driven by
+       js/capture.js. They come AFTER both hosts above on purpose: styles.css
+       hides the button with `#settings-host:not(:empty) ~ .capture-btn` and
+       `#sheet-host:not(:empty) ~ .capture-btn`, and `~` only matches a LATER
+       sibling. The box is not a modal: no backdrop, no tap-outside-to-close. -->
+  <div id="capture-box" class="capture-box" hidden>
+    <div class="capture-panel" role="region" aria-label="Capture">
+      <textarea id="capture-text" class="capture-text" rows="2" autocomplete="off"
+                placeholder="Say it, or tap here to type"></textarea>
+      <p id="capture-message" class="message" role="status"></p>
+      <button id="capture-type" class="capture-type" type="button" hidden>Type instead</button>
+      <section id="capture-preview" class="capture-preview" hidden></section>
+      <!-- One row, last and sticky at the panel's bottom, so Add stays
+           reachable however much text or preview there is: x on the left,
+           Cancel / Add on the right. -->
+      <div class="capture-actions">
+        <button id="capture-close" class="capture-close" type="button" aria-label="Close">&times;</button>
+        <button id="capture-cancel" class="cancel" type="button" hidden>Cancel</button>
+        <button id="capture-add" type="button">Add</button>
+      </div>
+    </div>
+  </div>
+  <button id="capture-btn" class="capture-btn" type="button"
+          aria-label="Capture by voice" aria-expanded="false" aria-controls="capture-box">
+    <svg class="icon-mic" viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"
+         fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="9" y="3" width="6" height="11" rx="3"></rect>
+      <path d="M5 11a7 7 0 0 0 14 0M12 18v3"></path>
+    </svg>
+    <svg class="icon-stop" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+      <rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor"></rect>
+    </svg>
+  </button>
   <!-- The toast (js/toast.js). The host is NOT a live region: it holds the
        Undo button, which would be read out as part of every notice. The
        message is announced through #toast-live, which is PERSISTENT because a
