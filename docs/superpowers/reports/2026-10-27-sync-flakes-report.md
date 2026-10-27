@@ -9,6 +9,7 @@ Branch `sync-flakes`, from `main` at f1d97ea (v6-16). Only `tests/apply.test.js`
 | Idle, 90 runs one at a time | 0 / 90 failing runs | 0 / 90 |
 | 14 at a time, 90 runs | 0 / 90 | not re-run |
 | **40 at a time, 360 runs** | **55 / 360 failing runs** | **0 / 360** |
+| Reviewer's own runs, 40 at a time | 7 / 80 | 1 / 80, then 1 / 160 (both: the open flake below) |
 
 Cancelled tests: 0 in every run, before and after. The machine has 14 cores. The prior lead's "3 of 90" did not reproduce idle or at 14-way load. It reproduced at 40-way load, so all the per-test numbers below come from that load.
 
@@ -33,7 +34,7 @@ Per test, 40-way load, 360 runs each side. "Failed" counts every run in which th
 
 ## Root cause (one cause, measured)
 
-app.js's `scheduleSync` arms a **real** `setTimeout(runSync, 2000)` whenever a test writes under real timers: a tick, an Ideas capture, an add, a Settings calendar change. About 26 earlier tests leave one pending when they end. On an idle machine all of them fire after the last linked test, against the offline fetch, so nothing breaks. Under load the file runs slower. Those timers then fire inside whichever test is running 2 s later, and that is usually one of the visible-only, slow-write or cross-tab sync tests (tests 154–168). By then the device is linked, the test's fetch stub is installed, and `installManualTimers` has replaced `setTimeout`.
+app.js's `scheduleSync` arms a **real** `setTimeout(runSync, 2000)` whenever a test writes under real timers: a tick, an Ideas capture, an add, a Settings calendar change. Twenty earlier tests leave one pending when they end. The reviewer counted this in afterEach: 21 per run including guard test 1, the same idle and loaded. On an idle machine all of them fire after the last linked test, against the offline fetch, so nothing breaks. Under load the file runs slower. Those timers then fire inside whichever test is running 2 s later, and that is usually one of the visible-only, slow-write or cross-tab sync tests (tests 154–168). By then the device is linked, the test's fetch stub is installed, and `installManualTimers` has replaced `setTimeout`.
 
 Two effects follow:
 - **An extra sync inside the test.** Examples: "expected 1 PUT, got 2"; a second PUT replaces `holdAccountWrite`'s single `releasePut`; or the test's own trigger finds `syncInFlight` set and only sets `syncPending`.
@@ -41,7 +42,7 @@ Two effects follow:
 
 **Evidence.** A temporary trace wrapped `setTimeout` for functions named `runSync` and logged the test in which each timer was armed and the test in which it fired. Across 120 runs at 40-way load, the stray timer fired inside the failing test in every failing run, each time with that test's stub installed (`fetchIsOffline=false`) and its manual timers in place (`setTimeoutIsReal=false`). Idle, the same timers all fired in the file's last test.
 
-**Ruled out by measurement:** the fixed-turn waits (`drain()`'s 50 turns, and the `for i < 200` loops). Instrumented at 40-way load over 120 runs, a healthy sync reached the network in at most 15 turns. A wait that ran out did so because the sync was stuck: it did not arrive within 10 s either. I left those waits unchanged. WebCrypto timing was not a cause at this load.
+**Ruled out by measurement, for tests 154–168 only:** the fixed-turn waits in those tests (`drain()`'s 50 turns, and the `for i < 200` loops). Instrumented at 40-way load over 120 runs, a healthy sync reached the network in at most 15 turns. A wait that ran out did so because the sync was stuck: it did not arrive within 10 s either. I left those waits unchanged. WebCrypto timing was not a cause at this load.
 
 ## Fix (test-side)
 
@@ -63,6 +64,20 @@ I mutation-checked each against a planted bug, and each failed:
 
 There are no raised timeouts, no skips and no retries.
 
+## STILL OPEN: "ticking a to-do schedules a sync" (test 30, tests/apply.test.js:1084)
+
+The final reviewer found this one, not my runs. Its counts:
+- after the fix: 2 failures in 240 runs at 40-way load;
+- on the parent file: 1 failure in 80 runs.
+
+So it predates this commit and is independent of the stray timers: it runs under MockTimers, so a real timer cannot reach it. In the failing run it failed after 6 ms with no PUT sent ('a completed to-do must reach the account…').
+
+The test waits a fixed 50 setImmediate turns after `t.mock.timers.tick(2000)` (line 1105). CLAUDE.md forbids that: "poll, never a fixed tick".
+- **Speculative cause:** that wait runs out before syncOnce's WebCrypto steps reach the PUT.
+- **Recommended fix:** replace the loop with `drainUntil(() => requests.some((r) => r.url.includes('/data') && r.method === 'PUT'))`, as the tick test at 7414 already does. Then measure before and after at 40-way load.
+
+The same raw 50-turn pattern is also at lines 564, 1237 and 2617. Not fixed here: the controller's hard stop left no time for a reviewed, measured fix.
+
 ## Not changed, noted
 
 - **Speculative risk.** "the line clears when its write settles…" releases the `pending` PUTs in `finally`. A PUT issued after that loop would stay held forever. Reaching that requires the test's own sync to arrive late, and I measured no such case once stray timers were gone. I made no change for it.
@@ -76,4 +91,12 @@ There are no raised timeouts, no skips and no retries.
 ## Process gaps
 
 - I wrote no separate plan under `docs/superpowers/plans/` and ran no devil's-advocate review of a plan. The work was a single test-side change, investigated directly.
-- Final diff review: see the controller reply for whether a fresh reviewer agent ran and what it found.
+- Final diff review: a fresh reviewer agent (opus) reviewed bc7f3b5. It:
+  - re-ran the gates and the three mutations, all of which matched;
+  - confirmed that the tracker stays installed for all 266 tests and that 0 tracked timers fire during tests (so none a test needs is cancelled);
+  - confirmed that odd handles passed to clearTimeout are safe.
+
+  Nothing blocking. Its findings:
+  - the open flake above;
+  - the overstated ruling-out and count, both corrected here;
+  - a suggestion to add `beforeEach(() => assert.equal(realSyncTimers.size, 0))` to catch a sync timer re-armed after a test's afterEach. It measured 0 such cases in 80 loaded runs. Not added.
