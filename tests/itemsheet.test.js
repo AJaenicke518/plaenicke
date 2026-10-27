@@ -1080,3 +1080,149 @@ test('each tag chip carries --tag-color equal to tagColour of its text', () => {
     ['var(--feed-palette-4)', 'var(--feed-palette-5)', 'var(--feed-palette-3)']);
   assert.notEqual(chips[0].style['--tag-color'], chips[1].style['--tag-color']);
 });
+
+// =========================================================================
+// Per-series visibility (option A, 2026-10-26)
+// =========================================================================
+// The sheet only draws the two switches and reports a tap; app.js decides
+// whether a series may be hidden (no guessed series) and writes the choice
+// (js/visibility.js). Nothing here touches storage.
+
+function openVis(item, visibility, result = () => ({ ok: true })) {
+  const changes = [];
+  const opened = open(item, {
+    calendarName: 'LMU Classes',
+    visibility,
+    onVisibilityChange: (surface, shown) => { changes.push([surface, shown]); return result(surface, shown); },
+  });
+  return { ...opened, changes };
+}
+const switches = (host) => byClass(host, 'sheet-switch');
+
+test('vis: a feed event given visibility shows two switches, calendar then lists, each a named switch', () => {
+  const { host } = openVis(external({ title: 'CLST 1300', recurring: true }), { calendar: true, list: false, every: true });
+  const block = one(host, 'sheet-vis');
+  assert.equal(one(host, 'sheet-vis-head').textContent, 'Show every CLST 1300');
+  const [cal, lst] = switches(host);
+  assert.equal(switches(host).length, 2);
+  for (const s of [cal, lst]) {
+    assert.equal(s.tagName, 'BUTTON');
+    assert.equal(s.type, 'button');
+    assert.equal(s.getAttribute('role'), 'switch');
+  }
+  assert.equal(cal.getAttribute('aria-checked'), 'true');
+  assert.equal(lst.getAttribute('aria-checked'), 'false');
+  assert.equal(cal.getAttribute('aria-label'), 'Show CLST 1300 on the calendar');
+  assert.equal(lst.getAttribute('aria-label'), 'Show CLST 1300 on Today and in lists');
+  const text = allText(block);
+  assert.match(text, /On the calendar/);
+  assert.match(text, /Day, Week and Month/);
+  assert.match(text, /On Today and in lists/);
+  assert.match(text, /On this device only\. Undo it here or in Settings → Linked calendars\./);
+  const sheet = one(host, 'sheet');
+  assert.equal(sheet.children.indexOf(block), sheet.children.indexOf(one(host, 'sheet-source')) + 1,
+    'directly under "From <calendar>", as the mockup draws it');
+});
+
+test('vis: "every" follows the caller, not `recurring`; the list sub-label names upcoming lists only when they can hold it', () => {
+  let { host } = openVis(external({ title: 'Exam', recurring: false }), { calendar: true, list: true, every: false });
+  assert.equal(one(host, 'sheet-vis-head').textContent, 'Show Exam');
+  assert.match(allText(host), /Today’s events, upcoming lists and the “Next” line/);
+  // A monthly series: not `recurring` (it can be in the upcoming lists), but
+  // one switch covers every month.
+  ({ host } = openVis(external({ title: 'Club', recurring: false }), { calendar: true, list: true, every: true }));
+  assert.equal(one(host, 'sheet-vis-head').textContent, 'Show every Club');
+  ({ host } = openVis(external({ title: 'CLST', recurring: true }), { calendar: true, list: true, every: true }));
+  assert.match(allText(host), /Today’s events and the “Next” line/);
+  assert.doesNotMatch(allText(host), /upcoming lists/, 'a weekly class is never in the upcoming lists');
+  ({ host } = openVis(external({ title: '', recurring: true }), { calendar: true, list: true, every: true }));
+  assert.equal(one(host, 'sheet-vis-head').textContent, 'Show every Untitled event');
+  assert.equal(switches(host)[0].getAttribute('aria-label'), 'Show Untitled event on the calendar');
+  assert.throws(() => openItemSheet(new FakeElement('div'), external(), {
+    today: () => TODAY, onClose: () => {}, visibility: { calendar: true, list: true }, onVisibilityChange: () => ({ ok: true }),
+  }), /every/);
+});
+
+test('vis: a tap reports the flipped value for its own surface, and the switch follows on success', () => {
+  const { host, changes } = openVis(external(), { calendar: true, list: true, every: true });
+  const [cal, lst] = switches(host);
+  cal.fire('click');
+  assert.deepEqual(changes, [['calendar', false]]);
+  assert.equal(cal.getAttribute('aria-checked'), 'false');
+  assert.equal(lst.getAttribute('aria-checked'), 'true', 'the other switch is untouched');
+  lst.fire('click');
+  cal.fire('click');
+  assert.deepEqual(changes, [['calendar', false], ['list', false], ['calendar', true]]);
+  assert.equal(cal.getAttribute('aria-checked'), 'true');
+  assert.equal(lst.getAttribute('aria-checked'), 'false');
+  assert.ok(host.children.length > 0, 'the sheet stays open');
+});
+
+test('vis: a failed write leaves the switch as it was and says why', () => {
+  let full = true;
+  const { host, changes } = openVis(external(), { calendar: true, list: true, every: true },
+    () => (full ? { ok: false, error: 'Storage is full.' } : { ok: true }));
+  const [cal] = switches(host);
+  assert.equal(one(host, 'sheet-vis-error').textContent, '');
+  cal.fire('click');
+  assert.deepEqual(changes, [['calendar', false]]);
+  assert.equal(cal.getAttribute('aria-checked'), 'true');
+  assert.equal(one(host, 'sheet-vis-error').textContent, 'Storage is full.');
+  assert.equal(one(host, 'sheet-vis-error').getAttribute('role'), 'alert');
+  full = false;
+  cal.fire('click');
+  assert.equal(cal.getAttribute('aria-checked'), 'false');
+  assert.equal(one(host, 'sheet-vis-error').textContent, '', 'a write that lands clears the old error');
+});
+
+test('vis: a malformed result from the callback throws rather than guess', () => {
+  const { host } = openVis(external(), { calendar: true, list: true, every: true }, () => undefined);
+  assert.throws(() => switches(host)[0].fire('click'), /onVisibilityChange/);
+});
+
+test('vis: the switches are Tab stops, between Close and the Google link', () => {
+  const url = 'https://calendar.google.com/calendar/r/day/2026/9/23';
+  const { host } = open(external(), {
+    calendarName: 'Work', googleDayUrl: url, visibility: { calendar: true, list: true, every: true }, onVisibilityChange: () => ({ ok: true }),
+  });
+  const [cal, lst] = switches(host);
+  const close = one(host, 'sheet-close');
+  const link = byTag(host, 'A')[0];
+  close.focus();
+  // Shift+Tab from the first wraps to the last: the Google link.
+  assert.equal(pressTab(true), true);
+  assert.equal(document.activeElement, link);
+  // Tab from the last wraps to the first.
+  assert.equal(pressTab(), true);
+  assert.equal(document.activeElement, close);
+  // Tab from a switch is the browser's own move (not an edge).
+  cal.focus();
+  assert.equal(pressTab(), false);
+  lst.focus();
+  assert.equal(pressTab(), false);
+  const sheet = one(host, 'sheet');
+  const order = [close, cal, lst, link].map((n) => {
+    let top = n;
+    while (top.parentNode !== sheet) top = top.parentNode;
+    return sheet.children.indexOf(top);
+  });
+  assert.deepEqual([...order].sort((a, b) => a - b), order, 'DOM order: Close, the switches, the link');
+});
+
+test('vis: no visibility given, no switches; visibility without a callback refuses to open', () => {
+  const { host } = open(external(), { calendarName: 'Work' });
+  assert.equal(byClass(host, 'sheet-vis').length, 0);
+  const h = new FakeElement('div');
+  assert.throws(() => openItemSheet(h, external(), {
+    today: () => TODAY, onClose: () => {}, visibility: { calendar: true, list: true, every: true },
+  }), /onVisibilityChange/);
+  assert.equal(h.children.length, 0, 'nothing mounted');
+  assert.throws(() => openItemSheet(h, external(), {
+    today: () => TODAY, onClose: () => {}, visibility: { calendar: 'yes', list: true }, onVisibilityChange: () => ({ ok: true }),
+  }), /visibility/);
+});
+
+test('vis: an own item never draws the switches, even if given them', () => {
+  const { host } = open(task(), { visibility: { calendar: true, list: true, every: true }, onVisibilityChange: () => ({ ok: true }) });
+  assert.equal(byClass(host, 'sheet-vis').length, 0);
+});

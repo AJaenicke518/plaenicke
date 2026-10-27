@@ -20,7 +20,8 @@ import { installFakeLocalStorage } from './fake-localstorage.js';
 import {
   makeFakeDocument, makeFakeWindow, mountIds, indexHtmlIds, allText, fire,
 } from './fake-dom.js';
-import { SCHEMA_VERSION } from '../js/merge.js';
+import { SCHEMA_VERSION, toWire } from '../js/merge.js';
+import { localState } from '../js/sync.js';
 import {
   saveItems, loadItems, saveTombstones, saveFeeds, loadFeeds, loadTombstones, loadSyncState, saveSyncState,
   loadLaunches,
@@ -610,7 +611,7 @@ const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
 // assume the cursors sit on today, so after any test that used dayOf the
 // cursors go back to today and the page that was showing is shown again.
 const PAGE_CONTROLS = [
-  ['today-view', 'tab-today'], ['day-view', 'show-day'], ['week-view', 'show-week'],
+  ['today-view', 'tab-today'], ['day-view', 'show-day'], ['three-day-view', 'show-3day'], ['week-view', 'show-week'],
   ['calendar-view', 'show-month'], ['todo-view', 'tab-todo'], ['ideas-view', 'tab-ideas'],
 ];
 let restoreAfterDayOf = null;
@@ -720,13 +721,14 @@ const NAV = [
   // [control, section, tab that is active]
   ['tab-today', 'today-view', 'tab-today'],
   ['show-day', 'day-view', 'tab-calendar'],
+  ['show-3day', 'three-day-view', 'tab-calendar'],
   ['show-week', 'week-view', 'tab-calendar'],
   ['show-month', 'calendar-view', 'tab-calendar'],
   ['tab-todo', 'todo-view', 'tab-todo'],
   ['tab-ideas', 'ideas-view', 'tab-ideas'],
 ];
 const TABS = ['tab-today', 'tab-calendar', 'tab-todo', 'tab-ideas'];
-const SEGMENTS = ['show-day', 'show-week', 'show-month'];
+const SEGMENTS = ['show-day', 'show-3day', 'show-week', 'show-month'];
 
 test('each tab and each Calendar segment reveals exactly its own page, and marks itself active', async () => {
   installFakeLocalStorage();
@@ -1063,24 +1065,35 @@ async function drain() {
 // Poll for a POSITIVE wait instead of a fixed tick count: syncOnce hashes the
 // token through WebCrypto, which completes on the thread pool as a macrotask,
 // so 50 setImmediates was not always enough under load (measured: 1 failure
-// in 7 full runs of the wiring tests). Bounded by wall time AND by a poll
-// count, so a test that mocks Date (freezing Date.now) still ends; setImmediate
-// and Date are never replaced by installManualTimers, so this works inside one.
-async function drainUntil(pred, ms = 2000, maxPolls = 200000) {
-  const end = Date.now() + ms;
-  for (let i = 0; !pred() && Date.now() < end && i < maxPolls; i += 1) {
+// in 7 full runs of the wiring tests). Bounded by performance.now(), which
+// MockTimers does not freeze, so a test that mocks Date still ends after `ms`
+// of real time. It used to be bounded by Date.now() plus a 200 000-poll cap for
+// the frozen case, and the cap made that case cost whatever 200 000
+// setImmediate turns cost at the time: about 3 s on an idle machine, over the
+// test's 10 s timeout under load (cancelled, 2026-10-26). setImmediate is never
+// replaced by installManualTimers, so this works inside one.
+const monotonicNow = performance.now.bind(performance);
+async function drainUntil(pred, ms = 2000) {
+  const end = monotonicNow() + ms;
+  while (!pred() && monotonicNow() < end) {
     await new Promise((resolve) => { setImmediate(resolve); });
   }
 }
 
-// A mocked Date (t.mock.timers with apis: ['Date']) freezes Date.now(), and
-// the wall-time bound alone then never ends the loop.
+// A mocked Date (t.mock.timers with apis: ['Date']) freezes Date.now(). The
+// wait must still end after `ms` of real time, however long each poll takes on
+// the machine at that moment. (`now` keeps the frozen Date at today rather
+// than 1970, for any real timer of app.js's that fires meanwhile.)
 test('drainUntil gives up even when Date is frozen', { timeout: 10000 }, async (t) => {
-  t.mock.timers.enable({ apis: ['Date'] });
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
   try {
     let polls = 0;
-    await drainUntil(() => { polls += 1; return false; });
+    const start = performance.now();
+    await drainUntil(() => { polls += 1; return false; }, 50);
+    const elapsed = performance.now() - start;
     assert.ok(polls > 1, 'fixture check: it polled');
+    assert.ok(elapsed >= 50, `it waited the full 50 ms (waited ${elapsed.toFixed(0)} ms)`);
+    assert.ok(elapsed < 500, `it gave up at 50 ms of real time, not after a poll count (waited ${elapsed.toFixed(0)} ms)`);
   } finally {
     t.mock.timers.reset();
   }
@@ -1534,7 +1547,7 @@ test('index.html opens on Today', () => {
   assert.doesNotMatch(html, /<button id="(tab-calendar|tab-todo|tab-ideas|show-[a-z]+)"[^>]*class="active"/, 'and no other');
   assert.match(html, /<div id="cal-switch"[^>]*hidden/, 'the Calendar switcher starts hidden');
   assert.match(html, /<section id="today-view"(?![^>]*hidden)[^>]*>/, 'the Today section must be visible on load');
-  for (const id of ['calendar-view', 'week-view', 'day-view', 'todo-view', 'ideas-view']) {
+  for (const id of ['calendar-view', 'week-view', 'three-day-view', 'day-view', 'todo-view', 'ideas-view']) {
     assert.match(html, new RegExp(`<section id="${id}"[^>]*hidden`), `#${id} must start hidden`);
   }
 });
@@ -1580,6 +1593,35 @@ test('resuming leaves a Day view the user moved elsewhere where they put it', as
   click(globalThis.document.getElementById('prev-day'));
   click(globalThis.document.getElementById('prev-day'));
   assert.equal(dayLabel.textContent, labelFor(new Date()), 'restored for later tests');
+});
+
+// Every showView re-renders every page, so leaving Day re-draws its grid while
+// the page is hidden. A browser reports scrollTop 0 for a hidden grid, and the
+// fake keeps whatever was written, so the test writes 0 the way the browser
+// would. Day used to keep "this day was already shown" across that hidden
+// render, so coming back skipped the 7 AM scroll and restored the 0: the grid
+// opened at midnight (reproduced in Chrome on main, 2026-10-26).
+test('Day: coming back to Calendar opens the grid at 7 AM again, not at midnight', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  const grid = () => dayBody().querySelector('.day-grid');
+  try {
+    click(doc.getElementById('show-day'));
+    assert.equal(doc.getElementById('day-view').hidden, false, 'fixture check: Day is showing');
+    grid().scrollTop = 600;
+    seed([]); // a re-render while Day stays visible keeps the user's place
+    assert.equal(grid().scrollTop, 600, 'a visible re-render keeps the scroll');
+    click(doc.getElementById('tab-today'));
+    assert.equal(doc.getElementById('day-view').hidden, true, 'fixture check: Day is hidden');
+    grid().scrollTop = 0; // drawn while hidden: what a browser reports
+    click(doc.getElementById('tab-calendar'));
+    assert.equal(doc.getElementById('day-view').hidden, false, 'fixture check: Calendar opened on Day');
+    assert.equal(grid().scrollTop, 7 * 48);
+  } finally {
+    if (restore) click(restore);
+  }
 });
 
 test('resuming re-fetches calendar feeds whose cache is stale', async () => {
@@ -1889,7 +1931,10 @@ function deleteControlFor(root, title) {
     for (const c of el.children) {
       if (hit) return;
       const chain = [...ancestors, el];
-      if (c.tagName === 'BUTTON' && c._classes.has('item-open') && (c.textContent || '').includes(title)) {
+      // allText, not the button's own textContent: the row a tick just
+      // marked holds its title in a .tick-strike span (rewards concept 1),
+      // and a real button's textContent includes its descendants too.
+      if (c.tagName === 'BUTTON' && c._classes.has('item-open') && allText(c).includes(title)) {
         for (let i = chain.length - 1; i >= 0 && !hit; i--) {
           hit = chain[i].children.find((s) => s._classes.has('delete') || s._classes.has('day-del')) || null;
         }
@@ -3374,6 +3419,7 @@ test('sweep D: two quick resumes fetch each calendar once, and a feed pulled mea
 // navigation tests do not fail in the week across New Year's.
 const weekLabelFor = (iso) => weekLabel(iso, addDays(iso, 6));
 const monthLabelFor = (d) => d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+const threeDayLabelFor = (iso) => weekLabel(iso, addDays(iso, 2));
 
 test('sweep D: the Week view follows a resume, and a navigated week stays put', async (t) => {
   installFakeLocalStorage();
@@ -3525,7 +3571,7 @@ const PAGES = [
 function visiblePageButton() {
   for (const [buttonId, sectionId] of [
     ['tab-today', 'today-view'],
-    ['show-month', 'calendar-view'], ['show-week', 'week-view'],
+    ['show-month', 'calendar-view'], ['show-week', 'week-view'], ['show-3day', 'three-day-view'],
     ['show-day', 'day-view'], ['tab-todo', 'todo-view'], ['tab-ideas', 'ideas-view'],
   ]) {
     if (!globalThis.document.getElementById(sectionId).hidden) return globalThis.document.getElementById(buttonId);
@@ -3968,6 +4014,7 @@ test('sF: the next arrows after the clock turns move from what is on screen, wit
   const cases = [
     ['prev-day', 'next-day', 'day-label', Date.now() + DAY, labelFor(real)],
     ['prev-week', 'next-week', 'week-label', Date.now() + 7 * DAY, weekLabelFor(startOfWeek(localISO(real)))],
+    ['prev-3day', 'next-3day', 'three-day-label', Date.now() + DAY, threeDayLabelFor(localISO(real))],
     ['prev-month', 'next-month', 'calendar-label',
       new Date(real.getFullYear(), real.getMonth() + 1, 1, 12).getTime(), monthLabelFor(real)],
   ];
@@ -6060,6 +6107,47 @@ test('Today: an overdue to-do ticked on Today stays in Overdue, struck through, 
   }
 });
 
+// Rewards concept 2 (Alex, 2026-10-26): "N DONE · M LEFT" in Today's head,
+// hidden until the first tick, "All N done" once Overdue and To do today are
+// both fully ticked. Painted on every render, through the real app.
+test('Today: the done/left count is hidden until a tick, counts each tick, and says "All 2 done" at the end', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
+  const node = () => globalThis.document.getElementById('today-tally');
+  const shown = () => node().children.map((c) => c.textContent).join('');
+  const tick = (title, on) => {
+    const box = checkboxFor(todayBody(), title);
+    assert.ok(box, `fixture check: ${title} has a checkbox`);
+    box.checked = on;
+    fire(box, 'change');
+  };
+  try {
+    seed([
+      record({ id: 'rw-late', type: 'due', title: 'rw Essay', date: '2026-10-19' }),
+      record({ id: 'rw-task', type: 'task', title: 'rw Call bank', date: '2026-10-21' }),
+      record({ id: 'rw-soon', type: 'task', title: 'rw Next week', date: '2026-10-24' }),
+    ]);
+    click(globalThis.document.getElementById('tab-today'));
+    assert.ok(node(), 'fixture check: index.html has #today-tally');
+    assert.equal(node().hidden, true, 'hidden before the first tick');
+    tick('rw Call bank', true);
+    assert.equal(node().hidden, false);
+    assert.equal(shown(), '1 done · 1 left');
+    tick('rw Essay', true);
+    assert.equal(shown(), 'All 2 done', 'a to-do dated later is not counted');
+    tick('rw Essay', false);
+    assert.equal(shown(), '1 done · 1 left');
+    tick('rw Call bank', false);
+    assert.equal(node().hidden, true, 'hidden again with nothing ticked');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+});
+
 test('Today: a tick on Today is saved, and the row stays, struck through, until tomorrow', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
@@ -6183,6 +6271,123 @@ test('Today: a delete waiting for its Undo is already gone from Today, and Undo 
     await resetMockTimers(t);
   }
   seed([]);
+});
+
+// Rewards concept 1 (Alex, 2026-10-26): the render right after a tick marks
+// that row `tick-just` on Today and on To-do, where the row lands; every later
+// render (here a tab switch) marks none. An untick and a failed save mark none.
+const rowWith = (box, cls) => {
+  let n = box.parentNode;
+  while (n && !n._classes.has(cls)) n = n.parentNode;
+  assert.ok(n, `fixture check: the box is inside a ${cls}`);
+  return n;
+};
+const justRows = (root) => {
+  const out = [];
+  const walk = (n) => { for (const c of n.children) { if (c._classes.has('tick-just')) out.push(c); walk(c); } };
+  walk(root);
+  return out;
+};
+
+test('the tick moment: a tick on Today marks its row once; the next render, and an untick, mark none', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const today = localISO(new Date());
+  seed([
+    record({ id: 'rw-a', type: 'task', title: 'rw First', date: today }),
+    record({ id: 'rw-b', type: 'task', title: 'rw Second', date: today }),
+  ]);
+  try {
+    click(globalThis.document.getElementById('tab-today'));
+    assert.equal(justRows(todayBody()).length, 0, 'fixture check: none before a tick');
+    const box = checkboxFor(todayBody(), 'rw First');
+    box.checked = true;
+    fire(box, 'change');
+    const landed = checkboxFor(todayBody(), 'rw First');
+    assert.deepEqual(justRows(todayBody()), [rowWith(landed, 'today-row')], 'the ticked row, where it landed');
+    assert.match(allText(todayBody()), /rw Second[\s\S]*rw First/, 'fixture check: it moved below the undone one');
+    click(globalThis.document.getElementById('tab-todo'));
+    click(globalThis.document.getElementById('tab-today'));
+    assert.equal(justRows(todayBody()).length, 0, 'a later render plays nothing');
+    assert.equal(justRows(todoList()).length, 0);
+    const again = checkboxFor(todayBody(), 'rw First');
+    again.checked = false;
+    fire(again, 'change');
+    assert.equal(justRows(todayBody()).length, 0, 'an untick plays nothing');
+  } finally {
+    if (restore) click(restore);
+  }
+  seed([]);
+});
+
+test('the tick moment: a tick on the To-do page marks its row there', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  seed([record({ id: 'rw-t', type: 'task', title: 'rw On the list', date: '2099-07-09' })]);
+  try {
+    click(globalThis.document.getElementById('tab-todo'));
+    const box = checkboxFor(todoList(), 'rw On the list');
+    box.checked = true;
+    fire(box, 'change');
+    assert.deepEqual(justRows(todoList()), [rowWith(checkboxFor(todoList(), 'rw On the list'), 'todo-row')]);
+  } finally {
+    if (restore) click(restore);
+  }
+  seed([]);
+});
+
+test('the tick moment: a tick that fails to save marks no row', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'rw-q', type: 'task', title: 'rw Quota', date: '2099-07-09' })]);
+  const real = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = (k, v) => {
+    if (k === 'plaenicke.items') { const e = new Error('The quota has been exceeded.'); e.name = 'QuotaExceededError'; throw e; }
+    return real(k, v);
+  };
+  try {
+    const box = checkboxFor(todoList(), 'rw Quota');
+    box.checked = true;
+    fire(box, 'change');
+  } finally {
+    localStorage.setItem = real;
+  }
+  assert.equal(storedById('rw-q').done, false, 'fixture check: not saved');
+  assert.equal(justRows(todoList()).length, 0);
+  assert.equal(justRows(todayBody()).length, 0);
+  clearMessage();
+  seed([]);
+});
+
+// Task 1 review (2026-10-26): the count is painted by every render, not only
+// a tick's. A to-do ticked today arrives here with no tick on this device (as
+// a sync or a reload brings it), and a delete waiting for its Undo takes its
+// struck row, and its count, away until Undo.
+test('Today: the done/left count follows every render: a stored tick shows it, a pending delete takes it away, Undo restores it', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const today = localISO(new Date());
+  const node = () => globalThis.document.getElementById('today-tally');
+  const shown = () => node().children.map((c) => c.textContent).join('');
+  seed([
+    record({ id: 'rw-done', type: 'task', title: 'rw Ticked elsewhere', date: today, done: true, updatedAt: new Date().toISOString() }),
+    record({ id: 'rw-open', type: 'task', title: 'rw Still open', date: today }),
+  ]);
+  enableMockTimers(t, { apis: ['setTimeout'] });
+  try {
+    assert.equal(node().hidden, false, 'no tick on this device, and the count shows');
+    assert.equal(shown(), '1 done · 1 left');
+    click(deleteControlFor(todoList(), 'rw Ticked elsewhere'));
+    assert.equal(node().hidden, true, 'its struck row is gone, and so is its count');
+    click(toastHost().querySelector('.toast-undo'));
+    assert.equal(shown(), '1 done · 1 left');
+  } finally {
+    await resetMockTimers(t);
+  }
+  seed([]);
+  assert.equal(node().hidden, true, 'an empty day: hidden');
 });
 
 test('Today: a calendar event is shown by its title; the calendar\'s link never reaches the page', async () => {
@@ -6586,10 +6791,258 @@ test('Week: a week with nothing left to list says "Nothing else this week."', as
 });
 
 // =========================================================================
+// The 3-day view (option A, Alex 2026-10-26): three columns of Day's hour
+// grid; ← → move 3 days; it starts on today and follows today as Day does;
+// repeating feed instances (the classes) are drawn; a block opens its sheet
+// and a heading opens Day.
+// =========================================================================
+const threeDayBody = () => globalThis.document.getElementById('three-day-body');
+const TD_ICS = [
+  'BEGIN:VCALENDAR', 'VERSION:2.0',
+  'BEGIN:VEVENT', 'UID:td-mwf', 'SUMMARY:td PHYS 2100',
+  'DTSTART;TZID=America/Los_Angeles:20261005T092500', 'DTEND;TZID=America/Los_Angeles:20261005T101500',
+  'RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR', 'END:VEVENT',
+  'BEGIN:VEVENT', 'UID:td-tuth', 'SUMMARY:td ENGR 2001',
+  'DTSTART;TZID=America/Los_Angeles:20261006T134500', 'DTEND;TZID=America/Los_Angeles:20261006T143500',
+  'RRULE:FREQ=WEEKLY;BYDAY=TU,TH', 'END:VEVENT',
+  'END:VCALENDAR',
+].join('\r\n');
+// The titles drawn in each of the three columns, timed blocks only, top to bottom.
+function threeDayColumns() {
+  const grid = threeDayBody().querySelector('.tday-grid');
+  assert.ok(grid, 'fixture check: the 3-day grid is drawn');
+  return grid.children.filter((c) => c._classes.has('tday-col')).map((col) => col.children
+    .filter((b) => b._classes.has('tday-block'))
+    .map((b) => b.querySelector('.tday-title').textContent));
+}
+
+test('3-day: today and the next two days, classes included; → and ← move three days', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 26, 9, 0).getTime() });
+  try {
+    seed([
+      record({ id: 'td-adv', type: 'event', title: 'td Advising', date: '2026-10-26', time: '12:00', endTime: '12:30' }),
+      record({ id: 'td-reg', type: 'task', title: 'td Register', date: '2026-10-27' }),
+      record({ id: 'td-idea', type: 'idea', title: 'td An idea', date: '2026-10-27' }),
+      record({ id: 'td-thu', type: 'due', title: 'td Thursday HW', date: '2026-10-29', time: '17:00' }),
+    ]);
+    const { events, skipped } = parseICS(TD_ICS);
+    assert.equal(skipped.length, 0, 'fixture check: every VEVENT parsed');
+    seedFeedsWithCache([sdFeed('td-feed')], { 'td-feed': { fetchedAt: new Date().toISOString(), events, skipped: [] } });
+    click(doc.getElementById('show-3day'));
+    assert.equal(doc.getElementById('three-day-view').hidden, false);
+    assert.equal(labelText('three-day-label'), '10/26 – 10/28', 'it starts on today');
+    assert.deepEqual(threeDayColumns(), [
+      ['td PHYS 2100', 'td Advising'],
+      ['td ENGR 2001'],
+      ['td PHYS 2100'],
+    ], 'the repeating classes are drawn on their days, beside own items');
+    const strip = threeDayBody().querySelector('.tday-allday');
+    assert.ok(strip, 'an untimed item puts up the All-day strip');
+    assert.match(allText(strip), /td Register/);
+    assert.ok(!allText(threeDayBody()).includes('td An idea'), 'an idea is not on the calendar');
+    assert.ok(!allText(threeDayBody()).includes('td Thursday HW'), 'Thursday is outside the window');
+
+    click(doc.getElementById('next-3day'));
+    assert.equal(labelText('three-day-label'), '10/29 – 10/31', '→ moves three days');
+    assert.deepEqual(threeDayColumns(), [['td ENGR 2001', 'td Thursday HW'], ['td PHYS 2100'], []]);
+    assert.equal(threeDayBody().querySelector('.tday-allday'), null, 'no untimed item, no strip');
+    click(doc.getElementById('prev-3day'));
+    click(doc.getElementById('prev-3day'));
+    assert.equal(labelText('three-day-label'), '10/23 – 10/25', '← moves three days');
+    click(doc.getElementById('next-3day'));
+    assert.equal(labelText('three-day-label'), '10/26 – 10/28');
+  } finally {
+    unseedFeeds();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('3-day: a block and an All-day chip open their sheet, and closing it returns focus there', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 26, 9, 0).getTime() });
+  try {
+    seed([
+      record({ id: 'td-o1', type: 'event', title: 'td Open me', date: '2026-10-27', time: '15:00', endTime: '16:00' }),
+      record({ id: 'td-o2', type: 'event', title: 'td Not me', date: '2026-10-27', time: '09:00', endTime: '10:00' }),
+      record({ id: 'td-o3', type: 'task', title: 'td Untimed', date: '2026-10-28' }),
+    ]);
+    click(doc.getElementById('show-3day'));
+    for (const title of ['td Open me', 'td Untimed']) {
+      click(openControlFor(threeDayBody(), title));
+      assert.ok(sheetHost().querySelector('.sheet'), `tapping ${title} opens a sheet`);
+      assert.equal(sheetHost().querySelector('.sheet-title').value, title, 'and it is THIS item');
+      closeSheet();
+      assert.equal(doc.activeElement, openControlFor(threeDayBody(), title), 'focus goes back to it');
+    }
+  } finally {
+    forceCloseSheet();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('3-day: a day heading opens that day in Day view, inside Calendar', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 26, 9, 0).getTime() });
+  try {
+    seed([]);
+    click(doc.getElementById('show-3day'));
+    const heads = threeDayBody().querySelector('.tday-heads').children.filter((c) => c._classes.has('tday-head'));
+    assert.equal(heads.length, 3, 'fixture check');
+    click(heads[1]);
+    assert.equal(doc.getElementById('day-view').hidden, false, 'Day view is showing');
+    assert.equal(doc.getElementById('three-day-view').hidden, true);
+    assert.equal(labelText('day-label'), 'Tue, Oct 27');
+    assert.ok(doc.getElementById('show-day')._classes.has('active'));
+    assert.ok(doc.getElementById('tab-calendar')._classes.has('active'));
+    click(doc.getElementById('show-3day'));
+    assert.equal(labelText('three-day-label'), '10/26 – 10/28', 'opening a day does not move the 3-day window');
+  } finally {
+    seed([]);
+    t.mock.timers.reset();
+    click(doc.getElementById('show-month'));
+    openDayForToday();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('3-day: Calendar reopens on 3-day when it was the last view used there', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  try {
+    click(doc.getElementById('show-3day'));
+    click(doc.getElementById('tab-todo'));
+    click(doc.getElementById('tab-calendar'));
+    assert.equal(doc.getElementById('three-day-view').hidden, false);
+    assert.ok(doc.getElementById('show-3day')._classes.has('active'));
+    assert.equal(doc.getElementById('show-3day').getAttribute('aria-pressed'), 'true');
+  } finally {
+    click(doc.getElementById('show-day'));
+    if (restore) click(restore);
+  }
+});
+
+test('3-day: the window follows a resume onto the new today, and a moved window stays put', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const DAY = 24 * 60 * 60 * 1000;
+  assert.equal(labelText('three-day-label'), threeDayLabelFor(localISO(new Date())), 'fixture check: on today');
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + DAY });
+  try {
+    resume();
+    assert.equal(labelText('three-day-label'), threeDayLabelFor(localISO(new Date())),
+      'a window that started on today starts on the new today');
+  } finally {
+    t.mock.timers.reset();
+  }
+  resume();
+  assert.equal(labelText('three-day-label'), threeDayLabelFor(localISO(new Date())), 'and back');
+  click(globalThis.document.getElementById('next-3day'));
+  const moved = labelText('three-day-label');
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + DAY });
+  try {
+    resume();
+    assert.equal(labelText('three-day-label'), moved, 'a window the user moved must not jump');
+  } finally {
+    t.mock.timers.reset();
+  }
+  resume();
+  click(globalThis.document.getElementById('prev-3day'));
+  assert.equal(labelText('three-day-label'), threeDayLabelFor(localISO(new Date())), 'restored for later tests');
+});
+
+// sF's rule for every arrow: it steps from what is ON SCREEN. A window still
+// showing the old today when the clock turns, then →, lands three days after
+// the old today, not three after the new one (a skipped day).
+test('3-day: → after midnight, before any render, steps from the window on screen', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const DAY = 24 * 60 * 60 * 1000;
+  const oldToday = localISO(new Date());
+  assert.equal(labelText('three-day-label'), threeDayLabelFor(oldToday), 'fixture check: on today');
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + DAY });
+  try {
+    click(globalThis.document.getElementById('next-3day'));
+    assert.equal(labelText('three-day-label'), threeDayLabelFor(addDays(oldToday, 3)));
+    click(globalThis.document.getElementById('prev-3day'));
+    assert.equal(labelText('three-day-label'), threeDayLabelFor(oldToday));
+  } finally {
+    t.mock.timers.reset();
+  }
+  resume();
+  assert.equal(labelText('three-day-label'), threeDayLabelFor(localISO(new Date())), 'fixture check: back on today');
+  // And ← first: three days before the old today, not before the new one.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + DAY });
+  try {
+    click(globalThis.document.getElementById('prev-3day'));
+    assert.equal(labelText('three-day-label'), threeDayLabelFor(addDays(oldToday, -3)));
+    click(globalThis.document.getElementById('next-3day'));
+  } finally {
+    t.mock.timers.reset();
+  }
+  resume();
+  assert.equal(labelText('three-day-label'), threeDayLabelFor(localISO(new Date())), 'restored for later tests');
+});
+
+// A grid drawn while its page is hidden cannot hold a scroll position: a
+// browser reports scrollTop 0 for it, and the fake keeps whatever was
+// written, so the test sets 0 the way the browser would. Without the rule,
+// coming back to the same window opened the grid at midnight (seen in Chrome,
+// 2026-10-26, Task 2 review).
+test('3-day: coming back to Calendar opens the grid at 7 AM again, not at midnight', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  const grid = () => threeDayBody().querySelector('.tday-grid');
+  try {
+    click(doc.getElementById('show-3day'));
+    assert.equal(grid().scrollTop, 7 * 48, 'fixture check: first show scrolls to 7 AM');
+    click(doc.getElementById('tab-today'));
+    grid().scrollTop = 0; // drawn while hidden: what a browser reports
+    click(doc.getElementById('tab-calendar'));
+    assert.equal(doc.getElementById('three-day-view').hidden, false, 'fixture check');
+    assert.equal(grid().scrollTop, 7 * 48);
+    grid().scrollTop = 600;
+    seed([]); // a re-render while it stays visible keeps the user's place
+    assert.equal(grid().scrollTop, 600);
+  } finally {
+    click(doc.getElementById('show-day'));
+    if (restore) click(restore);
+  }
+});
+
+test('3-day: the arrows are named for what they do', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  assert.match(html, /<button id="prev-3day" type="button" aria-label="Previous 3 days">/);
+  assert.match(html, /<button id="next-3day" type="button" aria-label="Next 3 days">/);
+});
+
+
+// =========================================================================
 // Home-screen stage 3c — the tab bar and Calendar's switcher (spec § 4)
 // =========================================================================
 
-test('tabs: the bar is Today | Calendar | To-do | Ideas, and Calendar\'s switcher is Day / Week / Month', () => {
+test('tabs: the bar is Today | Calendar | To-do | Ideas, and Calendar\'s switcher is Day / 3-day / Week / Month', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
   const bar = html.match(/<nav class="tab-bar"[\s\S]*?<\/nav>/);
   assert.ok(bar, 'fixture check: index.html has the tab bar');
@@ -6599,10 +7052,10 @@ test('tabs: the bar is Today | Calendar | To-do | Ideas, and Calendar\'s switche
   const sw = html.match(/<div id="cal-switch"[\s\S]*?<\/div>/);
   assert.ok(sw, 'fixture check: index.html has the switcher');
   assert.deepEqual([...sw[0].matchAll(/<button id="([^"]+)"[^>]*>([^<]*)</g)].map((m) => [m[1], m[2]]), [
-    ['show-day', 'Day'], ['show-week', 'Week'], ['show-month', 'Month'],
-  ], 'List is removed (stage 3d, Alex 2026-10-22); 3-day is hidden until it is built (question 5)');
-  assert.doesNotMatch(html, /class="view-toggle"|id="show-(today|todo|ideas|3day)"|>3-day</i,
-    'the six view buttons are gone, and no 3-day control exists');
+    ['show-day', 'Day'], ['show-3day', '3-day'], ['show-week', 'Week'], ['show-month', 'Month'],
+  ], 'List is removed (stage 3d, Alex 2026-10-22); 3-day sits after Day, beside Week (Alex, 2026-10-26)');
+  assert.doesNotMatch(html, /class="view-toggle"|id="show-(today|todo|ideas)"/,
+    'the six view buttons are gone');
 });
 
 // Stage 3d (Alex, 2026-10-22): "you can get rid of the list view". List is
@@ -6807,7 +7260,11 @@ test('a tick whose render throws after the save still schedules its sync, and th
     unbreak();
     assert.equal(storedById('ff2-c9').done, true, 'fixture check: the save succeeded');
     t.mock.timers.tick(2000);
-    for (let i = 0; i < 50; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    // Poll for the PUT, never a fixed count of turns: between the GET and the
+    // PUT, syncOnce decrypts, merges and encrypts through WebCrypto, which
+    // completes on the thread pool. A fixed 50 turns ran out with only the GET
+    // sent in 4 of 90 runs under load (2026-10-26).
+    await drainUntil(() => requests.some((r) => r.url.includes('/data') && r.method === 'PUT'));
   } finally {
     unbreak();
     await resetMockTimers(t);
@@ -7025,3 +7482,407 @@ for (const [page, tab, list, date] of [
     seed([]);
   });
 }
+
+// =========================================================================
+// Per-series visibility, option A (2026-10-26)
+// =========================================================================
+//
+// Two switches on a feed event's sheet: the calendar (Day, the Week grid,
+// Month) and lists (Today's events, Next 7 days, Coming up, the Week list,
+// the "Next:" line — controller ruling 1). Device-local in
+// plaenicke.seriesVisibility; a toggle writes nothing else, schedules no sync
+// and leaves toWire's output alone (the controller's hard constraints).
+
+const VIS_KEY = 'plaenicke.seriesVisibility';
+const VIS_URL = 'https://example.com/private/vis-SECRET-TOKEN-77/basic.ics';
+const VIS_ICS = [
+  'BEGIN:VCALENDAR', 'VERSION:2.0',
+  'BEGIN:VEVENT', 'UID:vis-class', 'SUMMARY:vis Class',
+  'DTSTART;TZID=America/Los_Angeles:20261001T121500', 'DTEND;TZID=America/Los_Angeles:20261001T133000',
+  'RRULE:FREQ=WEEKLY;BYDAY=TH,FR', 'END:VEVENT',
+  'BEGIN:VEVENT', 'UID:vis-quiz', 'SUMMARY:vis Quiz',
+  'DTSTART;TZID=America/Los_Angeles:20261023T105000', 'DTEND;TZID=America/Los_Angeles:20261023T113000', 'END:VEVENT',
+  'BEGIN:VEVENT', 'UID:vis-club', 'SUMMARY:vis Club',
+  'DTSTART;TZID=America/Los_Angeles:20261029T180000', 'DTEND;TZID=America/Los_Angeles:20261029T190000',
+  'RRULE:FREQ=MONTHLY', 'END:VEVENT',
+  'END:VCALENDAR',
+].join('\r\n');
+
+function seedVisFeed(ics = VIS_ICS) {
+  const { events, skipped } = parseICS(ics);
+  assert.equal(skipped.length, 0, 'fixture check: every VEVENT parsed');
+  seedFeedsWithCache([sdFeed('vis-feed', { url: VIS_URL, name: 'Vis classes' })],
+    { 'vis-feed': { fetchedAt: new Date().toISOString(), events, skipped: [] } });
+}
+function unseedVis() {
+  localStorage.removeItem(VIS_KEY);
+  unseedFeeds();
+}
+// Every stored key but the visibility one, byte for byte.
+const otherKeys = () => JSON.stringify([...localStorage.store.entries()].filter(([k]) => k !== VIS_KEY).sort());
+const wire = () => JSON.stringify(toWire(localState()));
+const weekCounts = () => [...globalThis.document.getElementById('week-grid').children].map((c) => c.children.length - 1);
+const switchFor = (surface) => sheetHost().querySelectorAll('button')
+  .find((b) => b._classes.has('sheet-switch') && b.getAttribute('aria-label').endsWith(surface === 'calendar' ? 'on the calendar' : 'on Today and in lists'));
+
+// Taps one switch on the open sheet, measuring around the tap only (the sheet
+// is opened before, so a toast it dismissed cannot count against the toggle).
+function toggleMeasured(surface) {
+  const feedsBefore = localStorage.getItem('plaenicke.feeds');
+  const keysBefore = otherKeys();
+  const wireBefore = wire();
+  const timers = installManualTimers();
+  try {
+    click(switchFor(surface));
+    assert.equal(timers.live(2000), 0, 'a visibility toggle schedules no sync');
+  } finally {
+    timers.restore();
+  }
+  assert.equal(localStorage.getItem('plaenicke.feeds'), feedsBefore, 'plaenicke.feeds is byte-identical');
+  assert.equal(otherKeys(), keysBefore, 'and so is every other key but plaenicke.seriesVisibility');
+  assert.equal(wire(), wireBefore, "toWire's output is unchanged");
+}
+
+test('vis: the calendar switch hides a series from Day, the Week grid and Month only; the list switch from Today and the Week list', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 22, 9, 0).getTime() });
+  try {
+    seed([]);
+    seedVisFeed();
+    click(doc.getElementById('show-week'));
+    assert.equal(labelText('week-label'), weekLabelFor('2026-10-18'), 'fixture check: the week of Thu Oct 22');
+    assert.deepEqual(weekCounts(), [0, 0, 0, 0, 1, 2, 0], 'fixture check: Thu the class; Fri the class and the quiz');
+    assert.match(allText(weekList()), /vis Quiz/, 'fixture check: the quiz is in the Week list');
+    assert.match(allText(todayBody()), /vis Quiz/, 'fixture check: and in Next 7 days');
+    click(doc.getElementById('show-month'));
+    assert.equal(labelText('calendar-label'), 'October 2026', 'fixture check: Month shows October');
+    assert.match(allText(doc.getElementById('calendar-grid')), /vis Quiz/, 'fixture check: Month has the quiz');
+
+    click(doc.getElementById('show-week'));
+    click(openControlFor(weekList(), 'vis Quiz'));
+    assert.equal(switchFor('calendar').getAttribute('aria-checked'), 'true', 'fixture check: shown');
+    assert.match(allText(sheetHost()), /Show vis Quiz\b/, 'a one-off: no "every"');
+    toggleMeasured('calendar');
+    assert.equal(switchFor('calendar').getAttribute('aria-checked'), 'false', 'the switch follows the write');
+    for (const s of stringsOf(sheetHost())) {
+      assert.ok(!s.includes('vis-SECRET-TOKEN-77'), `the feed URL must never be rendered; found it in ${JSON.stringify(s)}`);
+    }
+    closeSheet();
+
+    assert.deepEqual(weekCounts(), [0, 0, 0, 0, 1, 1, 0], 'gone from the Week grid');
+    assert.match(allText(weekList()), /vis Quiz/, 'still in the Week list');
+    assert.match(allText(todayBody()), /vis Quiz/, 'still in Next 7 days');
+    click(doc.getElementById('show-month'));
+    assert.doesNotMatch(allText(doc.getElementById('calendar-grid')), /vis Quiz/, 'gone from Month');
+    assert.equal(openControlFor(dayOf('2026-10-23'), 'vis Quiz'), null, 'gone from Day');
+    assert.ok(openControlFor(dayOf('2026-10-23'), 'vis Class'), 'and only that series: the class is still there');
+
+    click(doc.getElementById('show-week'));
+    click(openControlFor(weekList(), 'vis Quiz'));
+    assert.equal(switchFor('calendar').getAttribute('aria-checked'), 'false', 'reopened, the sheet shows the stored hide');
+    assert.equal(switchFor('list').getAttribute('aria-checked'), 'true', 'and the other surface as shown');
+    toggleMeasured('list');
+    closeSheet();
+    assert.doesNotMatch(allText(weekList()), /vis Quiz/, 'gone from the Week list');
+    assert.doesNotMatch(allText(todayBody()), /vis Quiz/, 'gone from Today');
+    assert.match(allText(todayBody()), /vis Class/, 'the class is still on Today');
+    click(openControlFor(dayOf('2026-10-22'), 'vis Class'));
+    assert.equal(switchFor('calendar').getAttribute('aria-checked'), 'true', 'another series opens shown');
+    assert.equal(switchFor('list').getAttribute('aria-checked'), 'true');
+    closeSheet();
+    click(doc.getElementById('show-week'));
+
+    // Positive control: the same timer harness sees an ordinary write's sync.
+    const { addItems } = await import('../js/app.js');
+    const timers = installManualTimers();
+    try {
+      addItems([{ title: 'vis control', date: '2099-05-01', type: 'event' }]);
+      assert.equal(timers.live(2000), 1, 'fixture check: the harness sees a scheduled sync');
+      timers.fire(2000);
+    } finally {
+      timers.restore();
+    }
+  } finally {
+    forceCloseSheet();
+    unseedVis();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('vis: a weekly class hidden from lists leaves Today\'s events and the "Next:" line (ruling 1), and stays on the calendar', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 22, 9, 0).getTime() });
+  try {
+    seed([]);
+    seedVisFeed();
+    click(doc.getElementById('tab-today'));
+    click(openControlFor(todayBody(), 'vis Class'));
+    assert.match(allText(sheetHost()), /Show every vis Class/);
+    assert.match(allText(sheetHost()), /Today’s events and the “Next” line/);
+    toggleMeasured('list');
+    closeSheet();
+    assert.doesNotMatch(allText(todayBody()), /vis Class/, "gone from Today's events");
+    click(openControlFor(dayOf('2026-10-22'), 'vis Class'));
+    assert.equal(switchFor('list').getAttribute('aria-checked'), 'false', 'reopened from Day, the sheet shows the stored hide');
+    assert.equal(switchFor('calendar').getAttribute('aria-checked'), 'true', 'and the calendar as shown');
+    closeSheet();
+    click(doc.getElementById('tab-today'));
+
+    // Saturday: nothing today, so the empty line names the next thing.
+    t.mock.timers.setTime(new Date(2026, 9, 24, 9, 0).getTime());
+    resume();
+    // The class (Thu 29, 12:15) comes before the club (Thu 29, 18:00), so only
+    // the look-ahead's filter keeps the class off this line.
+    assert.doesNotMatch(allText(todayBody()), /Next: vis Class/, 'a list-hidden class is not the "Next:" line');
+    assert.match(allText(todayBody()), /Next: vis Club · Thu\./, 'the next shown thing is');
+  } finally {
+    forceCloseSheet();
+    unseedVis();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('vis: a monthly series is not `recurring`, but its sheet says "every"', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 22, 9, 0).getTime() });
+  try {
+    seed([]);
+    seedVisFeed();
+    click(globalThis.document.getElementById('tab-today'));
+    click(openControlFor(todayBody(), 'vis Club'));
+    assert.match(allText(sheetHost()), /Show every vis Club/);
+    assert.match(allText(sheetHost()), /upcoming lists/, 'a monthly series can be in the upcoming lists');
+  } finally {
+    forceCloseSheet();
+    unseedVis();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('vis: a write in another tab re-renders here and schedules no sync', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 22, 9, 0).getTime() });
+  try {
+    seed([]);
+    seedVisFeed();
+    click(globalThis.document.getElementById('tab-today'));
+    assert.match(allText(todayBody()), /vis Class/, 'fixture check');
+    localStorage.setItem(VIS_KEY, JSON.stringify({ 'vis-feed': { 'vis-class': { calendar: true, list: false, title: 'vis Class' } } }));
+    const timers = installManualTimers();
+    try {
+      for (const fn of globalThis.window._listeners.storage) fn({ key: VIS_KEY });
+      assert.equal(timers.live(2000), 0, 'a visibility write is not synced data');
+    } finally {
+      timers.restore();
+    }
+    assert.doesNotMatch(allText(todayBody()), /vis Class/, 'the other tab\'s hide shows here');
+  } finally {
+    unseedVis();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('vis: a guessed series gets no switches (ruling 3)', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 22, 9, 0).getTime() });
+  const lab = (n, day) => ['BEGIN:VEVENT', `UID:vis-lab-${n}`, 'SUMMARY:vis Lab',
+    `DTSTART;TZID=America/Los_Angeles:202610${day}T100000`, `DTEND;TZID=America/Los_Angeles:202610${day}T110000`, 'END:VEVENT'];
+  try {
+    seed([]);
+    seedVisFeed(['BEGIN:VCALENDAR', 'VERSION:2.0', ...lab(1, '08'), ...lab(2, '15'), ...lab(3, '22'), 'END:VCALENDAR'].join('\r\n'));
+    click(globalThis.document.getElementById('tab-today'));
+    click(openControlFor(todayBody(), 'vis Lab'));
+    assert.match(allText(sheetHost()), /Repeats weekly \(guessed\)/, 'fixture check: a guessed series');
+    assert.equal(sheetHost().querySelectorAll('button').filter((b) => b._classes.has('sheet-switch')).length, 0);
+  } finally {
+    forceCloseSheet();
+    unseedVis();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('vis: a toggle that saved but whose render throws keeps the switch and says it saved', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  const dateEl = globalThis.document.getElementById('today-date');
+  const unbreak = () => { Object.defineProperty(dateEl, 'textContent', { configurable: true, writable: true, value: '' }); };
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 22, 9, 0).getTime() });
+  const errors = [];
+  const origError = console.error;
+  try {
+    seed([]);
+    seedVisFeed();
+    click(globalThis.document.getElementById('tab-today'));
+    click(openControlFor(todayBody(), 'vis Class'));
+    Object.defineProperty(dateEl, 'textContent', { configurable: true, get: () => '', set: () => { throw new Error('vis render failed'); } });
+    console.error = (...a) => errors.push(a);
+    click(switchFor('list'));
+    console.error = origError;
+    unbreak();
+    assert.equal(switchFor('list').getAttribute('aria-checked'), 'false', 'the write landed, so the switch moved');
+    assert.equal(JSON.parse(localStorage.getItem(VIS_KEY))['vis-feed']['vis-class'].list, false, 'fixture check: saved');
+    assert.equal(messageText(), "Saved, but the screen couldn't update — reload.");
+    assert.equal(errors.length, 1, 'and the render error reaches the console');
+  } finally {
+    console.error = origError;
+    unbreak();
+    forceCloseSheet();
+    unseedVis();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('vis: Settings lists a series hidden everywhere; Show puts it back on every page, writes only its key and schedules no sync', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 22, 9, 0).getTime() });
+  const settingsBtn = doc.getElementById('settings-btn');
+  const host = doc.getElementById('settings-host');
+  const toggleSettings = () => { for (const fn of settingsBtn._listeners.click || []) fn({ target: settingsBtn }); };
+  try {
+    seed([]);
+    seedVisFeed();
+    click(doc.getElementById('show-week'));
+    click(openControlFor(weekList(), 'vis Quiz'));
+    toggleMeasured('calendar');
+    toggleMeasured('list');
+    closeSheet();
+    assert.doesNotMatch(allText(weekList()) + allText(todayBody()), /vis Quiz/, 'fixture check: hidden everywhere');
+
+    toggleSettings();
+    assert.match(allText(host), /Hidden on this device \(1\)/);
+    assert.match(allText(host), /vis Quiz\s+everywhere/);
+    for (const str of stringsOf(host)) {
+      assert.ok(!str.includes('vis-SECRET-TOKEN-77'), `the feed URL must never be rendered; found it in ${JSON.stringify(str)}`);
+    }
+    const show = host.querySelectorAll('button').find((b) => b.getAttribute('aria-label') === 'Show vis Quiz again');
+    assert.ok(show, 'fixture check: the Show button');
+    const feedsBefore = localStorage.getItem('plaenicke.feeds');
+    const keysBefore = otherKeys();
+    const wireBefore = wire();
+    const timers = installManualTimers();
+    try {
+      click(show);
+      assert.equal(timers.live(2000), 0, 'Show schedules no sync');
+    } finally {
+      timers.restore();
+    }
+    assert.equal(localStorage.getItem('plaenicke.feeds'), feedsBefore);
+    assert.equal(otherKeys(), keysBefore);
+    assert.equal(wire(), wireBefore);
+    assert.doesNotMatch(allText(host), /Hidden on this device/, 'the list is gone');
+    assert.match(allText(weekList()), /vis Quiz/, 'back in the Week list');
+    assert.match(allText(todayBody()), /vis Quiz/, 'back on Today');
+    assert.deepEqual(weekCounts(), [0, 0, 0, 0, 1, 2, 0], 'back in the Week grid');
+  } finally {
+    if (host.childElementCount) toggleSettings();
+    forceCloseSheet();
+    unseedVis();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('vis: a calendar removed while its sheet is open: the switch stays put, says why in words, and nothing is stored', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 22, 9, 0).getTime() });
+  const origError = console.error;
+  try {
+    seed([]);
+    seedVisFeed();
+    click(globalThis.document.getElementById('tab-today'));
+    click(openControlFor(todayBody(), 'vis Class'));
+    // A sync from the other device removed it; the sheet is still open.
+    saveFeeds([]);
+    console.error = () => {};
+    click(switchFor('list'));
+    console.error = origError;
+    assert.equal(switchFor('list').getAttribute('aria-checked'), 'true', 'nothing saved, so the switch did not move');
+    const err = sheetHost().querySelector('.sheet-vis-error');
+    assert.equal(err.textContent, 'This calendar is no longer linked on this device, so this can’t be changed.');
+    assert.equal(localStorage.getItem(VIS_KEY), null, 'nothing stored');
+  } finally {
+    console.error = origError;
+    forceCloseSheet();
+    unseedVis();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+// Integration (release-v6-14): visibility and the 3-day view were built on
+// separate branches. A series hidden from the calendar must leave 3-day too,
+// while another series on the same days stays; a list-only hide leaves it on.
+test('vis + 3-day: a series hidden from the calendar is not in the 3-day view; a shown series on the same days is', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 22, 9, 0).getTime() });
+  try {
+    seed([]);
+    seedVisFeed();
+    click(doc.getElementById('show-3day'));
+    assert.equal(labelText('three-day-label'), '10/22 – 10/24', 'fixture check: the window starts Thu Oct 22');
+    assert.deepEqual(threeDayColumns(), [['vis Class'], ['vis Quiz', 'vis Class'], []],
+      'fixture check: Thu the class; Fri the quiz and the class');
+
+    click(openControlFor(threeDayBody(), 'vis Quiz'));
+    toggleMeasured('calendar');
+    closeSheet();
+    assert.deepEqual(threeDayColumns(), [['vis Class'], ['vis Class'], []],
+      'the calendar-hidden quiz is gone from 3-day; the class on the same day stays');
+
+    click(openControlFor(threeDayBody(), 'vis Class'));
+    toggleMeasured('list');
+    closeSheet();
+    assert.deepEqual(threeDayColumns(), [['vis Class'], ['vis Class'], []],
+      'a list-only hide leaves the class on 3-day');
+  } finally {
+    forceCloseSheet();
+    unseedVis();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
