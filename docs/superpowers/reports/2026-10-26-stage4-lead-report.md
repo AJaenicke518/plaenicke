@@ -88,6 +88,14 @@ On the iPhone home-screen app, unless noted.
 3. **A top-box smart add overtaken by a capture just goes quiet.** Its "Thinking…" clears and its text stays, with no message. *Recommendation:* fine as it is; it is rare.
 4. **The capture box's Add while its own preview is open** (checklist 21) sends the text again as a new paid request. *Recommendation:* hide the box's Add while its own preview is open, so "Add all" is the only confirm. I did not do this because it changes what you see and the spec does not settle it.
 
+## Note for whoever assembles the release
+
+At the time of writing, the main checkout is on a branch named `release-v6-14` (dc8764d), which merges other workstreams (three-day-view, visibility). That branch still has `CACHE = 'plaenicke-v6-13'`.
+
+This branch already sets `CACHE` to `plaenicke-v6-14` and `CACHE_ON_MAIN` to `plaenicke-v6-13`. If stage 4 goes into that release, merging it gives one v6-14 bump, which is correct for a single release. If stage 4 ships separately, after v6-14, it needs its own bump.
+
+In either case, re-run `npm test` on the merged tree. `js/app.js`, `index.html`, `styles.css` and `tests/apply.test.js` may conflict with the other workstreams.
+
 ## Known limits, by design or deferred
 
 - In a desktop browser, which has no on-screen keyboard, focusing the capture field drops the box over the tab bar and the round button until the field loses focus.
