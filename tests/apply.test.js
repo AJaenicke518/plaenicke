@@ -1063,24 +1063,36 @@ async function drain() {
 // Poll for a POSITIVE wait instead of a fixed tick count: syncOnce hashes the
 // token through WebCrypto, which completes on the thread pool as a macrotask,
 // so 50 setImmediates was not always enough under load (measured: 1 failure
-// in 7 full runs of the wiring tests). Bounded by wall time AND by a poll
-// count, so a test that mocks Date (freezing Date.now) still ends; setImmediate
-// and Date are never replaced by installManualTimers, so this works inside one.
-async function drainUntil(pred, ms = 2000, maxPolls = 200000) {
-  const end = Date.now() + ms;
-  for (let i = 0; !pred() && Date.now() < end && i < maxPolls; i += 1) {
+// in 7 full runs of the wiring tests). Bounded by performance.now(), which
+// MockTimers does not freeze, so a test that mocks Date still ends after `ms`
+// of real time. It used to be bounded by Date.now() plus a 200 000-poll cap for
+// the frozen case, and the cap made that case cost whatever 200 000
+// setImmediate turns cost at the time: about 3 s on an idle machine, over the
+// test's 10 s timeout under load (cancelled, 2026-10-26). setImmediate is never
+// replaced by installManualTimers, so this works inside one. The clock is
+// taken once here so a test that stubs `performance` cannot stop the wait.
+const monotonicNow = performance.now.bind(performance);
+async function drainUntil(pred, ms = 2000) {
+  const end = monotonicNow() + ms;
+  while (!pred() && monotonicNow() < end) {
     await new Promise((resolve) => { setImmediate(resolve); });
   }
 }
 
-// A mocked Date (t.mock.timers with apis: ['Date']) freezes Date.now(), and
-// the wall-time bound alone then never ends the loop.
+// A mocked Date (t.mock.timers with apis: ['Date']) freezes Date.now(). The
+// wait must still end after `ms` of real time, however long each poll takes on
+// the machine at that moment. (`now` keeps the frozen Date at today rather
+// than 1970, for any real timer of app.js's that fires meanwhile.)
 test('drainUntil gives up even when Date is frozen', { timeout: 10000 }, async (t) => {
-  t.mock.timers.enable({ apis: ['Date'] });
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
   try {
     let polls = 0;
-    await drainUntil(() => { polls += 1; return false; });
+    const start = performance.now();
+    await drainUntil(() => { polls += 1; return false; }, 50);
+    const elapsed = performance.now() - start;
     assert.ok(polls > 1, 'fixture check: it polled');
+    assert.ok(elapsed >= 50, `it waited the full 50 ms (waited ${elapsed.toFixed(0)} ms)`);
+    assert.ok(elapsed < 1000, `it gave up at 50 ms of real time, not after a poll count (waited ${elapsed.toFixed(0)} ms)`);
   } finally {
     t.mock.timers.reset();
   }
