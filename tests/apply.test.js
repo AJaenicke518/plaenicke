@@ -239,6 +239,33 @@ globalThis.window = makeFakeWindow();
 globalThis.document = makeFakeDocument();
 mountIds(globalThis.document, indexHtmlIds(readFileSync(new URL('../index.html', import.meta.url), 'utf8')));
 
+// EVERY TEST ENDS WITH NO REAL SYNC TIMER ARMED. app.js's scheduleSync arms a
+// real setTimeout(runSync, 2000) whenever a test writes under real timers (a
+// tick, a capture, an add). Left pending, it fires 2 s later inside whatever
+// test is running then — under load, a sync test, against its fetch stub and
+// manual timers (see "a real sync timer a test leaves armed" below). Tracked
+// here, by the function app.js passes, and cancelled after each test. Installed
+// before the first import of app.js; installManualTimers and MockTimers save
+// and restore whatever setTimeout is current, which is this one.
+const untrackedSetTimeout = globalThis.setTimeout;
+const untrackedClearTimeout = globalThis.clearTimeout;
+const realSyncTimers = new Set();
+globalThis.setTimeout = function trackingSetTimeout(fn, ms, ...args) {
+  if (typeof fn !== 'function' || fn.name !== 'runSync') return untrackedSetTimeout(fn, ms, ...args);
+  const handle = untrackedSetTimeout((...a) => { realSyncTimers.delete(handle); fn(...a); }, ms, ...args);
+  realSyncTimers.add(handle);
+  return handle;
+};
+globalThis.clearTimeout = function trackingClearTimeout(handle) {
+  realSyncTimers.delete(handle);
+  return untrackedClearTimeout(handle);
+};
+const pendingRealSyncTimers = () => [...realSyncTimers];
+afterEach(() => {
+  for (const handle of realSyncTimers) untrackedClearTimeout(handle);
+  realSyncTimers.clear();
+});
+
 const item = (id, updatedAt) => ({ id, title: `t-${id}`, date: '2026-08-02', time: null, updatedAt });
 const state = (o = {}) => ({ schemaVersion: SCHEMA_VERSION, items: [], feeds: [], tombstones: [], ...o });
 
@@ -1244,6 +1271,37 @@ test('drainUntil gives up even when Date is frozen', { timeout: 10000 }, async (
   } finally {
     t.mock.timers.reset();
   }
+});
+
+// A test that schedules a sync under REAL timers leaves app.js's 2 s
+// setTimeout(runSync) behind it. Idle, those fire after the last linked test.
+// Under load the file is slower, and they fired INSIDE whichever sync test was
+// running 2 s later, against its fetch stub and manual timers: an extra
+// GET/PUT, or a read whose deadline was a manual timer nobody fires, which
+// left syncInFlight true for the rest of the file (2026-10-27, traced in every
+// failing run of 120 at 40 parallel). The file cancels any left pending when
+// each test ends. These two tests pin that, in this order.
+let leftoverSyncTimer = null;
+test('a real sync timer a test leaves armed is seen by the tracker', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const before = new Set(pendingRealSyncTimers());
+  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.items' });
+  // If app.js renames runSync, or arms its debounce some other way, the
+  // tracker stops seeing it and this fails, rather than the file silently
+  // going back to leaking timers.
+  const armed = pendingRealSyncTimers().filter((h) => !before.has(h));
+  assert.equal(armed.length, 1, "app.js's debounced sync timer is tracked");
+  [leftoverSyncTimer] = armed;
+  assert.equal(before.size, 0, 'no earlier test left one armed');
+});
+
+test('...and is cancelled when that test ends, so it cannot fire inside a later one', () => {
+  assert.ok(leftoverSyncTimer, 'fixture check: the previous test left one armed');
+  assert.equal(pendingRealSyncTimers().length, 0, 'nothing is still tracked');
+  // Node marks a Timeout it will never run as destroyed.
+  assert.equal(leftoverSyncTimer._destroyed, true, 'the timer itself was cleared');
+  leftoverSyncTimer = null;
 });
 
 test('runSync gives up on an account read that never answers, and reports it as offline', async () => {
