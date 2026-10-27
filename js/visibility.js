@@ -28,6 +28,16 @@ export const CALENDAR = 'calendar';
 export const LISTS = 'list';
 const SURFACES = new Set([CALENDAR, LISTS]);
 
+// The one refusal a user can cause: the calendar was removed (here, or by a
+// sync from another device) while its sheet or Settings sat open. Its own
+// class, so callers can say so in words rather than show this module's text.
+export class UnlinkedCalendarError extends Error {
+  constructor() {
+    super('visibility: that calendar is no longer linked on this device');
+    this.name = 'UnlinkedCalendarError';
+  }
+}
+
 function checkSurface(surface) {
   if (!SURFACES.has(surface)) throw new Error(`visibility: unknown surface ${surface}`);
 }
@@ -130,7 +140,7 @@ function checkIds(feedId, uid) {
 function update(feedId, change) {
   const { map } = parseVisibility(readSeriesVisibility());
   const live = new Set(loadFeeds().map((f) => f.id));
-  if (!live.has(feedId)) throw new Error('visibility: that calendar is no longer linked on this device');
+  if (!live.has(feedId)) throw new UnlinkedCalendarError();
   for (const feedId of Object.keys(map)) if (!live.has(feedId)) delete map[feedId];
   change(map);
   for (const feedId of Object.keys(map)) if (Object.keys(map[feedId]).length === 0) delete map[feedId];

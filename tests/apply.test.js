@@ -7126,11 +7126,18 @@ test('vis: the calendar switch hides a series from Day, the Week grid and Month 
 
     click(doc.getElementById('show-week'));
     click(openControlFor(weekList(), 'vis Quiz'));
+    assert.equal(switchFor('calendar').getAttribute('aria-checked'), 'false', 'reopened, the sheet shows the stored hide');
+    assert.equal(switchFor('list').getAttribute('aria-checked'), 'true', 'and the other surface as shown');
     toggleMeasured('list');
     closeSheet();
     assert.doesNotMatch(allText(weekList()), /vis Quiz/, 'gone from the Week list');
     assert.doesNotMatch(allText(todayBody()), /vis Quiz/, 'gone from Today');
     assert.match(allText(todayBody()), /vis Class/, 'the class is still on Today');
+    click(openControlFor(dayOf('2026-10-22'), 'vis Class'));
+    assert.equal(switchFor('calendar').getAttribute('aria-checked'), 'true', 'another series opens shown');
+    assert.equal(switchFor('list').getAttribute('aria-checked'), 'true');
+    closeSheet();
+    click(doc.getElementById('show-week'));
 
     // Positive control: the same timer harness sees an ordinary write's sync.
     const { addItems } = await import('../js/app.js');
@@ -7168,7 +7175,10 @@ test('vis: a weekly class hidden from lists leaves Today\'s events and the "Next
     toggleMeasured('list');
     closeSheet();
     assert.doesNotMatch(allText(todayBody()), /vis Class/, "gone from Today's events");
-    assert.ok(openControlFor(dayOf('2026-10-22'), 'vis Class'), 'still on Day');
+    click(openControlFor(dayOf('2026-10-22'), 'vis Class'));
+    assert.equal(switchFor('list').getAttribute('aria-checked'), 'false', 'reopened from Day, the sheet shows the stored hide');
+    assert.equal(switchFor('calendar').getAttribute('aria-checked'), 'true', 'and the calendar as shown');
+    closeSheet();
     click(doc.getElementById('tab-today'));
 
     // Saturday: nothing today, so the empty line names the next thing.
@@ -7343,6 +7353,37 @@ test('vis: Settings lists a series hidden everywhere; Show puts it back on every
     assert.deepEqual(weekCounts(), [0, 0, 0, 0, 1, 2, 0], 'back in the Week grid');
   } finally {
     if (host.childElementCount) toggleSettings();
+    forceCloseSheet();
+    unseedVis();
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('vis: a calendar removed while its sheet is open: the switch stays put, says why in words, and nothing is stored', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 22, 9, 0).getTime() });
+  const origError = console.error;
+  try {
+    seed([]);
+    seedVisFeed();
+    click(globalThis.document.getElementById('tab-today'));
+    click(openControlFor(todayBody(), 'vis Class'));
+    // A sync from the other device removed it; the sheet is still open.
+    saveFeeds([]);
+    console.error = () => {};
+    click(switchFor('list'));
+    console.error = origError;
+    assert.equal(switchFor('list').getAttribute('aria-checked'), 'true', 'nothing saved, so the switch did not move');
+    const err = sheetHost().querySelector('.sheet-vis-error');
+    assert.equal(err.textContent, 'This calendar is no longer linked on this device, so this can’t be changed. Close and reopen.');
+    assert.equal(localStorage.getItem(VIS_KEY), null, 'nothing stored');
+  } finally {
+    console.error = origError;
     forceCloseSheet();
     unseedVis();
     seed([]);

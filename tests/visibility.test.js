@@ -7,7 +7,7 @@ import {
 } from '../js/storage.js';
 import {
   parseVisibility, loadVisibility, isShown, filterBySurface, canHideSeries,
-  setSeriesVisibility, showSeries, hiddenSeriesFor,
+  setSeriesVisibility, showSeries, hiddenSeriesFor, UnlinkedCalendarError,
 } from '../js/visibility.js';
 
 // Per-series visibility (option A, 2026-10-26): device-local, never synced.
@@ -206,7 +206,7 @@ test('a write for a calendar no longer linked throws and stores nothing; an unre
   saveFeeds([feed('f1')]);
   setSeriesVisibility({ feedId: 'f1', uid: 'a', title: 'A' }, 'list', false);
   const before = readSeriesVisibility();
-  assert.throws(() => setSeriesVisibility({ feedId: 'gone', uid: 'u', title: 'T' }, 'list', false), /no longer linked/);
+  assert.throws(() => setSeriesVisibility({ feedId: 'gone', uid: 'u', title: 'T' }, 'list', false), UnlinkedCalendarError);
   assert.throws(() => showSeries('gone', 'u'), /no longer linked/);
   assert.equal(readSeriesVisibility(), before);
   localStorage.setItem(FEEDS_KEY, '{corrupt');

@@ -1,9 +1,10 @@
 import {
   loadItems, saveItems, loadFeeds, loadFeedCache, addTombstone,
-  saveTombstones, recordLaunch, STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY, SERIES_VISIBILITY_KEY,
+  saveTombstones, recordLaunch, STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY, SERIES_VISIBILITY_KEY, QuotaError,
 } from './storage.js';
 import {
   loadVisibility, filterBySurface, isShown, canHideSeries, setSeriesVisibility, CALENDAR, LISTS,
+  UnlinkedCalendarError,
 } from './visibility.js';
 import { followToday, formatDayLabel } from './freshness.js';
 import {
@@ -691,7 +692,14 @@ function changeSeriesVisibility(item, surface, shown) {
   try {
     setSeriesVisibility({ feedId: item.feedId, uid: item.uid, title: item.title || 'Untitled event' }, surface, shown);
   } catch (e) {
-    return { ok: false, error: e.message };
+    // In words for the two causes a user can meet; anything else is a bug,
+    // logged by name and shown as one.
+    console.error('plaenicke: a visibility change was not saved', e && e.name);
+    if (e instanceof UnlinkedCalendarError) {
+      return { ok: false, error: 'This calendar is no longer linked on this device, so this can’t be changed. Close and reopen.' };
+    }
+    if (e instanceof QuotaError) return { ok: false, error: 'This device is out of storage, so that wasn’t saved.' };
+    return { ok: false, error: `That wasn’t saved (${e && e.name ? e.name : 'error'}).` };
   }
   try {
     render();
