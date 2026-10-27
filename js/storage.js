@@ -321,6 +321,30 @@ export function saveSyncState(s) {
   }
 }
 
+// --- per-series visibility ---
+// plaenicke.seriesVisibility — DEVICE-LOCAL, NEVER SYNCED (option A, Alex
+// 2026-10-26). Which feed series this device hides, and where:
+// { [feedId]: { [uid]: { calendar, list, title } } }. It is not in the synced
+// blob and not on the feed record, so writing it never touches plaenicke.feeds
+// and never schedules a sync. js/visibility.js is its ONLY reader and writer:
+// it parses, validates (a corrupt entry reads as shown) and prunes entries of
+// calendars that no longer exist on its own writes. These two functions move
+// raw bytes and nothing else.
+export const SERIES_VISIBILITY_KEY = 'plaenicke.seriesVisibility';
+
+export function readSeriesVisibility() {
+  return localStorage.getItem(SERIES_VISIBILITY_KEY);
+}
+
+export function writeSeriesVisibility(map) {
+  try {
+    localStorage.setItem(SERIES_VISIBILITY_KEY, JSON.stringify(map));
+  } catch (err) {
+    if (err && err.name === 'QuotaExceededError') throw new QuotaError('Series visibility exceeded storage quota');
+    throw err;
+  }
+}
+
 // --- launch log ---
 // Timestamps of each time the app was opened or resumed on THIS device. Local
 // only, never synced: it is the Phase 0 baseline for "is plaenicke actually

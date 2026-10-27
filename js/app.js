@@ -1,7 +1,11 @@
 import {
   loadItems, saveItems, loadFeeds, loadFeedCache, addTombstone,
-  saveTombstones, recordLaunch, STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY,
+  saveTombstones, recordLaunch, STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY, SERIES_VISIBILITY_KEY, QuotaError,
 } from './storage.js';
+import {
+  loadVisibility, filterBySurface, isShown, canHideSeries, setSeriesVisibility, CALENDAR, LISTS,
+  UnlinkedCalendarError,
+} from './visibility.js';
 import { followToday, formatDayLabel } from './freshness.js';
 import {
   makeItem, sortItemsByDate, isScheduled, isTodo, isTodoType, isIdea, sortIdeasNewestFirst,
@@ -115,6 +119,11 @@ let feedCache = loadFeedCache();
 // stampFromFeeds). Fed by every fetch this page makes: each background batch
 // and Settings' own Sync and Add calendar (onFeedFetched below).
 const failedFeedIds = new Set();
+// Which feed series this device hides, and where (js/visibility.js; option A,
+// 2026-10-26). DEVICE-LOCAL, NEVER SYNCED: nothing in this file that touches
+// it calls scheduleSync. Re-read at the top of every render(), so a write from
+// the sheet, from Settings or from another tab is never shown stale.
+let visibility = loadVisibility();
 
 // Deletes offered for Undo (edit-items Task 4b). A pending id is still in
 // `items` and in storage — nothing is written until commitDelete — but it is
@@ -140,10 +149,13 @@ function liveItems() { return items.filter((it) => !pendingDeletes.has(it.id)); 
 //
 // External feed instances carry no `type`, so isScheduled passes them through
 // — by design, not by accident: a feed event is always a scheduled thing.
+//
+// Month and Day read the CALENDAR surface: a series hidden from the calendar
+// on this device (js/visibility.js) is left out here.
 function visibleItems(start, end) {
   return [
     ...liveItems().filter(isScheduled),
-    ...instancesForRange(feeds, feedCache, start, end, deviceTz),
+    ...filterBySurface(instancesForRange(feeds, feedCache, start, end, deviceTz), visibility, CALENDAR),
   ];
 }
 
@@ -620,12 +632,23 @@ function openItem(item) {
   if (activeToast) activeToast.dismiss();
   let calendarName = null;
   let googleDayUrl = null;
+  let vis = null;
   if (item.external) {
     const feed = feeds.find((f) => f.id === item.feedId);
     calendarName = feed ? feed.name : 'a linked calendar';
     if (feed && isGoogleHost(feed.url)) {
       const [y, m, d] = item.date.split('-').map(Number);
       googleDayUrl = `https://calendar.google.com/calendar/r/day/${y}/${m}/${d}`;
+    }
+    // The two per-series switches, except on a guessed series (controller
+    // ruling 3): there each meeting has its own uid, and a switch would hide
+    // one meeting while looking as if it hid the class.
+    if (canHideSeries(item)) {
+      vis = {
+        calendar: isShown(visibility, item, CALENDAR),
+        list: isShown(visibility, item, LISTS),
+        every: seriesHasMany(item),
+      };
     }
   }
   // openItemSheet validates BEFORE touching the host (an unknown type, a
@@ -641,12 +664,51 @@ function openItem(item) {
       onSave: (p) => editItem(item.id, p, { openedType: item.type }),
       onDelete: () => requestDelete(item.id),
       onClose: () => focusOpener(item.id),
+      visibility: vis,
+      onVisibilityChange: (surface, shown) => changeSeriesVisibility(item, surface, shown),
     });
   } catch (e) {
     // The reason is for a developer (e.g. "Unknown type: x"), not the user.
     console.error('openItemSheet refused to open', item.id, e);
     setMessage("This item can't be edited here.");
   }
+}
+
+// Whether one switch covers more than this occurrence: the calendar holds
+// several ParsedEvents with this uid (overrides, duplicates), or a rule. Not
+// `recurring`, which is DAILY/WEEKLY only: a monthly series is one switch
+// over every month too.
+function seriesHasMany(item) {
+  const entry = feedCache[item.feedId];
+  const evs = entry && Array.isArray(entry.events) ? entry.events.filter((ev) => ev.uid === item.uid) : [];
+  return evs.length > 1 || evs.some((ev) => typeof ev.rrule === 'string');
+}
+
+// The sheet's switch tap. Writes plaenicke.seriesVisibility ONLY, through
+// js/visibility.js, and NEVER schedules a sync: the choice is per device
+// (Alex, 2026-10-19; option A, 2026-10-26). The write's result and the
+// render's are reported apart, as handleToggleDone does for a tick: a hide
+// that saved is never reported as failed because the screen did not redraw.
+function changeSeriesVisibility(item, surface, shown) {
+  try {
+    setSeriesVisibility({ feedId: item.feedId, uid: item.uid, title: item.title || 'Untitled event' }, surface, shown);
+  } catch (e) {
+    // In words for the two causes a user can meet; anything else is a bug,
+    // logged by name and shown as one.
+    console.error('plaenicke: a visibility change was not saved', e && e.name);
+    if (e instanceof UnlinkedCalendarError) {
+      return { ok: false, error: 'This calendar is no longer linked on this device, so this can’t be changed.' };
+    }
+    if (e instanceof QuotaError) return { ok: false, error: 'This device is out of storage, so that wasn’t saved.' };
+    return { ok: false, error: `That wasn’t saved (${e && e.name ? e.name : 'error'}).` };
+  }
+  try {
+    render();
+  } catch (e) {
+    setMessage(TICK_SAVED_RENDER_FAILED);
+    console.error('plaenicke: render after a visibility change failed', e && e.name);
+  }
+  return { ok: true };
 }
 
 // Is this feed Google's own? The link is offered only for a host of exactly
@@ -839,12 +901,16 @@ function renderWeek() {
   els.weekLabel.textContent = weekLabel(viewWeekStart, end);
   // One expansion for the whole week: the grid merges it with the own items
   // (as visibleItems does) and the list takes the slice it lists.
+  // The grid is the calendar surface and the list the list surface
+  // (js/visibility.js), so each takes its own filter of the one expansion.
   const weekInsts = instancesForRange(feeds, feedCache, viewWeekStart, end, deviceTz);
+  const gridInsts = filterBySurface(weekInsts, visibility, CALENDAR);
+  const listInsts = filterBySurface(weekInsts, visibility, LISTS);
   renderWeekView(els.weekGrid, viewWeekStart,
-    groupItemsByDate(sortItemsByDate([...liveItems().filter(isScheduled), ...weekInsts])), todayISO,
+    groupItemsByDate(sortItemsByDate([...liveItems().filter(isScheduled), ...gridInsts])), todayISO,
     { onSelectDay: openDay });
   const list = buildWeekList(liveItems(),
-    (from, to) => weekInsts.filter((i) => i.date >= from && i.date <= to), viewWeekStart, todayISO);
+    (from, to) => listInsts.filter((i) => i.date >= from && i.date <= to), viewWeekStart, todayISO);
   renderWeekList(els.weekList, list, { onOpen: openItem, onSelectDay: openDay });
 }
 
@@ -905,12 +971,17 @@ function renderToday() {
   const now = new Date();
   const todayISO = toISO(now);
   els.todayDate.textContent = now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+  // Every section of Today is the list surface, the look-ahead included, so
+  // a series hidden from lists is not the "Next:" line either (ruling 1).
   const today = buildToday(
     liveItems(),
-    instancesForRange(feeds, feedCache, todayISO, addDays(todayISO, NEXT_DAYS), deviceTz),
+    filterBySurface(instancesForRange(feeds, feedCache, todayISO, addDays(todayISO, NEXT_DAYS), deviceTz), visibility, LISTS),
     todayISO,
     minutesNow(now),
-    () => instancesForRange(feeds, feedCache, addDays(todayISO, 1), addDays(todayISO, LOOKAHEAD_DAYS), deviceTz),
+    () => filterBySurface(
+      instancesForRange(feeds, feedCache, addDays(todayISO, 1), addDays(todayISO, LOOKAHEAD_DAYS), deviceTz),
+      visibility, LISTS,
+    ),
   );
   // The head's "N DONE · M LEFT" (rewards concept 2), from the same rows.
   renderTally(els.todayTally, tally(today));
@@ -997,6 +1068,7 @@ function syncTodayTick() {
 // resume. It returns at once when the day has not changed.
 function render() {
   refreshForToday();
+  visibility = loadVisibility();
   renderToday(); renderCalendar(); renderWeek(); renderDay(); renderTodos(); renderIdeas();
 }
 
@@ -1314,6 +1386,9 @@ function scheduleSync() {
 // Standard, Web Storage, setItem steps). tests/apply.test.js runs the loop.
 const CROSS_TAB_KEYS = [STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY];
 window.addEventListener('storage', (e) => {
+  // Series visibility is device-local, not synced data: another tab's hide is
+  // shown here (render() re-reads it) and NO sync is scheduled.
+  if (e.key === SERIES_VISIBILITY_KEY) { render(); return; }
   if (!CROSS_TAB_KEYS.includes(e.key)) return;
   items = loadItems();
   feeds = loadFeeds();
