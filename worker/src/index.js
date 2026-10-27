@@ -9,6 +9,7 @@
 import { buildRequestBody } from './prompt.js';
 import { normalizeClaudeJson } from './normalize.js';
 import { handleFeed } from './feed.js';
+import { VERSION } from './version.js';
 import { cors, json } from './cors.js';
 import { handleGetData, handlePutData } from './data.js';
 import {
@@ -23,6 +24,13 @@ function utcTodayISO() {
   const d = new Date();
   const p = (n) => String(n).padStart(2, '0');
   return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`;
+}
+
+// Latency and status ONLY. Never the user's text, never Claude's reply, never
+// the key: worker logs are retained, and the text is the user's own notes.
+// Time is to response headers (the body is read afterwards).
+function logClaudeLatency(ms, status) {
+  console.log(`smart-add claude_ms=${ms} status=${status}`);
 }
 
 async function handleSmartAdd(request, env) {
@@ -44,6 +52,7 @@ async function handleSmartAdd(request, env) {
   const body = buildRequestBody(text, today);
 
   let claudeRes;
+  const startedAt = Date.now();
   try {
     claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -55,8 +64,10 @@ async function handleSmartAdd(request, env) {
       body: JSON.stringify(body),
     });
   } catch {
+    logClaudeLatency(Date.now() - startedAt, 'unreachable');
     return json({ error: 'upstream_unreachable' }, 502);
   }
+  logClaudeLatency(Date.now() - startedAt, claudeRes.status);
 
   if (!claudeRes.ok) return json({ error: 'upstream_error', status: claudeRes.status }, 502);
 
@@ -144,6 +155,11 @@ export default {
     try {
       if (request.method === 'OPTIONS') return new Response(null, { headers: cors() });
 
+      // Deploy marker: public, static, no Claude, no D1, no env.
+      if (pathname === '/version') {
+        if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+        return json({ version: VERSION });
+      }
       if (pathname === '/') return await handleSmartAdd(request, env);
       if (pathname === '/data') return await handleData(request, env);
       if (pathname === '/admin/device') return await handleAdminDevice(request, env);

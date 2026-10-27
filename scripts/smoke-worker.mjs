@@ -30,10 +30,12 @@
 //   - the response's Access-Control-Allow-Origin is the app's origin. The
 //     Worker does not read the request's Origin on POST /, so none is sent.
 //
-// No propagation retry: a deploy takes ~20 s to reach the edge, and nothing the
-// Worker returns says which version answered, so a retry could only wait, not
-// confirm. Wait before running it. (A `GET /version` marker would fix this; it
-// needs a Worker deploy — see the punchlist.)
+// Before any phrase, it GETs /version (free: no Claude call) and compares it to
+// worker/src/version.js in THIS checkout. A mismatch means the edge is still
+// serving the old deploy (or the checkout is not the deployed commit): it stops
+// BEFORE spending credits. There is still no retry: wait ~20 s after the deploy
+// and run it again. Against a Worker deployed before /version existed, the
+// check fails with a 404.
 //
 // Phrases come from worker/src/prompt.js's own instruction examples, on the
 // unambiguous side. A phrase on a real boundary in that text accepts a set.
@@ -42,6 +44,7 @@ import { pathToFileURL } from 'node:url';
 import { fetchWithTimeout } from '../js/fetchtimeout.js';
 import { WORKER_URL } from '../js/config.js';
 import { toISO } from '../js/dateparse.js';
+import { VERSION } from '../worker/src/version.js';
 
 // The origin the app is served from (GitHub Pages). worker/src/cors.js's
 // ALLOWED_ORIGIN must equal it; tests/smoke-worker.test.js pins the two.
@@ -109,6 +112,35 @@ export function checkResult(phrase, response, today) {
   return { pass: failures.length === 0, failures, got };
 }
 
+// Free pre-flight: does the Worker at `url` answer GET /version with `expected`?
+// No Claude call. Never retries and never falls back: any failure to read a
+// version is a failure.
+export async function checkVersion({ fetchImpl, url, expected } = {}) {
+  if (typeof fetchImpl !== 'function') throw new TypeError('checkVersion: fetchImpl is required');
+  if (typeof url !== 'string' || !url) throw new TypeError('checkVersion: url is required');
+  if (typeof expected !== 'string' || !expected) throw new TypeError('checkVersion: expected is required');
+  const endpoint = new URL('/version', url).href;
+  let res;
+  try {
+    res = await fetchImpl(endpoint);
+  } catch (err) {
+    return { pass: false, failures: [`no response from /version: ${err?.name}: ${err?.message}`], got: null };
+  }
+  let body;
+  try { body = JSON.parse(await res.text()); } catch { body = null; }
+  if (res.status !== 200) {
+    return { pass: false, failures: [`/version status ${res.status}, want 200 (is the new Worker deployed?)`], got: null };
+  }
+  const got = body && typeof body === 'object' ? body.version : undefined;
+  if (typeof got !== 'string') {
+    return { pass: false, failures: ['/version body has no string "version"'], got: null };
+  }
+  if (got !== expected) {
+    return { pass: false, failures: [`deployed version ${JSON.stringify(got)}, want ${JSON.stringify(expected)}`], got };
+  }
+  return { pass: true, failures: [], got };
+}
+
 // Every phrase once, in order, sequentially. No default fetch and no default
 // URL: a caller that forgets to inject one gets a throw, not production.
 export async function runSmoke({ fetchImpl, url, today, phrases = PHRASES } = {}) {
@@ -173,6 +205,13 @@ export const MAIN_FETCH = fetchWithTimeout;
 async function main() {
   const today = toISO(new Date());
   console.log(`smoke:worker -> ${WORKER_URL} (today ${today}; ${PHRASES.length} Claude calls)`);
+  const v = await checkVersion({ fetchImpl: MAIN_FETCH, url: WORKER_URL, expected: VERSION });
+  if (!v.pass) {
+    console.log(`VERSION CHECK FAILED (no Claude calls made): ${v.failures.join('; ')}`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`version ${v.got} confirmed`);
   const results = await runSmoke({ fetchImpl: MAIN_FETCH, url: WORKER_URL, today });
   console.log(formatTable(results));
   process.exitCode = results.every((r) => r.pass) ? 0 : 1;
