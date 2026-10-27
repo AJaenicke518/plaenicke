@@ -6963,14 +6963,14 @@ test('smart add: a preview from a superseded request cannot be confirmed or canc
 
     click(staleAddAll);
     assert.deepEqual(loadItems().map((it) => it.title), [], 'nothing from the stale preview is added');
-    assert.equal(messageText(), 'Preview closed — nothing was added from it.');
+    assert.equal(messageText(), 'Review the items below.', 'silent: the newer request\'s message stays');
     assert.equal(preview.children.length, newer, 'the newer preview is untouched');
     assert.equal(preview.hidden, false);
 
     click(staleCancel);
     assert.equal(preview.children.length, newer, 'a stale Cancel leaves the newer preview too');
     assert.equal(preview.hidden, false);
-    assert.equal(messageText(), 'Preview closed — nothing was added from it.', 'and says nothing new');
+    assert.equal(messageText(), 'Review the items below.', 'and says nothing either');
   } finally {
     timers.restore();
     net.restore();
@@ -7428,6 +7428,8 @@ test('capture: a manual add releases it too; a release leaves another action\'s 
     await settle();
     assert.equal(messageText(), 'Kept.', 'the release does not clear a message the top request did not set');
   } finally {
+    for (const release of held) release(smartReply([]));
+    await settle();
     closeCapture(timers);
     timers.restore();
     net.restore();

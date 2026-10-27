@@ -433,7 +433,11 @@ async function handleAdd(target) {
       // step 8). A newer Add closed this preview, but a button of it can still
       // be tapped (a tap already on its way). false: renderPreview then leaves
       // the container alone, which may now hold the NEWER request's preview.
-      if (generation !== addGeneration) { line.set(PREVIEW_CLOSED); return false; }
+      // Silent, like a stale Cancel: the line belongs to the newer request, and
+      // writing on it would bump its token and swallow its own "Added." or
+      // "Review the items below." (Task 5 review). Closing this preview already
+      // said "Preview closed — nothing was added from it."
+      if (generation !== addGeneration) return false;
       try { addItems(confirmed); } catch (e) { line.set(e.message); return false; }
       clearSentText();
       line.set('Added.');
@@ -702,8 +706,6 @@ function commitDelete(id) {
 // (CLAUDE.md, "Feed URLs are unrecoverable"). isGoogleHost reads the URL here,
 // in app.js, and only its yes/no verdict crosses into the sheet.
 function openItem(item) {
-  // Opening a sheet stops a listen and keeps its text (spec § 3 step 4).
-  capture.stopAndKeep();
   // Only the latest action can be undone, and an Undo left sitting over the
   // sheet's own buttons is a mis-tap waiting to happen. Dismissing settles
   // the toast (for a delete, that commits it).
@@ -737,6 +739,9 @@ function openItem(item) {
     console.error('openItemSheet refused to open', item.id, e);
     setMessage("This item can't be edited here.");
   }
+  // Opening a sheet stops a listen and keeps its text (spec § 3 step 4).
+  // Last, after the sheet is up: nothing here may stop it opening.
+  capture.stopAndKeep();
 }
 
 // Is this feed Google's own? The link is offered only for a host of exactly
@@ -1494,11 +1499,12 @@ document.addEventListener('visibilitychange', () => {
   // pending check: with the loop first, the toast's later onExpire would
   // commit the same id again with a later deletedAt (Task 4b review, item 5).
   if (document.visibilityState === 'hidden') {
-    // A listen stops and keeps its text; nothing is added (spec § 3 step 4).
-    capture.stopAndKeep();
     if (activeToast) activeToast.dismiss();
     for (const id of [...pendingDeletes]) commitDelete(id);
     syncTodayTick();
+    // A listen stops and keeps its text; nothing is added (spec § 3 step 4).
+    // Last: committing pending deletes matters more, and must not wait on it.
+    capture.stopAndKeep();
     return;
   }
   if (document.visibilityState !== 'visible') return;

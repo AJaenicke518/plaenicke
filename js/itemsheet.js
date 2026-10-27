@@ -44,9 +44,10 @@ const TYPE_LABELS = {
   general: 'General', task: 'To-do', idea: 'Idea',
 };
 
-// The share of the visible height a sheet may take (js/viewport.js); the rest
-// shows the scrim, so a tap above the sheet can still dismiss it. styles.css's 85dvh is the
-// same figure for a browser without visualViewport.
+// The share of the visible height a sheet may take, passed to js/viewport.js's
+// followVisualViewport; the rest shows the scrim, so a tap above the sheet can
+// still dismiss it. styles.css's 85dvh is the same figure for a browser
+// without visualViewport.
 const SHEET_MAX_SHARE = 0.85;
 
 function el(tag, className, text) {

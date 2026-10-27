@@ -1072,3 +1072,15 @@ test('the capture box\'s Cancel is secondary, like the preview\'s and the sheet\
   assert.equal(declOf('.capture-actions .cancel', 'background'), 'var(--card)');
   assert.equal(declOf('.capture-actions .cancel', 'border'), '1px solid var(--line)');
 });
+
+// Task 3 review: Chrome sticks the actions row at the panel's padding edge, so
+// content scrolled under it showed in the 12px strip below. The panel has no
+// bottom padding; the row carries it.
+test('nothing shows under the sticky actions row: the row, not the panel, has the bottom padding', () => {
+  assert.equal(declOf('.capture-panel', 'padding-bottom'), '0');
+  assert.equal(declOf('.capture-actions', 'padding-bottom'), 'var(--space-3)');
+});
+
+test('the capture panel\'s shadow uses the --shade token', () => {
+  assert.match(declOf('.capture-panel', 'box-shadow'), /var\(--shade\)/);
+});

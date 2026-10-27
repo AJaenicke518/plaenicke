@@ -510,3 +510,38 @@ test('the transform names the variable styles.css sets', () => {
   assert.match(css, /capture-shrink 250ms/, `CLOSE_MS (${CLOSE_MS}) is the close animation's length`);
   assert.equal(CLOSE_MS, 250);
 });
+
+// A late rejection after a Cancel must not replace "Cancelled — nothing was
+// added." on the line (the catch's own-latch guard); it is still logged.
+test('a submit that rejects after Cancel leaves the Cancel message, and is still logged', async (t) => {
+  globalThis.document.activeElement = null;
+  const make = (tag) => new FakeElement(tag);
+  const els = {
+    button: make('button'), box: make('div'), field: make('textarea'), add: make('button'),
+    cancel: make('button'), close: make('button'), typeInstead: make('button'), preview: make('section'),
+  };
+  const message = make('p');
+  let reject;
+  let cancels = 0;
+  const capture = createCapture({
+    els,
+    line: { set(text) { message.textContent = text || ''; } },
+    voice: { isVoiceSupported: () => false, listen() { throw new Error('unused'); }, errorKind },
+    isStandalone: () => false,
+    submit: () => new Promise((_, r) => { reject = r; }),
+    cancelSubmit() { cancels += 1; }, closePreviews() {},
+    later: () => ({}), clearLater() {}, follow: () => () => {},
+  });
+  const logged = t.mock.method(console, 'error', () => {});
+  tap(els.button); // no voice: typing mode
+  els.field.value = 'lunch';
+  tap(els.add);
+  tap(els.cancel);
+  assert.equal(cancels, 1, 'fixture check');
+  reject(new Error('late'));
+  await tick();
+  assert.equal(message.textContent, M.cancelled);
+  assert.equal(capture.state().adding, false);
+  assert.equal(els.button.disabled, false);
+  assert.equal(logged.mock.callCount(), 1);
+});
