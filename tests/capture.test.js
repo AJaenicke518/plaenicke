@@ -181,7 +181,9 @@ test('a tap while listening stops first, then adds the text shown, behind the ad
   tap(fx.els.add);
   await tick();
   assert.equal(fx.submits, 1, 'the latch refuses a second add');
-  fx.settle('preview');
+  // An outcome with no preview: Add comes back (with a preview it stays
+  // hidden; see the 2026-10-26 tests at the end).
+  fx.settle('failed');
   await tick();
   assert.equal(fx.capture.state().adding, false);
   assert.equal(fx.els.button.disabled, false);
@@ -544,4 +546,88 @@ test('a submit that rejects after Cancel leaves the Cancel message, and is still
   assert.equal(capture.state().adding, false);
   assert.equal(els.button.disabled, false);
   assert.equal(logged.mock.callCount(), 1);
+});
+
+// --- Alex's answers, 2026-10-26 ---------------------------------------------
+// (1) "add the item": Return in the capture box adds, through the same path
+// as the box's Add (stop-and-detach first, then the adding latch), and never
+// inserts a newline. (2) The box's own Add is hidden while its preview is open
+// ("Add all" is the one confirm), so a second paid request cannot re-send the
+// same text; it shows again when the preview closes or is confirmed.
+
+// A keydown as the browser sends it to the field, recording preventDefault.
+function keydown(el, init) {
+  const ev = { target: el, defaultPrevented: false, preventDefault() { ev.defaultPrevented = true; }, ...init };
+  for (const fn of el._listeners.keydown || []) fn(ev);
+  return ev;
+}
+
+test('Return in the field adds, as the box\'s Add does, and inserts no newline', async () => {
+  const fx = setup();
+  listening(fx, 'call the bank');
+  fx.voice.current.opts.onEnd(); // typing mode
+  const ev = keydown(fx.els.field, { key: 'Enter' });
+  assert.equal(ev.defaultPrevented, true, 'no newline');
+  assert.equal(fx.submits, 1, 'it adds');
+  assert.equal(fx.capture.state().adding, true, 'behind the adding latch');
+  assert.equal(fx.els.field.value, 'call the bank');
+  const again = keydown(fx.els.field, { key: 'Enter' });
+  assert.equal(again.defaultPrevented, true, 'no newline while thinking either');
+  await tick();
+  assert.equal(fx.submits, 1, 'the latch refuses a second add');
+});
+
+test('Return while listening stops first, then adds', () => {
+  const fx = setup();
+  listening(fx, 'buy stamps');
+  keydown(fx.els.field, { key: 'Enter' });
+  assert.deepEqual(fx.order, ['stop', 'submit']);
+});
+
+test('Return during IME composition, and other keys, do nothing', () => {
+  const fx = setup();
+  listening(fx, 'x');
+  fx.voice.current.opts.onEnd();
+  const composing = keydown(fx.els.field, { key: 'Enter', isComposing: true });
+  const other = keydown(fx.els.field, { key: 'a' });
+  assert.equal(composing.defaultPrevented, false);
+  assert.equal(other.defaultPrevented, false);
+  assert.equal(fx.submits, 0);
+});
+
+test('while its own preview is open the box\'s Add is hidden; it shows again when the preview closes', async () => {
+  const fx = setup();
+  listening(fx, 'two things friday');
+  tap(fx.els.button);
+  fx.settle('preview');
+  await tick();
+  assert.equal(fx.capture.state().adding, false, 'fixture check: the latch cleared');
+  assert.equal(fx.els.add.hidden, true, 'Add all is the one confirm');
+  assert.equal(fx.els.cancel.hidden, true);
+  fx.capture.previewClosed();
+  assert.equal(fx.els.add.hidden, false);
+});
+
+test('a confirmed preview with text typed meanwhile shows the box\'s Add again', async () => {
+  const fx = setup();
+  listening(fx, 'two things friday');
+  tap(fx.els.button);
+  fx.settle('preview');
+  await tick();
+  fx.els.field.value = 'and the next thing';
+  fx.capture.added();
+  assert.equal(fx.els.box.classList.contains('closing'), false, 'fixture check: the box stays');
+  assert.equal(fx.els.add.hidden, false);
+});
+
+test('x with a preview open resets the box\'s Add for the next opening', async () => {
+  const fx = setup();
+  listening(fx, 'two things friday');
+  tap(fx.els.button);
+  fx.settle('preview');
+  await tick();
+  tap(fx.els.close);
+  fx.timers[0].fn();
+  tap(fx.els.button);
+  assert.equal(fx.els.add.hidden, false);
 });

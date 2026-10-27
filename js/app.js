@@ -311,6 +311,7 @@ const topTarget = {
   unavailable: 'Smart add is unavailable — pick a date below and tap Add to add it manually.',
   onAdded() {},
   onSuperseded() {},
+  onPreviewClosed() {},
 };
 // The capture box has no date row, so its failure names the top box's.
 // `capture` is created below; these run only after an Add, long after.
@@ -322,6 +323,8 @@ const captureTarget = {
   unavailable: 'Smart add is unavailable — use the box at the top with a date to add it.',
   onAdded() { capture.added(); },
   onSuperseded() { capture.released(); },
+  // Its own Add is hidden while its preview is open (js/capture.js).
+  onPreviewClosed() { capture.previewClosed(); },
 };
 const TARGETS = [topTarget, captureTarget];
 
@@ -337,6 +340,7 @@ function closePreviews() {
     t.preview.hidden = true;
     t.preview.innerHTML = '';
     t.line.set(PREVIEW_CLOSED);
+    t.onPreviewClosed();
   }
 }
 
@@ -449,6 +453,7 @@ async function handleAdd(target) {
     onCancel: () => {
       if (generation !== addGeneration) return false;
       line.set('Cancelled.');
+      target.onPreviewClosed();
       return true;
     },
   });

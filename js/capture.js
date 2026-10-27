@@ -68,6 +68,10 @@ export function createCapture({
   let adding = null; // a fresh token while a smart add thinks, else null
   let refused = false; // voice refused once: later taps this session type instead
   let previewText = null; // the text that produced this box's open preview
+  // This box's preview is showing: its own Add is hidden then, so "Add all"
+  // is the one confirm and a second paid request cannot re-send the same
+  // text (controller ruling, 2026-10-26). app.js says when it closes.
+  let previewOpen = false;
   let closeTimer = null;
   let stopFollow = null;
 
@@ -145,7 +149,7 @@ export function createCapture({
   function setAdding(on) {
     els.button.disabled = on;
     els.add.disabled = on;
-    els.add.hidden = on;
+    els.add.hidden = on || previewOpen;
     els.cancel.hidden = !on;
   }
 
@@ -205,7 +209,7 @@ export function createCapture({
     const sent = els.field.value.trim();
     try {
       const outcome = await submit();
-      if (outcome === 'preview') previewText = sent;
+      if (outcome === 'preview') { previewText = sent; previewOpen = true; }
     } catch (err) {
       // handleAdd reports its own failures; reaching here is a bug. Say so,
       // and rethrow so the click handler logs it (zero fallback).
@@ -233,6 +237,8 @@ export function createCapture({
     els.typeInstead.hidden = true;
     els.preview.hidden = true;
     els.preview.innerHTML = '';
+    previewOpen = false;
+    els.add.hidden = false;
     setMode('closed');
     closeTimer = later(finishClose, CLOSE_MS);
   }
@@ -278,6 +284,15 @@ export function createCapture({
     focusField();
   });
   els.field.addEventListener('input', grow);
+  // Return adds (Alex, 2026-10-26: "add the item"), through the same path as
+  // the box's Add: stop-and-detach first, then the adding latch. Never a
+  // newline, while thinking too. Not mid-composition: an IME's Return
+  // confirms the composed word.
+  els.field.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.isComposing) return;
+    e.preventDefault();
+    add().catch(logFailure);
+  });
   // .typing lowers the box to just above the keyboard (styles.css) while any
   // control in it that raises the keyboard has focus: the field (not while
   // read-only: no keyboard comes up for that) or an input of its preview
@@ -304,9 +319,17 @@ export function createCapture({
     released() {
       if (adding !== null) { adding = null; setAdding(false); }
     },
-    // A capture was added (direct, or from its preview).
+    // This box's preview closed without being confirmed: a newer Add (from
+    // either box), its Cancel, or a new listen. Its Add shows again.
+    previewClosed() {
+      previewOpen = false;
+      setAdding(adding !== null);
+    },
+    // A capture was added (direct, or from its preview, which is then closed).
     added() {
-      if (adding !== null) { adding = null; setAdding(false); }
+      previewOpen = false;
+      adding = null;
+      setAdding(false);
       // Text typed while it was thinking is the next entry: the box stays.
       if (els.field.value.trim()) return;
       close();
