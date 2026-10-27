@@ -850,11 +850,13 @@ function renderDay() {
     onDelete: requestDelete,
     // Auto-scroll to 07:00 only on a genuine day change while visible; otherwise
     // dayview.js restores the grid's own prior scrollTop (see its `prev` capture).
-    // A hidden day-view has scrollTop 0, so lastDayRendered must not advance while hidden —
-    // otherwise the first visible open of a day would skip auto-scroll and land at midnight.
+    // A grid drawn while hidden holds no scroll position (a browser reports 0), so a hidden
+    // render FORGETS the day rather than only not advancing it. Every showView re-renders
+    // every page: leaving Day re-draws its grid hidden, and coming back to the same day
+    // would otherwise skip auto-scroll and restore that 0, opening the grid at midnight.
     autoScroll: visible && viewDay !== lastDayRendered,
   });
-  if (visible) lastDayRendered = viewDay;
+  lastDayRendered = visible ? viewDay : null;
 }
 
 function renderTodos() {

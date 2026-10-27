@@ -1063,24 +1063,35 @@ async function drain() {
 // Poll for a POSITIVE wait instead of a fixed tick count: syncOnce hashes the
 // token through WebCrypto, which completes on the thread pool as a macrotask,
 // so 50 setImmediates was not always enough under load (measured: 1 failure
-// in 7 full runs of the wiring tests). Bounded by wall time AND by a poll
-// count, so a test that mocks Date (freezing Date.now) still ends; setImmediate
-// and Date are never replaced by installManualTimers, so this works inside one.
-async function drainUntil(pred, ms = 2000, maxPolls = 200000) {
-  const end = Date.now() + ms;
-  for (let i = 0; !pred() && Date.now() < end && i < maxPolls; i += 1) {
+// in 7 full runs of the wiring tests). Bounded by performance.now(), which
+// MockTimers does not freeze, so a test that mocks Date still ends after `ms`
+// of real time. It used to be bounded by Date.now() plus a 200 000-poll cap for
+// the frozen case, and the cap made that case cost whatever 200 000
+// setImmediate turns cost at the time: about 3 s on an idle machine, over the
+// test's 10 s timeout under load (cancelled, 2026-10-26). setImmediate is never
+// replaced by installManualTimers, so this works inside one.
+const monotonicNow = performance.now.bind(performance);
+async function drainUntil(pred, ms = 2000) {
+  const end = monotonicNow() + ms;
+  while (!pred() && monotonicNow() < end) {
     await new Promise((resolve) => { setImmediate(resolve); });
   }
 }
 
-// A mocked Date (t.mock.timers with apis: ['Date']) freezes Date.now(), and
-// the wall-time bound alone then never ends the loop.
+// A mocked Date (t.mock.timers with apis: ['Date']) freezes Date.now(). The
+// wait must still end after `ms` of real time, however long each poll takes on
+// the machine at that moment. (`now` keeps the frozen Date at today rather
+// than 1970, for any real timer of app.js's that fires meanwhile.)
 test('drainUntil gives up even when Date is frozen', { timeout: 10000 }, async (t) => {
-  t.mock.timers.enable({ apis: ['Date'] });
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
   try {
     let polls = 0;
-    await drainUntil(() => { polls += 1; return false; });
+    const start = performance.now();
+    await drainUntil(() => { polls += 1; return false; }, 50);
+    const elapsed = performance.now() - start;
     assert.ok(polls > 1, 'fixture check: it polled');
+    assert.ok(elapsed >= 50, `it waited the full 50 ms (waited ${elapsed.toFixed(0)} ms)`);
+    assert.ok(elapsed < 500, `it gave up at 50 ms of real time, not after a poll count (waited ${elapsed.toFixed(0)} ms)`);
   } finally {
     t.mock.timers.reset();
   }
@@ -1580,6 +1591,35 @@ test('resuming leaves a Day view the user moved elsewhere where they put it', as
   click(globalThis.document.getElementById('prev-day'));
   click(globalThis.document.getElementById('prev-day'));
   assert.equal(dayLabel.textContent, labelFor(new Date()), 'restored for later tests');
+});
+
+// Every showView re-renders every page, so leaving Day re-draws its grid while
+// the page is hidden. A browser reports scrollTop 0 for a hidden grid, and the
+// fake keeps whatever was written, so the test writes 0 the way the browser
+// would. Day used to keep "this day was already shown" across that hidden
+// render, so coming back skipped the 7 AM scroll and restored the 0: the grid
+// opened at midnight (reproduced in Chrome on main, 2026-10-26).
+test('Day: coming back to Calendar opens the grid at 7 AM again, not at midnight', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  const grid = () => dayBody().querySelector('.day-grid');
+  try {
+    click(doc.getElementById('show-day'));
+    assert.equal(doc.getElementById('day-view').hidden, false, 'fixture check: Day is showing');
+    grid().scrollTop = 600;
+    seed([]); // a re-render while Day stays visible keeps the user's place
+    assert.equal(grid().scrollTop, 600, 'a visible re-render keeps the scroll');
+    click(doc.getElementById('tab-today'));
+    assert.equal(doc.getElementById('day-view').hidden, true, 'fixture check: Day is hidden');
+    grid().scrollTop = 0; // drawn while hidden: what a browser reports
+    click(doc.getElementById('tab-calendar'));
+    assert.equal(doc.getElementById('day-view').hidden, false, 'fixture check: Calendar opened on Day');
+    assert.equal(grid().scrollTop, 7 * 48);
+  } finally {
+    if (restore) click(restore);
+  }
 });
 
 test('resuming re-fetches calendar feeds whose cache is stale', async () => {
@@ -6807,7 +6847,11 @@ test('a tick whose render throws after the save still schedules its sync, and th
     unbreak();
     assert.equal(storedById('ff2-c9').done, true, 'fixture check: the save succeeded');
     t.mock.timers.tick(2000);
-    for (let i = 0; i < 50; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    // Poll for the PUT, never a fixed count of turns: between the GET and the
+    // PUT, syncOnce decrypts, merges and encrypts through WebCrypto, which
+    // completes on the thread pool. A fixed 50 turns ran out with only the GET
+    // sent in 4 of 90 runs under load (2026-10-26).
+    await drainUntil(() => requests.some((r) => r.url.includes('/data') && r.method === 'PUT'));
   } finally {
     unbreak();
     await resetMockTimers(t);

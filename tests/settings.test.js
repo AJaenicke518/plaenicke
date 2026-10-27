@@ -107,6 +107,53 @@ test('settings: cycling a feed\'s color does not discard a feed that arrived in 
   assert.deepEqual(stored.map((f) => f.id).sort(), ['feedA', 'feedC']);
 });
 
+// The Show/Hide toggle names its calendar for assistive tech, which otherwise
+// hears a row of identical "Show" or "Hide" buttons. The name only: a feed URL
+// is a capability token and is never displayed or announced.
+test('settings: the toggle is named "Show <calendar name>" or "Hide <calendar name>", never its URL', () => {
+  const work = {
+    id: 'feedW', url: 'https://calendar.example.com/private-s3cr3tT0ken/basic.ics', name: 'Work',
+    color: 'var(--feed-palette-2)', hidden: true, updatedAt: '2026-07-01T00:00:00.000Z',
+  };
+  const home = {
+    id: 'feedH', url: 'webcal://p01-caldav.example.com/published/2/h0meT0ken', name: 'Home',
+    color: 'var(--feed-palette-3)', hidden: true, updatedAt: '2026-07-01T00:00:00.000Z',
+  };
+  const school = {
+    id: 'feedS', url: 'https://school.example.com/feed/sch00lT0ken.ics', name: 'School',
+    color: 'var(--feed-palette-4)', hidden: false, updatedAt: '2026-07-01T00:00:00.000Z',
+  };
+  const { host } = openPanel([work, school, home]);
+  const hide = findButtonByText(host, 'Hide');
+  assert.ok(hide, 'fixture check: the visible calendar has a Hide button');
+  assert.equal(hide.getAttribute('aria-label'), 'Hide School');
+  const shows = host.querySelectorAll('button').filter((b) => b.textContent === 'Show');
+  assert.equal(shows.length, 2, 'fixture check: one Show button per hidden calendar');
+  assert.deepEqual(shows.map((b) => b.getAttribute('aria-label')), ['Show Work', 'Show Home']);
+  for (const b of [...shows, hide]) {
+    const label = b.getAttribute('aria-label');
+    for (const secret of ['s3cr3tT0ken', 'h0meT0ken', 'sch00lT0ken', 'example.com', 'https:', 'webcal:']) {
+      assert.ok(!label.includes(secret), `the label carries no part of a feed URL (${secret})`);
+    }
+  }
+});
+
+test('settings: hiding a calendar re-renders its toggle as "Show <name>", and showing it as "Hide <name>"', () => {
+  const work = {
+    id: 'feedW', url: 'https://calendar.example.com/private-s3cr3tT0ken/basic.ics', name: 'Work',
+    color: 'var(--feed-palette-2)', hidden: false, updatedAt: '2026-07-01T00:00:00.000Z',
+  };
+  const { host } = openPanel([work]);
+  findButtonByText(host, 'Hide').click();
+  const show = findButtonByText(host, 'Show');
+  assert.ok(show, 'fixture check: the toggle now reads Show');
+  assert.equal(show.getAttribute('aria-label'), 'Show Work');
+  show.click();
+  const hide = findButtonByText(host, 'Hide');
+  assert.ok(hide, 'fixture check: the toggle reads Hide again');
+  assert.equal(hide.getAttribute('aria-label'), 'Hide Work');
+});
+
 // --- synced mutations vs per-device view preferences (spec 6.3) ------------
 //
 // The panel's seven notification sites are NOT interchangeable. Two of them
