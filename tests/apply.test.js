@@ -7886,3 +7886,633 @@ test('vis + 3-day: a series hidden from the calendar is not in the 3-day view; a
   }
   resume();
 });
+
+// --- stage 4: a stale preview cannot be confirmed (home-screen spec § 3 step 8)
+//
+// Every Add closes every open preview, but a button of a closed preview can
+// still be tapped (a tap already on its way when the newer Add landed). Its
+// confirm checks that its request is still the newest and refuses otherwise,
+// and it must leave the container alone: by then it may hold the NEWER
+// request's preview.
+test('smart add: a preview from a superseded request cannot be confirmed or cancelled, and the newer preview is left alone', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const preview = doc.getElementById('preview');
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('two things on may 1');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    held[0](previewReply([
+      { title: 'Old one', date: '2099-05-01', type: 'task' },
+      { title: 'Old two', date: '2099-05-01', type: 'task' },
+    ]));
+    await settle();
+    const [staleAddAll, staleCancel] = preview.querySelector('.preview-actions').children;
+    assert.equal(staleAddAll.textContent, 'Add all', 'fixture check: the old preview\'s Add all');
+    assert.equal(staleCancel.textContent, 'Cancel', 'fixture check: and its Cancel');
+    typeIntoAddBox('two other things on may 2');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.equal(preview.children.length, 0, 'fixture check: the newer Add closed the old preview');
+    held[1](previewReply([
+      { title: 'New one', date: '2099-05-02', type: 'task' },
+      { title: 'New two', date: '2099-05-02', type: 'task' },
+    ]));
+    await settle();
+    const newer = preview.children.length;
+    assert.ok(newer > 0, 'fixture check: the newer preview is open');
+
+    click(staleAddAll);
+    assert.deepEqual(loadItems().map((it) => it.title), [], 'nothing from the stale preview is added');
+    assert.equal(messageText(), 'Review the items below.', 'silent: the newer request\'s message stays');
+    assert.equal(preview.children.length, newer, 'the newer preview is untouched');
+    assert.equal(preview.hidden, false);
+
+    click(staleCancel);
+    assert.equal(preview.children.length, newer, 'a stale Cancel leaves the newer preview too');
+    assert.equal(preview.hidden, false);
+    assert.equal(messageText(), 'Review the items below.', 'and says nothing either');
+  } finally {
+    timers.restore();
+    net.restore();
+    preview.hidden = true;
+    preview.innerHTML = '';
+  }
+  seed([]);
+});
+
+// --- stage 4: the capture button, wired into app.js (home-screen spec § 3) --
+//
+// js/capture.js's state machine is tested on its own in tests/capture.test.js.
+// These check the wiring: it adds through handleAdd with the capture box's own
+// target (its line, its preview, its failure text), Cancel makes the request
+// superseded, previews close across both boxes, and the page hiding, an item
+// sheet or Settings opening stop a listen and keep its text.
+//
+// A fake SpeechRecognition is installed on the fake window for each test and
+// removed after; voice.js reads it at each tap. app.js is imported once, so
+// every test leaves the box closed (closeCapture). The refusal test is LAST:
+// a refusal lasts the session, and every later tap would go straight to typing.
+class AppFakeSR {
+  constructor() {
+    AppFakeSR.instances.push(this);
+    this.calls = [];
+  }
+
+  start() { this.calls.push('start'); }
+
+  stop() { this.calls.push('stop'); }
+
+  abort() { this.calls.push('abort'); }
+
+  // One final result, as the browser delivers it.
+  say(text) { this.onresult({ results: [Object.assign([{ transcript: text }], { isFinal: true })] }); }
+}
+AppFakeSR.instances = [];
+function withVoice() {
+  AppFakeSR.instances = [];
+  globalThis.window.SpeechRecognition = AppFakeSR;
+  return {
+    last: () => AppFakeSR.instances[AppFakeSR.instances.length - 1],
+    count: () => AppFakeSR.instances.length,
+    restore: () => { delete globalThis.window.SpeechRecognition; },
+  };
+}
+const capEl = (id) => globalThis.document.getElementById(id);
+const captureMessage = () => capEl('capture-message').textContent;
+// x, then its close timer: a manual timers object fires it; otherwise it is
+// a real 250 ms timeout, and the box finishes closing on its own.
+function closeCapture(timers) {
+  click(capEl('capture-close'));
+  if (timers) timers.fire(250);
+}
+
+test('capture: tap, speak, tap again adds through smart add, with its messages in the capture box only', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const voice = withVoice();
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    doc.getElementById('message').textContent = 'top line';
+    click(capEl('capture-btn'));
+    assert.equal(capEl('capture-box').hidden, false, 'the box opens');
+    assert.equal(voice.count(), 1, 'and listens');
+    voice.last().say('lunch with sam tomorrow');
+    assert.equal(capEl('capture-text').value, 'lunch with sam tomorrow', 'live words appear');
+    click(capEl('capture-btn'));
+    await settle();
+    assert.deepEqual(voice.last().calls, ['start', 'stop', 'abort']);
+    assert.deepEqual(net.posts, ['lunch with sam tomorrow']);
+    assert.equal(captureMessage(), 'Thinking…');
+    assert.equal(messageText(), 'top line', '#message is not the capture box\'s line');
+    assert.equal(capEl('capture-btn').disabled, true);
+    assert.equal(capEl('capture-cancel').hidden, false);
+    held[0](smartReply([{ title: 'Lunch with Sam', date: '2099-06-01', type: 'event' }]));
+    await settle();
+    assert.deepEqual(loadItems().map((it) => it.title), ['Lunch with Sam']);
+    assert.ok(capEl('capture-box')._classes.has('closing'), 'success closes the box');
+    timers.fire(250);
+    assert.equal(capEl('capture-box').hidden, true);
+    assert.equal(capEl('capture-btn').disabled, false);
+    assert.equal(messageText(), 'top line');
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
+    voice.restore();
+  }
+  seed([]);
+});
+
+test('capture: Cancel during Thinking adds nothing when the reply comes, and the same words can be sent again', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    click(capEl('capture-btn'));
+    voice.last().say('dentist on may 15');
+    click(capEl('capture-btn'));
+    await settle();
+    assert.equal(captureMessage(), 'Thinking…', 'fixture check');
+    click(capEl('capture-cancel'));
+    assert.equal(captureMessage(), 'Cancelled — nothing was added.');
+    assert.equal(capEl('capture-btn').disabled, false);
+    assert.equal(capEl('capture-text').value, 'dentist on may 15', 'the text is kept');
+    held[0](smartReply([{ title: 'Dentist', date: '2099-05-15', type: 'event' }]));
+    await settle();
+    assert.deepEqual(loadItems().map((it) => it.title), [], 'the late reply is discarded');
+    assert.equal(captureMessage(), 'Cancelled — nothing was added.');
+    click(capEl('capture-add'));
+    await settle();
+    assert.equal(net.posts.length, 2, 'after a Cancel the same text can be sent again');
+    held[1](smartReply([]));
+    await settle();
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
+    voice.restore();
+  }
+  seed([]);
+});
+
+test('capture: smart add unavailable names the top box\'s date row, in the capture box\'s line', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const voice = withVoice();
+  const net = smartAddFetch(() => Promise.reject(new TypeError('offline')));
+  const timers = installManualTimers();
+  try {
+    doc.getElementById('message').textContent = 'top line';
+    click(capEl('capture-btn'));
+    voice.last().say('call the plumber');
+    click(capEl('capture-btn'));
+    await settle();
+    assert.equal(captureMessage(), 'Smart add is unavailable — use the box at the top with a date to add it.');
+    assert.equal(messageText(), 'top line');
+    assert.equal(capEl('capture-text').value, 'call the plumber', 'nothing is lost');
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
+    voice.restore();
+  }
+  seed([]);
+});
+
+test('capture: starting a listen closes the top box\'s open preview, and its line says so', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const voice = withVoice();
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('two things on may 1');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    held[0](previewReply([
+      { title: 'One', date: '2099-05-01', type: 'task' },
+      { title: 'Two', date: '2099-05-01', type: 'task' },
+    ]));
+    await settle();
+    assert.ok(doc.getElementById('preview').children.length > 0, 'fixture check: the top preview is open');
+    click(capEl('capture-btn'));
+    assert.equal(doc.getElementById('preview').children.length, 0);
+    assert.equal(doc.getElementById('preview').hidden, true);
+    assert.equal(messageText(), 'Preview closed — nothing was added from it.');
+    assert.equal(voice.count(), 1, 'and it listens');
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
+    voice.restore();
+  }
+  seed([]);
+});
+
+test('capture: its preview opens in the box, the button stays enabled, and a top-box Add closes it', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const voice = withVoice();
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    click(capEl('capture-btn'));
+    voice.last().say('two things on friday');
+    click(capEl('capture-btn'));
+    await settle();
+    held[0](previewReply([
+      { title: 'One', date: '2099-05-01', type: 'task' },
+      { title: 'Two', date: '2099-05-01', type: 'task' },
+    ]));
+    await settle();
+    assert.ok(capEl('capture-preview').children.length > 0, 'the preview renders in #capture-preview');
+    assert.equal(doc.getElementById('preview').children.length, 0, 'not in the top box\'s');
+    assert.equal(captureMessage(), 'Review the items below.');
+    assert.equal(capEl('capture-btn').disabled, false, 'the latch cleared when the preview was shown');
+    typeIntoAddBox('Manual dinner', '2099-03-04');
+    click(doc.getElementById('add-btn'));
+    assert.equal(capEl('capture-preview').children.length, 0);
+    assert.equal(captureMessage(), 'Preview closed — nothing was added from it.');
+    assert.equal(messageText(), 'Added.');
+    assert.deepEqual(loadItems().map((it) => it.title), ['Manual dinner']);
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
+    voice.restore();
+  }
+  seed([]);
+});
+
+test('capture: confirming its preview adds and closes the box', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    click(capEl('capture-btn'));
+    voice.last().say('two things on friday');
+    click(capEl('capture-btn'));
+    await settle();
+    held[0](previewReply([
+      { title: 'One', date: '2099-05-01', type: 'task' },
+      { title: 'Two', date: '2099-05-01', type: 'task' },
+    ]));
+    await settle();
+    click(capEl('capture-preview').querySelector('.preview-actions').children[0]);
+    assert.deepEqual(loadItems().map((it) => it.title), ['One', 'Two']);
+    assert.ok(capEl('capture-box')._classes.has('closing'), 'a confirmed preview is a success');
+    timers.fire(250);
+    assert.equal(capEl('capture-box').hidden, true);
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
+    voice.restore();
+  }
+  seed([]);
+});
+
+test('capture: going to the background while listening stops, keeps the words, and adds nothing', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const net = smartAddFetch(() => new Promise(() => {}));
+  const timers = installManualTimers();
+  try {
+    click(capEl('capture-btn'));
+    voice.last().say('call the bank');
+    globalThis.document.visibilityState = 'hidden';
+    try {
+      resume();
+    } finally {
+      globalThis.document.visibilityState = 'visible';
+    }
+    assert.deepEqual(voice.last().calls, ['start', 'stop', 'abort']);
+    assert.equal(capEl('capture-text').value, 'call the bank');
+    assert.equal(captureMessage(), 'Stopped listening — tap Add.');
+    assert.deepEqual(net.posts, [], 'nothing is added without a tap');
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
+    voice.restore();
+  }
+  seed([]);
+});
+
+test('capture: opening an item while listening stops and keeps the words', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'cap-open', title: 'Cap open me', date: far(0) })]);
+  const voice = withVoice();
+  const net = smartAddFetch(() => new Promise(() => {}));
+  const timers = installManualTimers();
+  try {
+    const opener = openControlFor(dayOf(far(0)), 'Cap open me');
+    click(capEl('capture-btn'));
+    voice.last().say('buy stamps');
+    click(opener);
+    assert.ok(sheetHost().querySelector('.sheet'), 'fixture check: the sheet opened');
+    assert.deepEqual(voice.last().calls, ['start', 'stop', 'abort']);
+    assert.equal(capEl('capture-text').value, 'buy stamps');
+    assert.equal(captureMessage(), 'Stopped listening — tap Add.');
+    assert.deepEqual(net.posts, []);
+  } finally {
+    forceCloseSheet();
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
+    voice.restore();
+  }
+  seed([]);
+});
+
+test('capture: opening Settings while listening stops and keeps the words', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const settingsBtn = globalThis.document.getElementById('settings-btn');
+  const settingsHost = globalThis.document.getElementById('settings-host');
+  if (settingsHost.childElementCount) click(settingsBtn); // left open by an earlier test
+  const voice = withVoice();
+  const net = smartAddFetch(() => new Promise(() => {}));
+  const timers = installManualTimers();
+  try {
+    click(capEl('capture-btn'));
+    voice.last().say('renew passport');
+    click(settingsBtn);
+    assert.ok(settingsHost.childElementCount > 0, 'fixture check: Settings opened');
+    assert.deepEqual(voice.last().calls, ['start', 'stop', 'abort']);
+    assert.equal(capEl('capture-text').value, 'renew passport');
+    assert.equal(captureMessage(), 'Stopped listening — tap Add.');
+    assert.deepEqual(net.posts, []);
+  } finally {
+    if (settingsHost.childElementCount) click(settingsBtn);
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
+    voice.restore();
+  }
+  seed([]);
+});
+
+// The duplicate guard stops a second paid request for a double-tapped Add in
+// ONE box. The same words from the other box are a new capture: sent, and
+// newest wins, as any newer Add does.
+test('capture: the same words from the other box are sent, not swallowed by the duplicate guard', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const voice = withVoice();
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('lunch at noon');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    click(capEl('capture-btn'));
+    voice.last().say('lunch at noon');
+    click(capEl('capture-btn'));
+    await settle();
+    assert.deepEqual(net.posts, ['lunch at noon', 'lunch at noon']);
+    assert.equal(messageText(), '', 'the superseded top box stops saying "Thinking…" at once');
+    held[1](smartReply([{ title: 'Lunch', date: '2099-06-02', type: 'event' }]));
+    held[0](smartReply([{ title: 'Lunch (old)', date: '2099-06-02', type: 'event' }]));
+    await settle();
+    assert.deepEqual(loadItems().map((it) => it.title), ['Lunch'], 'the newer capture wins');
+    assert.equal(messageText(), '', 'the superseded top box does not keep saying "Thinking…"');
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
+    voice.restore();
+  }
+  seed([]);
+});
+
+// DA I1: a top-box Add that supersedes the capture box's smart add releases
+// the capture box at once (no "Thinking…", no Cancel, the button enabled), so
+// its Cancel or x can never cancel the top box's newer request.
+test('capture: a top-box Add that supersedes it releases the capture box at once, and x then cancels nothing', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const voice = withVoice();
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    click(capEl('capture-btn'));
+    voice.last().say('dentist friday');
+    click(capEl('capture-btn'));
+    await settle();
+    assert.equal(captureMessage(), 'Thinking…', 'fixture check');
+    typeIntoAddBox('dentist on friday at 3');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    assert.equal(captureMessage(), '', 'the capture box stops saying "Thinking…"');
+    assert.equal(capEl('capture-btn').disabled, false);
+    assert.equal(capEl('capture-cancel').hidden, true);
+    assert.equal(capEl('capture-add').hidden, false);
+    assert.equal(capEl('capture-text').value, 'dentist friday', 'its text is kept');
+    click(capEl('capture-close'));
+    held[1](smartReply([{ title: 'Dentist', date: '2099-05-15', time: '15:00', type: 'event' }]));
+    await settle();
+    assert.deepEqual(loadItems().map((it) => it.title), ['Dentist'], 'the top box\'s request still lands');
+    assert.equal(messageText(), 'Added.');
+    held[0](smartReply([{ title: 'Dentist (voice)', date: '2099-05-15', type: 'event' }]));
+    await settle();
+    assert.deepEqual(loadItems().map((it) => it.title), ['Dentist']);
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
+    voice.restore();
+  }
+  seed([]);
+});
+
+// The release is for any newer Add, a manual one included, and it clears a
+// line only while that line still shows its own request's "Thinking…".
+test('capture: a manual add releases it too; a release leaves another action\'s message alone', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const voice = withVoice();
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    click(capEl('capture-btn'));
+    voice.last().say('call the vet');
+    click(capEl('capture-btn'));
+    await settle();
+    typeIntoAddBox('Vet', '2099-07-01');
+    click(doc.getElementById('add-btn'));
+    assert.equal(messageText(), 'Added.', 'fixture check: the manual add landed');
+    assert.equal(captureMessage(), '', 'a manual add releases the capture box too');
+    assert.equal(capEl('capture-btn').disabled, false);
+
+    typeIntoAddBox('lunch with sam tomorrow');
+    click(doc.getElementById('add-btn'));
+    await settle();
+    ideaText().value = 'An idea meanwhile';
+    click(ideaAdd());
+    assert.equal(messageText(), 'Kept.', 'fixture check');
+    click(capEl('capture-add'));
+    await settle();
+    assert.equal(messageText(), 'Kept.', 'the release does not clear a message the top request did not set');
+  } finally {
+    for (const release of held) release(smartReply([]));
+    await settle();
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
+    voice.restore();
+  }
+  seed([]);
+});
+
+test('stage 4 retires the small mic: no #mic-btn, no dictate(), one mic', async () => {
+  const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
+  assert.doesNotMatch(read('../index.html'), /mic-btn/);
+  assert.doesNotMatch(read('../styles.css'), /#mic-btn/);
+  assert.doesNotMatch(read('../js/app.js'), /dictate|mic-btn|els\.mic\b/);
+  const voice = await import('../js/voice.js');
+  assert.equal('dictate' in voice, false);
+});
+
+// Alex, 2026-10-26: Return in the capture box adds; and (controller ruling)
+// the box's own Add is hidden while its preview is open, back when it closes.
+test('capture: Return in the box adds through smart add, with no newline', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    click(capEl('capture-btn'));
+    voice.last().say('call the plumber friday');
+    let prevented = false;
+    for (const fn of capEl('capture-text')._listeners.keydown || []) {
+      fn({ key: 'Enter', target: capEl('capture-text'), preventDefault() { prevented = true; } });
+    }
+    await settle();
+    assert.equal(prevented, true, 'no newline');
+    assert.deepEqual(voice.last().calls, ['start', 'stop', 'abort'], 'it stops listening first');
+    assert.deepEqual(net.posts, ['call the plumber friday']);
+    assert.equal(captureMessage(), 'Thinking…');
+    held[0](smartReply([{ title: 'Call the plumber', date: '2099-06-05', type: 'task' }]));
+    await settle();
+    assert.deepEqual(loadItems().map((it) => it.title), ['Call the plumber']);
+  } finally {
+    for (const release of held) release(smartReply([]));
+    await settle();
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
+    voice.restore();
+  }
+  seed([]);
+});
+
+test('capture: its Add is hidden while its preview is open, and back when a top-box Add or its Cancel closes it', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const voice = withVoice();
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  const twoItems = () => previewReply([
+    { title: 'One', date: '2099-05-01', type: 'task' },
+    { title: 'Two', date: '2099-05-01', type: 'task' },
+  ]);
+  try {
+    click(capEl('capture-btn'));
+    voice.last().say('two things on friday');
+    click(capEl('capture-btn'));
+    await settle();
+    held[0](twoItems());
+    await settle();
+    assert.ok(capEl('capture-preview').children.length > 0, 'fixture check: the preview is open');
+    assert.equal(capEl('capture-add').hidden, true, '"Add all" is the one confirm');
+    typeIntoAddBox('Manual dinner', '2099-03-04');
+    click(doc.getElementById('add-btn'));
+    assert.equal(capEl('capture-preview').children.length, 0, 'fixture check: the top-box Add closed it');
+    assert.equal(capEl('capture-add').hidden, false, 'back once the preview is closed');
+
+    click(capEl('capture-add'));
+    await settle();
+    held[1](twoItems());
+    await settle();
+    assert.equal(capEl('capture-add').hidden, true, 'fixture check: a new preview hides it again');
+    click(capEl('capture-preview').querySelector('.preview-actions').children[1]); // its Cancel
+    assert.equal(captureMessage(), 'Cancelled.');
+    assert.equal(capEl('capture-add').hidden, false, 'back after the preview\'s Cancel');
+  } finally {
+    for (const release of held) release(smartReply([]));
+    await settle();
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
+    voice.restore();
+  }
+  seed([]);
+});
+
+// LAST of the capture tests: a refusal lasts the session (js/capture.js).
+test('capture: a refusal in the home-screen app points to Settings and offers Type instead', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const timers = installManualTimers();
+  Object.defineProperty(globalThis.navigator, 'standalone', { value: true, configurable: true });
+  try {
+    click(capEl('capture-btn'));
+    voice.last().onerror({ error: 'not-allowed' });
+    assert.equal(captureMessage(), 'Microphone permission is off — Settings → plaenicke.');
+    assert.equal(capEl('capture-type').hidden, false);
+  } finally {
+    delete globalThis.navigator.standalone;
+    closeCapture(timers);
+    timers.restore();
+    voice.restore();
+  }
+  seed([]);
+});

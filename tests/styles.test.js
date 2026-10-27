@@ -510,6 +510,7 @@ test('the item sheet uses the sheet radius on its top corners', () => {
 const INPUT_RULES = [
   '#entry-text', '#entry-date', '#entry-time', '#entry-end', '.idea-add textarea',
   '.feed-add input', '.link-ui input', '.preview-row input', '.preview-row select',
+  '.capture-text',
 ];
 for (const sel of INPUT_RULES) {
   test(`${sel} is at least 16px`, () => {
@@ -568,11 +569,12 @@ for (const [sel, size] of Object.entries(CALENDAR_SIZES)) {
 // The sheet's tag chips are the one other reader: first the 13px label scale
 // (Commit 1b), now the 16px row scale (2026-10-25). The List's tags moved into the sheet. The Week
 // page's list (wlist-, stage 3 Commit 3) is a new screen under the grid; the
-// grid itself (week-) keeps its compact sizes.
+// grid itself (week-) keeps its compact sizes. The capture box (capture-,
+// stage 4) is the spec's third new screen.
 // The 3-day view's day headings and its "All day" label are labels in the
 // Week list's style (2026-10-26); its blocks keep Day's compact sizes, so only
 // those two selectors are allowed, not all of tday-.
-const NEW_SCREEN = /\.(today-|tab-|cal-switch|wlist-|tday-head(?![\w-])|tday-allday-label(?![\w-])|sheet-tags?(?![\w-]))/;
+const NEW_SCREEN = /\.(today-|tab-|cal-switch|wlist-|capture-|tday-head(?![\w-])|tday-allday-label(?![\w-])|sheet-tags?(?![\w-]))/;
 test('only the new screens read the new type scale', () => {
   const readers = [];
   for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
@@ -647,8 +649,10 @@ test('rulesInContext keeps each rule\'s @media and reads @keyframes whole (fixtu
 // Rewards concept 1 (Alex, 2026-10-26) is the first motion in the app, and it
 // respects Reduce Motion by construction: every animation and transition sits
 // inside a no-preference block, so with Reduce Motion on nothing moves and the
-// page is what it was before. The only keyframes are the tick moment's.
-test('every animation is inside a reduced-motion no-preference block; the only keyframes are the tick moment\'s', () => {
+// page is what it was before. The only keyframes are the tick moment's and
+// the capture box's (stage 4, merged 2026-10-26).
+const CAPTURE_KEYFRAMES = ['capture-fade-out', 'capture-grow', 'capture-shrink'];
+test('every animation is inside a reduced-motion no-preference block; the only keyframes are the tick moment\'s and the capture box\'s', () => {
   let moving = 0;
   const keyframes = [];
   for (const { at, sel, body } of rulesInContext(css)) {
@@ -659,7 +663,7 @@ test('every animation is inside a reduced-motion no-preference block; the only k
     }
   }
   assert.ok(moving >= 3, `fixture check: ${moving} rules that move`);
-  assert.deepEqual(keyframes.sort(), ['tick-draw', 'tick-pop', 'tick-wash']);
+  assert.deepEqual(keyframes.sort(), [...CAPTURE_KEYFRAMES, 'tick-draw', 'tick-pop', 'tick-wash'].sort());
 });
 
 // The mockup's motion: a ~0.9 s fading wash, a 260 ms pop of the box, and the
@@ -685,6 +689,32 @@ test('the tick moment: wash, pop and drawn strike, in tokens, replacing the line
   assert.match(wash.body, /to\s*\{\s*box-shadow: inset 0 0 0 100vmax transparent;\s*\}/);
   assert.equal(declOf(':root', '--tick-glow'), 'rgba(138, 90, 59, 0.14)');
   assert.equal(declOf('[data-theme="dark"]', '--tick-glow'), 'rgba(143, 167, 200, 0.18)');
+});
+
+// Stage 4's capture box (spec § 5): it grows from the button in 250 ms and
+// shrinks back, and with the keyboard up it fades. Like every motion here
+// since rewards, it sits inside the no-preference block, so with Reduce Motion
+// on the box does not move at all (the spec's "only fades" predates that rule;
+// the controller ruled the rule applies, 2026-10-26).
+test('the capture panel grows from the button\'s corner in 250ms and shrinks back; with the keyboard up it fades; only without Reduce Motion', () => {
+  const moving = rulesInContext(css).filter((r) => r.at === NO_PREFERENCE);
+  const decl = (selector, prop) => declOf(selector, prop, moving.map((r) => `${r.sel} {${r.body}}`).join('\n'));
+  assert.equal(decl('.capture-panel', 'animation'), 'capture-grow 250ms ease-out');
+  assert.equal(decl('.capture-box.closing .capture-panel', 'animation'), 'capture-shrink 250ms ease-out forwards');
+  assert.equal(decl('.capture-box.closing.fade .capture-panel', 'animation-name'), 'capture-fade-out');
+  assert.equal(declOf('.capture-panel', 'transform-origin'), 'bottom right');
+  // transform and opacity only (spec § 5).
+  for (const name of CAPTURE_KEYFRAMES) {
+    const frames = rulesInContext(css).find((r) => r.at === `@keyframes ${name}`);
+    assert.ok(frames, `no @keyframes ${name}`);
+    for (const { body } of rulesOf(frames.body)) {
+      for (const d of body.split(';')) {
+        const i = d.indexOf(':');
+        if (i < 0) continue;
+        assert.ok(['transform', 'opacity'].includes(d.slice(0, i).trim()), `${name} animates ${d.trim()}`);
+      }
+    }
+  }
 });
 
 // --- home-screen stage 3b: the guessed-series line on the sheet (spec § 2.4) --
@@ -942,8 +972,10 @@ test('the tab bar is fixed at the bottom, 56px plus the home-indicator inset', (
   assert.equal(declOf('.tab-bar', 'border-top'), '1px solid var(--line)');
 });
 
-test('layers: tab bar 5 < settings 10 < item sheet 15 < toast 20 (spec § 4)', () => {
+test('layers: tab bar 5 < capture button 6 < capture box 8 < settings 10 < item sheet 15 < toast 20 (spec § 4)', () => {
   assert.equal(zIndexOf('.tab-bar'), 5);
+  assert.equal(zIndexOf('.capture-btn'), 6);
+  assert.equal(zIndexOf('.capture-box'), 8);
   assert.equal(zIndexOf('.settings-backdrop'), 10);
   assert.equal(zIndexOf('.sheet-backdrop'), 15);
   assert.equal(zIndexOf('.toast'), 20);
@@ -1044,6 +1076,113 @@ test('no tag-chip rule carries a hex literal', () => {
     assert.ok(m.length, sel);
     for (const [, , body] of m) assert.doesNotMatch(body, /#[0-9a-fA-F]{3,8}\b/, sel);
   }
+});
+
+// --- home-screen stage 4: the capture button and box (spec § 3, § 4, § 5) ---
+const indexHtml = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+
+test('the capture button is a 56px accent circle, 16px from the right and 16px above the tab bar', () => {
+  assert.equal(declOf('.capture-btn', 'position'), 'fixed');
+  assert.equal(declOf('.capture-btn', 'right'), '16px');
+  assert.equal(declOf('.capture-btn', 'bottom'), 'calc(56px + 16px + env(safe-area-inset-bottom))');
+  assert.equal(declOf('.capture-btn', 'width'), '56px');
+  assert.equal(declOf('.capture-btn', 'height'), '56px');
+  assert.equal(declOf('.capture-btn', 'border-radius'), 'var(--radius-round)');
+  assert.equal(declOf('.capture-btn', 'background'), 'var(--accent)');
+  assert.equal(declOf('.capture-btn', 'color'), 'var(--accent-ink)');
+  assert.equal(declOf('.capture-btn', 'box-shadow'), null, 'shadows are for the box, sheets and the toast only');
+});
+
+test('pressed, the capture button scales instead of dimming', () => {
+  assert.equal(declOf('.capture-btn.pressed', 'transform'), 'scale(0.94)');
+  assert.equal(declOf('.capture-btn.pressed', 'opacity'), '1');
+});
+
+test('listening, the capture button shows a stop square instead of the mic', () => {
+  assert.equal(declOf('.capture-btn .icon-stop', 'display'), 'none');
+  assert.equal(declOf('.capture-btn.listening .icon-mic', 'display'), 'none');
+  assert.equal(declOf('.capture-btn.listening .icon-stop', 'display'), 'block');
+});
+
+test('the capture button is not shown while Settings or the item sheet is open', () => {
+  assert.equal(declOf('#settings-host:not(:empty) ~ .capture-btn', 'display'), 'none');
+  assert.equal(declOf('#sheet-host:not(:empty) ~ .capture-btn', 'display'), 'none');
+});
+
+// `~` matches a LATER sibling only, so the rules above depend on the order.
+test('index.html puts the capture button after both hosts, as siblings in body', () => {
+  const at = (needle) => {
+    const i = indexHtml.indexOf(needle);
+    assert.ok(i >= 0, `index.html has no ${needle}`);
+    return i;
+  };
+  const btn = at('<button id="capture-btn" class="capture-btn" type="button"');
+  assert.ok(btn > at('<div id="settings-host"></div>'));
+  assert.ok(btn > at('<div id="sheet-host"></div>'));
+  assert.ok(at('<script type="module" src="js/app.js"></script>') > btn);
+  assert.match(indexHtml, /<div id="capture-box" class="capture-box" hidden>/, 'the box starts hidden');
+});
+
+test('the capture box sits just above the button, and 8px above the keyboard while typing', () => {
+  assert.equal(declOf('.capture-box', '--capture-lift'), 'calc(56px + 16px + 56px + 8px + env(safe-area-inset-bottom))');
+  assert.equal(declOf('.capture-box', 'bottom'), 'var(--capture-lift)');
+  assert.equal(declOf('.capture-box.typing', '--capture-lift'), '8px');
+  assert.equal(declOf('.capture-box', 'position'), 'fixed');
+  assert.equal(declOf('.capture-box', 'left'), '16px');
+  assert.equal(declOf('.capture-box', 'right'), '16px');
+  assert.equal(declOf('.capture-box', 'max-height'), '50dvh');
+  assert.equal(declOf('.capture-box[hidden]', 'display'), 'none');
+});
+
+test('the capture panel has the sheet radius and a shadow, and scrolls inside itself', () => {
+  assert.equal(declOf('.capture-panel', 'border-radius'), 'var(--radius-sheet)');
+  assert.notEqual(declOf('.capture-panel', 'box-shadow'), null);
+  assert.equal(declOf('.capture-panel', 'overflow-y'), 'auto');
+  assert.equal(declOf('.capture-panel', 'overscroll-behavior'), 'contain');
+  assert.equal(declOf('.capture-panel', 'min-height'), '0');
+});
+
+test('every capture control is a 44px target', () => {
+  assert.ok(px(declOf('.capture-close', 'min-width')) >= 44);
+  assert.ok(px(declOf('.capture-actions button', 'min-height')) >= 44, 'x, Cancel and Add are all in this row');
+  assert.ok(px(declOf('.capture-type', 'min-height')) >= 44);
+  assert.match(indexHtml, /<div class="capture-actions">\s*<button id="capture-close"/, 'x is in the actions row');
+});
+
+// Add must stay reachable in a box that may be ~200px tall with the keyboard
+// up (DA I3): the field stops growing at five lines, and the actions row is
+// the panel's last child, stuck to its bottom edge.
+test('Add stays reachable: the field stops growing, and the actions row sticks to the bottom', () => {
+  assert.equal(declOf('.capture-text', 'max-height'), '120px');
+  assert.equal(declOf('.capture-text', 'overflow-y'), 'auto');
+  assert.equal(declOf('.capture-actions', 'position'), 'sticky');
+  assert.equal(declOf('.capture-actions', 'bottom'), '0');
+  assert.equal(declOf('.capture-actions', 'background'), 'var(--card)', 'opaque, so scrolled content does not show through');
+  const panel = indexHtml.slice(indexHtml.indexOf('<div class="capture-panel"'), indexHtml.indexOf('<button id="capture-btn"'));
+  assert.ok(panel.lastIndexOf('<div class="capture-actions">') > panel.indexOf('id="capture-preview"'),
+    'the actions row comes after the preview');
+});
+
+test('a closing capture box lets taps through to the page', () => {
+  assert.equal(declOf('.capture-box.closing', 'pointer-events'), 'none');
+});
+
+test('the capture box\'s Cancel is secondary, like the preview\'s and the sheet\'s', () => {
+  assert.match(indexHtml, /<button id="capture-cancel" class="cancel" type="button" hidden>Cancel<\/button>/);
+  assert.equal(declOf('.capture-actions .cancel', 'background'), 'var(--card)');
+  assert.equal(declOf('.capture-actions .cancel', 'border'), '1px solid var(--line)');
+});
+
+// Task 3 review: Chrome sticks the actions row at the panel's padding edge, so
+// content scrolled under it showed in the 12px strip below. The panel has no
+// bottom padding; the row carries it.
+test('nothing shows under the sticky actions row: the row, not the panel, has the bottom padding', () => {
+  assert.equal(declOf('.capture-panel', 'padding-bottom'), '0');
+  assert.equal(declOf('.capture-actions', 'padding-bottom'), 'var(--space-3)');
+});
+
+test('the capture panel\'s shadow uses the --shade token', () => {
+  assert.match(declOf('.capture-panel', 'box-shadow'), /var\(--shade\)/);
 });
 
 // --- per-series visibility (option A, 2026-10-26) ----------------------------
@@ -1173,4 +1312,11 @@ test('3-day: the overrides come after the rules they override', () => {
   assert.ok(at('.tday-chip') > at('.item-open'));
   assert.ok(at('.tday-block') > at('.day-block'));
   assert.ok(at('.tday-block .item-open') > at('.day-block .item-open'));
+});
+
+// Merge review, 2026-10-26: with Reduce Motion on nothing animates, so a
+// closing box would sit there inert for CLOSE_MS; it is hidden at once.
+test('with Reduce Motion on, a closing capture box is hidden at once', () => {
+  const reduce = rulesInContext(css).filter((r) => r.at === '@media (prefers-reduced-motion: reduce)');
+  assert.equal(declOf('.capture-box.closing', 'visibility', reduce.map((r) => `${r.sel} {${r.body}}`).join('\n')), 'hidden');
 });

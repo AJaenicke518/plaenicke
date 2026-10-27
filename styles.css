@@ -188,15 +188,6 @@ header h1 { font-size: 1.7rem; font-style: italic; font-weight: 700; margin: 16p
 
 .text-row { display: flex; gap: 8px; align-items: stretch; }
 .text-row #entry-text { flex: 1; }
-#mic-btn {
-  flex: 0 0 auto;
-  background: var(--card);
-  border: 1px solid var(--line);
-  color: var(--ink);
-  font-size: 1.2rem;
-  padding: 0 14px;
-}
-#mic-btn.listening { background: var(--danger); border-color: var(--danger); color: var(--accent-ink); }
 
 .hint { color: var(--muted); font-size: 0.8rem; margin: 8px 0 0; }
 
@@ -961,7 +952,7 @@ button[data-press].pressed { opacity: 1; }
    the iOS keyboard: there the keyboard shrinks only the visual viewport, so
    bottom: 0 and 85dvh still measure the full layout viewport, the sheet sits
    behind the keyboard and its top bar is above the visible area. While a
-   sheet is open, js/itemsheet.js (followVisualViewport) overrides bottom,
+   sheet is open, js/viewport.js's followVisualViewport overrides bottom,
    top, transform and max-height inline from window.visualViewport; these
    rules are what applies without it. */
 .sheet {
@@ -1067,6 +1058,135 @@ button[data-press].pressed { opacity: 1; }
    it; this is the room .sheet-actions' margin gives an own item (sweep U15).
    After .sheet, which it overrides at equal specificity. */
 .sheet-external { padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+
+/* ---------- capture button and box (home-screen spec § 3, § 4, § 5) ---------- */
+/* The round button: bottom right on every page, 16px above the tab bar, on
+   layer 6. No shadow: shadows are for the capture box, sheets and the toast. */
+.capture-btn {
+  position: fixed;
+  right: 16px;
+  bottom: calc(56px + 16px + env(safe-area-inset-bottom));
+  z-index: 6;
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-round);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+/* Pressed, it scales instead of dimming (spec § 5). */
+.capture-btn.pressed { opacity: 1; transform: scale(0.94); }
+/* Disabled while a smart add is thinking (the adding latch, js/capture.js). */
+.capture-btn:disabled { opacity: 0.5; }
+/* The mic, or while listening a stop square (no pulsing). */
+.capture-btn .icon-stop { display: none; }
+.capture-btn.listening .icon-mic { display: none; }
+.capture-btn.listening .icon-stop { display: block; }
+/* Not shown while Settings or the item sheet is open (spec § 3). Each host is
+   empty exactly when its panel is closed (both close with innerHTML = ''), and
+   the button follows both hosts in index.html. */
+#settings-host:not(:empty) ~ .capture-btn,
+#sheet-host:not(:empty) ~ .capture-btn { display: none; }
+
+/* The box, on layer 8. The OUTER wrapper is placed by js/viewport.js (from
+   js/capture.js): its bottom edge sits --capture-lift above the visible
+   area's bottom edge, which is just above the button with the keyboard down,
+   and 8px above the keyboard while the field has focus (.typing). These
+   rules are what applies without visualViewport. The INNER panel animates,
+   so placement and animation never share a transform (spec § 5). */
+.capture-box {
+  --capture-lift: calc(56px + 16px + 56px + 8px + env(safe-area-inset-bottom));
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: var(--capture-lift);
+  max-height: 50dvh;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+}
+.capture-box[hidden] { display: none; }
+.capture-box.typing { --capture-lift: 8px; }
+.capture-panel {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--card);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sheet);
+  /* No bottom padding: the sticky actions row carries it, or content
+     scrolled under the row shows below it (Task 3 review). */
+  padding: var(--space-3) var(--space-3) 0;
+  box-shadow: 0 4px 16px var(--shade);
+  transform-origin: bottom right;
+}
+/* The box grows from the button in 250ms; closing reverses the path, and with
+   the keyboard up the button is covered, so the box fades out instead
+   (.fade). js/capture.js hides the box after CLOSE_MS, the same 250ms. Like
+   every motion in the app since rewards, only without Reduce Motion: with it
+   on, the box appears and goes without moving (the spec's "only fades"
+   predates that rule; controller ruling, 2026-10-26). */
+@media (prefers-reduced-motion: no-preference) {
+  .capture-panel { animation: capture-grow 250ms ease-out; }
+  .capture-box.closing .capture-panel { animation: capture-shrink 250ms ease-out forwards; }
+  .capture-box.closing.fade .capture-panel { animation-name: capture-fade-out; }
+}
+@keyframes capture-grow { from { transform: scale(0.2); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes capture-shrink { from { transform: none; opacity: 1; } to { transform: scale(0.2); opacity: 0; } }
+@keyframes capture-fade-out { from { opacity: 1; } to { opacity: 0; } }
+/* With Reduce Motion on nothing animates, so a closing box goes at once
+   instead of sitting there, inert, for CLOSE_MS. Not motion: visibility. */
+@media (prefers-reduced-motion: reduce) {
+  .capture-box.closing { visibility: hidden; }
+}
+/* A closing box is on its way out: taps go to the page under it. */
+.capture-box.closing { pointer-events: none; }
+/* The field grows (js/capture.js) up to five lines, then scrolls, so the
+   actions row stays inside a box that may be only ~200px tall with the
+   keyboard up. */
+.capture-text {
+  width: 100%;
+  max-height: 120px;
+  overflow-y: auto;
+  font-size: 16px;
+  font-family: var(--sans);
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--card);
+  color: var(--ink);
+  resize: none;
+}
+/* x, Cancel and Add in one row, last in the panel and stuck to its bottom
+   edge, so Add is reachable however long the text or the preview. */
+.capture-actions {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  gap: var(--space-2);
+  justify-content: flex-end;
+  margin-top: var(--space-2);
+  padding-bottom: var(--space-3);
+  background: var(--card);
+}
+.capture-actions button { min-height: 44px; }
+/* x on the left, away from Add. */
+.capture-close {
+  min-width: 44px;
+  margin-right: auto;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--text-title);
+}
+/* Cancel is secondary, as the preview's and the sheet's are. */
+.capture-actions .cancel { background: var(--card); color: var(--ink); border: 1px solid var(--line); }
+.capture-type { min-height: 44px; margin-top: var(--space-2); }
+.capture-preview { margin-top: var(--space-3); }
 
 /* ---------- the tick moment (rewards concept 1, Alex 2026-10-26) ----------
    The render right after a tick marks that row .tick-just (Today and To-do;
