@@ -1,6 +1,6 @@
 # plaenicke — Brightspace deadlines (see and track)
 
-**Status:** DRAFT, awaiting Alex's review of this written spec. Sections 1–4 were approved one at a time in conversation on 2026-10-29/30.
+**Status:** APPROVED by Alex, 2026-10-30. Plan: `docs/superpowers/plans/2026-10-30-brightspace-deadlines.md`.
 
 Code facts cite file:line on `main` @ 71b922d (v6-17). Feed facts come from Alex's real LMU feed, fetched once on 2026-10-27 and run through plaenicke's own `parseICS`/`expandEvents` on the laptop; the feed itself is **not** committed (§ 6). Background research: `docs/superpowers/reports/2026-10-27-brightspace-research.md` on branch `worktree-agent-abc5101109f85b94e` (approach B2).
 

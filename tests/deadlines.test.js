@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parseICS } from '../js/ics.js';
 import { addDays } from '../js/timegrid.js';
+import { merge, SCHEMA_VERSION } from '../js/merge.js';
+import { makeItem } from '../js/items.js';
 import {
   isTrackableTitle, courseCode, deadlineTitle, deriveDeadlines, DEADLINE_ID_PREFIX,
   planDeadlineImport, trackedCopyIds, hideTrackedCopies,
@@ -242,4 +244,17 @@ test('deriveDeadlines: the horizon runs from today once today passes the start d
   const todayLater = addDays(FROM, 450);
   assert.ok(deriveDeadlines([late], FROM, todayLater).has('bs-late'));
   assert.equal(deriveDeadlines([late], FROM, FROM).has('bs-late'), false);
+});
+
+test('two devices importing the same feed converge to one item; the second writes nothing', () => {
+  const cache = { f1: entry([HW1]) };
+  const build = (p, stamp) => p.create.map((c) => makeItem({ ...c, type: 'due' }, { id: c.id, createdAt: '2026-10-30', updatedAt: stamp }));
+  const a = build(plan({ cache }), '2026-10-30T10:00:00.000Z');
+  const b = build(plan({ cache }), '2026-10-30T10:00:05.000Z');
+  assert.equal(a.length, 1);
+  const st = (items) => ({ schemaVersion: SCHEMA_VERSION, items, feeds: [], tombstones: [] });
+  const merged = merge(st(a), st(b), new Date('2026-10-30T10:01:00.000Z'));
+  assert.equal(merged.items.filter((it) => it.id === 'bs-u1').length, 1);
+  const again = plan({ prevCache: cache, cache, items: merged.items });
+  assert.deepEqual([again.create, again.update, again.remove], [[], [], []]);
 });
