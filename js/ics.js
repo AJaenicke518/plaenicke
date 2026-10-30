@@ -900,12 +900,14 @@ function emptyRawEvent() {
   return {
     uid: null, summary: null, dtstart: null, dtend: null, duration: null,
     rrule: null, exdateLines: [], recurrenceId: null, hasRdate: false,
+    location: null,
   };
 }
 
 function collectProperty(raw, prop, params, value) {
   switch (prop) {
     case 'UID': raw.uid = value; break;
+    case 'LOCATION': raw.location = unescapeText(value); break;
     case 'SUMMARY': raw.summary = unescapeText(value); break;
     case 'DTSTART': raw.dtstart = { value, params }; break;
     case 'DTEND': raw.dtend = { value, params }; break;
@@ -1003,6 +1005,7 @@ function buildParsedEvent(raw) {
   return {
     uid: raw.uid,
     title: raw.summary === null ? '' : raw.summary,
+    location: raw.location,
     form: start.form,
     dtstart: { value: raw.dtstart.value, tzid: start.tzid },
     dtend,
