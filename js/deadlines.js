@@ -76,7 +76,9 @@ export function planDeadlineImport({ feeds, prevCache, cache, items, tombstones,
   const byId = new Map(items.map((it) => [it.id, it]));
   const current = new Map();
   let allOk = true;
-  let anyEvents = false;
+  // § 4.2, per feed: one feed that returned nothing trackable blocks every
+  // removal this round, even when another tracking feed is healthy.
+  let degenerate = false;
 
   for (const feed of tracking) {
     const entry = cache[feed.id];
@@ -84,12 +86,13 @@ export function planDeadlineImport({ feeds, prevCache, cache, items, tombstones,
       allOk = false;
       continue;
     }
-    if (entry.events.length > 0) anyEvents = true;
     const prevEntry = prevCache[feed.id];
     const prev = prevEntry && Array.isArray(prevEntry.events) && !prevEntry.quotaDropped
       ? deriveDeadlines(prevEntry.events, feed.trackDeadlines.from, todayISO)
       : new Map();
-    for (const [id, d] of deriveDeadlines(entry.events, feed.trackDeadlines.from, todayISO)) {
+    const derived = deriveDeadlines(entry.events, feed.trackDeadlines.from, todayISO);
+    if (entry.events.length === 0 || derived.size === 0) degenerate = true;
+    for (const [id, d] of derived) {
       if (current.has(id)) continue;
       current.set(id, d);
       if (pendingIds.has(id) || dead.has(id)) continue;
@@ -112,7 +115,7 @@ export function planDeadlineImport({ feeds, prevCache, cache, items, tombstones,
       && typeof it.date === 'string' && it.date >= todayISO)
     .map((it) => it.id);
   if (missing.length === 0 || !allOk) return plan;
-  if (!anyEvents || current.size === 0) {
+  if (degenerate) {
     plan.note = NO_DEADLINES;
     return plan;
   }

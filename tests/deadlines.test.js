@@ -187,6 +187,20 @@ test('plan: an empty feed, or one with no trackable event, removes nothing and s
   assert.equal(noneTrackable.note, 'Brightspace returned no deadlines — none removed');
 });
 
+test('plan: one tracking feed empty or with nothing trackable removes nothing, even if another is healthy', () => {
+  // § 4.2 is checked per feed: a healthy f1 must not vouch for an empty f2.
+  const feeds = [feed(), feed({ id: 'f2' })];
+  const items = [own('bs-u1'), own('bs-f2a', { date: '2026-11-05' }), own('bs-f2b', { date: '2026-11-06' })];
+  const empty = plan({ feeds, cache: { f1: entry([HW1]), f2: entry([]) }, items });
+  assert.deepEqual([empty.remove, empty.held, empty.note], [[], [], 'Brightspace returned no deadlines — none removed']);
+  const examOnly = plan({ feeds, cache: { f1: entry([HW1]), f2: entry([ev('x', 'Exam', '20261106T170000Z')]) }, items });
+  assert.deepEqual([examOnly.remove, examOnly.held, examOnly.note], [[], [], 'Brightspace returned no deadlines — none removed']);
+  // Creates for the healthy feed still proceed.
+  const fresh = plan({ feeds, cache: { f1: entry([HW1]), f2: entry([]) }, items: [own('bs-f2a', { date: '2026-11-05' })] });
+  assert.deepEqual(fresh.create.map((c) => c.id), ['bs-u1']);
+  assert.deepEqual(fresh.remove, []);
+});
+
 test('plan: more than 3 removals are held, not applied', () => {
   const gone = ['a', 'b', 'c', 'd'].map((k) => own(`bs-${k}`, { date: '2026-11-05' }));
   const p = plan({ cache: { f1: entry([HW1]) }, items: [own('bs-u1'), ...gone] });
