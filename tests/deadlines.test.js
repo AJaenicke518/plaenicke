@@ -62,3 +62,20 @@ test('deriveDeadlines: the start date is inclusive and an empty or missing list 
   assert.equal(deriveDeadlines([], '2026-10-01').size, 0);
   assert.equal(deriveDeadlines(undefined, '2026-10-01').size, 0);
 });
+
+test('deriveDeadlines: a repeating event with a trackable title is never a single deadline', () => {
+  const ics = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//test//EN',
+    'BEGIN:VEVENT',
+    'UID:9-1@brightspace.example',
+    'SUMMARY:Weekly Quiz - Due',
+    'DTSTART:20261103T075900Z',
+    'DTEND:20261103T075900Z',
+    'RRULE:FREQ=WEEKLY;COUNT=4',
+    'END:VEVENT', 'END:VCALENDAR', '',
+  ].join('\r\n');
+  const { events, skipped } = parseICS(ics);
+  assert.equal(skipped.length, 0);
+  assert.equal(events.length, 1);
+  assert.equal(deriveDeadlines(events, '2026-10-15').size, 0);
+});
