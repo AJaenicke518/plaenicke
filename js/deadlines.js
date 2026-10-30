@@ -12,7 +12,9 @@ import { addDays } from './timegrid.js';
 export const DEADLINE_ZONE = 'America/Los_Angeles';
 export const DEADLINE_ID_PREFIX = 'bs-';
 export const MAX_AUTO_REMOVALS = 3;
-// How far past the start date a deadline is looked for.
+// How far ahead a deadline is looked for: from the start date to this many
+// days past today (or past the start date, while that is still ahead), so
+// tracking never silently stops importing a year after it was turned on.
 const HORIZON_DAYS = 400;
 
 const TRACKABLE = /(?:^|\s-\s|\s)(?:revisions\s+)?due\s*$/i;
@@ -39,13 +41,14 @@ export function deadlineTitle(title, location) {
 // deriveDeadlines: one feed's cached ParsedEvents -> Map of item id to the
 // fields the import owns. Repeating events and overrides are never a single
 // deadline. A multi-day instance contributes its first day only.
-export function deriveDeadlines(events, fromISO) {
+export function deriveDeadlines(events, fromISO, todayISO) {
   const out = new Map();
   if (!Array.isArray(events)) return out;
   const singles = events.filter((ev) => !ev.rrule && !ev.recurrenceId && isTrackableTitle(ev.title));
   if (singles.length === 0) return out;
   const byUid = new Map(singles.map((ev) => [ev.uid, ev]));
-  for (const inst of expandEvents(singles, fromISO, addDays(fromISO, HORIZON_DAYS), DEADLINE_ZONE)) {
+  const anchor = fromISO > todayISO ? fromISO : todayISO;
+  for (const inst of expandEvents(singles, fromISO, addDays(anchor, HORIZON_DAYS), DEADLINE_ZONE)) {
     const id = DEADLINE_ID_PREFIX + inst.uid;
     if (out.has(id)) continue;
     out.set(id, {
@@ -56,4 +59,81 @@ export function deriveDeadlines(events, fromISO) {
     });
   }
   return out;
+}
+
+const isTracking = (f) => Boolean(f && f.trackDeadlines && typeof f.trackDeadlines.from === 'string');
+const NO_DEADLINES = 'Brightspace returned no deadlines — none removed';
+const OWNED_FIELDS = ['title', 'date', 'time'];
+
+// planDeadlineImport: what app.js must write after a feed refresh (spec § 3.5,
+// § 4). Never reads the clock, storage or the device zone.
+export function planDeadlineImport({ feeds, prevCache, cache, items, tombstones, failedFeedIds, pendingIds, todayISO }) {
+  const plan = { create: [], update: [], remove: [], held: [], note: null };
+  const tracking = feeds.filter(isTracking);
+  if (tracking.length === 0) return plan;
+
+  const dead = new Set(tombstones.filter((t) => t.kind === 'item').map((t) => t.id));
+  const byId = new Map(items.map((it) => [it.id, it]));
+  const current = new Map();
+  let allOk = true;
+  let anyEvents = false;
+
+  for (const feed of tracking) {
+    const entry = cache[feed.id];
+    if (!entry || !Array.isArray(entry.events) || entry.quotaDropped || failedFeedIds.has(feed.id)) {
+      allOk = false;
+      continue;
+    }
+    if (entry.events.length > 0) anyEvents = true;
+    const prevEntry = prevCache[feed.id];
+    const prev = prevEntry && Array.isArray(prevEntry.events) && !prevEntry.quotaDropped
+      ? deriveDeadlines(prevEntry.events, feed.trackDeadlines.from, todayISO)
+      : new Map();
+    for (const [id, d] of deriveDeadlines(entry.events, feed.trackDeadlines.from, todayISO)) {
+      if (current.has(id)) continue;
+      current.set(id, d);
+      if (pendingIds.has(id) || dead.has(id)) continue;
+      const item = byId.get(id);
+      if (!item) {
+        plan.create.push({ id, title: d.title, date: d.date, time: d.time });
+        continue;
+      }
+      const was = prev.get(id);
+      if (!was) continue; // no record of Brightspace's last value: leave the item alone
+      const patch = {};
+      for (const k of OWNED_FIELDS) if (was[k] !== d[k] && item[k] !== d[k]) patch[k] = d[k];
+      if ('time' in patch && item.endTime) patch.endTime = null;
+      if (Object.keys(patch).length > 0) plan.update.push({ id, patch });
+    }
+  }
+
+  const missing = items
+    .filter((it) => it.id.startsWith(DEADLINE_ID_PREFIX) && !current.has(it.id) && !pendingIds.has(it.id)
+      && typeof it.date === 'string' && it.date >= todayISO)
+    .map((it) => it.id);
+  if (missing.length === 0 || !allOk) return plan;
+  if (!anyEvents || current.size === 0) {
+    plan.note = NO_DEADLINES;
+    return plan;
+  }
+  if (missing.length > MAX_AUTO_REMOVALS) {
+    plan.held = missing;
+    plan.note = `${missing.length} deadlines disappeared from Brightspace — not removed`;
+    return plan;
+  }
+  plan.remove = missing;
+  return plan;
+}
+
+export function trackedCopyIds(items, tombstones) {
+  const ids = new Set();
+  for (const it of items) if (it.id.startsWith(DEADLINE_ID_PREFIX)) ids.add(it.id);
+  for (const t of tombstones) if (t.kind === 'item' && t.id.startsWith(DEADLINE_ID_PREFIX)) ids.add(t.id);
+  return ids;
+}
+
+export function hideTrackedCopies(instances, feeds, hiddenIds) {
+  const trackingIds = new Set(feeds.filter(isTracking).map((f) => f.id));
+  if (trackingIds.size === 0) return instances;
+  return instances.filter((inst) => !(trackingIds.has(inst.feedId) && hiddenIds.has(DEADLINE_ID_PREFIX + inst.uid)));
 }
