@@ -197,6 +197,16 @@ test('plan: an id in the baseline but absent from a feed that was NOT re-fetched
   assert.ok('bs-gone' in p.nextBaseline.f1.deadlines, 'still a candidate for the next real fetch');
 });
 
+test('plan: judged is false only when every tracking feed refreshed OK and none was re-fetched', () => {
+  const items = [own('bs-u1')];
+  assert.equal(plan({ baseline: { f1: HW1_BASE }, cache: { f1: entry([HW1]) }, items }).judged, true, 're-fetched');
+  assert.equal(plan({ cache: { f1: entry([HW1]) }, items }).judged, true, 'no baseline yet');
+  const same = { f1: bl({ 'bs-u1': rec() }, entry([]).fetchedAt) };
+  assert.equal(plan({ baseline: same, cache: { f1: entry([HW1]) }, items }).judged, false, 'same fetch');
+  assert.equal(plan({ baseline: same, cache: { f1: entry([HW1]) }, items, failedFeedIds: new Set(['f1']) }).judged, true, 'failed');
+  assert.equal(plan({ feeds: [feed({ trackDeadlines: null })], baseline: same, cache: { f1: entry([HW1]) }, items }).judged, true, 'none tracking');
+});
+
 test('plan: past deadlines are never auto-removed', () => {
   const p = plan({ baseline: { f1: bl({ 'bs-u1': rec(), 'bs-old': rec('2026-10-29') }) }, cache: { f1: entry([HW1]) },
     items: [own('bs-u1'), own('bs-old', { date: '2026-10-29' })] });

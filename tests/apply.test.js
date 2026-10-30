@@ -9244,3 +9244,28 @@ test('bsD: after "Stop tracking" the feed copy of an existing deadline stays hid
     assert.doesNotMatch(text, /HW I3 - Due/);
   } finally { bsCleanup(); }
 });
+
+// The held list is judged only when a tracking feed was re-fetched (or
+// failed). An import from the same cache — a resume within 30 minutes, any
+// Settings tap — judges nothing and must leave "Remove them" as it was.
+test('bsD: the held list survives an import that fetched nothing', async () => {
+  installFakeLocalStorage();
+  const { deadlines } = await import('../js/app.js');
+  const heldIds = ['bs-bsD-s1', 'bs-bsD-s2', 'bs-bsD-s3', 'bs-bsD-s4'];
+  const keep = { uid: 'bsD-sk', summary: 'Keep - Due', date: far(5) };
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([...[1, 2, 3, 4].map((n) => ({ uid: `bsD-s${n}`, summary: `HW s${n} - Due`, date: far(n) })), keep]));
+    await drainUntil(() => heldIds.every((id) => loadItems().some((it) => it.id === id)));
+    await refreshWith(bsIcs([keep]));
+    await drainUntil(() => deadlines.status().held.length === 4);
+    assert.deepEqual([...deadlines.status().held].sort(), heldIds, 'fixture check: four held');
+    resume(); // the cache is fresh: nothing is fetched, the import still runs
+    await drain();
+    tapColourDot('Brightspace');
+    assert.deepEqual([...deadlines.status().held].sort(), heldIds);
+    assert.equal(deadlines.status().note, '4 deadlines disappeared from Brightspace — not removed');
+  } finally {
+    bsCleanup();
+  }
+});

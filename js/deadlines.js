@@ -95,8 +95,15 @@ const recordOf = (d) => ({ title: d.title, date: d.date, time: d.time });
 // the candidates not removed this round (held or blocked), so they stay
 // candidates. Feeds that failed, were degenerate or are pre-release keep their
 // old entry; feeds no longer tracking are dropped.
+//
+// `judged` says whether this round judged removals at all: false only when
+// every tracking feed refreshed OK and none was re-fetched since its baseline
+// (an import from the same cache: a resume within 30 minutes, a Settings tap).
+// Such a round has no removal candidates by the rule above, so its empty
+// `held` and `note` mean "not looked at", not "nothing held": app.js keeps
+// the last judged round's note and held list.
 export function planDeadlineImport({ feeds, baseline, cache, items, tombstones, failedFeedIds, pendingIds, todayISO }) {
-  const plan = { create: [], update: [], remove: [], held: [], note: null, nextBaseline: {} };
+  const plan = { create: [], update: [], remove: [], held: [], note: null, nextBaseline: {}, judged: true };
   const tracking = feeds.filter(isTracking);
   if (tracking.length === 0) return plan;
 
@@ -139,6 +146,8 @@ export function planDeadlineImport({ feeds, baseline, cache, items, tombstones, 
       if (Object.keys(patch).length > 0) plan.update.push({ id, patch });
     }
   }
+
+  plan.judged = !allOk || ok.some(({ entry, base }) => !base || entry.fetchedAt !== base.fetchedAt);
 
   // Removal candidates, per feed: ids this device imported from it, gone from
   // its re-fetched copy and from every other tracking feed.

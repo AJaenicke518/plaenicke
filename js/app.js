@@ -620,7 +620,9 @@ function importDeadlines() {
       feeds, baseline, cache: feedCache, items, tombstones: localState().tombstones,
       failedFeedIds, pendingIds: pendingDeletes, todayISO: toISO(new Date()),
     });
-    deadlineStatus = { note: plan.note, held: plan.held };
+    // A round that judged nothing (no tracking feed re-fetched or failed)
+    // leaves the last judged round's note and "Remove them" list in place.
+    if (plan.judged) deadlineStatus = { note: plan.note, held: plan.held };
     applyDeadlinePlan(plan);
     // Only after the writes landed (or there were none): a failed write leaves
     // the stored baseline as it was, so the next import plans the same change.
