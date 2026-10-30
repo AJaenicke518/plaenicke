@@ -58,6 +58,8 @@ New **optional, synced** field on the feed record: `trackDeadlines: { from: 'YYY
 ### 3.2 Parser
 `collectProperty` (`js/ics.js:906-919`) keeps `LOCATION` (unescaped) on the parsed event as `location`. The cached ParsedEvent gains that field; `deserializeFeedCache` (`js/storage.js:214-235`) checks only `fetchedAt`/`events`/`skipped`, so old caches still load (no `location` until the next fetch → no course prefix until then; the import is idempotent and will update the title once it arrives).
 
+**Amended 2026-10-31 after final review.** The sentence above was wrong about the title: a pre-release entry's derived titles lack the course code, and judging the next fetch against them would make "MATH 234 · " look like a Brightspace title change and overwrite a title Alex renamed (on the other device, synced here). A tracking feed whose cache entry has any event **lacking the `location` key** (a parsed event without LOCATION has `location: null`) is therefore treated as **not refreshed** that round, like a failed feed (§ 3.5): nothing created, updated or removed from it, removals blocked, its baseline unchanged. The next real fetch writes `location`.
+
 ### 3.3 Item identity
 - id = `bs-` + the VEVENT UID, e.g. `bs-6606-237@brightspace.lmu.edu`. Independent of plaenicke's feed id, so removing and re-adding the calendar cannot duplicate items, and both devices derive the same id.
 - Built with `makeItem` (`js/items.js:5-48`): `type: 'due'`, `title`, `date`, `time` (null for a `VALUE=DATE` event), `endTime: null`. No new item field; the 13-key whitelist is untouched.
@@ -69,9 +71,19 @@ Converted in **`America/Los_Angeles`** on every device (not the device zone), so
 A pure planner, new module `js/deadlines.js`:
 
 ```
-planDeadlineImport({ feeds, prevCache, cache, items, tombstones, todayISO })
-  → { create: [fields+id], update: [{ id, patch }], remove: [id], held: { feedId, ids } | null, note }
+planDeadlineImport({ feeds, baseline, cache, items, tombstones, failedFeedIds, pendingIds, todayISO })
+  → { create: [fields+id], update: [{ id, patch }], remove: [id], held: [id], note, nextBaseline, judged }
 ```
+
+**Amended 2026-10-31 after final review: a device-local baseline replaces `prevCache`.** The final review reproduced two losses with `prevCache` (this device's feed cache before the refresh): a device whose cache was older than the other device's removed real upcoming deadlines (ticks included) the other device had imported, and a sync or storage reload landing mid feed batch replaced the "before" cache with the new one, so a Brightspace date change was never applied. The rules in steps 2 and 3 below are now judged against **`plaenicke.deadlineBaseline`**: device-local, never synced, owned by `app.js`, shaped `{ [feedId]: { fetchedAt, deadlines: { [id]: { title, date, time } } } }` — what *this device* last imported per tracking feed.
+
+- **Update:** patch a field only when it differs between the baseline record and the current derived record **and** the item differs. No baseline record for the id → no update.
+- **Remove (candidate):** the id is in `baseline[feed.id].deadlines`, absent from that feed's current derived set, the feed was **re-fetched** since (`cache[feed.id].fetchedAt !== baseline[feed.id].fetchedAt`), and absent from every other tracking feed's current set. An id never in this device's baseline is never removed by this device. Then every § 4 guard; a candidate whose item is gone (deleted, never here) has nothing to remove and drops out.
+- **`nextBaseline`:** per tracking feed that refreshed OK and was not degenerate, `{ fetchedAt, deadlines: current derived ∪ carried }`, where *carried* = candidates not removed this round (held, or blocked by a guard), so they stay candidates. A feed not re-fetched keeps every earlier record. Failed, degenerate and pre-release (§ 3.2) feeds keep their old entry; feeds no longer tracking are dropped.
+- `app.js` loads the baseline per import and saves `nextBaseline` **only after** the plan's writes succeeded (or when it has none). A failed write leaves the stored baseline as it was, so the next import plans the same change again.
+- **`judged`** is false only when every tracking feed refreshed OK and none was re-fetched (an import from the same cache: a resume within 30 minutes, a Settings tap). Such a round has no candidates by the rule above, so `app.js` keeps the last judged round's note and held list rather than clearing "Remove them".
+
+Where steps 2 and 3 and the paragraph after them say `prevCache`, read the baseline.
 
 `app.js` (the sole items writer, CLAUDE.md "Ownership") applies the plan after each settled feed refresh (`js/app.js:1405-1430`, `settle`), for feeds with `trackDeadlines`:
 
@@ -81,10 +93,12 @@ planDeadlineImport({ feeds, prevCache, cache, items, tombstones, todayISO })
 
 Writes happen only on a real difference, so the second device to refresh usually finds nothing to do: it sees the same Brightspace change, and after syncing the first device's write the item already holds the new value.
 
-`prevCache` is captured in `app.js` before `syncStale` replaces the entries (`js/app.js:1405-1430`). Caches written before this release have no `location`, so the first refresh after release sees the course code appear and prefixes titles once; nothing has been imported yet, so no edit of Alex's can be overwritten.
+~~`prevCache` is captured in `app.js` before `syncStale` replaces the entries.~~ Superseded 2026-10-31: there is no `prevCache` (see the amendment above), and a pre-release cache is not a refresh (§ 3.2 amendment) — the earlier claim that "no edit of Alex's can be overwritten" did not hold once the other device had imported and Alex had renamed.
 
 ### 3.6 Hiding the feed copy
-`instancesForRange` (`js/feeds.js:742`) callers drop a feed instance whose `bs-` + uid is an existing live item **or** has an item tombstone, for feeds with `trackDeadlines`. Implemented as a filter in the caller, with the id set passed in, so `feeds.js` stays free of item knowledge.
+`instancesForRange` (`js/feeds.js:742`) callers drop a feed instance whose `bs-` + uid is an existing live item **or** has an item tombstone. Implemented as a filter in the caller, with the id set passed in, so `feeds.js` stays free of item knowledge.
+
+**Amended 2026-10-31 after final review:** for **every** feed, tracking or not (`hideTrackedCopies(instances, hiddenIds)`). The items outlive "Stop tracking" and a removed and re-added calendar (a new feed id, tracking off), and hiding only on tracking feeds showed every deadline twice then.
 
 ### 3.7 Known gap (accepted)
 Item tombstones are pruned after 90 days (`js/merge.js:256-266`). A tracked deadline deleted by Alex **more than 90 days before its due date**, still listed by Brightspace when the tombstone ages out, would be re-created. Accepted rather than adding machinery.
@@ -99,8 +113,10 @@ Removal (§ 3.5 step 3) runs only when **all** hold:
 4. The item's date is **today or later**. Past deadlines are never auto-removed.
 5. With several tracking feeds, the id is missing from all of them.
 
+**Amended 2026-10-31 after final review — the import waits for sync on a linked device.** A device that has not yet pulled the account's latest items would patch a stale copy, stamped later than Alex's tick or note on the other device, and whole-record last-write-wins keeps that later automatic write: the tick and notes are lost. So on a linked device, `app.js` defers the import (and "Remove them") while an adoption is pending or until a sync has **succeeded** (`syncOnce` status `ok`) since launch or the last return to visible; the deferred import then runs from `runSync`'s success path. A failed or skipped sync leaves it waiting (the sync indicator already shows the failure). An unlinked device imports at once. **Accepted residual:** a Brightspace change applied in the same sync window as a tick on the other device can still lose the tick (whole-record last-write-wins, CLAUDE.md); the deferral removes the stale-device case, not true concurrency.
+
 **Other failures:**
-- A write throws (e.g. `QuotaError`): the import stops at that item; Settings shows the existing storage-full message; already-written items stay; the next refresh continues. Never swallowed.
+- A write throws (e.g. `QuotaError`): the import stops at that item; Settings shows the existing storage-full message; already-written items stay; the next refresh continues. Never swallowed. *(Amended 2026-10-31: the items write is one save, so a failure leaves `items` as it was; tombstones for that round's removals are written first and may already be stored; the baseline is not advanced, so the next refresh retries. The message is on the top line.)*
 - No course code → plain title. A skipped VEVENT stays in the feed's skipped count and is never imported.
 
 **Release order:**
