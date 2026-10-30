@@ -241,6 +241,12 @@ function ideaItems() { return sortIdeasNewestFirst(liveItems().filter(isIdea)); 
 // imports it cannot be unit-tested in Node (`ReferenceError: document is not
 // defined`). Keep the injection even if renderSyncStatus moves and the cycle
 // goes away.
+// The deadline import's last note and held ids, for the Settings row (Task 6).
+// Declared before initSettings so nothing it calls can meet the TDZ. The
+// same hooks object goes to Settings and is exported for the tests.
+let deadlineStatus = { note: null, held: [] };
+export const deadlines = { status: () => deadlineStatus, removeHeld: removeHeldDeadlines };
+
 initSettings({
   button: els.settingsBtn,
   host: els.settingsHost,
@@ -271,7 +277,7 @@ initSettings({
   onSyncedDataChanged: () => scheduleSync(),
   applyState: applySyncedState,
   // Brightspace deadlines: the Settings row's note and its "Remove them".
-  deadlines: { status: () => deadlineStatus, removeHeld: removeHeldDeadlines },
+  deadlines,
 });
 
 // The top box's line: Ideas, ticks, deletes, edits and the top box's own adds.
@@ -573,7 +579,7 @@ function handleDelete(id) {
 // module-scope `items`, saved once. Tombstones first, as deleteItem does.
 // prevCache is this device's feed cache BEFORE the refresh: a field is
 // patched only when Brightspace changed it between the two (edits stick).
-let deadlineStatus = { note: null, held: [] };
+// deadlineStatus and the `deadlines` hooks are declared above initSettings.
 
 function applyDeadlinePlan({ create, update, remove }) {
   if (create.length === 0 && update.length === 0 && remove.length === 0) return;
@@ -619,11 +625,19 @@ function importDeadlines(prevCache) {
   }
 }
 
+// "Remove them": the held list is cleared only once the write succeeded, so a
+// failed removal keeps the list and its button. Same catch as importDeadlines.
 function removeHeldDeadlines() {
   const live = new Set(items.map((it) => it.id));
   const held = deadlineStatus.held.filter((id) => live.has(id) && !pendingDeletes.has(id));
+  try {
+    applyDeadlinePlan({ create: [], update: [], remove: held });
+  } catch (e) {
+    setMessage(e.message);
+    console.error('plaenicke: removing held deadlines failed', e && e.name);
+    return;
+  }
   deadlineStatus = { note: null, held: [] };
-  applyDeadlinePlan({ create: [], update: [], remove: held });
 }
 
 // setDone — V6's To-do checkbox, and THE APP'S FIRST EDIT PATH (spec § 5.1).

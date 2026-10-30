@@ -9039,3 +9039,84 @@ test('bsD: the feed\'s own copy of a tracked deadline is hidden; the Deadline sh
     assert.doesNotMatch(text, /HW 9 - Due/);
   } finally { bsCleanup(); }
 });
+
+// The Settings path: a colour tap (or a Settings Sync/Add) reaches app.js
+// through onFeedsChanged, which must import from the cache it just reloaded.
+// No background refresh runs here: the feed and its cache are written straight
+// to storage, and only the Settings tap tells app.js about them.
+test('bsD: a Settings change imports from the cache without a background refresh', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    const { events, skipped } = parseICS(bsIcs([{ uid: 'bsD-10', summary: 'HW 10 - Due', date: far(2) }]));
+    localStorage.setItem('plaenicke.feedCache', JSON.stringify({
+      'bsD-feed': { fetchedAt: new Date().toISOString(), events, skipped },
+    }));
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-10'), false, 'fixture check: not imported yet');
+    tapColourDot('Brightspace');
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-10'), true);
+  } finally { bsCleanup(); }
+});
+
+test('bsD: the Week view hides the feed\'s own copy of a tracked deadline', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  let steps = 0;
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([{ uid: 'bsD-11', summary: 'HW 11 - Due', date: far(3) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-11'));
+    click(globalThis.document.getElementById('show-week'));
+    const want = weekLabelFor(startOfWeek(far(3)));
+    for (; labelText('week-label') !== want; steps += 1) {
+      assert.ok(steps < 60, 'fixture check: the week arrows reach far(3)');
+      click(globalThis.document.getElementById('next-week'));
+    }
+    const doc = globalThis.document;
+    const text = [...stringsOf(doc.getElementById('week-grid')), ...stringsOf(doc.getElementById('week-list'))].join(' | ');
+    assert.match(text, /MATH 234 · HW 11/);
+    assert.doesNotMatch(text, /HW 11 - Due/);
+  } finally {
+    for (; steps > 0; steps -= 1) click(globalThis.document.getElementById('prev-week'));
+    click(globalThis.document.getElementById('show-day'));
+    bsCleanup();
+  }
+});
+
+// Four deadlines vanish at once: more than MAX_AUTO_REMOVALS, so they are
+// held, not removed. "Remove them" whose items write fails keeps them and the
+// held list; a retry that succeeds removes them.
+test('bsD: a failed "Remove them" keeps the held deadlines and the held list', async () => {
+  installFakeLocalStorage();
+  const { deadlines } = await import('../js/app.js');
+  const heldIds = ['bs-bsD-h1', 'bs-bsD-h2', 'bs-bsD-h3', 'bs-bsD-h4'];
+  const keep = { uid: 'bsD-hk', summary: 'Keep - Due', date: far(5) };
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([
+      ...[1, 2, 3, 4].map((n) => ({ uid: `bsD-h${n}`, summary: `HW h${n} - Due`, date: far(n) })), keep,
+    ]));
+    await drainUntil(() => heldIds.every((id) => loadItems().some((it) => it.id === id)));
+    await refreshWith(bsIcs([keep]));
+    await drainUntil(() => deadlines.status().held.length === 4);
+    assert.deepEqual([...deadlines.status().held].sort(), heldIds, 'fixture check: four held');
+
+    const quota = refuseItemsWrites();
+    try {
+      deadlines.removeHeld(); // must not throw
+    } finally {
+      quota.restore();
+    }
+    assert.ok(quota.refused() > 0, 'fixture check: the removal reached the items write');
+    for (const id of heldIds) assert.ok(loadItems().some((it) => it.id === id), `${id} still stored`);
+    assert.deepEqual([...deadlines.status().held].sort(), heldIds, 'the held list survives a failed write');
+
+    deadlines.removeHeld();
+    assert.equal(loadItems().some((it) => heldIds.includes(it.id)), false, 'a write that succeeds removes them');
+    assert.deepEqual(deadlines.status().held, []);
+  } finally {
+    bsCleanup();
+    saveTombstones(loadTombstones().filter((t) => !heldIds.includes(t.id)));
+  }
+});
