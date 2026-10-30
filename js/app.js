@@ -656,7 +656,10 @@ function importDeadlines() {
 }
 
 // "Remove them": the held list is cleared only once the write succeeded, so a
-// failed removal keeps the list and its button. Same catch as importDeadlines.
+// failed removal keeps the list and its button. A failed items write leaves
+// the items stored, but tombstones for some or all of the held ids may
+// already be written (they go first, as deleteItem's do) and the next sync
+// applies them. Same catch as importDeadlines.
 function removeHeldDeadlines() {
   // Waits for sync like the import itself: the held list and its button stay.
   if (importWaitsForSync()) { setMessage('Waiting for sync — nothing removed yet.'); return; }

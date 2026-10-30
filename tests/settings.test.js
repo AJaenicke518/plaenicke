@@ -1028,3 +1028,25 @@ test('settings: a calendar without tracking shows no deadline note or Remove the
   assert.equal(findButtonByText(host, 'Remove them'), null);
   assert.doesNotMatch(allText(host), /Tracking deadlines due from/);
 });
+
+// Final review minor: app.js runs the deadline import inside onFeedsChanged,
+// and the panel used to draw its rows BEFORE that, so the note and "Remove
+// them" showed the previous round. The rows are drawn again after it.
+test('settings: the deadline row shows the import that the tap itself ran', () => {
+  const status = { note: null, held: [] };
+  const { host, notified } = openPanel([bsRowFeed({ trackDeadlines: { from: '2026-10-30' } })], () => {}, status);
+  notified.push = (x) => {
+    if (x === 'view') { status.note = '4 deadlines disappeared from Brightspace — not removed'; status.held = ['a', 'b', 'c', 'd']; }
+    return Array.prototype.push.call(notified, x);
+  };
+  host.querySelectorAll('button').find((b) => (b.className || '').includes('feed-dot')).click();
+  assert.match(allText(host), /4 deadlines disappeared from Brightspace — not removed/);
+  assert.ok(findButtonByText(host, 'Remove them'));
+});
+
+test('settings: "Track deadlines" stamps updatedAt strictly later than the record\'s own', () => {
+  const future = '2999-01-01T00:00:00.000Z';
+  const { host } = openPanel([bsRowFeed({ updatedAt: future })]);
+  findButtonByText(host, 'Track deadlines').click();
+  assert.ok(loadFeeds()[0].updatedAt > future, `stamped ${loadFeeds()[0].updatedAt}`);
+});

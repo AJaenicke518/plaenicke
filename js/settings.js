@@ -18,6 +18,7 @@ import { describeLaunches } from './freshness.js';
 import { initLinkUI } from './linkui.js';
 import { uid } from './uid.js';
 import { nowISO, toISO } from './dateparse.js';
+import { nextStamp } from './merge.js';
 import { lock } from './scrolllock.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
 import { FEED_PALETTE } from './palette.js';
@@ -116,7 +117,16 @@ export function initSettings({
   // this app that cannot be re-entered from anything on screen (this file
   // never re-displays one). An unpushed item is a re-typed line; an unpushed
   // feed lost with the device is gone.
-  function notifyViewChanged() { if (onFeedsChanged) onFeedsChanged(); }
+  //
+  // onFeedsChanged also runs app.js's Brightspace deadline import, which sets
+  // the note and held list the calendar rows show (deadlines.status()). So
+  // the open panel draws its rows again AFTER it: drawn only before, they
+  // showed the previous round's note and "Remove them".
+  let repaintRows = null; // the open panel's renderCalendars, or null
+  function notifyViewChanged() {
+    if (onFeedsChanged) onFeedsChanged();
+    if (repaintRows) repaintRows();
+  }
 
   function notifySyncedChanged() {
     // View first: app.js reloads its snapshot before the sync it is about to
@@ -154,6 +164,7 @@ export function initSettings({
   // focusOpener): otherwise it falls back to the top of the document. Without
   // scrolling, for the same reason.
   function close() {
+    repaintRows = null;
     host.innerHTML = '';
     if (releaseScroll) { releaseScroll(); releaseScroll = null; }
     document.removeEventListener('keydown', onKey);
@@ -464,7 +475,9 @@ export function initSettings({
           trackBtn.addEventListener('click', () => {
             reapplyFeedField(feed.id, (f) => ({
               trackDeadlines: f.trackDeadlines ? null : { from: toISO(new Date()) },
-              updatedAt: nowISO(),
+              // Strictly later than the record's own stamp (nextStamp), so the
+              // toggle cannot lose to the other device's copy on clock skew.
+              updatedAt: nextStamp(nowISO(), f.updatedAt),
             }));
             renderCalendars();
             notifySyncedChanged();
@@ -701,6 +714,7 @@ export function initSettings({
     }
 
     renderCalendars();
+    repaintRows = renderCalendars;
 
     // --- Sync (Task 8) ------------------------------------------------
     //

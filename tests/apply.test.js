@@ -9086,9 +9086,10 @@ test('bsD: the Week view hides the feed\'s own copy of a tracked deadline', asyn
 });
 
 // Four deadlines vanish at once: more than MAX_AUTO_REMOVALS, so they are
-// held, not removed. "Remove them" whose items write fails keeps them and the
-// held list; a retry that succeeds removes them.
-test('bsD: a failed "Remove them" keeps the held deadlines and the held list', async () => {
+// held, not removed. "Remove them" whose items write fails keeps them in
+// items storage and keeps the held list (tombstones, written first, may
+// already be stored); a retry that succeeds removes them.
+test('bsD: a failed "Remove them" keeps the held items stored and the held list', async () => {
   installFakeLocalStorage();
   const { deadlines } = await import('../js/app.js');
   const heldIds = ['bs-bsD-h1', 'bs-bsD-h2', 'bs-bsD-h3', 'bs-bsD-h4'];
