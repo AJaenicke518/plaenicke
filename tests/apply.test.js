@@ -9269,3 +9269,178 @@ test('bsD: the held list survives an import that fetched nothing', async () => {
     bsCleanup();
   }
 });
+
+// --- Final review C2: on a linked device the import waits for a sync -------
+// A device that has not pulled the account's latest items would write its
+// automatic patch over a stale copy, stamped later than Alex's tick on the
+// other device, and whole-record last-write-wins would keep it. So on a
+// linked device the import is deferred until a sync has SUCCEEDED since
+// launch / the last return to visible, and then runs from the sync's success.
+function bsLinkedNet(ics) {
+  const original = globalThis.fetch;
+  const state = { gets: 0, getResponse: null, releases: [] };
+  globalThis.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    const method = (opts && opts.method) || 'GET';
+    if (u.includes('/feed?url=')) return { ok: true, status: 200, text: async () => ics };
+    if (u.includes('/data')) {
+      if (method !== 'GET') return putAccepted();
+      state.gets += 1;
+      if (state.getResponse) return state.getResponse();
+      return new Promise((r) => { state.releases.push(r); });
+    }
+    return original(url, opts);
+  };
+  return {
+    state,
+    release: (res) => { for (const r of state.releases.splice(0)) r(res()); },
+    restore: () => { for (const r of state.releases.splice(0)) r(emptyAccount()); globalThis.fetch = original; },
+  };
+}
+const bsCacheFetched = () => JSON.parse(localStorage.getItem('plaenicke.feedCache') || '{}')['bsD-feed']?.fetchedAt > '2001';
+const failingAccount = () => Promise.resolve({ ok: false, status: 502, json: async () => ({}) });
+
+test('bsD: on a linked device the import waits for a successful sync, then runs', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  const net = bsLinkedNet(bsIcs([{ uid: 'bsD-r2a', summary: 'HW R2a - Due', date: far(2) }]));
+  try {
+    saveFeeds([bsFeed()]);
+    reloadFromStorage('plaenicke.feeds');
+    resume();
+    await drainUntil(() => bsCacheFetched() && net.state.gets > 0);
+    assert.ok(bsCacheFetched() && net.state.gets > 0, 'fixture check: feed settled, sync read held');
+    await drain();
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-r2a'), false, 'nothing written before the sync');
+    tapColourDot('Brightspace');
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-r2a'), false, 'a Settings change waits too');
+    net.release(emptyAccount);
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-r2a'));
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-r2a'), true, 'imported once the sync succeeded');
+  } finally { net.restore(); bsCleanup(); }
+});
+
+test('bsD: a failed sync keeps the import deferred; the next successful sync runs it', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  const net = bsLinkedNet(bsIcs([{ uid: 'bsD-r2b', summary: 'HW R2b - Due', date: far(2) }]));
+  net.state.getResponse = failingAccount;
+  try {
+    saveFeeds([bsFeed()]);
+    reloadFromStorage('plaenicke.feeds');
+    resume();
+    await drainUntil(() => bsCacheFetched() && loadSyncState().lastError === 'http_502');
+    assert.equal(loadSyncState().lastError, 'http_502', 'fixture check: the sync failed');
+    await drain();
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-r2b'), false, 'nothing written after a failed sync');
+    net.state.getResponse = emptyAccount;
+    for (const fn of globalThis.window._listeners.online || []) fn();
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-r2b'));
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-r2b'), true);
+  } finally { net.restore(); bsCleanup(); }
+});
+
+test('bsD: a pending adoption defers the import even after an earlier successful sync', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  const net = bsLinkedNet('BEGIN:VCALENDAR\r\nEND:VCALENDAR');
+  net.state.getResponse = emptyAccount;
+  try {
+    resume();
+    await drainUntil(() => loadSyncState().lastSyncedAt !== null);
+    assert.notEqual(loadSyncState().lastSyncedAt, null, 'fixture check: a sync succeeded since the resume');
+    saveFeeds([bsFeed()]);
+    const { events, skipped } = parseICS(bsIcs([{ uid: 'bsD-r2c', summary: 'HW R2c - Due', date: far(2) }]));
+    localStorage.setItem('plaenicke.feedCache', JSON.stringify({ 'bsD-feed': { fetchedAt: new Date().toISOString(), events, skipped } }));
+    saveSyncState({ adoptionPending: true });
+    tapColourDot('Brightspace');
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-r2c'), false, 'deferred while adoption is pending');
+    clearAdoptionPending();
+    tapColourDot('Brightspace');
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-r2c'), true, 'fixture check: imports once it is lifted');
+  } finally { net.restore(); bsCleanup(); }
+});
+
+test('bsD: on an unlinked device the import runs at once, with no sync', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const requests = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => { if (String(url).includes('/data')) requests.push(url); return original(url, opts); };
+  try {
+    saveFeeds([bsFeed()]);
+    const { events, skipped } = parseICS(bsIcs([{ uid: 'bsD-r2d', summary: 'HW R2d - Due', date: far(2) }]));
+    localStorage.setItem('plaenicke.feedCache', JSON.stringify({ 'bsD-feed': { fetchedAt: new Date().toISOString(), events, skipped } }));
+    resume();
+    tapColourDot('Brightspace');
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-r2d'), true);
+    assert.deepEqual(requests, []);
+  } finally { globalThis.fetch = original; bsCleanup(); }
+});
+
+test('bsD: "Remove them" waits for a sync on a linked device and says so', async () => {
+  installFakeLocalStorage();
+  const { deadlines } = await import('../js/app.js');
+  const heldIds = ['bs-bsD-w1', 'bs-bsD-w2', 'bs-bsD-w3', 'bs-bsD-w4'];
+  const keep = { uid: 'bsD-wk', summary: 'Keep - Due', date: far(5) };
+  let net = null;
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([...[1, 2, 3, 4].map((n) => ({ uid: `bsD-w${n}`, summary: `HW w${n} - Due`, date: far(n) })), keep]));
+    await drainUntil(() => heldIds.every((id) => loadItems().some((it) => it.id === id)));
+    await refreshWith(bsIcs([keep]));
+    await drainUntil(() => deadlines.status().held.length === 4);
+    assert.deepEqual([...deadlines.status().held].sort(), heldIds, 'fixture check: four held');
+    await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+    clearAdoptionPending();
+    net = bsLinkedNet(bsIcs([keep]));
+    resume();
+    await drainUntil(() => net.state.gets > 0);
+    globalThis.document.getElementById('message').textContent = '';
+    deadlines.removeHeld();
+    for (const id of heldIds) assert.ok(loadItems().some((it) => it.id === id), `${id} kept`);
+    assert.equal(loadTombstones().some((t) => heldIds.includes(t.id)), false, 'no tombstone written');
+    assert.deepEqual([...deadlines.status().held].sort(), heldIds, 'the held list stays');
+    assert.match(messageText(), /Waiting for sync/);
+    net.release(emptyAccount);
+    await drainUntil(() => loadSyncState().lastSyncedAt !== null);
+    await drain();
+    deadlines.removeHeld();
+    assert.equal(loadItems().some((it) => heldIds.includes(it.id)), false, 'removed once a sync succeeded');
+  } finally {
+    if (net) net.restore();
+    bsCleanup();
+    saveTombstones(loadTombstones().filter((t) => !heldIds.includes(t.id)));
+  }
+});
+
+test('bsD: each return to visible waits for that visit\'s sync, even after an earlier one succeeded', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  const net = bsLinkedNet(bsIcs([{ uid: 'bsD-r2f', summary: 'HW R2f - Due', date: far(2) }]));
+  net.state.getResponse = emptyAccount;
+  try {
+    resume();
+    await drainUntil(() => loadSyncState().lastSyncedAt !== null);
+    assert.notEqual(loadSyncState().lastSyncedAt, null, 'fixture check: an earlier visit synced');
+    net.state.getResponse = null; // this visit's sync read is held
+    saveFeeds([bsFeed()]);
+    reloadFromStorage('plaenicke.feeds');
+    const gets = net.state.gets;
+    resume();
+    await drainUntil(() => bsCacheFetched() && net.state.gets > gets);
+    await drain();
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-r2f'), false, 'waits for this visit\'s sync');
+    net.release(emptyAccount);
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-r2f'));
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-r2f'), true);
+  } finally { net.restore(); bsCleanup(); }
+});

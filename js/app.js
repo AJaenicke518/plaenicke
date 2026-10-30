@@ -247,6 +247,19 @@ function ideaItems() { return sortIdeasNewestFirst(liveItems().filter(isIdea)); 
 // same hooks object goes to Settings and is exported for the tests.
 let deadlineStatus = { note: null, held: [] };
 export const deadlines = { status: () => deadlineStatus, removeHeld: removeHeldDeadlines };
+// THE IMPORT WAITS FOR SYNC ON A LINKED DEVICE (final review C2). A device that
+// has not pulled the account's latest items would patch a stale copy, stamped
+// later than Alex's tick on the other device, and whole-record last-write-wins
+// would keep the patch: tick and notes lost. So while linked, nothing is
+// imported until a sync has SUCCEEDED since launch or the last return to
+// visible (and never while an adoption is pending); the import that was asked
+// for meanwhile runs from runSync's success path. Unlinked, it runs at once.
+// Residual (accepted): a Brightspace change applied in the same sync window
+// as a tick on the other device can still lose the tick; this removes the
+// stale-device case, not true concurrency.
+let syncedSinceVisible = false;
+let deadlineImportDeferred = false;
+const importWaitsForSync = () => isLinked() && (isAdoptionPending() || !syncedSinceVisible);
 
 initSettings({
   button: els.settingsBtn,
@@ -614,6 +627,8 @@ function applyDeadlinePlan({ create, update, remove }) {
 }
 
 function importDeadlines() {
+  if (importWaitsForSync()) { deadlineImportDeferred = true; return; }
+  deadlineImportDeferred = false;
   try {
     const baseline = loadDeadlineBaseline();
     const plan = planDeadlineImport({
@@ -643,6 +658,8 @@ function importDeadlines() {
 // "Remove them": the held list is cleared only once the write succeeded, so a
 // failed removal keeps the list and its button. Same catch as importDeadlines.
 function removeHeldDeadlines() {
+  // Waits for sync like the import itself: the held list and its button stay.
+  if (importWaitsForSync()) { setMessage('Waiting for sync — nothing removed yet.'); return; }
   const live = new Set(items.map((it) => it.id));
   const held = deadlineStatus.held.filter((id) => live.has(id) && !pendingDeletes.has(id));
   try {
@@ -1637,8 +1654,9 @@ async function runSync() {
   if (document.visibilityState === 'hidden') return;
   if (syncInFlight) { syncPending = true; return; }
   syncInFlight = true;
+  let synced = false;
   try {
-    await syncOnce({
+    const result = await syncOnce({
       // The read gives up at the shared download deadline and reports as
       // offline; the write never does (js/sync.js, punchlist L63).
       readFetchImpl: fetchWithTimeout,
@@ -1658,6 +1676,10 @@ async function runSync() {
       apiBase: WORKER_URL,
       applyState: applySyncedState,
     });
+    // Only a sync that finished 'ok' (pulled, applied and, if needed, pushed)
+    // releases the deadline import; skipped, offline, error, conflict and
+    // adoption-required all leave it waiting.
+    synced = result && result.status === 'ok';
   } catch (err) {
     // Never let a sync failure break the app; local data keeps rendering.
     console.error('sync', err && err.name);
@@ -1676,6 +1698,11 @@ async function runSync() {
     // A trigger that arrived mid-sync must not be dropped — otherwise it
     // would wait for an unrelated later trigger instead of running promptly.
     if (syncPending) { syncPending = false; scheduleSync(); }
+  }
+  if (synced) {
+    syncedSinceVisible = true;
+    // The import asked for while waiting. importDeadlines never throws.
+    if (deadlineImportDeferred) importDeadlines();
   }
 }
 
@@ -1815,6 +1842,9 @@ document.addEventListener('visibilitychange', () => {
     return;
   }
   if (document.visibilityState !== 'visible') return;
+  // The other device may have written while this one was away: the deadline
+  // import waits for this visit's first successful sync (C2, above).
+  syncedSinceVisible = false;
   noteLaunch();
   render(); // refreshForToday runs first, inside render
   syncTodayTick();
