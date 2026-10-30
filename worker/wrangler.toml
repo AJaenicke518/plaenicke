@@ -8,6 +8,12 @@ compatibility_date = "2026-07-18"
 [observability]
 enabled = true
 
+# Invocation logs record every request as `<METHOD> <URL>`, and /feed's query
+# string is the feed's capability URL (feed.js: it must never be logged).
+# console.log/console.error above still reach Workers Logs.
+[observability.logs]
+invocation_logs = false
+
 [[d1_databases]]
 binding = "DB"
 database_name = "plaenicke"
