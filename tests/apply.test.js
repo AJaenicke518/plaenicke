@@ -8896,3 +8896,146 @@ test('sync-safety: applySyncedState refuses to run without a valid clock, before
   }
   assert.deepEqual(loadItems(), [], 'nothing was written');
 });
+
+// --- Brightspace deadlines (spec 2026-10-30) -------------------------------
+// Ids prefixed bsD-. The module is imported once for the file: every test puts
+// feeds, cache and items back.
+const bsFeed = (o = {}) => ({ id: 'bsD-feed', url: 'https://example.com/bsD.ics', name: 'Brightspace',
+  color: 'var(--feed-palette-1)', hidden: false, updatedAt: '2026-10-01T00:00:00.000Z',
+  trackDeadlines: { from: localISO(new Date()) }, ...o });
+// A minimal Brightspace-shaped feed: all-day due entries with a course LOCATION.
+function bsIcs(rows) {
+  const lines = ['BEGIN:VCALENDAR'];
+  for (const r of rows) {
+    lines.push('BEGIN:VEVENT', `UID:${r.uid}`, `SUMMARY:${r.summary}`,
+      `DTSTART;VALUE=DATE:${r.date.replace(/-/g, '')}`, `LOCATION:${r.location || 'Fall 2026 Calculus III (MATH-234-01/02)'}`, 'END:VEVENT');
+  }
+  lines.push('END:VCALENDAR');
+  return lines.join('\r\n');
+}
+async function refreshWith(ics) {
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url) => (String(url).includes('/feed?url=')
+    ? { ok: true, status: 200, text: async () => ics }
+    : original(url));
+  try {
+    // Make the cache stale so the resume refetches.
+    const cache = JSON.parse(localStorage.getItem('plaenicke.feedCache') || '{}');
+    for (const k of Object.keys(cache)) cache[k].fetchedAt = '2000-01-01T00:00:00.000Z';
+    localStorage.setItem('plaenicke.feedCache', JSON.stringify(cache));
+    reloadFromStorage('plaenicke.feeds');
+    resume();
+    await drainUntil(() => JSON.parse(localStorage.getItem('plaenicke.feedCache') || '{}')['bsD-feed']?.fetchedAt > '2001');
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+function bsCleanup() {
+  saveFeeds([]);
+  localStorage.removeItem('plaenicke.feedCache');
+  saveItems(loadItems().filter((it) => !it.id.startsWith('bs-')));
+  reloadFromStorage('plaenicke.feeds');
+  reloadFromStorage('plaenicke.items');
+}
+
+test('bsD: a refresh imports Due items as Deadlines; Available stays calendar-only', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([
+      { uid: 'bsD-1', summary: 'HW 1 - Due', date: far(1) },
+      { uid: 'bsD-2', summary: 'Solutions - Available', date: far(1) },
+    ]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-1'));
+    const it = loadItems().find((x) => x.id === 'bs-bsD-1');
+    assert.equal(it.type, 'due');
+    assert.equal(it.title, 'MATH 234 · HW 1');
+    assert.equal(loadItems().some((x) => x.id === 'bs-bsD-2'), false);
+  } finally { bsCleanup(); }
+});
+
+test('bsD: a moved due date updates the date and keeps the tick', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([{ uid: 'bsD-3', summary: 'HW 3 - Due', date: far(2) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-3'));
+    saveItems(loadItems().map((it) => (it.id === 'bs-bsD-3' ? { ...it, done: true } : it)));
+    reloadFromStorage('plaenicke.items');
+    await refreshWith(bsIcs([{ uid: 'bsD-3', summary: 'HW 3 - Due', date: far(4) }]));
+    await drainUntil(() => loadItems().find((it) => it.id === 'bs-bsD-3')?.date === far(4));
+    assert.equal(loadItems().find((it) => it.id === 'bs-bsD-3').date, far(4));
+    assert.equal(loadItems().find((it) => it.id === 'bs-bsD-3').done, true);
+  } finally { bsCleanup(); }
+});
+
+test('bsD: a renamed item keeps Alex\'s title across refreshes', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    const ics = bsIcs([{ uid: 'bsD-4', summary: 'HW 4 - Due', date: far(2) }]);
+    await refreshWith(ics);
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-4'));
+    saveItems(loadItems().map((it) => (it.id === 'bs-bsD-4' ? { ...it, title: 'Calc HW 4' } : it)));
+    reloadFromStorage('plaenicke.items');
+    await refreshWith(ics);
+    assert.equal(loadItems().find((it) => it.id === 'bs-bsD-4').title, 'Calc HW 4');
+  } finally { bsCleanup(); }
+});
+
+test('bsD: a deadline deleted in plaenicke is not re-created', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    const ics = bsIcs([{ uid: 'bsD-5', summary: 'HW 5 - Due', date: far(2) }]);
+    await refreshWith(ics);
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-5'));
+    saveItems(loadItems().filter((it) => it.id !== 'bs-bsD-5'));
+    saveTombstones([...loadTombstones(), { id: 'bs-bsD-5', kind: 'item', deletedAt: new Date(Date.now() + 1000).toISOString() }]);
+    reloadFromStorage('plaenicke.items');
+    await refreshWith(ics);
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-5'), false);
+  } finally { bsCleanup(); saveTombstones(loadTombstones().filter((t) => t.id !== 'bs-bsD-5')); }
+});
+
+test('bsD: tracking off keeps existing items and imports nothing new', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([{ uid: 'bsD-6', summary: 'HW 6 - Due', date: far(2) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-6'));
+    saveFeeds([bsFeed({ trackDeadlines: null, updatedAt: '2026-10-02T00:00:00.000Z' })]);
+    await refreshWith(bsIcs([{ uid: 'bsD-7', summary: 'HW 7 - Due', date: far(2) }]));
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-6'), true, 'kept');
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-7'), false, 'not imported');
+  } finally { bsCleanup(); }
+});
+
+test('bsD: a calendar hidden on this device still imports its deadlines', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed({ hidden: true })]);
+    await refreshWith(bsIcs([{ uid: 'bsD-8', summary: 'HW 8 - Due', date: far(2) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-8'));
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-8'), true);
+  } finally { bsCleanup(); }
+});
+
+test('bsD: the feed\'s own copy of a tracked deadline is hidden; the Deadline shows once', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([{ uid: 'bsD-9', summary: 'HW 9 - Due', date: far(3) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-9'));
+    const text = stringsOf(dayOf(far(3))).join(' | ');
+    assert.match(text, /MATH 234 · HW 9/);
+    assert.doesNotMatch(text, /HW 9 - Due/);
+  } finally { bsCleanup(); }
+});

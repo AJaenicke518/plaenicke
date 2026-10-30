@@ -25,6 +25,7 @@ import { renderPreview } from './preview.js';
 import { isVoiceSupported, listen, errorKind } from './voice.js';
 import { initSettings } from './settings.js';
 import { instancesForRange, syncStale, applyRemoteFeeds } from './feeds.js';
+import { planDeadlineImport, trackedCopyIds, hideTrackedCopies } from './deadlines.js';
 import { openItemSheet } from './itemsheet.js';
 import { showToast } from './toast.js';
 import { applyEdit, typeChangePatch, snapshotOf, nextStamp, EDITABLE_FIELDS } from './edit.js';
@@ -193,8 +194,17 @@ function liveItems() { return items.filter((it) => !pendingDeletes.has(it.id)); 
 function visibleItems(start, end) {
   return [
     ...liveItems().filter(isScheduled),
-    ...filterBySurface(instancesForRange(feeds, feedCache, start, end, deviceTz), visibility, CALENDAR),
+    ...filterBySurface(feedInstances(start, end), visibility, CALENDAR),
   ];
+}
+
+// feedInstances: every feed instance for [start, end], minus the feed's own
+// copy of a tracked Brightspace deadline (the Deadline item shows instead,
+// spec § 3.6). A deadline Alex deleted stays hidden too. Tombstones are read
+// through localState(), the one reader of local synced state (tests/sync.test.js).
+function feedInstances(start, end) {
+  return hideTrackedCopies(instancesForRange(feeds, feedCache, start, end, deviceTz),
+    feeds, trackedCopyIds(items, localState().tombstones));
 }
 
 // THE To-do AND Ideas PAGES READ `items` DIRECTLY, never visibleItems (V6
@@ -237,7 +247,10 @@ initSettings({
   // The stamp is repainted too (sweep F, O5): adding, removing or hiding a
   // calendar changes what is on screen, and so what the stamp is about.
   onFeedsChanged: () => {
-    feeds = loadFeeds(); feedCache = loadFeedCache(); render();
+    const prevCache = feedCache;
+    feeds = loadFeeds(); feedCache = loadFeedCache();
+    importDeadlines(prevCache);
+    render();
     stampUpdated(); stampFromFeeds();
   },
   // Settings' manual Sync and Add calendar fetch outside the background batch.
@@ -257,6 +270,8 @@ initSettings({
   // visibilityState nor connectivity.
   onSyncedDataChanged: () => scheduleSync(),
   applyState: applySyncedState,
+  // Brightspace deadlines: the Settings row's note and its "Remove them".
+  deadlines: { status: () => deadlineStatus, removeHeld: removeHeldDeadlines },
 });
 
 // The top box's line: Ideas, ticks, deletes, edits and the top box's own adds.
@@ -549,6 +564,66 @@ function handleDelete(id) {
     // removes it on the next sync (the pre-4b deleteItem behaved the same).
     render();
   }
+}
+
+// --- Brightspace deadlines (spec 2026-10-30) --------------------------------
+//
+// A SECOND ITEMS WRITER PATH, inside app.js on purpose (CLAUDE.md, Ownership):
+// the plan comes from js/deadlines.js (pure); the writes land here, in the
+// module-scope `items`, saved once. Tombstones first, as deleteItem does.
+// prevCache is this device's feed cache BEFORE the refresh: a field is
+// patched only when Brightspace changed it between the two (edits stick).
+let deadlineStatus = { note: null, held: [] };
+
+function applyDeadlinePlan({ create, update, remove }) {
+  if (create.length === 0 && update.length === 0 && remove.length === 0) return;
+  const now = nowISO();
+  for (const id of remove) {
+    const rec = items.find((it) => it.id === id);
+    addTombstone(id, 'item', nextStamp(now, rec && rec.updatedAt));
+  }
+  const gone = new Set(remove);
+  const patches = new Map(update.map((u) => [u.id, u.patch]));
+  const made = create.map((c) => makeItem({ title: c.title, date: c.date, time: c.time, type: 'due' }, {
+    id: c.id, createdAt: localStamp(new Date()), updatedAt: now,
+  }));
+  const prev = items;
+  items = [
+    ...items.filter((it) => !gone.has(it.id))
+      .map((it) => (patches.has(it.id) ? applyEdit(it, patches.get(it.id), nextStamp(now, it.updatedAt)) : it)),
+    ...made,
+  ];
+  try {
+    saveItems(items);
+  } catch (e) {
+    items = prev;
+    throw e;
+  }
+  render();
+  scheduleSync();
+}
+
+function importDeadlines(prevCache) {
+  try {
+    const plan = planDeadlineImport({
+      feeds, prevCache, cache: feedCache, items, tombstones: localState().tombstones,
+      failedFeedIds, pendingIds: pendingDeletes, todayISO: toISO(new Date()),
+    });
+    deadlineStatus = { note: plan.note, held: plan.held };
+    applyDeadlinePlan(plan);
+  } catch (e) {
+    // Never swallowed: the top line says why, and the console names the error
+    // (never a feed URL). Nothing was saved; the next refresh retries.
+    setMessage(e.message);
+    console.error('plaenicke: deadline import failed', e && e.name);
+  }
+}
+
+function removeHeldDeadlines() {
+  const live = new Set(items.map((it) => it.id));
+  const held = deadlineStatus.held.filter((id) => live.has(id) && !pendingDeletes.has(id));
+  deadlineStatus = { note: null, held: [] };
+  applyDeadlinePlan({ create: [], update: [], remove: held });
 }
 
 // setDone — V6's To-do checkbox, and THE APP'S FIRST EDIT PATH (spec § 5.1).
@@ -1046,7 +1121,7 @@ function renderWeek() {
   // (as visibleItems does) and the list takes the slice it lists.
   // The grid is the calendar surface and the list the list surface
   // (js/visibility.js), so each takes its own filter of the one expansion.
-  const weekInsts = instancesForRange(feeds, feedCache, viewWeekStart, end, deviceTz);
+  const weekInsts = feedInstances(viewWeekStart, end);
   const gridInsts = filterBySurface(weekInsts, visibility, CALENDAR);
   const listInsts = filterBySurface(weekInsts, visibility, LISTS);
   renderWeekView(els.weekGrid, viewWeekStart,
@@ -1141,11 +1216,11 @@ function renderToday() {
   // a series hidden from lists is not the "Next:" line either (ruling 1).
   const today = buildToday(
     liveItems(),
-    filterBySurface(instancesForRange(feeds, feedCache, todayISO, addDays(todayISO, NEXT_DAYS), deviceTz), visibility, LISTS),
+    filterBySurface(feedInstances(todayISO, addDays(todayISO, NEXT_DAYS)), visibility, LISTS),
     todayISO,
     minutesNow(now),
     () => filterBySurface(
-      instancesForRange(feeds, feedCache, addDays(todayISO, 1), addDays(todayISO, LOOKAHEAD_DAYS), deviceTz),
+      feedInstances(addDays(todayISO, 1), addDays(todayISO, LOOKAHEAD_DAYS)),
       visibility, LISTS,
     ),
   );
@@ -1408,10 +1483,12 @@ function backgroundSyncFeeds(feedList) {
   // not fetch (still fresh) keeps whatever its last fetch said.
   const settle = (results) => {
     feedBatch = null;
+    const prevCache = feedCache;
     feedCache = loadFeedCache();
     render();
     if (results === null) for (const f of feedList) failedFeedIds.add(f.id);
     else for (const [id, r] of Object.entries(results)) { if (r.ok) failedFeedIds.delete(id); else failedFeedIds.add(id); }
+    importDeadlines(prevCache);
     stampFromFeeds();
     if (feedQueue.size > 0) {
       const queued = new Set(feedQueue);
