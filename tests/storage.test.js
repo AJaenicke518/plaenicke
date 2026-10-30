@@ -563,3 +563,11 @@ test('each saver writes to its pinned key, including the two private ones', () =
     assert.notEqual(localStorage.getItem(key), null, `nothing was written to ${key}`);
   }
 });
+
+test('feeds: an optional trackDeadlines field round-trips through save/load', () => {
+  installFakeLocalStorage();
+  const f = { id: 'f1', url: 'https://x/f.ics', name: 'BS', color: 'c', hidden: false,
+    updatedAt: '2026-10-30T00:00:00.000Z', trackDeadlines: { from: '2026-10-30' } };
+  saveFeeds([f]);
+  assert.deepEqual(loadFeeds()[0].trackDeadlines, { from: '2026-10-30' });
+});
