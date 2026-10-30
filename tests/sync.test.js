@@ -7,7 +7,7 @@ import { fetchWithTimeout, FETCH_TIMEOUT_MS } from '../js/fetchtimeout.js';
 import { linkWithCode, clearAdoptionPending, tokenHash } from '../js/auth.js';
 import { encryptBlob, decryptBlob, generateEncKey, bytesToBase64url, composeLinkCode } from '../js/crypto.js';
 import { SCHEMA_VERSION, toWire } from '../js/merge.js';
-import { saveItems, loadItems, loadFeeds, saveFeeds, saveAuth, loadSyncState, saveSyncState } from '../js/storage.js';
+import { saveItems, loadItems, loadFeeds, saveFeeds, saveAuth, loadSyncState, saveSyncState, saveDeadlineBaseline } from '../js/storage.js';
 
 const NOW = () => new Date('2026-08-02T12:00:00.000Z');
 const item = (id, updatedAt) => ({ id, title: `t-${id}`, date: '2026-08-02', time: null, updatedAt });
@@ -970,6 +970,20 @@ test('localState reads the synced keys through the storage loaders', () => {
   assert.equal(out.items[0].updatedAt, '2026-07-01T00:00:00.000Z');
   assert.deepEqual(out.feeds, loadFeeds());
   assert.deepEqual(out.tombstones, [{ id: 't1', kind: 'item', deletedAt: '2026-08-01T00:00:00.000Z' }]);
+});
+
+// The deadline baseline (plaenicke.deadlineBaseline) is device-local: two
+// devices' baselines differ by design, and syncing one would hand the other a
+// record of imports it never made (spec 2026-10-30 § 3.5, amended 2026-10-31).
+test('the deadline baseline is never part of the synced state', () => {
+  installFakeLocalStorage();
+  saveDeadlineBaseline({ f1: { fetchedAt: '2026-10-30T12:00:00.000Z',
+    deadlines: { 'bs-baseline-only': { title: 'Baseline only', date: '2026-11-02', time: null } } } });
+  const out = localState();
+  assert.deepEqual(Object.keys(out).sort(), ['feeds', 'items', 'schemaVersion', 'tombstones']);
+  const wire = JSON.stringify(toWire(out));
+  assert.doesNotMatch(wire, /bs-baseline-only|deadlineBaseline|Baseline only/);
+  assert.notEqual(localStorage.getItem('plaenicke.deadlineBaseline'), null, 'fixture check: the baseline is stored');
 });
 
 // The shape used to be rebuilt in three places. The other two now call

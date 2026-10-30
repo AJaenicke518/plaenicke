@@ -5,7 +5,7 @@ import {
   serializeFeeds, deserializeFeeds, loadFeeds, saveFeeds,
   serializeFeedCache, deserializeFeedCache, loadFeedCache, saveFeedCache,
   loadTombstones, saveTombstones, addTombstone,
-  QuotaError,
+  QuotaError, loadDeadlineBaseline, saveDeadlineBaseline, DEADLINE_BASELINE_KEY,
 } from '../js/storage.js';
 import { installFakeLocalStorage } from './fake-localstorage.js';
 import { loadAuth, saveAuth, clearAuth, loadSyncState, saveSyncState } from '../js/storage.js';
@@ -570,4 +570,40 @@ test('feeds: an optional trackDeadlines field round-trips through save/load', ()
     updatedAt: '2026-10-30T00:00:00.000Z', trackDeadlines: { from: '2026-10-30' } };
   saveFeeds([f]);
   assert.deepEqual(loadFeeds()[0].trackDeadlines, { from: '2026-10-30' });
+});
+
+// --- Brightspace deadline baseline (spec 2026-10-30 § 3.5, amended 2026-10-31)
+// Device-local: what this device last imported per tracking feed. Never synced.
+test('deadline baseline: round trip under its own pinned key', () => {
+  installFakeLocalStorage();
+  const b = { f1: { fetchedAt: '2026-10-30T12:00:00.000Z',
+    deadlines: { 'bs-u1': { title: 'MATH 234 · HW 1', date: '2026-11-02', time: '23:59' },
+      'bs-u2': { title: 'Survey', date: '2026-11-05', time: null } } } };
+  saveDeadlineBaseline(b);
+  assert.equal(DEADLINE_BASELINE_KEY, 'plaenicke.deadlineBaseline');
+  assert.notEqual(localStorage.getItem('plaenicke.deadlineBaseline'), null);
+  assert.deepEqual(loadDeadlineBaseline(), b);
+});
+
+test('deadline baseline: missing, corrupt or wrong-shaped values load as {}; bad entries and records are dropped', () => {
+  installFakeLocalStorage();
+  assert.deepEqual(loadDeadlineBaseline(), {});
+  for (const raw of ['{not json', '[]', 'null', '"x"', '42']) {
+    localStorage.setItem('plaenicke.deadlineBaseline', raw);
+    assert.deepEqual(loadDeadlineBaseline(), {}, raw);
+  }
+  localStorage.setItem('plaenicke.deadlineBaseline', JSON.stringify({
+    good: { fetchedAt: 't', deadlines: { 'bs-a': { title: 'A', date: '2026-11-01', time: null },
+      'bs-bad': { title: 'B', date: 7, time: null } } },
+    noFetchedAt: { deadlines: {} },
+    noDeadlines: { fetchedAt: 't' },
+    arrayDeadlines: { fetchedAt: 't', deadlines: [] },
+  }));
+  assert.deepEqual(loadDeadlineBaseline(), { good: { fetchedAt: 't', deadlines: { 'bs-a': { title: 'A', date: '2026-11-01', time: null } } } });
+});
+
+test('deadline baseline: a quota failure is a QuotaError', () => {
+  installFakeLocalStorage();
+  localStorage.setItem = () => { const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; };
+  assert.throws(() => saveDeadlineBaseline({}), QuotaError);
 });
