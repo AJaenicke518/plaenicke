@@ -9445,3 +9445,70 @@ test('bsD: each return to visible waits for that visit\'s sync, even after an ea
     assert.equal(loadItems().some((it) => it.id === 'bs-bsD-r2f'), true);
   } finally { net.restore(); bsCleanup(); }
 });
+
+// Residual 1 (re-review): a sync already in flight when the tab hides runs to
+// completion, and its GET was answered before the hide. It must not release
+// the import deferred on the NEXT visit: the other device may have ticked in
+// between, and an import run on the pre-tick copy is stamped later than the
+// tick, so the next merge keeps the import's patch and loses the tick. Only a
+// sync STARTED during the current visit releases it.
+test('bsD: a sync in flight across a hide does not release the next visit\'s deferred import', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const { getLink } = await import('../js/auth.js');
+  let net = null;
+  try {
+    // Device B, unlinked, imports Y.
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([{ uid: 'bsD-r1', summary: 'HW R1 - Due', date: far(2) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-r1'));
+    const imported = loadItems().find((it) => it.id === 'bs-bsD-r1');
+    assert.ok(imported && imported.date === far(2) && imported.done === false, 'fixture check: Y imported');
+    await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+    clearAdoptionPending();
+    const encKey = getLink().encKey;
+    // The account as it stood before the other device's tick.
+    const preTick = await encryptBlob(encKey, state({ items: [imported] }));
+    net = bsLinkedNet(bsIcs([{ uid: 'bsD-r1', summary: 'HW R1 - Due', date: far(4) }]));
+    // A sync starts and its GET is held.
+    resume();
+    await drainUntil(() => net.state.gets > 0);
+    assert.equal(net.state.gets, 1, 'fixture check: a sync read is held');
+    // Hide.
+    globalThis.document.visibilityState = 'hidden';
+    try { resume(); } finally { globalThis.document.visibilityState = 'visible'; }
+    // The other device ticks Y and writes notes.
+    const ticked = { ...imported, done: true, notes: 'started', updatedAt: new Date(Date.parse(imported.updatedAt) + 1).toISOString() };
+    const postTick = await encryptBlob(encKey, state({ items: [ticked] }));
+    // Show: the feed refetch brings Y's new date; the import is deferred.
+    const cache = JSON.parse(localStorage.getItem('plaenicke.feedCache') || '{}');
+    for (const k of Object.keys(cache)) cache[k].fetchedAt = '2000-01-01T00:00:00.000Z';
+    localStorage.setItem('plaenicke.feedCache', JSON.stringify(cache));
+    reloadFromStorage('plaenicke.feeds');
+    resume();
+    await drainUntil(bsCacheFetched);
+    assert.ok(bsCacheFetched(), 'fixture check: the feed refetched on the show');
+    await drain();
+    assert.equal(loadItems().find((it) => it.id === 'bs-bsD-r1').date, far(2), 'fixture check: the import is deferred');
+    assert.equal(net.state.gets, 1, 'fixture check: the show did not start a second sync');
+    // Release the held GET with the pre-tick account state.
+    net.release(() => Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 3, blob: preTick }) }));
+    await drainUntil(() => loadSyncState().lastSyncedAt !== null);
+    assert.notEqual(loadSyncState().lastSyncedAt, null, 'fixture check: the held sync finished ok');
+    await drain();
+    assert.equal(loadItems().find((it) => it.id === 'bs-bsD-r1').date, far(2),
+      'a sync started before the hide must not release the import');
+    // The next sync (the re-arm of the trigger the show queued) pulls the tick
+    // and releases the import, which patches the date and keeps the tick.
+    net.state.getResponse = () => Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 5, blob: postTick }) });
+    await drainUntil(() => loadItems().find((it) => it.id === 'bs-bsD-r1')?.date === far(4), 6000);
+    const y = loadItems().find((it) => it.id === 'bs-bsD-r1');
+    assert.equal(y.date, far(4), 'the next successful sync released the import');
+    assert.equal(y.done, true, 'the tick is kept');
+    assert.equal(y.notes, 'started', 'the notes are kept');
+    assert.ok(net.state.gets >= 2, 'fixture check: a second sync ran');
+  } finally {
+    if (net) net.restore();
+    bsCleanup();
+  }
+});

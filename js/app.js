@@ -257,7 +257,13 @@ export const deadlines = { status: () => deadlineStatus, removeHeld: removeHeldD
 // Residual (accepted): a Brightspace change applied in the same sync window
 // as a tick on the other device can still lose the tick; this removes the
 // stale-device case, not true concurrency.
+// A sync releases the wait only if it STARTED during the current visit
+// (residual 1): one already in flight when the tab hid read the account before
+// the hide, so it can predate the other device's latest writes. `visit` counts
+// visits (launch is the first; the visible handler increments it) and runSync
+// captures it when a sync actually starts, not when it only marks syncPending.
 let syncedSinceVisible = false;
+let visit = 1;
 let deadlineImportDeferred = false;
 const importWaitsForSync = () => isLinked() && (isAdoptionPending() || !syncedSinceVisible);
 
@@ -1657,6 +1663,7 @@ async function runSync() {
   if (document.visibilityState === 'hidden') return;
   if (syncInFlight) { syncPending = true; return; }
   syncInFlight = true;
+  const startedInVisit = visit;
   let synced = false;
   try {
     const result = await syncOnce({
@@ -1702,7 +1709,7 @@ async function runSync() {
     // would wait for an unrelated later trigger instead of running promptly.
     if (syncPending) { syncPending = false; scheduleSync(); }
   }
-  if (synced) {
+  if (synced && startedInVisit === visit) {
     syncedSinceVisible = true;
     // The import asked for while waiting. importDeadlines never throws.
     if (deadlineImportDeferred) importDeadlines();
@@ -1848,6 +1855,7 @@ document.addEventListener('visibilitychange', () => {
   // The other device may have written while this one was away: the deadline
   // import waits for this visit's first successful sync (C2, above).
   syncedSinceVisible = false;
+  visit += 1;
   noteLaunch();
   render(); // refreshForToday runs first, inside render
   syncTodayTick();
