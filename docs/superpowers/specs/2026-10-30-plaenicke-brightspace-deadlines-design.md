@@ -125,4 +125,4 @@ Test-first throughout; gate on `# fail 0` and `# cancelled 0`; mutation-test the
 
 Submission status (Valence API, needs LMU ITS); notifications for these deadlines (separate notifications design); per-course filtering.
 
-**Consequence to confirm:** Brightspace owns an imported deadline's title, date and time. If Alex edits one of those in plaenicke, the next refresh sets it back (§ 3.5 step 2 sees a difference). Notes, type-independent fields and the tick are never touched by the import.
+**Consequence to confirm:** Brightspace owns an imported deadline's title, date and time. If Alex edits one of those in plaenicke, the next refresh sets it back (§ 3.5 step 2 sees a difference). Notes, type and the tick are never touched by the import.
