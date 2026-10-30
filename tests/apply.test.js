@@ -24,7 +24,7 @@ import { SCHEMA_VERSION, toWire } from '../js/merge.js';
 import { localState } from '../js/sync.js';
 import {
   saveItems, loadItems, saveTombstones, saveFeeds, loadFeeds, loadTombstones, loadSyncState, saveSyncState,
-  loadLaunches,
+  loadLaunches, loadDeadlineBaseline,
 } from '../js/storage.js';
 import { linkWithCode, clearAdoptionPending } from '../js/auth.js';
 import { FETCH_TIMEOUT_MS } from '../js/fetchtimeout.js';
@@ -8933,6 +8933,7 @@ async function refreshWith(ics) {
 function bsCleanup() {
   saveFeeds([]);
   localStorage.removeItem('plaenicke.feedCache');
+  localStorage.removeItem('plaenicke.deadlineBaseline');
   saveItems(loadItems().filter((it) => !it.id.startsWith('bs-')));
   reloadFromStorage('plaenicke.feeds');
   reloadFromStorage('plaenicke.items');
@@ -9119,4 +9120,127 @@ test('bsD: a failed "Remove them" keeps the held deadlines and the held list', a
     bsCleanup();
     saveTombstones(loadTombstones().filter((t) => !heldIds.includes(t.id)));
   }
+});
+
+// Final review C1: the other device imported bs-X from a newer fetch, and it
+// reached this device by sync. This device's own cache is still fresh (< 30
+// min), so a resume fetches nothing and settles from it; bs-X is absent from
+// that older cache. It must not be removed: this device never imported it.
+test('bsD: a synced deadline this device never imported survives a no-fetch resume and a Settings change', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([{ uid: 'bsD-c1a', summary: 'HW A - Due', date: far(2) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-c1a'));
+    // The other device's import arrives by sync.
+    const other = { ...loadItems().find((it) => it.id === 'bs-bsD-c1a'), id: 'bs-bsD-c1x', title: 'MATH 234 · HW X', date: far(3) };
+    saveItems([...loadItems(), other]);
+    reloadFromStorage('plaenicke.items');
+    resume(); // the cache is fresh: settles with nothing fetched, then imports
+    await drain();
+    tapColourDot('Brightspace');
+    await drain();
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-c1x'), true, 'still present');
+    assert.equal(loadTombstones().some((t) => t.id === 'bs-bsD-c1x'), false, 'no tombstone');
+  } finally { bsCleanup(); saveTombstones(loadTombstones().filter((t) => t.id !== 'bs-bsD-c1x')); }
+});
+
+// Final review I1: a storage reload (a sync landing, another tab's write)
+// while the feed batch is still running used to replace the "before" cache
+// with the one syncFeed had already written, so the Brightspace date change
+// looked like no change and was never applied. Two feeds; the Brightspace one
+// is fetched first, the second is held while the reload happens.
+test('bsD: a reload mid feed batch does not swallow a Brightspace date change', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const plain = { id: 'bsD-plain', url: 'https://example.com/bsD-plain.ics', name: 'Plain', color: 'var(--feed-palette-2)',
+    hidden: false, updatedAt: '2026-10-01T00:00:00.000Z' };
+  const original = globalThis.fetch;
+  let releasePlain = () => {};
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([{ uid: 'bsD-i1', summary: 'HW I1 - Due', date: far(2) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-i1'));
+    saveFeeds([bsFeed(), plain]);
+    const moved = bsIcs([{ uid: 'bsD-i1', summary: 'HW I1 - Due', date: far(4) }]);
+    const plainHeld = new Promise((r) => { releasePlain = r; });
+    let plainAsked = false;
+    globalThis.fetch = async (url) => {
+      const u = decodeURIComponent(String(url));
+      if (u.includes('/feed?url=') && u.includes('bsD-plain')) {
+        plainAsked = true;
+        await plainHeld;
+        return { ok: true, status: 200, text: async () => 'BEGIN:VCALENDAR\r\nEND:VCALENDAR' };
+      }
+      if (u.includes('/feed?url=')) return { ok: true, status: 200, text: async () => moved };
+      return original(url);
+    };
+    const cache = JSON.parse(localStorage.getItem('plaenicke.feedCache') || '{}');
+    for (const k of Object.keys(cache)) cache[k].fetchedAt = '2000-01-01T00:00:00.000Z';
+    localStorage.setItem('plaenicke.feedCache', JSON.stringify(cache));
+    reloadFromStorage('plaenicke.feeds');
+    resume();
+    await drainUntil(() => plainAsked);
+    assert.ok(plainAsked, 'fixture check: the second fetch is held');
+    assert.ok(JSON.parse(localStorage.getItem('plaenicke.feedCache'))['bsD-feed'].fetchedAt > '2001', 'fixture check: Brightspace already fetched');
+    reloadFromStorage('plaenicke.items'); // a sync / another tab lands mid batch
+    releasePlain();
+    await drainUntil(() => loadItems().find((it) => it.id === 'bs-bsD-i1')?.date === far(4));
+    assert.equal(loadItems().find((it) => it.id === 'bs-bsD-i1').date, far(4));
+  } finally {
+    releasePlain();
+    globalThis.fetch = original;
+    bsCleanup();
+  }
+});
+
+// Spec § 5 (final review I4): a write failure inside the import itself — not
+// only "Remove them" — surfaces on the top line, leaves items and this
+// device's baseline as they were, and the next refresh applies the change.
+test('bsD: an import whose items write fails says so, keeps the baseline, and the next refresh retries', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([{ uid: 'bsD-i4', summary: 'HW I4 - Due', date: far(2) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-i4'));
+    const itemsBefore = loadItems();
+    const baselineBefore = loadDeadlineBaseline();
+    assert.ok(baselineBefore['bsD-feed'], 'fixture check: the first import recorded a baseline');
+    const changed = bsIcs([{ uid: 'bsD-i4', summary: 'HW I4 - Due', date: far(4) }, { uid: 'bsD-i4b', summary: 'HW I4b - Due', date: far(5) }]);
+    globalThis.document.getElementById('message').textContent = '';
+    const quota = refuseItemsWrites();
+    try {
+      await refreshWith(changed);
+      await drainUntil(() => quota.refused() > 0);
+    } finally {
+      quota.restore();
+    }
+    assert.ok(quota.refused() > 0, 'fixture check: the import reached the items write');
+    assert.match(messageText(), /storage quota/);
+    assert.deepEqual(loadItems(), itemsBefore, 'items unchanged');
+    assert.deepEqual(loadDeadlineBaseline(), baselineBefore, 'baseline not advanced');
+    await refreshWith(changed);
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-i4b'));
+    assert.equal(loadItems().find((it) => it.id === 'bs-bsD-i4').date, far(4), 'the retry applies the date change');
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-i4b'), true, 'and the create');
+  } finally { bsCleanup(); }
+});
+
+// Final review I3: "Stop tracking" keeps the Deadline items, so the feed's
+// own copy must stay hidden, or every deadline shows twice.
+test('bsD: after "Stop tracking" the feed copy of an existing deadline stays hidden', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([{ uid: 'bsD-i3', summary: 'HW I3 - Due', date: far(3) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-i3'));
+    saveFeeds([bsFeed({ trackDeadlines: null, updatedAt: '2026-10-02T00:00:00.000Z' })]);
+    reloadFromStorage('plaenicke.feeds');
+    const text = stringsOf(dayOf(far(3))).join(' | ');
+    assert.match(text, /MATH 234 · HW I3/);
+    assert.doesNotMatch(text, /HW I3 - Due/);
+  } finally { bsCleanup(); }
 });

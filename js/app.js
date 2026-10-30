@@ -1,6 +1,6 @@
 import {
   loadItems, saveItems, loadFeeds, loadFeedCache, addTombstone,
-  saveTombstones, recordLaunch, STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY, SERIES_VISIBILITY_KEY, QuotaError,
+  saveTombstones, recordLaunch, loadDeadlineBaseline, saveDeadlineBaseline, STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY, SERIES_VISIBILITY_KEY, QuotaError,
 } from './storage.js';
 import {
   loadVisibility, filterBySurface, isShown, canHideSeries, setSeriesVisibility, CALENDAR, LISTS,
@@ -200,11 +200,12 @@ function visibleItems(start, end) {
 
 // feedInstances: every feed instance for [start, end], minus the feed's own
 // copy of a tracked Brightspace deadline (the Deadline item shows instead,
-// spec § 3.6). A deadline Alex deleted stays hidden too. Tombstones are read
+// spec § 3.6). A deadline Alex deleted stays hidden too, and so does the copy
+// on a calendar no longer tracking (amended 2026-10-31). Tombstones are read
 // through localState(), the one reader of local synced state (tests/sync.test.js).
 function feedInstances(start, end) {
   return hideTrackedCopies(instancesForRange(feeds, feedCache, start, end, deviceTz),
-    feeds, trackedCopyIds(items, localState().tombstones));
+    trackedCopyIds(items, localState().tombstones));
 }
 
 // THE To-do AND Ideas PAGES READ `items` DIRECTLY, never visibleItems (V6
@@ -253,9 +254,8 @@ initSettings({
   // The stamp is repainted too (sweep F, O5): adding, removing or hiding a
   // calendar changes what is on screen, and so what the stamp is about.
   onFeedsChanged: () => {
-    const prevCache = feedCache;
     feeds = loadFeeds(); feedCache = loadFeedCache();
-    importDeadlines(prevCache);
+    importDeadlines();
     render();
     stampUpdated(); stampFromFeeds();
   },
@@ -577,8 +577,12 @@ function handleDelete(id) {
 // A SECOND ITEMS WRITER PATH, inside app.js on purpose (CLAUDE.md, Ownership):
 // the plan comes from js/deadlines.js (pure); the writes land here, in the
 // module-scope `items`, saved once. Tombstones first, as deleteItem does.
-// prevCache is this device's feed cache BEFORE the refresh: a field is
-// patched only when Brightspace changed it between the two (edits stick).
+// Updates and removals are judged against this device's deadline baseline
+// (plaenicke.deadlineBaseline, device-local: what THIS device last imported),
+// never against the feed cache: a field is patched only when Brightspace
+// changed it since then (edits stick), and only an id this device imported
+// can be removed. The baseline is advanced only once the plan's writes
+// succeeded, so a failed write is retried by the next import.
 // deadlineStatus and the `deadlines` hooks are declared above initSettings.
 
 function applyDeadlinePlan({ create, update, remove }) {
@@ -609,17 +613,26 @@ function applyDeadlinePlan({ create, update, remove }) {
   scheduleSync();
 }
 
-function importDeadlines(prevCache) {
+function importDeadlines() {
   try {
+    const baseline = loadDeadlineBaseline();
     const plan = planDeadlineImport({
-      feeds, prevCache, cache: feedCache, items, tombstones: localState().tombstones,
+      feeds, baseline, cache: feedCache, items, tombstones: localState().tombstones,
       failedFeedIds, pendingIds: pendingDeletes, todayISO: toISO(new Date()),
     });
     deadlineStatus = { note: plan.note, held: plan.held };
     applyDeadlinePlan(plan);
+    // Only after the writes landed (or there were none): a failed write leaves
+    // the stored baseline as it was, so the next import plans the same change.
+    if (JSON.stringify(plan.nextBaseline) !== JSON.stringify(baseline)) saveDeadlineBaseline(plan.nextBaseline);
   } catch (e) {
     // Never swallowed: the top line says why, and the console names the error
-    // (never a feed URL). Nothing was saved; the next refresh retries.
+    // (never a feed URL). The baseline was not advanced, so the next import
+    // plans this round again. If the items write failed, `items` is as it
+    // was, but tombstones for this round's removals may already be stored
+    // (written first, as deleteItem does) and the next sync applies them. If
+    // only the baseline write failed, the items landed and the next import
+    // finds nothing left to write for them.
     setMessage(e.message);
     console.error('plaenicke: deadline import failed', e && e.name);
   }
@@ -1497,12 +1510,11 @@ function backgroundSyncFeeds(feedList) {
   // not fetch (still fresh) keeps whatever its last fetch said.
   const settle = (results) => {
     feedBatch = null;
-    const prevCache = feedCache;
     feedCache = loadFeedCache();
     render();
     if (results === null) for (const f of feedList) failedFeedIds.add(f.id);
     else for (const [id, r] of Object.entries(results)) { if (r.ok) failedFeedIds.delete(id); else failedFeedIds.add(id); }
-    importDeadlines(prevCache);
+    importDeadlines();
     stampFromFeeds();
     if (feedQueue.size > 0) {
       const queued = new Set(feedQueue);

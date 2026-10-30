@@ -64,17 +64,46 @@ export function deriveDeadlines(events, fromISO, todayISO) {
 const isTracking = (f) => Boolean(f && f.trackDeadlines && typeof f.trackDeadlines.from === 'string');
 const NO_DEADLINES = 'Brightspace returned no deadlines — none removed';
 const OWNED_FIELDS = ['title', 'date', 'time'];
+const isLive = (it) => Boolean(it) && typeof it.date === 'string';
+
+// A cache entry written before LOCATION was parsed (spec § 3.2) has events
+// with no `location` key at all (a parsed event without LOCATION has null).
+// Its derived titles lack the course code, so it is not a refresh: recording
+// those titles in the baseline would make the next real fetch look like a
+// Brightspace title change and overwrite a title Alex renamed.
+const isPreRelease = (entry) => entry.events.some((ev) => !ev || !('location' in ev));
+
+const recordOf = (d) => ({ title: d.title, date: d.date, time: d.time });
 
 // planDeadlineImport: what app.js must write after a feed refresh (spec § 3.5,
-// § 4). Never reads the clock, storage or the device zone.
-export function planDeadlineImport({ feeds, prevCache, cache, items, tombstones, failedFeedIds, pendingIds, todayISO }) {
-  const plan = { create: [], update: [], remove: [], held: [], note: null };
+// § 4, amended 2026-10-31). Never reads the clock, storage or the device zone.
+//
+// `baseline` is THIS device's record of what it last imported, per tracking
+// feed: { [feedId]: { fetchedAt, deadlines: { [id]: { title, date, time } } } }
+// (plaenicke.deadlineBaseline, device-local). Every update and removal is
+// judged against it, never against the feed cache, which only says what this
+// device last fetched and can be older than what the other device imported:
+//   - update: a field differs between the baseline record and the current
+//     derived value (Brightspace changed it) AND the item differs. No baseline
+//     record for the id -> no update.
+//   - remove: the id is in this feed's baseline, absent from this feed's
+//     current set, the feed was re-fetched since the baseline (fetchedAt
+//     differs), and no other tracking feed lists it. An id this device never
+//     imported is never removed by this device. Then the § 4 guards.
+// `nextBaseline` is what app.js stores once the writes succeeded: per tracking
+// feed that refreshed OK and was not degenerate, the current derived set plus
+// the candidates not removed this round (held or blocked), so they stay
+// candidates. Feeds that failed, were degenerate or are pre-release keep their
+// old entry; feeds no longer tracking are dropped.
+export function planDeadlineImport({ feeds, baseline, cache, items, tombstones, failedFeedIds, pendingIds, todayISO }) {
+  const plan = { create: [], update: [], remove: [], held: [], note: null, nextBaseline: {} };
   const tracking = feeds.filter(isTracking);
   if (tracking.length === 0) return plan;
 
   const dead = new Set(tombstones.filter((t) => t.kind === 'item').map((t) => t.id));
   const byId = new Map(items.map((it) => [it.id, it]));
   const current = new Map();
+  const ok = []; // { feed, entry, derived, degenerate, base }
   let allOk = true;
   // § 4.2, per feed: one feed that returned nothing trackable blocks every
   // removal this round, even when another tracking feed is healthy.
@@ -82,16 +111,17 @@ export function planDeadlineImport({ feeds, prevCache, cache, items, tombstones,
 
   for (const feed of tracking) {
     const entry = cache[feed.id];
-    if (!entry || !Array.isArray(entry.events) || entry.quotaDropped || failedFeedIds.has(feed.id)) {
+    const base = baseline[feed.id];
+    if (!entry || !Array.isArray(entry.events) || entry.quotaDropped || failedFeedIds.has(feed.id) || isPreRelease(entry)) {
       allOk = false;
+      if (base) plan.nextBaseline[feed.id] = base;
       continue;
     }
-    const prevEntry = prevCache[feed.id];
-    const prev = prevEntry && Array.isArray(prevEntry.events) && !prevEntry.quotaDropped
-      ? deriveDeadlines(prevEntry.events, feed.trackDeadlines.from, todayISO)
-      : new Map();
     const derived = deriveDeadlines(entry.events, feed.trackDeadlines.from, todayISO);
-    if (entry.events.length === 0 || derived.size === 0) degenerate = true;
+    const feedDegenerate = entry.events.length === 0 || derived.size === 0;
+    if (feedDegenerate) degenerate = true;
+    ok.push({ feed, entry, derived, degenerate: feedDegenerate, base });
+    const was = base ? base.deadlines : {};
     for (const [id, d] of derived) {
       if (current.has(id)) continue;
       current.set(id, d);
@@ -101,30 +131,57 @@ export function planDeadlineImport({ feeds, prevCache, cache, items, tombstones,
         plan.create.push({ id, title: d.title, date: d.date, time: d.time });
         continue;
       }
-      const was = prev.get(id);
-      if (!was) continue; // no record of Brightspace's last value: leave the item alone
+      const prev = was[id];
+      if (!prev) continue; // this device has no record of Brightspace's last value: leave the item alone
       const patch = {};
-      for (const k of OWNED_FIELDS) if (was[k] !== d[k] && item[k] !== d[k]) patch[k] = d[k];
+      for (const k of OWNED_FIELDS) if (prev[k] !== d[k] && item[k] !== d[k]) patch[k] = d[k];
       if ('time' in patch && item.endTime) patch.endTime = null;
       if (Object.keys(patch).length > 0) plan.update.push({ id, patch });
     }
   }
 
-  const missing = items
-    .filter((it) => it.id.startsWith(DEADLINE_ID_PREFIX) && !current.has(it.id) && !pendingIds.has(it.id)
-      && typeof it.date === 'string' && it.date >= todayISO)
-    .map((it) => it.id);
-  if (missing.length === 0 || !allOk) return plan;
-  if (degenerate) {
-    plan.note = NO_DEADLINES;
-    return plan;
+  // Removal candidates, per feed: ids this device imported from it, gone from
+  // its re-fetched copy and from every other tracking feed.
+  const candidates = []; // { feedId, id }
+  for (const { feed, entry, derived, base } of ok) {
+    if (!base || entry.fetchedAt === base.fetchedAt) continue;
+    for (const id of Object.keys(base.deadlines)) {
+      if (derived.has(id) || current.has(id)) continue;
+      candidates.push({ feedId: feed.id, id });
+    }
   }
-  if (missing.length > MAX_AUTO_REMOVALS) {
-    plan.held = missing;
-    plan.note = `${missing.length} deadlines disappeared from Brightspace — not removed`;
-    return plan;
+  // The § 4 guards that are about the item itself. An id whose item is gone
+  // (deleted, or never here) has nothing left to remove and drops out.
+  const live = candidates.filter(({ id }) => id.startsWith(DEADLINE_ID_PREFIX) && !dead.has(id) && isLive(byId.get(id)));
+  const removable = live.filter(({ id }) => !pendingIds.has(id) && byId.get(id).date >= todayISO).map(({ id }) => id);
+  const removableIds = [...new Set(removable)];
+
+  if (removableIds.length > 0 && allOk) {
+    if (degenerate) plan.note = NO_DEADLINES;
+    else if (removableIds.length > MAX_AUTO_REMOVALS) {
+      plan.held = removableIds;
+      plan.note = `${removableIds.length} deadlines disappeared from Brightspace — not removed`;
+    } else plan.remove = removableIds;
   }
-  plan.remove = missing;
+
+  const removed = new Set(plan.remove);
+  for (const { feed, entry, derived, degenerate: feedDegenerate, base } of ok) {
+    if (feedDegenerate) {
+      if (base) plan.nextBaseline[feed.id] = base;
+      continue;
+    }
+    const deadlines = {};
+    for (const [id, d] of derived) deadlines[id] = recordOf(d);
+    if (base && entry.fetchedAt === base.fetchedAt) {
+      // Not re-fetched: nothing was judged, so every earlier record stays.
+      for (const [id, r] of Object.entries(base.deadlines)) if (!(id in deadlines)) deadlines[id] = r;
+    } else {
+      for (const { feedId, id } of live) {
+        if (feedId === feed.id && !removed.has(id)) deadlines[id] = base.deadlines[id];
+      }
+    }
+    plan.nextBaseline[feed.id] = { fetchedAt: entry.fetchedAt, deadlines };
+  }
   return plan;
 }
 
@@ -135,8 +192,11 @@ export function trackedCopyIds(items, tombstones) {
   return ids;
 }
 
-export function hideTrackedCopies(instances, feeds, hiddenIds) {
-  const trackingIds = new Set(feeds.filter(isTracking).map((f) => f.id));
-  if (trackingIds.size === 0) return instances;
-  return instances.filter((inst) => !(trackingIds.has(inst.feedId) && hiddenIds.has(DEADLINE_ID_PREFIX + inst.uid)));
+// hideTrackedCopies: drop every feed instance whose bs-<uid> is a live
+// Deadline item or an item tombstone — for EVERY feed, tracking or not (spec
+// § 3.6, amended 2026-10-31). The items outlive "Stop tracking" and a removed
+// and re-added calendar, so the feed's own copy must stay hidden then too.
+export function hideTrackedCopies(instances, hiddenIds) {
+  if (hiddenIds.size === 0) return instances;
+  return instances.filter((inst) => !hiddenIds.has(DEADLINE_ID_PREFIX + inst.uid));
 }
