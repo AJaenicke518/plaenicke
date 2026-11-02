@@ -598,8 +598,9 @@ function handleDelete(id) {
 // module-scope `items`, saved once. Tombstones first, as deleteItem does.
 // Updates and removals are judged against this device's deadline baseline
 // (plaenicke.deadlineBaseline, device-local: what THIS device last imported),
-// never against the feed cache: a field is patched only when Brightspace
-// changed it since then (edits stick), and only an id this device imported
+// never against the feed cache: a field is patched only while the item
+// still holds the value Brightspace last gave this device for it (once Alex
+// changes a field, Brightspace never overwrites it), and only an id this device imported
 // can be removed. The baseline is advanced only once the plan's writes
 // succeeded, so a failed write is retried by the next import.
 // deadlineStatus and the `deadlines` hooks are declared above initSettings.
