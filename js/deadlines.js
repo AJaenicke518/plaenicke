@@ -84,8 +84,10 @@ const recordOf = (d) => ({ title: d.title, date: d.date, time: d.time });
 // judged against it, never against the feed cache, which only says what this
 // device last fetched and can be older than what the other device imported:
 //   - update: a field differs between the baseline record and the current
-//     derived value (Brightspace changed it) AND the item differs. No baseline
-//     record for the id -> no update.
+//     derived value (Brightspace changed it) AND the item still holds the
+//     baseline value (Alex has not changed it; decided 2026-11-02). A field he
+//     changed is never overwritten again. No baseline record for the id -> no
+//     update.
 //   - remove: the id is in this feed's baseline, absent from this feed's
 //     current set, the feed was re-fetched since the baseline (fetchedAt
 //     differs), and no other tracking feed lists it. An id this device never
@@ -141,7 +143,10 @@ export function planDeadlineImport({ feeds, baseline, cache, items, tombstones, 
       const prev = was[id];
       if (!prev) continue; // this device has no record of Brightspace's last value: leave the item alone
       const patch = {};
-      for (const k of OWNED_FIELDS) if (prev[k] !== d[k] && item[k] !== d[k]) patch[k] = d[k];
+      // Patch a field only while the item still holds the value Brightspace
+      // last gave this device (Alex, 2026-11-02). A field he changed -- here,
+      // or on the other device and synced -- is his for good.
+      for (const k of OWNED_FIELDS) if (prev[k] !== d[k] && item[k] === prev[k]) patch[k] = d[k];
       if ('time' in patch && item.endTime) patch.endTime = null;
       if (Object.keys(patch).length > 0) plan.update.push({ id, patch });
     }

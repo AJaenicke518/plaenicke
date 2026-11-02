@@ -163,9 +163,56 @@ test('plan: no baseline record for the id -> no patch (the device that saw the c
 
 test('plan: a time change clears an end time Alex set, so the edit validates', () => {
   const earlier = ev('u1', 'HW 1 - Due', '20261102T190000Z'); // 2026-11-02 11:00
-  const p = plan({ baseline: { f1: HW1_BASE }, cache: { f1: entry([earlier]) },
+  // The item holds the time Brightspace last gave (23:00), so the time is
+  // still Brightspace's to change (2026-11-02 rule); the end time is Alex's.
+  const p = plan({ baseline: { f1: bl({ 'bs-u1': rec('2026-11-02', 'MATH 234 · HW 1', '23:00') }) }, cache: { f1: entry([earlier]) },
     items: [own('bs-u1', { time: '23:00', endTime: '23:30' })] });
   assert.deepEqual(p.update, [{ id: 'bs-u1', patch: { time: '11:00', endTime: null } }]);
+});
+
+// Residual 2 (Alex, 2026-11-02): a field is patched only while the item still
+// holds the value Brightspace last gave THIS device for it (the baseline
+// record). Once Alex changed a field, Brightspace never overwrites it again.
+const T0 = 'MATH 234 · HW 1';
+const T1 = 'MATH 234 · HW 1 (v2)';
+const HW1_T1 = ev('u1', 'HW 1 (v2) - Due', '20261103T075900Z');
+
+test('plan: Alex\'s rename synced from the other device survives a stale baseline (rename-back reproduction)', () => {
+  // A's baseline says T0; B imported T1; Alex renamed to C on B; C synced to A.
+  const p = plan({ baseline: { f1: HW1_BASE }, cache: { f1: entry([HW1_T1]) },
+    items: [own('bs-u1', { title: 'Calc HW 1' })] });
+  assert.deepEqual(p.update, []);
+  assert.equal(p.nextBaseline.f1.deadlines['bs-u1'].title, T1);
+});
+
+test('plan: Alex moved the date, then Brightspace changes the date -> his date stays', () => {
+  const moved = ev('u1', 'HW 1 - Due', '20261105T075900Z'); // 2026-11-04 23:59
+  const p = plan({ baseline: { f1: HW1_BASE }, cache: { f1: entry([moved]) },
+    items: [own('bs-u1', { date: '2026-11-06' })] });
+  assert.deepEqual(p.update, []);
+});
+
+test('plan: Alex renamed, Brightspace moves the date and retitles -> date patched, his title kept', () => {
+  const moved = ev('u1', 'HW 1 (v2) - Due', '20261104T075900Z'); // 2026-11-03 23:59
+  const p = plan({ baseline: { f1: HW1_BASE }, cache: { f1: entry([moved]) },
+    items: [own('bs-u1', { title: 'Calc HW 1' })] });
+  assert.deepEqual(p.update, [{ id: 'bs-u1', patch: { date: '2026-11-03' } }]);
+});
+
+test('plan: item untouched by Alex, Brightspace changes title and date -> both patched', () => {
+  const moved = ev('u1', 'HW 1 (v2) - Due', '20261104T075900Z');
+  const p = plan({ baseline: { f1: HW1_BASE }, cache: { f1: entry([moved]) }, items: [own('bs-u1', { title: T0 })] });
+  assert.deepEqual(p.update, [{ id: 'bs-u1', patch: { title: T1, date: '2026-11-03' } }]);
+});
+
+test('plan: the other device already applied T1 and it synced here -> no patch, baseline advances to T1', () => {
+  const p = plan({ baseline: { f1: HW1_BASE }, cache: { f1: entry([HW1_T1]) }, items: [own('bs-u1', { title: T1 })] });
+  assert.deepEqual(p.update, []);
+  assert.deepEqual(p.nextBaseline.f1.deadlines['bs-u1'], rec('2026-11-02', T1));
+  // And with that baseline, a later rename by Alex is kept on the next fetch.
+  const later = plan({ baseline: p.nextBaseline, cache: { f1: { ...entry([HW1_T1]), fetchedAt: '2026-10-31T12:00:00.000Z' } },
+    items: [own('bs-u1', { title: 'Calc HW 1' })] });
+  assert.deepEqual(later.update, []);
 });
 
 const GONE_BASE = bl({ 'bs-u1': rec(), 'bs-gone': rec('2026-11-05') });

@@ -8987,6 +8987,30 @@ test('bsD: a renamed item keeps Alex\'s title across refreshes', async () => {
   } finally { bsCleanup(); }
 });
 
+// Residual 2 (Alex, 2026-11-02): this device's baseline still holds the old
+// title T0; the other device imported Brightspace's T1, Alex renamed it there,
+// and the rename synced here. This device's next fetch sees T1 — a Brightspace
+// change against its stale baseline — and must still keep Alex's rename.
+test('bsD: a rename synced from the other device survives this device\'s next fetch of a newer title', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([{ uid: 'bsD-r2', summary: 'HW R2 - Due', date: far(2) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-r2'));
+    const base = () => JSON.parse(localStorage.getItem('plaenicke.deadlineBaseline') || '{}')['bsD-feed']?.deadlines['bs-bsD-r2'];
+    assert.equal(base()?.title, 'MATH 234 · HW R2', 'fixture check: the stale baseline holds T0');
+    // The other device's rename arrives by sync, stamped later.
+    const mine = loadItems().find((it) => it.id === 'bs-bsD-r2');
+    saveItems(loadItems().map((it) => (it.id === 'bs-bsD-r2'
+      ? { ...it, title: 'Calc HW R2', updatedAt: new Date(Date.parse(mine.updatedAt) + 1000).toISOString() } : it)));
+    reloadFromStorage('plaenicke.items');
+    await refreshWith(bsIcs([{ uid: 'bsD-r2', summary: 'HW R2 v2 - Due', date: far(2) }]));
+    await drainUntil(() => base()?.title === 'MATH 234 · HW R2 v2');
+    assert.equal(loadItems().find((it) => it.id === 'bs-bsD-r2').title, 'Calc HW R2');
+  } finally { bsCleanup(); }
+});
+
 test('bsD: a deadline deleted in plaenicke is not re-created', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
