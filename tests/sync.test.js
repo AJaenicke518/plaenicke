@@ -667,6 +667,40 @@ test('a read that times out is reported as offline: nothing applied, nothing pus
   assert.equal(wrote, false);
 });
 
+// fetchWithTimeout's contract (js/fetchtimeout.js): its deadline is disarmed
+// only when the body read settles, so a caller must read the body even on an
+// error status. A 502 or 401 read whose body sync.js never read left the 60 s
+// timer armed after the sync had already reported, and it later aborted a
+// request that had long finished (2026-11-02: it held tests/apply.test.js
+// open for 60 s after its last test). The status reported is unchanged.
+for (const [status, expected] of [[502, 'error'], [401, 'unauthorized']]) {
+  test(`a ${status} read is reported as ${expected} and leaves no read deadline armed`, async (t) => {
+    await linked();
+    const originalFetch = globalThis.fetch;
+    let signal = null;
+    globalThis.fetch = (url, init) => {
+      signal = init.signal;
+      return Promise.resolve({ ok: false, status, headers: {}, json: async () => ({ error: 'x' }) });
+    };
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      const res = await realSyncOnce({
+        readFetchImpl: fetchWithTimeout,
+        fetchImpl: async () => { throw new Error('no write expected'); },
+        now: NOW, apiBase: 'https://w.example', applyState: echo,
+      });
+      assert.equal(res.status, expected);
+      for (let i = 0; i < 5; i += 1) await Promise.resolve(); // the discarded body read settles in microtasks
+      assert.ok(signal, 'fixture check: the read went through fetchWithTimeout');
+      t.mock.timers.tick(FETCH_TIMEOUT_MS);
+      assert.equal(signal.aborted, false, 'the read deadline must be disarmed once the error response is handled');
+    } finally {
+      t.mock.timers.reset();
+      globalThis.fetch = originalFetch;
+    }
+  });
+}
+
 test('previewRemote reports a timed-out read as offline', async (t) => {
   await linked();
   const originalFetch = globalThis.fetch;
