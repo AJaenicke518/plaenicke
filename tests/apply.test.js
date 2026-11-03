@@ -559,9 +559,11 @@ test('removing a calendar in Settings pushes it, without waiting for a reload', 
       'the push is debounced, so nothing may go out before the timer fires');
 
     t.mock.timers.tick(2000);
-    // runSync -> syncOnce is async; let its awaits drain against the real
-    // microtask queue (only setTimeout is mocked).
-    for (let i = 0; i < 50; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    // Poll for the PUT, never a fixed count of turns: syncOnce hashes the
+    // token and encrypts through WebCrypto, which completes on the thread
+    // pool. A fixed 50 turns ran out with the GET sent and the PUT not yet,
+    // in 7 of 60 runs of this file under parallel load (2026-11-02).
+    await drainUntil(() => requests.some((r) => r.url.includes('/data') && r.method === 'PUT'));
   } finally {
     await resetMockTimers(t);
     globalThis.fetch = originalFetch;
@@ -1102,7 +1104,8 @@ test('ticking a to-do schedules a sync', async (t) => {
     assert.deepEqual(requests.filter((r) => r.url.includes('/data')), [],
       'the push is debounced, so nothing may go out before the timer fires');
     t.mock.timers.tick(2000);
-    for (let i = 0; i < 50; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    // Poll for the PUT (WebCrypto completes on the thread pool; see above).
+    await drainUntil(() => requests.some((r) => r.url.includes('/data') && r.method === 'PUT'));
   } finally {
     await resetMockTimers(t);
     globalThis.fetch = originalFetch;
@@ -2641,7 +2644,8 @@ test('edit: a Save through the sheet writes storage, bumps updatedAt and schedul
     assert.deepEqual(requests.filter((r) => r.url.includes('/data')), [], 'the push is debounced');
     assert.equal(timers.live(2000), 1, 'exactly one debounced sync is scheduled');
     timers.fire(2000);
-    for (let i = 0; i < 50; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    // Poll for the PUT (WebCrypto completes on the thread pool).
+    await drainUntil(() => requests.some((r) => r.url.includes('/data') && r.method === 'PUT'));
     assert.ok(requests.some((r) => r.url.includes('/data') && r.method === 'PUT'),
       'an edit must reach the account without waiting for a reload');
     timers.fire(5000);
@@ -4992,7 +4996,9 @@ test('visible-only sync: a delete committed on backgrounding is pushed when the 
 
     setVisibility('visible');
     resume();
-    await drain();
+    // Poll for the PUT, never a fixed count of turns (WebCrypto completes on
+    // the thread pool).
+    await drainUntil(() => net.requests.some((r) => r.method === 'PUT'));
   } finally {
     setVisibility('visible');
     timers.restore();
@@ -8913,16 +8919,31 @@ function bsIcs(rows) {
   lines.push('END:VCALENDAR');
   return lines.join('\r\n');
 }
+// Makes the feed cache stale so the next resume refetches. THE CLOCK MUST
+// PASS THE LAST FETCH FIRST. The import tells a re-fetch from a cache it has
+// already judged only by fetchedAt (js/deadlines.js: equal to the baseline's
+// means "not re-fetched", so nothing is judged), and fetchedAt is an ISO
+// string with millisecond resolution. Two refreshes back to back can land in
+// one millisecond; the second then wrote the same fetchedAt, judged nothing,
+// and "the held list survives an import that fetched nothing" read held []
+// after a 2 s wait (2 of 20 npm test runs, 2026-11-02; every time with Date
+// frozen). Polls, never sleeps; if the clock never passes the last fetch (a
+// frozen Date), it fails loudly rather than let a refetch pass for none.
+async function staleBsCache(ms) {
+  const cache = JSON.parse(localStorage.getItem('plaenicke.feedCache') || '{}');
+  const last = Math.max(0, ...Object.values(cache).map((e) => Date.parse(e.fetchedAt)));
+  await drainUntil(() => Date.now() > last, ms);
+  assert.ok(Date.now() > last, 'fixture check: the clock passed the last fetch, so the refetch gets its own fetchedAt');
+  for (const k of Object.keys(cache)) cache[k].fetchedAt = '2000-01-01T00:00:00.000Z';
+  localStorage.setItem('plaenicke.feedCache', JSON.stringify(cache));
+}
 async function refreshWith(ics) {
   const original = globalThis.fetch;
   globalThis.fetch = async (url) => (String(url).includes('/feed?url=')
     ? { ok: true, status: 200, text: async () => ics }
     : original(url));
   try {
-    // Make the cache stale so the resume refetches.
-    const cache = JSON.parse(localStorage.getItem('plaenicke.feedCache') || '{}');
-    for (const k of Object.keys(cache)) cache[k].fetchedAt = '2000-01-01T00:00:00.000Z';
-    localStorage.setItem('plaenicke.feedCache', JSON.stringify(cache));
+    await staleBsCache(); // the resume refetches
     reloadFromStorage('plaenicke.feeds');
     resume();
     await drainUntil(() => JSON.parse(localStorage.getItem('plaenicke.feedCache') || '{}')['bsD-feed']?.fetchedAt > '2001');
@@ -8938,6 +8959,29 @@ function bsCleanup() {
   reloadFromStorage('plaenicke.feeds');
   reloadFromStorage('plaenicke.items');
 }
+
+// The fixture refuses to stale the cache while the clock still reads the last
+// fetch's millisecond: the refetch would write the same fetchedAt, which the
+// import reads as "not re-fetched" (js/deadlines.js), and the test would judge
+// nothing, silently. Here the clock is frozen on the last fetch, so it must
+// fail loudly instead.
+test('bsD: the refetch fixture waits for the clock to pass the last fetch, and fails loudly if it cannot', async (t) => {
+  installFakeLocalStorage();
+  const last = Date.now();
+  localStorage.setItem('plaenicke.feedCache', JSON.stringify({ 'bsD-feed': { fetchedAt: new Date(last).toISOString(), events: [], skipped: 0 } }));
+  t.mock.timers.enable({ apis: ['Date'], now: last });
+  try {
+    await assert.rejects(staleBsCache(50), /fixture check: the clock passed the last fetch/);
+    assert.equal(JSON.parse(localStorage.getItem('plaenicke.feedCache'))['bsD-feed'].fetchedAt, new Date(last).toISOString(),
+      'the cache is not staled when the refetch could not get its own fetchedAt');
+    t.mock.timers.tick(1);
+    await staleBsCache(50);
+    assert.equal(JSON.parse(localStorage.getItem('plaenicke.feedCache'))['bsD-feed'].fetchedAt, '2000-01-01T00:00:00.000Z');
+  } finally {
+    t.mock.timers.reset();
+    localStorage.removeItem('plaenicke.feedCache');
+  }
+});
 
 test('bsD: a refresh imports Due items as Deadlines; Available stays calendar-only', async () => {
   installFakeLocalStorage();
@@ -9201,9 +9245,7 @@ test('bsD: a reload mid feed batch does not swallow a Brightspace date change', 
       if (u.includes('/feed?url=')) return { ok: true, status: 200, text: async () => moved };
       return original(url);
     };
-    const cache = JSON.parse(localStorage.getItem('plaenicke.feedCache') || '{}');
-    for (const k of Object.keys(cache)) cache[k].fetchedAt = '2000-01-01T00:00:00.000Z';
-    localStorage.setItem('plaenicke.feedCache', JSON.stringify(cache));
+    await staleBsCache();
     reloadFromStorage('plaenicke.feeds');
     resume();
     await drainUntil(() => plainAsked);
@@ -9505,9 +9547,7 @@ test('bsD: a sync in flight across a hide does not release the next visit\'s def
     const ticked = { ...imported, done: true, notes: 'started', updatedAt: new Date(Date.parse(imported.updatedAt) + 1).toISOString() };
     const postTick = await encryptBlob(encKey, state({ items: [ticked] }));
     // Show: the feed refetch brings Y's new date; the import is deferred.
-    const cache = JSON.parse(localStorage.getItem('plaenicke.feedCache') || '{}');
-    for (const k of Object.keys(cache)) cache[k].fetchedAt = '2000-01-01T00:00:00.000Z';
-    localStorage.setItem('plaenicke.feedCache', JSON.stringify(cache));
+    await staleBsCache();
     reloadFromStorage('plaenicke.feeds');
     resume();
     await drainUntil(bsCacheFetched);
