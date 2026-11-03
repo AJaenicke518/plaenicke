@@ -701,6 +701,41 @@ for (const [status, expected] of [[502, 'error'], [401, 'unauthorized']]) {
   });
 }
 
+// Real error bodies are often not JSON (an HTML 502 from the edge, an empty
+// 401), so the discarded json() read REJECTS. It must be caught: an uncaught
+// one is an unhandled rejection on every failed sync.
+for (const [label, respond] of [
+  ['an HTML 502', () => new Response('<html>Bad gateway</html>', { status: 502 })],
+  ['an empty 401', () => new Response('', { status: 401 })],
+  ['a 502 whose json() rejects', () => ({ ok: false, status: 502, headers: {}, json: async () => { throw new SyntaxError('not json'); } })],
+]) {
+  test(`${label}: the discarded body read that rejects is caught`, async () => {
+    await linked();
+    const originalFetch = globalThis.fetch;
+    let signal = null;
+    globalThis.fetch = (url, init) => { signal = init.signal; return Promise.resolve(respond()); };
+    const unhandled = [];
+    const onUnhandled = (reason) => { unhandled.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const res = await realSyncOnce({
+        readFetchImpl: fetchWithTimeout,
+        fetchImpl: async () => { throw new Error('no write expected'); },
+        now: NOW, apiBase: 'https://w.example', applyState: echo,
+      });
+      assert.ok(['error', 'unauthorized'].includes(res.status), `reported as a failed read (${res.status})`);
+      // The body read settles on a real Response's stream; unhandledRejection
+      // is emitted after the microtask queue drains, so settle real turns.
+      for (let i = 0; i < 20; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+      assert.ok(signal, 'fixture check: the read went through fetchWithTimeout');
+      assert.deepEqual(unhandled.map((e) => e && e.name), [], 'no unhandled rejection from the discarded body read');
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      globalThis.fetch = originalFetch;
+    }
+  });
+}
+
 test('previewRemote reports a timed-out read as offline', async (t) => {
   await linked();
   const originalFetch = globalThis.fetch;

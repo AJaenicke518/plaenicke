@@ -4999,6 +4999,7 @@ test('visible-only sync: a delete committed on backgrounding is pushed when the 
     // Poll for the PUT, never a fixed count of turns (WebCrypto completes on
     // the thread pool).
     await drainUntil(() => net.requests.some((r) => r.method === 'PUT'));
+    await drain(); // bounded settle: a duplicate PUT still has time to show before the exactly-one check
   } finally {
     setVisibility('visible');
     timers.restore();
