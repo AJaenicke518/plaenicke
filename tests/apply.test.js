@@ -7201,6 +7201,8 @@ test('Week list: a to-do ticked there is saved, stays in its day struck through,
     assert.ok(again && again !== box && again.checked, 'still listed, re-drawn ticked');
     assert.equal(again.getAttribute('aria-label'), 'Mark "wk Homework 5" not done');
     assert.ok(todayRowOf(again)._classes.has('done'), 'struck through');
+    assert.ok(todayRowOf(again)._classes.has('tick-just'), 'the tick moment plays on the re-drawn row');
+    assert.ok(todayRowOf(again).querySelector('.tick-strike'), 'its title is wrapped in tick-strike');
     assert.match(allText(weekList()), /Fri\s+23\s+7:00 PM\s+wk Dinner\s+8:00 PM\s+wk Later task\s+All day\s+wk Homework 5\s*$/,
       'the done row sits after the undone rows of its day');
     assert.equal(doc.activeElement, again, 'focus is on the re-drawn box');

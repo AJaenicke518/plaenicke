@@ -5,8 +5,9 @@
 //
 // buildWeekList is pure. renderWeekList is presentation only: it NEVER
 // writes; a row reports through onOpen, a checkbox through onToggleDone and a
-// day label through onSelectDay, and app.js acts. Rows are styled through classes only: an id selector would
-// outrank `[data-press].pressed` (styles.css).
+// day label through onSelectDay, and app.js acts. Rows are styled through
+// classes only: an id selector would outrank `[data-press].pressed`
+// (styles.css).
 import { addDays, formatTime } from './timegrid.js';
 import { itemTypeClass } from './calendar.js';
 import { upcomingRows } from './today.js';
