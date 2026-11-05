@@ -191,7 +191,38 @@ function getZonedFormatter(tzid) {
 
 // formatZonedParts: instant (epoch ms) -> wall-clock fields in tzid. This is
 // the *easy* direction (the one Intl.DateTimeFormat gives directly).
-function formatZonedParts(instantMs, tzid) {
+//
+// Memoised per (zone, instant): formatToParts was ~79% of a render
+// (docs/superpowers/reports/2026-11-04-render-speed-investigation.md). The
+// answer for a zone and instant cannot change within a page load (same engine
+// tz data; getZonedFormatter's cache already assumes that), and it does not
+// depend on which feed the instant came from, so nothing needs invalidating.
+// Each zone's map is cleared whole when it reaches zonedMemoMax entries. The
+// returned object is FROZEN and shared: callers only read it, and a write
+// throws (module code is strict) instead of corrupting the memo.
+const zonedPartsMemo = new Map(); // tzid -> Map(instantMs -> frozen parts)
+let zonedMemoMax = 50000;
+let zonedPartsUncachedCount = 0;
+export function formatZonedParts(instantMs, tzid) {
+  let memo = zonedPartsMemo.get(tzid);
+  if (!memo) { memo = new Map(); zonedPartsMemo.set(tzid, memo); }
+  let parts = memo.get(instantMs);
+  if (parts === undefined) {
+    parts = Object.freeze(formatZonedPartsUncached(instantMs, tzid));
+    if (memo.size >= zonedMemoMax) memo.clear();
+    memo.set(instantMs, parts);
+  }
+  return parts;
+}
+
+// Test seams (like feeds.js's seriesComputations): Intl calls actually made,
+// a zone's memo size, and a settable bound (returns the previous one).
+export function zonedPartsUncachedCalls() { return zonedPartsUncachedCount; }
+export function zonedPartsMemoSize(tzid) { const m = zonedPartsMemo.get(tzid); return m ? m.size : 0; }
+export function setZonedMemoMax(n) { const prev = zonedMemoMax; zonedMemoMax = n; return prev; }
+
+function formatZonedPartsUncached(instantMs, tzid) {
+  zonedPartsUncachedCount++;
   const dtf = getZonedFormatter(tzid);
   const map = {};
   for (const p of dtf.formatToParts(instantMs)) map[p.type] = p.value;
