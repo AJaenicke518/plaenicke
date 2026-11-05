@@ -1857,3 +1857,174 @@ test('parseICS keeps LOCATION, unescaped, and null when absent', () => {
   assert.equal(events[0].location, 'Fall 2026 Sport, Race and Society (CLST-1300-01/02)');
   assert.equal(events[1].location, null);
 });
+
+// ===========================================================================
+// formatZonedParts memo (render speed, fix B, 2026-11-05). The memo keys on
+// (zone, instant), caps each zone's map at a bound, and hands out frozen
+// objects. Report: docs/superpowers/reports/2026-11-04-render-speed-investigation.md
+// ===========================================================================
+
+import {
+  formatZonedParts, zonedPartsUncachedCalls, zonedPartsMemoSize, setZonedMemoMax,
+} from '../js/ics.js';
+
+// freshIntlParts: the oracle. A brand-new Intl.DateTimeFormat per call, so it
+// shares no state (formatter cache or memo) with js/ics.js.
+function freshIntlParts(instantMs, tzid) {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone: tzid, hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  const m = {};
+  for (const p of dtf.formatToParts(instantMs)) m[p.type] = p.value;
+  const hour = parseInt(m.hour, 10);
+  return {
+    year: parseInt(m.year, 10), month: parseInt(m.month, 10), day: parseInt(m.day, 10),
+    hour: hour === 24 ? 0 : hour, minute: parseInt(m.minute, 10), second: parseInt(m.second, 10),
+  };
+}
+
+const MIN = 60000;
+// Instants either side of each 2026 transition, 1 minute apart, plus the
+// transition instant itself. All in UTC ms.
+const DST_INSTANTS = {
+  'America/Los_Angeles': [
+    Date.UTC(2026, 2, 8, 10, 0),  // spring-forward: 02:00 PST -> 03:00 PDT
+    Date.UTC(2026, 10, 1, 9, 0),  // fall-back: 02:00 PDT -> 01:00 PST
+  ],
+  'Europe/London': [
+    Date.UTC(2026, 2, 29, 1, 0),  // spring-forward: 01:00 GMT -> 02:00 BST
+    Date.UTC(2026, 9, 25, 1, 0),  // fall-back: 02:00 BST -> 01:00 GMT
+  ],
+  'Australia/Lord_Howe': [
+    Date.UTC(2026, 3, 4, 15, 0),  // fall-back by 30 min (02:00 -> 01:30)
+    Date.UTC(2026, 9, 3, 15, 30), // spring-forward by 30 min (02:00 -> 02:30)
+  ],
+};
+
+test('memo: formatZonedParts across DST transitions equals a fresh Intl answer, first call and memoised call', () => {
+  for (const [tz, transitions] of Object.entries(DST_INSTANTS)) {
+    for (const t of transitions) {
+      for (const d of [-61, -31, -1, 0, 1, 29, 31, 61]) {
+        const ms = t + d * MIN;
+        const want = freshIntlParts(ms, tz);
+        const first = formatZonedParts(ms, tz);
+        const before = zonedPartsUncachedCalls();
+        const second = formatZonedParts(ms, tz);
+        assert.equal(zonedPartsUncachedCalls(), before, `${tz} ${new Date(ms).toISOString()}: second call must be served from the memo`);
+        assert.deepEqual({ ...first }, want, `${tz} ${new Date(ms).toISOString()} first`);
+        assert.deepEqual({ ...second }, want, `${tz} ${new Date(ms).toISOString()} memoised`);
+      }
+    }
+  }
+});
+
+test('memo: zonedWallClockToInstant answers for ambiguous and gap wall times are unchanged when served from the memo', () => {
+  const cases = [
+    // [wall clock, zone, expected instant]: ambiguous -> first (earlier) instant; gap -> shifted forward.
+    [{ year: 2026, month: 11, day: 1, hour: 1, minute: 30, second: 0 }, 'America/Los_Angeles', Date.UTC(2026, 10, 1, 8, 30)],
+    [{ year: 2026, month: 3, day: 8, hour: 2, minute: 30, second: 0 }, 'America/Los_Angeles', Date.UTC(2026, 2, 8, 10, 30)],
+    [{ year: 2026, month: 10, day: 25, hour: 1, minute: 30, second: 0 }, 'Europe/London', Date.UTC(2026, 9, 25, 0, 30)],
+    [{ year: 2026, month: 3, day: 29, hour: 1, minute: 30, second: 0 }, 'Europe/London', Date.UTC(2026, 2, 29, 1, 30)],
+    [{ year: 2026, month: 4, day: 5, hour: 1, minute: 45, second: 0 }, 'Australia/Lord_Howe', Date.UTC(2026, 3, 4, 14, 45)],
+    [{ year: 2026, month: 10, day: 4, hour: 2, minute: 15, second: 0 }, 'Australia/Lord_Howe', Date.UTC(2026, 9, 3, 15, 45)],
+  ];
+  for (const [parts, tz, want] of cases) {
+    const first = zonedWallClockToInstant(parts, tz);
+    const before = zonedPartsUncachedCalls();
+    const second = zonedWallClockToInstant(parts, tz);
+    assert.equal(zonedPartsUncachedCalls(), before, `${tz} ${JSON.stringify(parts)}: repeat must be served from the memo`);
+    assert.equal(first, want, `${tz} ${JSON.stringify(parts)} first`);
+    assert.equal(second, want, `${tz} ${JSON.stringify(parts)} memoised`);
+  }
+});
+
+test('memo: the same instant in two zones gets two separate entries (zone is part of the key)', () => {
+  const ms = Date.UTC(2026, 10, 4, 23, 59, 7);
+  for (const tz of ['Europe/Berlin', 'America/Los_Angeles', 'Europe/Berlin', 'Asia/Kolkata', 'America/Los_Angeles']) {
+    assert.deepEqual({ ...formatZonedParts(ms, tz) }, freshIntlParts(ms, tz), tz);
+  }
+  // Berlin is 2026-11-05 00:59; LA is 2026-11-04 15:59 — the answers really differ.
+  assert.notDeepEqual({ ...formatZonedParts(ms, 'Europe/Berlin') }, { ...formatZonedParts(ms, 'America/Los_Angeles') });
+});
+
+test('memo: a second expandEvents over the same range and zone formats nothing new; a new zone does', () => {
+  const parsed = parseICS(readFileSync(new URL('./fixtures/dst-synthetic.ics', import.meta.url), 'utf8'));
+  assert.deepEqual(parsed.skipped, []);
+  const a = expandEvents(parsed, '2026-10-20', '2026-11-10', 'Pacific/Auckland');
+  const before = zonedPartsUncachedCalls();
+  const b = expandEvents(parsed, '2026-10-20', '2026-11-10', 'Pacific/Auckland');
+  assert.equal(zonedPartsUncachedCalls(), before, 'warm re-expansion must be served entirely from the memo');
+  assert.deepEqual(b, a);
+  expandEvents(parsed, '2026-10-20', '2026-11-10', 'Pacific/Honolulu');
+  assert.ok(zonedPartsUncachedCalls() > before, 'a zone not seen before must miss the memo');
+});
+
+test('memo: each zone\'s map is capped — it evicts rather than grows, and answers stay correct', () => {
+  const tz = 'Pacific/Chatham'; // used by no other test, so its map starts empty
+  const prev = setZonedMemoMax(10);
+  try {
+    assert.equal(zonedPartsMemoSize(tz), 0);
+    const base = Date.UTC(2026, 3, 5, 12, 0);
+    for (let i = 0; i < 35; i++) {
+      const ms = base + i * 15 * MIN;
+      assert.deepEqual({ ...formatZonedParts(ms, tz) }, freshIntlParts(ms, tz), `instant ${i}`);
+      const size = zonedPartsMemoSize(tz);
+      assert.ok(size >= 1 && size <= 10, `after ${i + 1} distinct instants the map holds ${size}, bound is 10`);
+    }
+    // The newest entry survived eviction: re-reading it is a hit.
+    const last = base + 34 * 15 * MIN;
+    const before = zonedPartsUncachedCalls();
+    formatZonedParts(last, tz);
+    assert.equal(zonedPartsUncachedCalls(), before, 'the most recent instant must still be memoised');
+  } finally {
+    setZonedMemoMax(prev);
+  }
+});
+
+test('memo: a returned parts object cannot be mutated to poison the cache', () => {
+  const ms = Date.UTC(2026, 6, 14, 18, 45);
+  const tz = 'Europe/London';
+  const got = formatZonedParts(ms, tz);
+  assert.throws(() => { 'use strict'; got.hour = 99; }, TypeError);
+  assert.throws(() => { 'use strict'; got.extra = 1; }, TypeError);
+  assert.deepEqual({ ...formatZonedParts(ms, tz) }, freshIntlParts(ms, tz), 'the memoised answer is unchanged');
+});
+
+test('memo: setZonedMemoMax rejects anything but a positive integer (a bad value must not silently remove the cap)', () => {
+  for (const bad of [NaN, undefined, null, 0, -1, 1.5, Infinity, '10']) {
+    assert.throws(() => setZonedMemoMax(bad), TypeError, `setZonedMemoMax(${String(bad)})`);
+  }
+  // The rejected calls left the bound alone: it is still the default.
+  const prev = setZonedMemoMax(7);
+  try {
+    assert.equal(prev, 20000);
+  } finally {
+    setZonedMemoMax(prev);
+  }
+});
+
+test('memo: whole-feed expansion equals the pre-change output (golden from main @ e7c4fa1), first and second pass', () => {
+  // tests/fixtures/expansion-golden.json was generated by the unmemoised
+  // js/ics.js (main @ e7c4fa1, not this branch): 4 fixtures x 5 zones x 2
+  // ranges (2026-09-01..2026-11-30, which crosses the EU and US fall-back,
+  // and all of 2026), 40 keys, none empty. The first pass is not a cold memo:
+  // earlier tests in this file have already filled it. The second pass reads
+  // what the first pass memoised.
+  const golden = JSON.parse(readFileSync(new URL('./fixtures/expansion-golden.json', import.meta.url), 'utf8'));
+  const keys = Object.keys(golden);
+  assert.equal(keys.length, 40);
+  for (const key of keys) assert.ok(golden[key].length > 0, `golden key ${key} is empty`);
+  const parsedByFile = new Map();
+  for (let pass = 0; pass < 2; pass++) {
+    for (const key of keys) {
+      const [file, tz, range] = key.split('|');
+      const [from, to] = range.split('..');
+      if (!parsedByFile.has(file)) parsedByFile.set(file, parseICS(fixture(file)));
+      const got = expandEvents(parsedByFile.get(file), from, to, tz)
+        .map((i) => [i.uid, i.title, i.date, i.time, i.endTime]);
+      assert.deepEqual(got, golden[key], `pass ${pass} ${key}`);
+    }
+  }
+});
