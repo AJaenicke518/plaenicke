@@ -27,7 +27,7 @@ function findButtonByText(el, text) {
   return null;
 }
 
-function openPanel(feeds, seed = () => {}) {
+function openPanel(feeds, seed = () => {}, deadlineStatus = { note: null, held: [] }) {
   globalThis.window = makeFakeWindow();
   globalThis.document = makeFakeDocument();
   installFakeLocalStorage();
@@ -41,6 +41,7 @@ function openPanel(feeds, seed = () => {}) {
   // onSyncedDataChanged (something the account must be told about).
   const notified = [];
   const fetched = [];
+  const removed = [];
   initSettings({
     button,
     host,
@@ -52,9 +53,10 @@ function openPanel(feeds, seed = () => {}) {
     // and calendar controls — but open() mounts initLinkUI, which refuses to
     // mount without one. app.js always passes applySyncedState here.
     applyState: (s) => s,
+    deadlines: { status: () => deadlineStatus, removeHeld: () => removed.push('held') },
   });
   button.click(); // host.childElementCount === 0 -> open()
-  return { host, notified, button, fetched };
+  return { host, notified, button, fetched, removed };
 }
 
 // --- the second-writer fix --------------------------------------------------
@@ -431,6 +433,7 @@ test('settings: the panel refuses to open its sync section without an applyState
     onFeedsChanged: () => {},
     onSyncedDataChanged: () => {},
     onFeedFetched: () => {},
+    deadlines: { status: () => ({ note: null, held: [] }), removeHeld() {} },
   });
   assert.throws(() => button.click(), /applyState/,
     'a settings panel that cannot save synced data must say so at mount, not after a round trip to the account');
@@ -482,6 +485,7 @@ test('settings: the calendar list refreshes when an adoption lands while the pan
       onFeedsChanged: () => {},
       onSyncedDataChanged: () => {},
       onFeedFetched: () => {},
+      deadlines: { status: () => ({ note: null, held: [] }), removeHeld() {} },
       // Stands in for app.js's applySyncedState: the feed owner assigns a
       // real colour before saving (merge.js hands a first-seen feed
       // color: null, and deserializeFeeds drops any feed whose color is not
@@ -972,4 +976,77 @@ test('settings.js uses visibility.js only to read the list and to Show; Remove n
   assert.deepEqual(imp[1].split(',').map((s) => s.trim()).filter(Boolean).sort(),
     ['UnlinkedCalendarError', 'hiddenSeriesFor', 'loadVisibility', 'showSeries']);
   assert.ok(!/setSeriesVisibility|SERIES_VISIBILITY|seriesVisibility/.test(code));
+});
+
+// --- Brightspace deadlines (Task 6) -------------------------------------------
+
+const bsRowFeed = (o = {}) => ({ id: 'bsS', url: 'https://example.com/bs.ics', name: 'Brightspace',
+  color: 'var(--feed-palette-1)', hidden: false, updatedAt: '2026-10-01T00:00:00.000Z', ...o });
+
+test('settings: initSettings refuses to mount without the deadlines wiring', () => {
+  globalThis.window = makeFakeWindow();
+  globalThis.document = makeFakeDocument();
+  installFakeLocalStorage();
+  assert.throws(() => initSettings({
+    button: document.createElement('button'), host: document.createElement('div'),
+    onFeedsChanged() {}, onSyncedDataChanged() {}, onFeedFetched() {}, applyState: (s) => s,
+  }), /deadlines/);
+});
+
+test('settings: "Track deadlines" turns tracking on from today, synced, with a fresh updatedAt', () => {
+  const { host, notified } = openPanel([bsRowFeed()]);
+  findButtonByText(host, 'Track deadlines').click();
+  const f = loadFeeds()[0];
+  const today = new Date();
+  const iso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  assert.deepEqual(f.trackDeadlines, { from: iso });
+  assert.ok(f.updatedAt > '2026-10-01T00:00:00.000Z', 'a synced field change bumps updatedAt');
+  assert.ok(notified.includes('synced'), 'the account is told');
+  assert.ok(findButtonByText(host, 'Stop tracking deadlines'), 'the button flips');
+  assert.match(allText(host), /Tracking deadlines due from /);
+});
+
+test('settings: "Stop tracking deadlines" turns it off (null) and is synced', () => {
+  const { host, notified } = openPanel([bsRowFeed({ trackDeadlines: { from: '2026-10-30' } })]);
+  findButtonByText(host, 'Stop tracking deadlines').click();
+  assert.equal(loadFeeds()[0].trackDeadlines, null);
+  assert.ok(notified.includes('synced'));
+});
+
+test('settings: the deadline note and "Remove them" show on a tracking calendar', () => {
+  const { host, removed } = openPanel(
+    [bsRowFeed({ trackDeadlines: { from: '2026-10-30' } })], () => {},
+    { note: '4 deadlines disappeared from Brightspace — not removed', held: ['bs-a', 'bs-b', 'bs-c', 'bs-d'] },
+  );
+  assert.match(allText(host), /4 deadlines disappeared from Brightspace — not removed/);
+  findButtonByText(host, 'Remove them').click();
+  assert.deepEqual(removed, ['held']);
+});
+
+test('settings: a calendar without tracking shows no deadline note or Remove them', () => {
+  const { host } = openPanel([bsRowFeed()], () => {}, { note: 'x', held: ['bs-a'] });
+  assert.equal(findButtonByText(host, 'Remove them'), null);
+  assert.doesNotMatch(allText(host), /Tracking deadlines due from/);
+});
+
+// Final review minor: app.js runs the deadline import inside onFeedsChanged,
+// and the panel used to draw its rows BEFORE that, so the note and "Remove
+// them" showed the previous round. The rows are drawn again after it.
+test('settings: the deadline row shows the import that the tap itself ran', () => {
+  const status = { note: null, held: [] };
+  const { host, notified } = openPanel([bsRowFeed({ trackDeadlines: { from: '2026-10-30' } })], () => {}, status);
+  notified.push = (x) => {
+    if (x === 'view') { status.note = '4 deadlines disappeared from Brightspace — not removed'; status.held = ['a', 'b', 'c', 'd']; }
+    return Array.prototype.push.call(notified, x);
+  };
+  host.querySelectorAll('button').find((b) => (b.className || '').includes('feed-dot')).click();
+  assert.match(allText(host), /4 deadlines disappeared from Brightspace — not removed/);
+  assert.ok(findButtonByText(host, 'Remove them'));
+});
+
+test('settings: "Track deadlines" stamps updatedAt strictly later than the record\'s own', () => {
+  const future = '2999-01-01T00:00:00.000Z';
+  const { host } = openPanel([bsRowFeed({ updatedAt: future })]);
+  findButtonByText(host, 'Track deadlines').click();
+  assert.ok(loadFeeds()[0].updatedAt > future, `stamped ${loadFeeds()[0].updatedAt}`);
 });

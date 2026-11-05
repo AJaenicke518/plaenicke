@@ -17,7 +17,8 @@ import { loadFeeds, saveFeeds, loadFeedCache, loadLaunches, QuotaError } from '.
 import { describeLaunches } from './freshness.js';
 import { initLinkUI } from './linkui.js';
 import { uid } from './uid.js';
-import { nowISO } from './dateparse.js';
+import { nowISO, toISO } from './dateparse.js';
+import { nextStamp } from './merge.js';
 import { lock } from './scrolllock.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
 import { FEED_PALETTE } from './palette.js';
@@ -74,7 +75,7 @@ function tabStops(root) {
 }
 
 export function initSettings({
-  button, host, onFeedsChanged, onSyncedDataChanged, onFeedFetched, applyState,
+  button, host, onFeedsChanged, onSyncedDataChanged, onFeedFetched, applyState, deadlines,
 }) {
   // A missing wire here is silent data loss, not a degraded feature: without
   // it a calendar added or removed in this panel never reaches the account
@@ -88,6 +89,11 @@ export function initSettings({
   // failed, and a fetch it never heard about leaves that memory wrong.
   if (typeof onFeedFetched !== 'function') {
     throw new Error('initSettings requires an onFeedFetched callback');
+  }
+  // The Brightspace deadline row reads app.js's import status and asks it to
+  // apply a held removal. Missing wiring would hide a held removal silently.
+  if (!deadlines || typeof deadlines.status !== 'function' || typeof deadlines.removeHeld !== 'function') {
+    throw new Error('initSettings requires deadlines: { status, removeHeld }');
   }
 
   // Follow the phone while in auto.
@@ -111,7 +117,16 @@ export function initSettings({
   // this app that cannot be re-entered from anything on screen (this file
   // never re-displays one). An unpushed item is a re-typed line; an unpushed
   // feed lost with the device is gone.
-  function notifyViewChanged() { if (onFeedsChanged) onFeedsChanged(); }
+  //
+  // onFeedsChanged also runs app.js's Brightspace deadline import, which sets
+  // the note and held list the calendar rows show (deadlines.status()). So
+  // the open panel draws its rows again AFTER it: drawn only before, they
+  // showed the previous round's note and "Remove them".
+  let repaintRows = null; // the open panel's renderCalendars, or null
+  function notifyViewChanged() {
+    if (onFeedsChanged) onFeedsChanged();
+    if (repaintRows) repaintRows();
+  }
 
   function notifySyncedChanged() {
     // View first: app.js reloads its snapshot before the sync it is about to
@@ -149,6 +164,7 @@ export function initSettings({
   // focusOpener): otherwise it falls back to the top of the document. Without
   // scrolling, for the same reason.
   function close() {
+    repaintRows = null;
     host.innerHTML = '';
     if (releaseScroll) { releaseScroll(); releaseScroll = null; }
     document.removeEventListener('keydown', onKey);
@@ -450,6 +466,23 @@ export function initSettings({
           syncBtn.disabled = isBusy();
           syncBtn.addEventListener('click', () => runSync(feed));
 
+          // Brightspace deadlines (spec 2026-10-30 § 2): a SYNCED field, so it
+          // bumps updatedAt and tells the account, unlike Hide/colour.
+          const trackBtn = document.createElement('button');
+          trackBtn.type = 'button';
+          trackBtn.textContent = feed.trackDeadlines ? 'Stop tracking deadlines' : 'Track deadlines';
+          trackBtn.disabled = isBusy();
+          trackBtn.addEventListener('click', () => {
+            reapplyFeedField(feed.id, (f) => ({
+              trackDeadlines: f.trackDeadlines ? null : { from: toISO(new Date()) },
+              // Strictly later than the record's own stamp (nextStamp), so the
+              // toggle cannot lose to the other device's copy on clock skew.
+              updatedAt: nextStamp(nowISO(), f.updatedAt),
+            }));
+            renderCalendars();
+            notifySyncedChanged();
+          });
+
           const removeBtn = document.createElement('button');
           removeBtn.type = 'button';
           removeBtn.className = 'remove';
@@ -515,12 +548,39 @@ export function initSettings({
 
           const shapeLine = shapeLineFor(feed);
           const hiddenBlock = hiddenBlockFor(feed, visMap);
-          const head = [main, status, shapeLine, hiddenBlock].filter(Boolean);
+          const deadlineBlock = [];
+          if (feed.trackDeadlines) {
+            const dl = document.createElement('div');
+            dl.className = 'feed-deadlines';
+            const from = new Date(`${feed.trackDeadlines.from}T12:00:00`);
+            dl.textContent = `Tracking deadlines due from ${from.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+            deadlineBlock.push(dl);
+            const { note, held } = deadlines.status();
+            if (note) {
+              const n = document.createElement('p');
+              n.className = 'note feed-deadlines-note';
+              n.textContent = note;
+              deadlineBlock.push(n);
+            }
+            if (held.length > 0) {
+              const rm = document.createElement('button');
+              rm.type = 'button';
+              rm.textContent = 'Remove them';
+              rm.addEventListener('click', () => {
+                // removeHeld applies the removal itself and never throws.
+                deadlines.removeHeld();
+                renderCalendars();
+                notifyViewChanged();
+              });
+              deadlineBlock.push(rm);
+            }
+          }
+          const head = [main, status, shapeLine, hiddenBlock, ...deadlineBlock].filter(Boolean);
           if (confirmingRemoveId === feed.id) {
             actions.append(confirmRemoveBtn, cancelRemoveBtn);
             row.append(...head, confirmNote, actions);
           } else {
-            actions.append(toggle, syncBtn, removeBtn);
+            actions.append(toggle, syncBtn, trackBtn, removeBtn);
             row.append(...head, actions);
           }
           list.appendChild(row);
@@ -654,6 +714,7 @@ export function initSettings({
     }
 
     renderCalendars();
+    repaintRows = renderCalendars;
 
     // --- Sync (Task 8) ------------------------------------------------
     //

@@ -24,7 +24,7 @@ import { SCHEMA_VERSION, toWire } from '../js/merge.js';
 import { localState } from '../js/sync.js';
 import {
   saveItems, loadItems, saveTombstones, saveFeeds, loadFeeds, loadTombstones, loadSyncState, saveSyncState,
-  loadLaunches,
+  loadLaunches, loadDeadlineBaseline,
 } from '../js/storage.js';
 import { linkWithCode, clearAdoptionPending } from '../js/auth.js';
 import { FETCH_TIMEOUT_MS } from '../js/fetchtimeout.js';
@@ -559,9 +559,11 @@ test('removing a calendar in Settings pushes it, without waiting for a reload', 
       'the push is debounced, so nothing may go out before the timer fires');
 
     t.mock.timers.tick(2000);
-    // runSync -> syncOnce is async; let its awaits drain against the real
-    // microtask queue (only setTimeout is mocked).
-    for (let i = 0; i < 50; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    // Poll for the PUT, never a fixed count of turns: syncOnce hashes the
+    // token and encrypts through WebCrypto, which completes on the thread
+    // pool. A fixed 50 turns ran out with the GET sent and the PUT not yet,
+    // in 7 of 60 runs of this file under parallel load (2026-11-02).
+    await drainUntil(() => requests.some((r) => r.url.includes('/data') && r.method === 'PUT'));
   } finally {
     await resetMockTimers(t);
     globalThis.fetch = originalFetch;
@@ -1102,7 +1104,8 @@ test('ticking a to-do schedules a sync', async (t) => {
     assert.deepEqual(requests.filter((r) => r.url.includes('/data')), [],
       'the push is debounced, so nothing may go out before the timer fires');
     t.mock.timers.tick(2000);
-    for (let i = 0; i < 50; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    // Poll for the PUT (WebCrypto completes on the thread pool; see above).
+    await drainUntil(() => requests.some((r) => r.url.includes('/data') && r.method === 'PUT'));
   } finally {
     await resetMockTimers(t);
     globalThis.fetch = originalFetch;
@@ -2641,7 +2644,8 @@ test('edit: a Save through the sheet writes storage, bumps updatedAt and schedul
     assert.deepEqual(requests.filter((r) => r.url.includes('/data')), [], 'the push is debounced');
     assert.equal(timers.live(2000), 1, 'exactly one debounced sync is scheduled');
     timers.fire(2000);
-    for (let i = 0; i < 50; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    // Poll for the PUT (WebCrypto completes on the thread pool).
+    await drainUntil(() => requests.some((r) => r.url.includes('/data') && r.method === 'PUT'));
     assert.ok(requests.some((r) => r.url.includes('/data') && r.method === 'PUT'),
       'an edit must reach the account without waiting for a reload');
     timers.fire(5000);
@@ -4992,7 +4996,10 @@ test('visible-only sync: a delete committed on backgrounding is pushed when the 
 
     setVisibility('visible');
     resume();
-    await drain();
+    // Poll for the PUT, never a fixed count of turns (WebCrypto completes on
+    // the thread pool).
+    await drainUntil(() => net.requests.some((r) => r.method === 'PUT'));
+    await drain(); // bounded settle: a duplicate PUT still has time to show before the exactly-one check
   } finally {
     setVisibility('visible');
     timers.restore();
@@ -8895,4 +8902,678 @@ test('sync-safety: applySyncedState refuses to run without a valid clock, before
     assert.throws(() => applySyncedState(state({ items: [record({ id: 'ss-noclock' })] }), bad), TypeError, String(bad));
   }
   assert.deepEqual(loadItems(), [], 'nothing was written');
+});
+
+// --- Brightspace deadlines (spec 2026-10-30) -------------------------------
+// Ids prefixed bsD-. The module is imported once for the file: every test puts
+// feeds, cache and items back.
+const bsFeed = (o = {}) => ({ id: 'bsD-feed', url: 'https://example.com/bsD.ics', name: 'Brightspace',
+  color: 'var(--feed-palette-1)', hidden: false, updatedAt: '2026-10-01T00:00:00.000Z',
+  trackDeadlines: { from: localISO(new Date()) }, ...o });
+// A minimal Brightspace-shaped feed: all-day due entries with a course LOCATION.
+function bsIcs(rows) {
+  const lines = ['BEGIN:VCALENDAR'];
+  for (const r of rows) {
+    lines.push('BEGIN:VEVENT', `UID:${r.uid}`, `SUMMARY:${r.summary}`,
+      `DTSTART;VALUE=DATE:${r.date.replace(/-/g, '')}`, `LOCATION:${r.location || 'Fall 2026 Calculus III (MATH-234-01/02)'}`, 'END:VEVENT');
+  }
+  lines.push('END:VCALENDAR');
+  return lines.join('\r\n');
+}
+// Makes the feed cache stale so the next resume refetches. THE CLOCK MUST
+// PASS THE LAST FETCH FIRST. The import tells a re-fetch from a cache it has
+// already judged only by fetchedAt (js/deadlines.js: equal to the baseline's
+// means "not re-fetched", so nothing is judged), and fetchedAt is an ISO
+// string with millisecond resolution. Two refreshes back to back can land in
+// one millisecond; the second then wrote the same fetchedAt, judged nothing,
+// and "the held list survives an import that fetched nothing" read held []
+// after a 2 s wait (2 of 20 npm test runs, 2026-11-02; every time with Date
+// frozen). Polls, never sleeps; if the clock never passes the last fetch (a
+// frozen Date), it fails loudly rather than let a refetch pass for none.
+async function staleBsCache(ms) {
+  const cache = JSON.parse(localStorage.getItem('plaenicke.feedCache') || '{}');
+  const last = Math.max(0, ...Object.values(cache).map((e) => Date.parse(e.fetchedAt)));
+  await drainUntil(() => Date.now() > last, ms);
+  assert.ok(Date.now() > last, 'fixture check: the clock passed the last fetch, so the refetch gets its own fetchedAt');
+  for (const k of Object.keys(cache)) cache[k].fetchedAt = '2000-01-01T00:00:00.000Z';
+  localStorage.setItem('plaenicke.feedCache', JSON.stringify(cache));
+}
+async function refreshWith(ics) {
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url) => (String(url).includes('/feed?url=')
+    ? { ok: true, status: 200, text: async () => ics }
+    : original(url));
+  try {
+    await staleBsCache(); // the resume refetches
+    reloadFromStorage('plaenicke.feeds');
+    resume();
+    await drainUntil(() => JSON.parse(localStorage.getItem('plaenicke.feedCache') || '{}')['bsD-feed']?.fetchedAt > '2001');
+  } finally {
+    globalThis.fetch = original;
+  }
+}
+function bsCleanup() {
+  saveFeeds([]);
+  localStorage.removeItem('plaenicke.feedCache');
+  localStorage.removeItem('plaenicke.deadlineBaseline');
+  saveItems(loadItems().filter((it) => !it.id.startsWith('bs-')));
+  reloadFromStorage('plaenicke.feeds');
+  reloadFromStorage('plaenicke.items');
+}
+
+// The fixture refuses to stale the cache while the clock still reads the last
+// fetch's millisecond: the refetch would write the same fetchedAt, which the
+// import reads as "not re-fetched" (js/deadlines.js), and the test would judge
+// nothing, silently. Here the clock is frozen on the last fetch, so it must
+// fail loudly instead.
+test('bsD: the refetch fixture waits for the clock to pass the last fetch, and fails loudly if it cannot', async (t) => {
+  installFakeLocalStorage();
+  const last = Date.now();
+  localStorage.setItem('plaenicke.feedCache', JSON.stringify({ 'bsD-feed': { fetchedAt: new Date(last).toISOString(), events: [], skipped: 0 } }));
+  t.mock.timers.enable({ apis: ['Date'], now: last });
+  try {
+    await assert.rejects(staleBsCache(50), /fixture check: the clock passed the last fetch/);
+    assert.equal(JSON.parse(localStorage.getItem('plaenicke.feedCache'))['bsD-feed'].fetchedAt, new Date(last).toISOString(),
+      'the cache is not staled when the refetch could not get its own fetchedAt');
+    t.mock.timers.tick(1);
+    await staleBsCache(50);
+    assert.equal(JSON.parse(localStorage.getItem('plaenicke.feedCache'))['bsD-feed'].fetchedAt, '2000-01-01T00:00:00.000Z');
+  } finally {
+    t.mock.timers.reset();
+    localStorage.removeItem('plaenicke.feedCache');
+  }
+});
+
+test('bsD: a refresh imports Due items as Deadlines; Available stays calendar-only', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([
+      { uid: 'bsD-1', summary: 'HW 1 - Due', date: far(1) },
+      { uid: 'bsD-2', summary: 'Solutions - Available', date: far(1) },
+    ]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-1'));
+    const it = loadItems().find((x) => x.id === 'bs-bsD-1');
+    assert.equal(it.type, 'due');
+    assert.equal(it.title, 'MATH 234 · HW 1');
+    assert.equal(loadItems().some((x) => x.id === 'bs-bsD-2'), false);
+  } finally { bsCleanup(); }
+});
+
+test('bsD: a moved due date updates the date and keeps the tick', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([{ uid: 'bsD-3', summary: 'HW 3 - Due', date: far(2) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-3'));
+    saveItems(loadItems().map((it) => (it.id === 'bs-bsD-3' ? { ...it, done: true } : it)));
+    reloadFromStorage('plaenicke.items');
+    await refreshWith(bsIcs([{ uid: 'bsD-3', summary: 'HW 3 - Due', date: far(4) }]));
+    await drainUntil(() => loadItems().find((it) => it.id === 'bs-bsD-3')?.date === far(4));
+    assert.equal(loadItems().find((it) => it.id === 'bs-bsD-3').date, far(4));
+    assert.equal(loadItems().find((it) => it.id === 'bs-bsD-3').done, true);
+  } finally { bsCleanup(); }
+});
+
+test('bsD: a renamed item keeps Alex\'s title across refreshes', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    const ics = bsIcs([{ uid: 'bsD-4', summary: 'HW 4 - Due', date: far(2) }]);
+    await refreshWith(ics);
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-4'));
+    saveItems(loadItems().map((it) => (it.id === 'bs-bsD-4' ? { ...it, title: 'Calc HW 4' } : it)));
+    reloadFromStorage('plaenicke.items');
+    await refreshWith(ics);
+    assert.equal(loadItems().find((it) => it.id === 'bs-bsD-4').title, 'Calc HW 4');
+  } finally { bsCleanup(); }
+});
+
+// Residual 2 (Alex, 2026-11-02): this device's baseline still holds the old
+// title T0; the other device imported Brightspace's T1, Alex renamed it there,
+// and the rename synced here. This device's next fetch sees T1 — a Brightspace
+// change against its stale baseline — and must still keep Alex's rename.
+test('bsD: a rename synced from the other device survives this device\'s next fetch of a newer title', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([{ uid: 'bsD-r2', summary: 'HW R2 - Due', date: far(2) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-r2'));
+    const base = () => JSON.parse(localStorage.getItem('plaenicke.deadlineBaseline') || '{}')['bsD-feed']?.deadlines['bs-bsD-r2'];
+    assert.equal(base()?.title, 'MATH 234 · HW R2', 'fixture check: the stale baseline holds T0');
+    // The other device's rename arrives by sync, stamped later.
+    const mine = loadItems().find((it) => it.id === 'bs-bsD-r2');
+    saveItems(loadItems().map((it) => (it.id === 'bs-bsD-r2'
+      ? { ...it, title: 'Calc HW R2', updatedAt: new Date(Date.parse(mine.updatedAt) + 1000).toISOString() } : it)));
+    reloadFromStorage('plaenicke.items');
+    await refreshWith(bsIcs([{ uid: 'bsD-r2', summary: 'HW R2 v2 - Due', date: far(2) }]));
+    await drainUntil(() => base()?.title === 'MATH 234 · HW R2 v2');
+    assert.equal(loadItems().find((it) => it.id === 'bs-bsD-r2').title, 'Calc HW R2');
+  } finally { bsCleanup(); }
+});
+
+test('bsD: a deadline deleted in plaenicke is not re-created', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    const ics = bsIcs([{ uid: 'bsD-5', summary: 'HW 5 - Due', date: far(2) }]);
+    await refreshWith(ics);
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-5'));
+    saveItems(loadItems().filter((it) => it.id !== 'bs-bsD-5'));
+    saveTombstones([...loadTombstones(), { id: 'bs-bsD-5', kind: 'item', deletedAt: new Date(Date.now() + 1000).toISOString() }]);
+    reloadFromStorage('plaenicke.items');
+    await refreshWith(ics);
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-5'), false);
+  } finally { bsCleanup(); saveTombstones(loadTombstones().filter((t) => t.id !== 'bs-bsD-5')); }
+});
+
+test('bsD: tracking off keeps existing items and imports nothing new', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([{ uid: 'bsD-6', summary: 'HW 6 - Due', date: far(2) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-6'));
+    saveFeeds([bsFeed({ trackDeadlines: null, updatedAt: '2026-10-02T00:00:00.000Z' })]);
+    await refreshWith(bsIcs([{ uid: 'bsD-7', summary: 'HW 7 - Due', date: far(2) }]));
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-6'), true, 'kept');
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-7'), false, 'not imported');
+  } finally { bsCleanup(); }
+});
+
+test('bsD: a calendar hidden on this device still imports its deadlines', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed({ hidden: true })]);
+    await refreshWith(bsIcs([{ uid: 'bsD-8', summary: 'HW 8 - Due', date: far(2) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-8'));
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-8'), true);
+  } finally { bsCleanup(); }
+});
+
+test('bsD: the feed\'s own copy of a tracked deadline is hidden; the Deadline shows once', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([{ uid: 'bsD-9', summary: 'HW 9 - Due', date: far(3) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-9'));
+    const text = stringsOf(dayOf(far(3))).join(' | ');
+    assert.match(text, /MATH 234 · HW 9/);
+    assert.doesNotMatch(text, /HW 9 - Due/);
+  } finally { bsCleanup(); }
+});
+
+// The Settings path: a colour tap (or a Settings Sync/Add) reaches app.js
+// through onFeedsChanged, which must import from the cache it just reloaded.
+// No background refresh runs here: the feed and its cache are written straight
+// to storage, and only the Settings tap tells app.js about them.
+test('bsD: a Settings change imports from the cache without a background refresh', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    const { events, skipped } = parseICS(bsIcs([{ uid: 'bsD-10', summary: 'HW 10 - Due', date: far(2) }]));
+    localStorage.setItem('plaenicke.feedCache', JSON.stringify({
+      'bsD-feed': { fetchedAt: new Date().toISOString(), events, skipped },
+    }));
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-10'), false, 'fixture check: not imported yet');
+    tapColourDot('Brightspace');
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-10'), true);
+  } finally { bsCleanup(); }
+});
+
+test('bsD: the Week view hides the feed\'s own copy of a tracked deadline', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  let steps = 0;
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([{ uid: 'bsD-11', summary: 'HW 11 - Due', date: far(3) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-11'));
+    click(globalThis.document.getElementById('show-week'));
+    const want = weekLabelFor(startOfWeek(far(3)));
+    for (; labelText('week-label') !== want; steps += 1) {
+      assert.ok(steps < 60, 'fixture check: the week arrows reach far(3)');
+      click(globalThis.document.getElementById('next-week'));
+    }
+    const doc = globalThis.document;
+    const text = [...stringsOf(doc.getElementById('week-grid')), ...stringsOf(doc.getElementById('week-list'))].join(' | ');
+    assert.match(text, /MATH 234 · HW 11/);
+    assert.doesNotMatch(text, /HW 11 - Due/);
+  } finally {
+    for (; steps > 0; steps -= 1) click(globalThis.document.getElementById('prev-week'));
+    click(globalThis.document.getElementById('show-day'));
+    bsCleanup();
+  }
+});
+
+// Four deadlines vanish at once: more than MAX_AUTO_REMOVALS, so they are
+// held, not removed. "Remove them" whose items write fails keeps them in
+// items storage and keeps the held list (tombstones, written first, may
+// already be stored); a retry that succeeds removes them.
+test('bsD: a failed "Remove them" keeps the held items stored and the held list', async () => {
+  installFakeLocalStorage();
+  const { deadlines } = await import('../js/app.js');
+  const heldIds = ['bs-bsD-h1', 'bs-bsD-h2', 'bs-bsD-h3', 'bs-bsD-h4'];
+  const keep = { uid: 'bsD-hk', summary: 'Keep - Due', date: far(5) };
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([
+      ...[1, 2, 3, 4].map((n) => ({ uid: `bsD-h${n}`, summary: `HW h${n} - Due`, date: far(n) })), keep,
+    ]));
+    await drainUntil(() => heldIds.every((id) => loadItems().some((it) => it.id === id)));
+    await refreshWith(bsIcs([keep]));
+    await drainUntil(() => deadlines.status().held.length === 4);
+    assert.deepEqual([...deadlines.status().held].sort(), heldIds, 'fixture check: four held');
+
+    const quota = refuseItemsWrites();
+    try {
+      deadlines.removeHeld(); // must not throw
+    } finally {
+      quota.restore();
+    }
+    assert.ok(quota.refused() > 0, 'fixture check: the removal reached the items write');
+    for (const id of heldIds) assert.ok(loadItems().some((it) => it.id === id), `${id} still stored`);
+    assert.deepEqual([...deadlines.status().held].sort(), heldIds, 'the held list survives a failed write');
+
+    deadlines.removeHeld();
+    assert.equal(loadItems().some((it) => heldIds.includes(it.id)), false, 'a write that succeeds removes them');
+    assert.deepEqual(deadlines.status().held, []);
+  } finally {
+    bsCleanup();
+    saveTombstones(loadTombstones().filter((t) => !heldIds.includes(t.id)));
+  }
+});
+
+// Final review C1: the other device imported bs-X from a newer fetch, and it
+// reached this device by sync. This device's own cache is still fresh (< 30
+// min), so a resume fetches nothing and settles from it; bs-X is absent from
+// that older cache. It must not be removed: this device never imported it.
+test('bsD: a synced deadline this device never imported survives a no-fetch resume and a Settings change', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([{ uid: 'bsD-c1a', summary: 'HW A - Due', date: far(2) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-c1a'));
+    // The other device's import arrives by sync.
+    const other = { ...loadItems().find((it) => it.id === 'bs-bsD-c1a'), id: 'bs-bsD-c1x', title: 'MATH 234 · HW X', date: far(3) };
+    saveItems([...loadItems(), other]);
+    reloadFromStorage('plaenicke.items');
+    resume(); // the cache is fresh: settles with nothing fetched, then imports
+    await drain();
+    tapColourDot('Brightspace');
+    await drain();
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-c1x'), true, 'still present');
+    assert.equal(loadTombstones().some((t) => t.id === 'bs-bsD-c1x'), false, 'no tombstone');
+  } finally { bsCleanup(); saveTombstones(loadTombstones().filter((t) => t.id !== 'bs-bsD-c1x')); }
+});
+
+// Final review I1: a storage reload (a sync landing, another tab's write)
+// while the feed batch is still running used to replace the "before" cache
+// with the one syncFeed had already written, so the Brightspace date change
+// looked like no change and was never applied. Two feeds; the Brightspace one
+// is fetched first, the second is held while the reload happens.
+test('bsD: a reload mid feed batch does not swallow a Brightspace date change', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const plain = { id: 'bsD-plain', url: 'https://example.com/bsD-plain.ics', name: 'Plain', color: 'var(--feed-palette-2)',
+    hidden: false, updatedAt: '2026-10-01T00:00:00.000Z' };
+  const original = globalThis.fetch;
+  let releasePlain = () => {};
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([{ uid: 'bsD-i1', summary: 'HW I1 - Due', date: far(2) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-i1'));
+    saveFeeds([bsFeed(), plain]);
+    const moved = bsIcs([{ uid: 'bsD-i1', summary: 'HW I1 - Due', date: far(4) }]);
+    const plainHeld = new Promise((r) => { releasePlain = r; });
+    let plainAsked = false;
+    globalThis.fetch = async (url) => {
+      const u = decodeURIComponent(String(url));
+      if (u.includes('/feed?url=') && u.includes('bsD-plain')) {
+        plainAsked = true;
+        await plainHeld;
+        return { ok: true, status: 200, text: async () => 'BEGIN:VCALENDAR\r\nEND:VCALENDAR' };
+      }
+      if (u.includes('/feed?url=')) return { ok: true, status: 200, text: async () => moved };
+      return original(url);
+    };
+    await staleBsCache();
+    reloadFromStorage('plaenicke.feeds');
+    resume();
+    await drainUntil(() => plainAsked);
+    assert.ok(plainAsked, 'fixture check: the second fetch is held');
+    assert.ok(JSON.parse(localStorage.getItem('plaenicke.feedCache'))['bsD-feed'].fetchedAt > '2001', 'fixture check: Brightspace already fetched');
+    reloadFromStorage('plaenicke.items'); // a sync / another tab lands mid batch
+    releasePlain();
+    await drainUntil(() => loadItems().find((it) => it.id === 'bs-bsD-i1')?.date === far(4));
+    assert.equal(loadItems().find((it) => it.id === 'bs-bsD-i1').date, far(4));
+  } finally {
+    releasePlain();
+    globalThis.fetch = original;
+    bsCleanup();
+  }
+});
+
+// Spec § 5 (final review I4): a write failure inside the import itself — not
+// only "Remove them" — surfaces on the top line, leaves items and this
+// device's baseline as they were, and the next refresh applies the change.
+test('bsD: an import whose items write fails says so, keeps the baseline, and the next refresh retries', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([{ uid: 'bsD-i4', summary: 'HW I4 - Due', date: far(2) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-i4'));
+    const itemsBefore = loadItems();
+    const baselineBefore = loadDeadlineBaseline();
+    assert.ok(baselineBefore['bsD-feed'], 'fixture check: the first import recorded a baseline');
+    const changed = bsIcs([{ uid: 'bsD-i4', summary: 'HW I4 - Due', date: far(4) }, { uid: 'bsD-i4b', summary: 'HW I4b - Due', date: far(5) }]);
+    globalThis.document.getElementById('message').textContent = '';
+    const quota = refuseItemsWrites();
+    try {
+      await refreshWith(changed);
+      await drainUntil(() => quota.refused() > 0);
+    } finally {
+      quota.restore();
+    }
+    assert.ok(quota.refused() > 0, 'fixture check: the import reached the items write');
+    assert.match(messageText(), /storage quota/);
+    assert.deepEqual(loadItems(), itemsBefore, 'items unchanged');
+    assert.deepEqual(loadDeadlineBaseline(), baselineBefore, 'baseline not advanced');
+    await refreshWith(changed);
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-i4b'));
+    assert.equal(loadItems().find((it) => it.id === 'bs-bsD-i4').date, far(4), 'the retry applies the date change');
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-i4b'), true, 'and the create');
+  } finally { bsCleanup(); }
+});
+
+// Final review I3: "Stop tracking" keeps the Deadline items, so the feed's
+// own copy must stay hidden, or every deadline shows twice.
+test('bsD: after "Stop tracking" the feed copy of an existing deadline stays hidden', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([{ uid: 'bsD-i3', summary: 'HW I3 - Due', date: far(3) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-i3'));
+    saveFeeds([bsFeed({ trackDeadlines: null, updatedAt: '2026-10-02T00:00:00.000Z' })]);
+    reloadFromStorage('plaenicke.feeds');
+    const text = stringsOf(dayOf(far(3))).join(' | ');
+    assert.match(text, /MATH 234 · HW I3/);
+    assert.doesNotMatch(text, /HW I3 - Due/);
+  } finally { bsCleanup(); }
+});
+
+// The held list is judged only when a tracking feed was re-fetched (or
+// failed). An import from the same cache — a resume within 30 minutes, any
+// Settings tap — judges nothing and must leave "Remove them" as it was.
+test('bsD: the held list survives an import that fetched nothing', async () => {
+  installFakeLocalStorage();
+  const { deadlines } = await import('../js/app.js');
+  const heldIds = ['bs-bsD-s1', 'bs-bsD-s2', 'bs-bsD-s3', 'bs-bsD-s4'];
+  const keep = { uid: 'bsD-sk', summary: 'Keep - Due', date: far(5) };
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([...[1, 2, 3, 4].map((n) => ({ uid: `bsD-s${n}`, summary: `HW s${n} - Due`, date: far(n) })), keep]));
+    await drainUntil(() => heldIds.every((id) => loadItems().some((it) => it.id === id)));
+    await refreshWith(bsIcs([keep]));
+    await drainUntil(() => deadlines.status().held.length === 4);
+    assert.deepEqual([...deadlines.status().held].sort(), heldIds, 'fixture check: four held');
+    resume(); // the cache is fresh: nothing is fetched, the import still runs
+    await drain();
+    tapColourDot('Brightspace');
+    assert.deepEqual([...deadlines.status().held].sort(), heldIds);
+    assert.equal(deadlines.status().note, '4 deadlines disappeared from Brightspace — not removed');
+  } finally {
+    bsCleanup();
+  }
+});
+
+// --- Final review C2: on a linked device the import waits for a sync -------
+// A device that has not pulled the account's latest items would write its
+// automatic patch over a stale copy, stamped later than Alex's tick on the
+// other device, and whole-record last-write-wins would keep it. So on a
+// linked device the import is deferred until a sync has SUCCEEDED since
+// launch / the last return to visible, and then runs from the sync's success.
+function bsLinkedNet(ics) {
+  const original = globalThis.fetch;
+  const state = { gets: 0, getResponse: null, releases: [] };
+  globalThis.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    const method = (opts && opts.method) || 'GET';
+    if (u.includes('/feed?url=')) return { ok: true, status: 200, text: async () => ics };
+    if (u.includes('/data')) {
+      if (method !== 'GET') return putAccepted();
+      state.gets += 1;
+      if (state.getResponse) return state.getResponse();
+      return new Promise((r) => { state.releases.push(r); });
+    }
+    return original(url, opts);
+  };
+  return {
+    state,
+    release: (res) => { for (const r of state.releases.splice(0)) r(res()); },
+    restore: () => { for (const r of state.releases.splice(0)) r(emptyAccount()); globalThis.fetch = original; },
+  };
+}
+const bsCacheFetched = () => JSON.parse(localStorage.getItem('plaenicke.feedCache') || '{}')['bsD-feed']?.fetchedAt > '2001';
+const failingAccount = () => Promise.resolve({ ok: false, status: 502, json: async () => ({}) });
+
+test('bsD: on a linked device the import waits for a successful sync, then runs', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  const net = bsLinkedNet(bsIcs([{ uid: 'bsD-r2a', summary: 'HW R2a - Due', date: far(2) }]));
+  try {
+    saveFeeds([bsFeed()]);
+    reloadFromStorage('plaenicke.feeds');
+    resume();
+    await drainUntil(() => bsCacheFetched() && net.state.gets > 0);
+    assert.ok(bsCacheFetched() && net.state.gets > 0, 'fixture check: feed settled, sync read held');
+    await drain();
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-r2a'), false, 'nothing written before the sync');
+    tapColourDot('Brightspace');
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-r2a'), false, 'a Settings change waits too');
+    net.release(emptyAccount);
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-r2a'));
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-r2a'), true, 'imported once the sync succeeded');
+  } finally { net.restore(); bsCleanup(); }
+});
+
+test('bsD: a failed sync keeps the import deferred; the next successful sync runs it', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  const net = bsLinkedNet(bsIcs([{ uid: 'bsD-r2b', summary: 'HW R2b - Due', date: far(2) }]));
+  net.state.getResponse = failingAccount;
+  try {
+    saveFeeds([bsFeed()]);
+    reloadFromStorage('plaenicke.feeds');
+    resume();
+    await drainUntil(() => bsCacheFetched() && loadSyncState().lastError === 'http_502');
+    assert.equal(loadSyncState().lastError, 'http_502', 'fixture check: the sync failed');
+    await drain();
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-r2b'), false, 'nothing written after a failed sync');
+    net.state.getResponse = emptyAccount;
+    for (const fn of globalThis.window._listeners.online || []) fn();
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-r2b'));
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-r2b'), true);
+  } finally { net.restore(); bsCleanup(); }
+});
+
+test('bsD: a pending adoption defers the import even after an earlier successful sync', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  const net = bsLinkedNet('BEGIN:VCALENDAR\r\nEND:VCALENDAR');
+  net.state.getResponse = emptyAccount;
+  try {
+    resume();
+    await drainUntil(() => loadSyncState().lastSyncedAt !== null);
+    assert.notEqual(loadSyncState().lastSyncedAt, null, 'fixture check: a sync succeeded since the resume');
+    saveFeeds([bsFeed()]);
+    const { events, skipped } = parseICS(bsIcs([{ uid: 'bsD-r2c', summary: 'HW R2c - Due', date: far(2) }]));
+    localStorage.setItem('plaenicke.feedCache', JSON.stringify({ 'bsD-feed': { fetchedAt: new Date().toISOString(), events, skipped } }));
+    saveSyncState({ adoptionPending: true });
+    tapColourDot('Brightspace');
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-r2c'), false, 'deferred while adoption is pending');
+    clearAdoptionPending();
+    tapColourDot('Brightspace');
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-r2c'), true, 'fixture check: imports once it is lifted');
+  } finally { net.restore(); bsCleanup(); }
+});
+
+test('bsD: on an unlinked device the import runs at once, with no sync', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const requests = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => { if (String(url).includes('/data')) requests.push(url); return original(url, opts); };
+  try {
+    saveFeeds([bsFeed()]);
+    const { events, skipped } = parseICS(bsIcs([{ uid: 'bsD-r2d', summary: 'HW R2d - Due', date: far(2) }]));
+    localStorage.setItem('plaenicke.feedCache', JSON.stringify({ 'bsD-feed': { fetchedAt: new Date().toISOString(), events, skipped } }));
+    resume();
+    tapColourDot('Brightspace');
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-r2d'), true);
+    assert.deepEqual(requests, []);
+  } finally { globalThis.fetch = original; bsCleanup(); }
+});
+
+test('bsD: "Remove them" waits for a sync on a linked device and says so', async () => {
+  installFakeLocalStorage();
+  const { deadlines } = await import('../js/app.js');
+  const heldIds = ['bs-bsD-w1', 'bs-bsD-w2', 'bs-bsD-w3', 'bs-bsD-w4'];
+  const keep = { uid: 'bsD-wk', summary: 'Keep - Due', date: far(5) };
+  let net = null;
+  try {
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([...[1, 2, 3, 4].map((n) => ({ uid: `bsD-w${n}`, summary: `HW w${n} - Due`, date: far(n) })), keep]));
+    await drainUntil(() => heldIds.every((id) => loadItems().some((it) => it.id === id)));
+    await refreshWith(bsIcs([keep]));
+    await drainUntil(() => deadlines.status().held.length === 4);
+    assert.deepEqual([...deadlines.status().held].sort(), heldIds, 'fixture check: four held');
+    await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+    clearAdoptionPending();
+    net = bsLinkedNet(bsIcs([keep]));
+    resume();
+    await drainUntil(() => net.state.gets > 0);
+    globalThis.document.getElementById('message').textContent = '';
+    deadlines.removeHeld();
+    for (const id of heldIds) assert.ok(loadItems().some((it) => it.id === id), `${id} kept`);
+    assert.equal(loadTombstones().some((t) => heldIds.includes(t.id)), false, 'no tombstone written');
+    assert.deepEqual([...deadlines.status().held].sort(), heldIds, 'the held list stays');
+    assert.match(messageText(), /Waiting for sync/);
+    net.release(emptyAccount);
+    await drainUntil(() => loadSyncState().lastSyncedAt !== null);
+    await drain();
+    deadlines.removeHeld();
+    assert.equal(loadItems().some((it) => heldIds.includes(it.id)), false, 'removed once a sync succeeded');
+  } finally {
+    if (net) net.restore();
+    bsCleanup();
+    saveTombstones(loadTombstones().filter((t) => !heldIds.includes(t.id)));
+  }
+});
+
+test('bsD: each return to visible waits for that visit\'s sync, even after an earlier one succeeded', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  const net = bsLinkedNet(bsIcs([{ uid: 'bsD-r2f', summary: 'HW R2f - Due', date: far(2) }]));
+  net.state.getResponse = emptyAccount;
+  try {
+    resume();
+    await drainUntil(() => loadSyncState().lastSyncedAt !== null);
+    assert.notEqual(loadSyncState().lastSyncedAt, null, 'fixture check: an earlier visit synced');
+    net.state.getResponse = null; // this visit's sync read is held
+    saveFeeds([bsFeed()]);
+    reloadFromStorage('plaenicke.feeds');
+    const gets = net.state.gets;
+    resume();
+    await drainUntil(() => bsCacheFetched() && net.state.gets > gets);
+    await drain();
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-r2f'), false, 'waits for this visit\'s sync');
+    net.release(emptyAccount);
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-r2f'));
+    assert.equal(loadItems().some((it) => it.id === 'bs-bsD-r2f'), true);
+  } finally { net.restore(); bsCleanup(); }
+});
+
+// Residual 1 (re-review): a sync already in flight when the tab hides runs to
+// completion, and its GET was answered before the hide. It must not release
+// the import deferred on the NEXT visit: the other device may have ticked in
+// between, and an import run on the pre-tick copy is stamped later than the
+// tick, so the next merge keeps the import's patch and loses the tick. Only a
+// sync STARTED during the current visit releases it.
+test('bsD: a sync in flight across a hide does not release the next visit\'s deferred import', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const { getLink } = await import('../js/auth.js');
+  let net = null;
+  try {
+    // Device B, unlinked, imports Y.
+    saveFeeds([bsFeed()]);
+    await refreshWith(bsIcs([{ uid: 'bsD-r1', summary: 'HW R1 - Due', date: far(2) }]));
+    await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-r1'));
+    const imported = loadItems().find((it) => it.id === 'bs-bsD-r1');
+    assert.ok(imported && imported.date === far(2) && imported.done === false, 'fixture check: Y imported');
+    await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+    clearAdoptionPending();
+    const encKey = getLink().encKey;
+    // The account as it stood before the other device's tick.
+    const preTick = await encryptBlob(encKey, state({ items: [imported] }));
+    net = bsLinkedNet(bsIcs([{ uid: 'bsD-r1', summary: 'HW R1 - Due', date: far(4) }]));
+    // A sync starts and its GET is held.
+    resume();
+    await drainUntil(() => net.state.gets > 0);
+    assert.equal(net.state.gets, 1, 'fixture check: a sync read is held');
+    // Hide.
+    globalThis.document.visibilityState = 'hidden';
+    try { resume(); } finally { globalThis.document.visibilityState = 'visible'; }
+    // The other device ticks Y and writes notes.
+    const ticked = { ...imported, done: true, notes: 'started', updatedAt: new Date(Date.parse(imported.updatedAt) + 1).toISOString() };
+    const postTick = await encryptBlob(encKey, state({ items: [ticked] }));
+    // Show: the feed refetch brings Y's new date; the import is deferred.
+    await staleBsCache();
+    reloadFromStorage('plaenicke.feeds');
+    resume();
+    await drainUntil(bsCacheFetched);
+    assert.ok(bsCacheFetched(), 'fixture check: the feed refetched on the show');
+    await drain();
+    assert.equal(loadItems().find((it) => it.id === 'bs-bsD-r1').date, far(2), 'fixture check: the import is deferred');
+    assert.equal(net.state.gets, 1, 'fixture check: the show did not start a second sync');
+    // Release the held GET with the pre-tick account state.
+    net.release(() => Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 3, blob: preTick }) }));
+    await drainUntil(() => loadSyncState().lastSyncedAt !== null);
+    assert.notEqual(loadSyncState().lastSyncedAt, null, 'fixture check: the held sync finished ok');
+    await drain();
+    assert.equal(loadItems().find((it) => it.id === 'bs-bsD-r1').date, far(2),
+      'a sync started before the hide must not release the import');
+    // The next sync (the re-arm of the trigger the show queued) pulls the tick
+    // and releases the import, which patches the date and keeps the tick.
+    net.state.getResponse = () => Promise.resolve({ ok: true, status: 200, json: async () => ({ version: 5, blob: postTick }) });
+    await drainUntil(() => loadItems().find((it) => it.id === 'bs-bsD-r1')?.date === far(4), 6000);
+    const y = loadItems().find((it) => it.id === 'bs-bsD-r1');
+    assert.equal(y.date, far(4), 'the next successful sync released the import');
+    assert.equal(y.done, true, 'the tick is kept');
+    assert.equal(y.notes, 'started', 'the notes are kept');
+    assert.ok(net.state.gets >= 2, 'fixture check: a second sync ran');
+  } finally {
+    if (net) net.restore();
+    bsCleanup();
+  }
 });

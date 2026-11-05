@@ -74,6 +74,12 @@ public repo or forum — that is a stranger's private calendar data.
   overrides sharing a master UID, or the `CALDAVJ` `PRODID`. Those remain
   **unverified** pending a capture from Alex's own iCloud published calendar.
 
+## brightspace-shape.ics
+
+- `brightspace-shape.ics` — SYNTHETIC. Written by hand to reproduce the shapes measured in a real
+  Brightspace (D2L) calendar feed on 2026-10-27 (UTC due times, DATE events, one RRULE, the course
+  in LOCATION, NNNN-NNN@host UIDs). No real course, person or link. The real feed is never committed.
+
 ## canvas-sample.ics — TODO, not captured this session
 
 Alex's Canvas calendar feed (personal capability URL,

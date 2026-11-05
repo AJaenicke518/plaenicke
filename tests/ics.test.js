@@ -462,6 +462,7 @@ test('parseICS returns one ParsedEvent per VEVENT with the compact serializable 
   assert.deepEqual(events[0], {
     uid: 'evt-1',
     title: 'Statics Lecture',
+    location: null,
     form: 'TZID',
     dtstart: { value: '20260901T090000', tzid: NY },
     dtend: { value: '20260901T100000', tzid: NY },
@@ -1832,4 +1833,27 @@ test('parseICS skips a RECURRENCE-ID event that carries its own RRULE (never fab
     ['2026-09-02', '09:00', '10:00'],
     ['2026-09-03', '09:00', '10:00'],
   ]);
+});
+
+test('parseICS keeps LOCATION, unescaped, and null when absent', () => {
+  const ics = [
+    'BEGIN:VCALENDAR',
+    'BEGIN:VEVENT',
+    'UID:1-1@brightspace.example',
+    'SUMMARY:Essay - Due',
+    'DTSTART:20261103T075900Z',
+    'DTEND:20261103T075900Z',
+    'LOCATION:Fall 2026 Sport\\, Race and Society (CLST-1300-01/02)',
+    'END:VEVENT',
+    'BEGIN:VEVENT',
+    'UID:1-2@brightspace.example',
+    'SUMMARY:No place',
+    'DTSTART;VALUE=DATE:20261104',
+    'END:VEVENT',
+    'END:VCALENDAR',
+  ].join('\r\n');
+  const { events, skipped } = parseICS(ics);
+  assert.equal(skipped.length, 0);
+  assert.equal(events[0].location, 'Fall 2026 Sport, Race and Society (CLST-1300-01/02)');
+  assert.equal(events[1].location, null);
 });

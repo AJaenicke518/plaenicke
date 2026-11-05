@@ -56,6 +56,10 @@ function requireReadFetch(readFetchImpl, fn) {
   if (typeof readFetchImpl !== 'function') throw new Error(`${fn} requires readFetchImpl`);
 }
 
+function discardBody(res) {
+  Promise.resolve().then(() => res.json()).catch(() => {});
+}
+
 async function fetchRemote({ readFetchImpl, apiBase, link }) {
   // The network call, the body read, and the decrypt/schema check below must
   // all fail distinguishably: a dropped connection (offline) is not the same
@@ -82,8 +86,14 @@ async function fetchRemote({ readFetchImpl, apiBase, link }) {
     console.error('plaenicke: sync read failed', err && err.name);
     return { networkError: err };
   }
-  if (res.status === 401) return { unauthorized: true };
-  if (!res.ok) return { failed: res.status };
+  // An error status is decided by the status alone, but its body is still
+  // read and discarded: fetchWithTimeout disarms its deadline only when a body
+  // read settles (js/fetchtimeout.js), so an unread error body left a 60 s
+  // timer armed that later aborted a request already handled. Not awaited:
+  // a stalled error body must not hold the sync queue, and the deadline still
+  // bounds the read. Its outcome is irrelevant, so a failure is ignored.
+  if (res.status === 401) { discardBody(res); return { unauthorized: true }; }
+  if (!res.ok) { discardBody(res); return { failed: res.status }; }
   let body;
   try {
     body = await res.json();

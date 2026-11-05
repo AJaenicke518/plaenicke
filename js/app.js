@@ -1,6 +1,6 @@
 import {
   loadItems, saveItems, loadFeeds, loadFeedCache, addTombstone,
-  saveTombstones, recordLaunch, STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY, SERIES_VISIBILITY_KEY, QuotaError,
+  saveTombstones, recordLaunch, loadDeadlineBaseline, saveDeadlineBaseline, STORAGE_KEY, FEEDS_KEY, TOMBSTONES_KEY, SERIES_VISIBILITY_KEY, QuotaError,
 } from './storage.js';
 import {
   loadVisibility, filterBySurface, isShown, canHideSeries, setSeriesVisibility, CALENDAR, LISTS,
@@ -25,6 +25,7 @@ import { renderPreview } from './preview.js';
 import { isVoiceSupported, listen, errorKind } from './voice.js';
 import { initSettings } from './settings.js';
 import { instancesForRange, syncStale, applyRemoteFeeds } from './feeds.js';
+import { planDeadlineImport, trackedCopyIds, hideTrackedCopies } from './deadlines.js';
 import { openItemSheet } from './itemsheet.js';
 import { showToast } from './toast.js';
 import { applyEdit, typeChangePatch, snapshotOf, nextStamp, EDITABLE_FIELDS } from './edit.js';
@@ -193,8 +194,18 @@ function liveItems() { return items.filter((it) => !pendingDeletes.has(it.id)); 
 function visibleItems(start, end) {
   return [
     ...liveItems().filter(isScheduled),
-    ...filterBySurface(instancesForRange(feeds, feedCache, start, end, deviceTz), visibility, CALENDAR),
+    ...filterBySurface(feedInstances(start, end), visibility, CALENDAR),
   ];
+}
+
+// feedInstances: every feed instance for [start, end], minus the feed's own
+// copy of a tracked Brightspace deadline (the Deadline item shows instead,
+// spec § 3.6). A deadline Alex deleted stays hidden too, and so does the copy
+// on a calendar no longer tracking (amended 2026-10-31). Tombstones are read
+// through localState(), the one reader of local synced state (tests/sync.test.js).
+function feedInstances(start, end) {
+  return hideTrackedCopies(instancesForRange(feeds, feedCache, start, end, deviceTz),
+    trackedCopyIds(items, localState().tombstones));
 }
 
 // THE To-do AND Ideas PAGES READ `items` DIRECTLY, never visibleItems (V6
@@ -231,13 +242,40 @@ function ideaItems() { return sortIdeasNewestFirst(liveItems().filter(isIdea)); 
 // imports it cannot be unit-tested in Node (`ReferenceError: document is not
 // defined`). Keep the injection even if renderSyncStatus moves and the cycle
 // goes away.
+// The deadline import's last note and held ids, for the Settings row (Task 6).
+// Declared before initSettings so nothing it calls can meet the TDZ. The
+// same hooks object goes to Settings and is exported for the tests.
+let deadlineStatus = { note: null, held: [] };
+export const deadlines = { status: () => deadlineStatus, removeHeld: removeHeldDeadlines };
+// THE IMPORT WAITS FOR SYNC ON A LINKED DEVICE (final review C2). A device that
+// has not pulled the account's latest items would patch a stale copy, stamped
+// later than Alex's tick on the other device, and whole-record last-write-wins
+// would keep the patch: tick and notes lost. So while linked, nothing is
+// imported until a sync has SUCCEEDED since launch or the last return to
+// visible (and never while an adoption is pending); the import that was asked
+// for meanwhile runs from runSync's success path. Unlinked, it runs at once.
+// Residual (accepted): a Brightspace change applied in the same sync window
+// as a tick on the other device can still lose the tick; this removes the
+// stale-device case, not true concurrency.
+// A sync releases the wait only if it STARTED during the current visit
+// (residual 1): one already in flight when the tab hid read the account before
+// the hide, so it can predate the other device's latest writes. `visit` counts
+// visits (launch is the first; the visible handler increments it) and runSync
+// captures it when a sync actually starts, not when it only marks syncPending.
+let syncedSinceVisible = false;
+let visit = 1;
+let deadlineImportDeferred = false;
+const importWaitsForSync = () => isLinked() && (isAdoptionPending() || !syncedSinceVisible);
+
 initSettings({
   button: els.settingsBtn,
   host: els.settingsHost,
   // The stamp is repainted too (sweep F, O5): adding, removing or hiding a
   // calendar changes what is on screen, and so what the stamp is about.
   onFeedsChanged: () => {
-    feeds = loadFeeds(); feedCache = loadFeedCache(); render();
+    feeds = loadFeeds(); feedCache = loadFeedCache();
+    importDeadlines();
+    render();
     stampUpdated(); stampFromFeeds();
   },
   // Settings' manual Sync and Add calendar fetch outside the background batch.
@@ -257,6 +295,8 @@ initSettings({
   // visibilityState nor connectivity.
   onSyncedDataChanged: () => scheduleSync(),
   applyState: applySyncedState,
+  // Brightspace deadlines: the Settings row's note and its "Remove them".
+  deadlines,
 });
 
 // The top box's line: Ideas, ticks, deletes, edits and the top box's own adds.
@@ -549,6 +589,97 @@ function handleDelete(id) {
     // removes it on the next sync (the pre-4b deleteItem behaved the same).
     render();
   }
+}
+
+// --- Brightspace deadlines (spec 2026-10-30) --------------------------------
+//
+// A SECOND ITEMS WRITER PATH, inside app.js on purpose (CLAUDE.md, Ownership):
+// the plan comes from js/deadlines.js (pure); the writes land here, in the
+// module-scope `items`, saved once. Tombstones first, as deleteItem does.
+// Updates and removals are judged against this device's deadline baseline
+// (plaenicke.deadlineBaseline, device-local: what THIS device last imported),
+// never against the feed cache: a field is patched only while the item
+// still holds the value Brightspace last gave this device for it (once Alex
+// changes a field, Brightspace never overwrites it), and only an id this device imported
+// can be removed. The baseline is advanced only once the plan's writes
+// succeeded, so a failed write is retried by the next import.
+// deadlineStatus and the `deadlines` hooks are declared above initSettings.
+
+function applyDeadlinePlan({ create, update, remove }) {
+  if (create.length === 0 && update.length === 0 && remove.length === 0) return;
+  const now = nowISO();
+  for (const id of remove) {
+    const rec = items.find((it) => it.id === id);
+    addTombstone(id, 'item', nextStamp(now, rec && rec.updatedAt));
+  }
+  const gone = new Set(remove);
+  const patches = new Map(update.map((u) => [u.id, u.patch]));
+  const made = create.map((c) => makeItem({ title: c.title, date: c.date, time: c.time, type: 'due' }, {
+    id: c.id, createdAt: localStamp(new Date()), updatedAt: now,
+  }));
+  const prev = items;
+  items = [
+    ...items.filter((it) => !gone.has(it.id))
+      .map((it) => (patches.has(it.id) ? applyEdit(it, patches.get(it.id), nextStamp(now, it.updatedAt)) : it)),
+    ...made,
+  ];
+  try {
+    saveItems(items);
+  } catch (e) {
+    items = prev;
+    throw e;
+  }
+  render();
+  scheduleSync();
+}
+
+function importDeadlines() {
+  if (importWaitsForSync()) { deadlineImportDeferred = true; return; }
+  deadlineImportDeferred = false;
+  try {
+    const baseline = loadDeadlineBaseline();
+    const plan = planDeadlineImport({
+      feeds, baseline, cache: feedCache, items, tombstones: localState().tombstones,
+      failedFeedIds, pendingIds: pendingDeletes, todayISO: toISO(new Date()),
+    });
+    // A round that judged nothing (no tracking feed re-fetched or failed)
+    // leaves the last judged round's note and "Remove them" list in place.
+    if (plan.judged) deadlineStatus = { note: plan.note, held: plan.held };
+    applyDeadlinePlan(plan);
+    // Only after the writes landed (or there were none): a failed write leaves
+    // the stored baseline as it was, so the next import plans the same change.
+    if (JSON.stringify(plan.nextBaseline) !== JSON.stringify(baseline)) saveDeadlineBaseline(plan.nextBaseline);
+  } catch (e) {
+    // Never swallowed: the top line says why, and the console names the error
+    // (never a feed URL). The baseline was not advanced, so the next import
+    // plans this round again. If the items write failed, `items` is as it
+    // was, but tombstones for this round's removals may already be stored
+    // (written first, as deleteItem does) and the next sync applies them. If
+    // only the baseline write failed, the items landed and the next import
+    // finds nothing left to write for them.
+    setMessage(e.message);
+    console.error('plaenicke: deadline import failed', e && e.name);
+  }
+}
+
+// "Remove them": the held list is cleared only once the write succeeded, so a
+// failed removal keeps the list and its button. A failed items write leaves
+// the items stored, but tombstones for some or all of the held ids may
+// already be written (they go first, as deleteItem's do) and the next sync
+// applies them. Same catch as importDeadlines.
+function removeHeldDeadlines() {
+  // Waits for sync like the import itself: the held list and its button stay.
+  if (importWaitsForSync()) { setMessage('Waiting for sync — nothing removed yet.'); return; }
+  const live = new Set(items.map((it) => it.id));
+  const held = deadlineStatus.held.filter((id) => live.has(id) && !pendingDeletes.has(id));
+  try {
+    applyDeadlinePlan({ create: [], update: [], remove: held });
+  } catch (e) {
+    setMessage(e.message);
+    console.error('plaenicke: removing held deadlines failed', e && e.name);
+    return;
+  }
+  deadlineStatus = { note: null, held: [] };
 }
 
 // setDone — V6's To-do checkbox, and THE APP'S FIRST EDIT PATH (spec § 5.1).
@@ -1046,7 +1177,7 @@ function renderWeek() {
   // (as visibleItems does) and the list takes the slice it lists.
   // The grid is the calendar surface and the list the list surface
   // (js/visibility.js), so each takes its own filter of the one expansion.
-  const weekInsts = instancesForRange(feeds, feedCache, viewWeekStart, end, deviceTz);
+  const weekInsts = feedInstances(viewWeekStart, end);
   const gridInsts = filterBySurface(weekInsts, visibility, CALENDAR);
   const listInsts = filterBySurface(weekInsts, visibility, LISTS);
   renderWeekView(els.weekGrid, viewWeekStart,
@@ -1141,11 +1272,11 @@ function renderToday() {
   // a series hidden from lists is not the "Next:" line either (ruling 1).
   const today = buildToday(
     liveItems(),
-    filterBySurface(instancesForRange(feeds, feedCache, todayISO, addDays(todayISO, NEXT_DAYS), deviceTz), visibility, LISTS),
+    filterBySurface(feedInstances(todayISO, addDays(todayISO, NEXT_DAYS)), visibility, LISTS),
     todayISO,
     minutesNow(now),
     () => filterBySurface(
-      instancesForRange(feeds, feedCache, addDays(todayISO, 1), addDays(todayISO, LOOKAHEAD_DAYS), deviceTz),
+      feedInstances(addDays(todayISO, 1), addDays(todayISO, LOOKAHEAD_DAYS)),
       visibility, LISTS,
     ),
   );
@@ -1412,6 +1543,7 @@ function backgroundSyncFeeds(feedList) {
     render();
     if (results === null) for (const f of feedList) failedFeedIds.add(f.id);
     else for (const [id, r] of Object.entries(results)) { if (r.ok) failedFeedIds.delete(id); else failedFeedIds.add(id); }
+    importDeadlines();
     stampFromFeeds();
     if (feedQueue.size > 0) {
       const queued = new Set(feedQueue);
@@ -1532,8 +1664,10 @@ async function runSync() {
   if (document.visibilityState === 'hidden') return;
   if (syncInFlight) { syncPending = true; return; }
   syncInFlight = true;
+  const startedInVisit = visit;
+  let synced = false;
   try {
-    await syncOnce({
+    const result = await syncOnce({
       // The read gives up at the shared download deadline and reports as
       // offline; the write never does (js/sync.js, punchlist L63).
       readFetchImpl: fetchWithTimeout,
@@ -1553,6 +1687,10 @@ async function runSync() {
       apiBase: WORKER_URL,
       applyState: applySyncedState,
     });
+    // Only a sync that finished 'ok' (pulled, applied and, if needed, pushed)
+    // releases the deadline import; skipped, offline, error, conflict and
+    // adoption-required all leave it waiting.
+    synced = result && result.status === 'ok';
   } catch (err) {
     // Never let a sync failure break the app; local data keeps rendering.
     console.error('sync', err && err.name);
@@ -1571,6 +1709,11 @@ async function runSync() {
     // A trigger that arrived mid-sync must not be dropped — otherwise it
     // would wait for an unrelated later trigger instead of running promptly.
     if (syncPending) { syncPending = false; scheduleSync(); }
+  }
+  if (synced && startedInVisit === visit) {
+    syncedSinceVisible = true;
+    // The import asked for while waiting. importDeadlines never throws.
+    if (deadlineImportDeferred) importDeadlines();
   }
 }
 
@@ -1710,6 +1853,10 @@ document.addEventListener('visibilitychange', () => {
     return;
   }
   if (document.visibilityState !== 'visible') return;
+  // The other device may have written while this one was away: the deadline
+  // import waits for this visit's first successful sync (C2, above).
+  syncedSinceVisible = false;
+  visit += 1;
   noteLaunch();
   render(); // refreshForToday runs first, inside render
   syncTodayTick();

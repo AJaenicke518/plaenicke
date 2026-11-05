@@ -772,3 +772,13 @@ test('applyTombstones refuses a junk element rather than skipping it', () => {
   assert.throws(() => applyTombstones(records, [null], 'item'));
   assert.throws(() => applyTombstones(records, [{ id: 'a', kind: 'item', deletedAt: 'x' }, undefined], 'item'));
 });
+
+test('merge/toWire: a feed\'s trackDeadlines rides through; the newer feed record wins', () => {
+  const base = { id: 'f1', url: 'https://x/f.ics', name: 'BS', color: 'c', hidden: false };
+  const off = { ...base, updatedAt: '2026-10-29T00:00:00.000Z' };
+  const on = { ...base, updatedAt: '2026-10-30T00:00:00.000Z', trackDeadlines: { from: '2026-10-30' } };
+  const st = (feeds) => ({ schemaVersion: SCHEMA_VERSION, items: [], feeds, tombstones: [] });
+  assert.deepEqual(toWire(st([on])).feeds[0].trackDeadlines, { from: '2026-10-30' });
+  const merged = merge(st([off]), st([on]), new Date('2026-10-30T12:00:00.000Z'));
+  assert.deepEqual(merged.feeds.find((f) => f.id === 'f1').trackDeadlines, { from: '2026-10-30' });
+});

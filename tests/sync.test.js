@@ -7,7 +7,7 @@ import { fetchWithTimeout, FETCH_TIMEOUT_MS } from '../js/fetchtimeout.js';
 import { linkWithCode, clearAdoptionPending, tokenHash } from '../js/auth.js';
 import { encryptBlob, decryptBlob, generateEncKey, bytesToBase64url, composeLinkCode } from '../js/crypto.js';
 import { SCHEMA_VERSION, toWire } from '../js/merge.js';
-import { saveItems, loadItems, loadFeeds, saveFeeds, saveAuth, loadSyncState, saveSyncState } from '../js/storage.js';
+import { saveItems, loadItems, loadFeeds, saveFeeds, saveAuth, loadSyncState, saveSyncState, saveDeadlineBaseline } from '../js/storage.js';
 
 const NOW = () => new Date('2026-08-02T12:00:00.000Z');
 const item = (id, updatedAt) => ({ id, title: `t-${id}`, date: '2026-08-02', time: null, updatedAt });
@@ -667,6 +667,75 @@ test('a read that times out is reported as offline: nothing applied, nothing pus
   assert.equal(wrote, false);
 });
 
+// fetchWithTimeout's contract (js/fetchtimeout.js): its deadline is disarmed
+// only when the body read settles, so a caller must read the body even on an
+// error status. A 502 or 401 read whose body sync.js never read left the 60 s
+// timer armed after the sync had already reported, and it later aborted a
+// request that had long finished (2026-11-02: it held tests/apply.test.js
+// open for 60 s after its last test). The status reported is unchanged.
+for (const [status, expected] of [[502, 'error'], [401, 'unauthorized']]) {
+  test(`a ${status} read is reported as ${expected} and leaves no read deadline armed`, async (t) => {
+    await linked();
+    const originalFetch = globalThis.fetch;
+    let signal = null;
+    globalThis.fetch = (url, init) => {
+      signal = init.signal;
+      return Promise.resolve({ ok: false, status, headers: {}, json: async () => ({ error: 'x' }) });
+    };
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      const res = await realSyncOnce({
+        readFetchImpl: fetchWithTimeout,
+        fetchImpl: async () => { throw new Error('no write expected'); },
+        now: NOW, apiBase: 'https://w.example', applyState: echo,
+      });
+      assert.equal(res.status, expected);
+      for (let i = 0; i < 5; i += 1) await Promise.resolve(); // the discarded body read settles in microtasks
+      assert.ok(signal, 'fixture check: the read went through fetchWithTimeout');
+      t.mock.timers.tick(FETCH_TIMEOUT_MS);
+      assert.equal(signal.aborted, false, 'the read deadline must be disarmed once the error response is handled');
+    } finally {
+      t.mock.timers.reset();
+      globalThis.fetch = originalFetch;
+    }
+  });
+}
+
+// Real error bodies are often not JSON (an HTML 502 from the edge, an empty
+// 401), so the discarded json() read REJECTS. It must be caught: an uncaught
+// one is an unhandled rejection on every failed sync.
+for (const [label, respond] of [
+  ['an HTML 502', () => new Response('<html>Bad gateway</html>', { status: 502 })],
+  ['an empty 401', () => new Response('', { status: 401 })],
+  ['a 502 whose json() rejects', () => ({ ok: false, status: 502, headers: {}, json: async () => { throw new SyntaxError('not json'); } })],
+]) {
+  test(`${label}: the discarded body read that rejects is caught`, async () => {
+    await linked();
+    const originalFetch = globalThis.fetch;
+    let signal = null;
+    globalThis.fetch = (url, init) => { signal = init.signal; return Promise.resolve(respond()); };
+    const unhandled = [];
+    const onUnhandled = (reason) => { unhandled.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const res = await realSyncOnce({
+        readFetchImpl: fetchWithTimeout,
+        fetchImpl: async () => { throw new Error('no write expected'); },
+        now: NOW, apiBase: 'https://w.example', applyState: echo,
+      });
+      assert.ok(['error', 'unauthorized'].includes(res.status), `reported as a failed read (${res.status})`);
+      // The body read settles on a real Response's stream; unhandledRejection
+      // is emitted after the microtask queue drains, so settle real turns.
+      for (let i = 0; i < 20; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+      assert.ok(signal, 'fixture check: the read went through fetchWithTimeout');
+      assert.deepEqual(unhandled.map((e) => e && e.name), [], 'no unhandled rejection from the discarded body read');
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      globalThis.fetch = originalFetch;
+    }
+  });
+}
+
 test('previewRemote reports a timed-out read as offline', async (t) => {
   await linked();
   const originalFetch = globalThis.fetch;
@@ -970,6 +1039,20 @@ test('localState reads the synced keys through the storage loaders', () => {
   assert.equal(out.items[0].updatedAt, '2026-07-01T00:00:00.000Z');
   assert.deepEqual(out.feeds, loadFeeds());
   assert.deepEqual(out.tombstones, [{ id: 't1', kind: 'item', deletedAt: '2026-08-01T00:00:00.000Z' }]);
+});
+
+// The deadline baseline (plaenicke.deadlineBaseline) is device-local: two
+// devices' baselines differ by design, and syncing one would hand the other a
+// record of imports it never made (spec 2026-10-30 § 3.5, amended 2026-10-31).
+test('the deadline baseline is never part of the synced state', () => {
+  installFakeLocalStorage();
+  saveDeadlineBaseline({ f1: { fetchedAt: '2026-10-30T12:00:00.000Z',
+    deadlines: { 'bs-baseline-only': { title: 'Baseline only', date: '2026-11-02', time: null } } } });
+  const out = localState();
+  assert.deepEqual(Object.keys(out).sort(), ['feeds', 'items', 'schemaVersion', 'tombstones']);
+  const wire = JSON.stringify(toWire(out));
+  assert.doesNotMatch(wire, /bs-baseline-only|deadlineBaseline|Baseline only/);
+  assert.notEqual(localStorage.getItem('plaenicke.deadlineBaseline'), null, 'fixture check: the baseline is stored');
 });
 
 // The shape used to be rebuilt in three places. The other two now call

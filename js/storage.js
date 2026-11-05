@@ -352,6 +352,55 @@ export function writeSeriesVisibility(map) {
   }
 }
 
+// --- Brightspace deadline baseline ---
+// plaenicke.deadlineBaseline — DEVICE-LOCAL, NEVER SYNCED. Not part of the
+// sync blob (sync.js's localState() never reads it) and not one of app.js's
+// cross-tab sync keys. Owner: app.js's deadline import, its ONLY reader and
+// writer; js/deadlines.js computes the next value (spec 2026-10-30 § 3.5,
+// amended 2026-10-31). What THIS device last imported, per tracking feed:
+//   { [feedId]: { fetchedAt, deadlines: { [bs-id]: { title, date, time } } } }
+// The import judges every update and removal against it, never against the
+// feed cache: a cache only says what this device last fetched, which can be
+// older than what the other device imported. A corrupt value loads as {} and
+// a malformed entry or record is dropped: a missing record only means no
+// update and no removal for that id, the safe direction.
+export const DEADLINE_BASELINE_KEY = 'plaenicke.deadlineBaseline';
+
+const isBaselineRecord = (r) => Boolean(r) && typeof r === 'object' && typeof r.title === 'string'
+  && typeof r.date === 'string' && (r.time === null || typeof r.time === 'string');
+
+export function loadDeadlineBaseline() {
+  const json = localStorage.getItem(DEADLINE_BASELINE_KEY);
+  if (!json) return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return {};
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+  const result = {};
+  for (const [feedId, entry] of Object.entries(parsed)) {
+    if (!entry || typeof entry.fetchedAt !== 'string' || !entry.deadlines
+      || typeof entry.deadlines !== 'object' || Array.isArray(entry.deadlines)) continue;
+    const deadlines = {};
+    for (const [id, r] of Object.entries(entry.deadlines)) {
+      if (isBaselineRecord(r)) deadlines[id] = { title: r.title, date: r.date, time: r.time };
+    }
+    result[feedId] = { fetchedAt: entry.fetchedAt, deadlines };
+  }
+  return result;
+}
+
+export function saveDeadlineBaseline(baseline) {
+  try {
+    localStorage.setItem(DEADLINE_BASELINE_KEY, JSON.stringify(baseline));
+  } catch (err) {
+    if (err && err.name === 'QuotaExceededError') throw new QuotaError('Deadline baseline exceeded storage quota');
+    throw err;
+  }
+}
+
 // --- launch log ---
 // Timestamps of each time the app was opened or resumed on THIS device. Local
 // only, never synced: it is the Phase 0 baseline for "is plaenicke actually
