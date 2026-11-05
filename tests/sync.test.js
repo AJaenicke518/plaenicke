@@ -774,7 +774,8 @@ test('a PUT slower than the read deadline is still waited for, and lands', async
       },
       now: NOW, apiBase: 'https://w.example', applyState: echo,
     });
-    for (let i = 0; i < 50 && !putStarted; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    // Not settleUntil: its setTimeout turns would be the mocked ones here.
+    for (const end = performance.now() + 2000; !putStarted && performance.now() < end;) await new Promise((resolve) => { setImmediate(resolve); });
     assert.ok(putStarted, 'fixture check: the PUT is in flight');
     t.mock.timers.tick(2 * FETCH_TIMEOUT_MS);
     const res = await pending;
