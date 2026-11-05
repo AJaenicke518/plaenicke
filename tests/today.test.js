@@ -814,6 +814,37 @@ test('buildToday: a ticked to-do is listed once — today\'s in To do today, nev
   assert.deepEqual(ids(t.todo), ['t']);
 });
 
+// Controller ruling, 2026-11-04: the empty line never claims nothing is
+// there while a struck row is drawn under Next 7 days or Coming up. "Next:"
+// still names the next UNDONE thing.
+test('buildToday: with only ticked to-dos ahead, the empty line says nothing is due today, never "Nothing coming up."', () => {
+  const soon = own('s', { type: 'task', date: '2026-10-23', done: true, title: 'Stamps' });
+  const far = own('f', { type: 'task', date: '2026-11-02', done: true, title: 'Far' });
+  assert.equal(buildToday([soon], [], TODAY, at(8, 0), none).emptyLine, 'Nothing due today.', 'struck row in Next 7 days');
+  assert.equal(buildToday([far], [], TODAY, at(8, 0), none).emptyLine, 'Nothing due today.', 'struck row in Coming up');
+  const undone = own('u', { type: 'event', date: '2026-10-25', title: 'Dinner' });
+  assert.equal(buildToday([soon, undone], [], TODAY, at(8, 0), none).emptyLine, 'Nothing due today. Next: Dinner · Sun.',
+    'Next: skips the ticked one and names the next undone thing');
+  assert.equal(buildToday([], [], TODAY, at(8, 0), none).emptyLine, 'Nothing coming up.', 'truly nothing');
+});
+
+// Controller ruling, 2026-11-04: within a day, done rows after undone ones
+// (as in To do today), date/time order kept inside each group.
+test('buildToday: within a day of Next 7 days and Coming up, ticked rows come after the undone ones', () => {
+  const items = [
+    own('d1', { type: 'task', date: '2026-10-23', time: '08:00', done: true }),
+    own('u1', { type: 'task', date: '2026-10-23', time: '09:00' }),
+    own('d2', { type: 'due', date: '2026-10-23', time: '10:00', done: true }),
+    own('u2', { type: 'event', date: '2026-10-23', time: '11:00' }),
+    own('ld', { type: 'task', date: '2026-11-02', time: '07:00', done: true }),
+    own('lu', { type: 'task', date: '2026-11-02', time: '12:00' }),
+  ];
+  const instances = [inst('club', '2026-10-23', { time: '07:30' })];
+  const t = buildToday(items, instances, TODAY, at(8, 0), () => instances);
+  assert.deepEqual(dayRows(t.next), [['2026-10-23', 'Fri', ['feedR:club:2026-10-23:07:30', 'u1', 'u2', 'd1', 'd2']]]);
+  assert.deepEqual(dayRows(t.later), [['2026-11-02', 'Mon, Nov 2', ['lu', 'ld']]]);
+});
+
 const TICKED_AT = '2026-10-21T15:00:00.000Z';
 test('tally: a to-do ticked ahead, now drawn in Next 7 days, is still not counted', () => {
   const items = [

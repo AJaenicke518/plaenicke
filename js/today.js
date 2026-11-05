@@ -154,7 +154,8 @@ export const LOOKAHEAD_DAYS = 30;
 //   later      the same shape over [today + 8, today + 30] ("Coming up",
 //              Alex 2026-10-22), from the look-ahead's instances
 //   emptyLine  the one line shown when Overdue, To do today and Today's
-//              events are all empty; otherwise null
+//              events are all empty; otherwise null. "Nothing coming up."
+//              only when Next 7 days and Coming up are empty too
 // No section is capped (Alex, question 3). No item appears twice: an own
 // item is in sectionOf's one section; a feed instance is under Today's events
 // on today, or under Next 7 days or Coming up once — on its first day there, and not at
@@ -227,9 +228,11 @@ export function buildToday(items, instances, todayISO, nowMinutes, lookahead) {
       ...ahead.filter((inst) => inst.date > todayISO && inst.date <= lookEnd),
     ];
     const first = sortItemsByDate(candidates)[0];
-    emptyLine = first
-      ? `Nothing due today. Next: ${first.title} · ${dayWord(first.date, todayISO)}.`
-      : 'Nothing coming up.';
+    // "Next:" names the next UNDONE thing. With none, a to-do ticked ahead
+    // may still be drawn struck under Next 7 days or Coming up, so the line
+    // must not claim nothing is coming (controller ruling, 2026-11-04).
+    if (first) emptyLine = `Nothing due today. Next: ${first.title} · ${dayWord(first.date, todayISO)}.`;
+    else emptyLine = next.length > 0 || later.length > 0 ? 'Nothing due today.' : 'Nothing coming up.';
   }
 
   return { overdue, todo, events, next, later, emptyLine };
@@ -250,7 +253,8 @@ export function tally(today) {
 
 // upcomingRows: the rows of the days [fromISO, toISO], grouped by day —
 // [{ date, label, rows: [{ item }] }], one entry per day that has rows, in
-// sortItemsByDate order, each day named by dayWord(date, todayISO). The ONE
+// sortItemsByDate order (done rows last in their day), each day named by
+// dayWord(date, todayISO). The ONE
 // copy of the rule Next 7 days, Coming up and the Week page's list share:
 //   own items   scheduled, not done, dated in the range (isUpcomingOwn);
 //               with { keepDone: true } (Today's two lists, Alex 2026-11-04)
@@ -289,6 +293,11 @@ export function upcomingRows(items, instances, fromISO, toISO, todayISO, { keepD
       days.push(day);
     }
     day.rows.push({ item });
+  }
+  // Within a day, done rows after the undone ones, as in To do today
+  // (controller ruling, 2026-11-04); sortItemsByDate order inside each.
+  for (const day of days) {
+    day.rows = [...day.rows.filter((r) => r.item.done !== true), ...day.rows.filter((r) => r.item.done === true)];
   }
   return days;
 }
