@@ -166,7 +166,7 @@ test('Today: a to-do due today shows its time', () => {
   assert.deepEqual(byClass(rowOf(host, 'Call bank'), 'today-time').map((n) => n.textContent), ['9:00 AM']);
 });
 
-test('Today: only Overdue and To do today rows have a checkbox', () => {
+test('Today: Overdue and To do today rows have a checkbox; events, and Next 7 days\' event rows, do not', () => {
   const { host } = draw(DAY, DAY_FEED);
   const [overdue, todo, events, next] = byClass(host, 'today-section');
   assert.equal(findAll(overdue, 'INPUT').length, 2);
@@ -267,6 +267,57 @@ test('Today: an overdue to-do ticked today keeps its row, drawn checked and mark
   assert.equal(findAll(row, 'INPUT')[0].checked, true);
 });
 
+// Alex, 2026-11-04: "make it so i can check off things that are due in a
+// couple days". An own to-do under Next 7 days or Coming up gets the same
+// checkbox To do today has; an event or a calendar (feed) row never does.
+const AHEAD_ITEMS = [
+  own('hw', { type: 'due', date: '2026-10-24', title: 'Homework 5' }),
+  own('st', { type: 'start', date: '2026-10-24', title: 'Start project' }),
+  own('ms', { type: 'milestone', date: '2026-10-25', title: 'Draft one' }),
+  own('tk', { type: 'task', date: '2026-10-25', title: 'Buy stamps', done: true }),
+  own('bs-x1', { type: 'due', date: '2026-10-26', title: 'Brightspace quiz' }),
+  own('din', { type: 'event', date: '2026-10-24', time: '19:00', title: 'Dinner' }),
+  own('gen', { type: 'general', date: '2026-10-24', title: 'Birthday' }),
+];
+// A feed row with a to-do-shaped `type` is still a calendar row: no checkbox
+// (the To-do page's note in app.js: a feed could grow a type-shaped field).
+const AHEAD_FEED = [
+  inst('club', '2026-10-24', { time: '08:00', title: 'Club meeting' }),
+  inst('typed', '2026-10-25', { type: 'due', title: 'Feed deadline' }),
+];
+
+test('Next 7 days: an own to-do row has a checkbox in a today-tick label; events and feed rows do not', () => {
+  const { host, calls } = draw(AHEAD_ITEMS, AHEAD_FEED);
+  const next = byClass(host, 'today-section').find((s) => byClass(s, 'today-label')[0].textContent === 'Next 7 days');
+  assert.ok(next, 'fixture check');
+  for (const title of ['Homework 5', 'Start project', 'Draft one', 'Buy stamps', 'Brightspace quiz']) {
+    const row = rowOf(next, title);
+    const boxes = findAll(row, 'INPUT');
+    assert.equal(boxes.length, 1, title);
+    assert.equal(boxes[0].type, 'checkbox');
+    assert.ok(boxes[0].parentNode._classes.has('today-tick'), `${title}: in its 44px label`);
+    assert.equal(boxes[0].getAttribute('aria-label'),
+      `Mark "${title}" ${title === 'Buy stamps' ? 'not done' : 'done'}`);
+  }
+  for (const title of ['Dinner', 'Birthday', 'Club meeting', 'Feed deadline']) {
+    assert.equal(findAll(rowOf(next, title), 'INPUT').length, 0, `${title} has no checkbox`);
+  }
+  const done = rowOf(next, 'Buy stamps');
+  assert.ok(done._classes.has('done'), 'a ticked one stays, struck through');
+  assert.equal(findAll(done, 'INPUT')[0].checked, true);
+  const box = findAll(rowOf(next, 'Homework 5'), 'INPUT')[0];
+  box.checked = true;
+  fire(box, 'change');
+  assert.deepEqual(calls.toggle, [['hw', true]], 'reports through onToggleDone');
+});
+
+test('Next 7 days: a just-ticked row there plays the tick moment', () => {
+  const { host } = draw(AHEAD_ITEMS, [], at(9, 18), { justTicked: 'tk' });
+  const row = rowOf(host, 'Buy stamps');
+  assert.ok(row._classes.has('tick-just'));
+  assert.equal(strikeOf(row).length, 1);
+});
+
 // --- Coming up (A2; stage 3 Commit 2, Alex 2026-10-22) ------------------------
 // A full-width quiet button, "Show the next 30 days", under Next 7 days. It
 // opens the days today + 8 .. today + 30 in place, in Next 7 days' row style,
@@ -320,7 +371,9 @@ test('Coming up, open: its days in Next 7 days\' row style, then "Show less" at 
   assert.equal(byClass(quiz, 'today-open')[0].getAttribute('data-item-id'), 'feedR:quiz:2026-11-03:09:25');
   const reg = rowOf(section, 'Register for spring classes');
   assert.equal(byClass(reg, 'today-time').length, 0, 'untimed: no time, as under Next 7 days');
-  assert.equal(findAll(section, 'INPUT').length, 0, 'no checkbox, as under Next 7 days');
+  assert.equal(findAll(quiz, 'INPUT').length, 0, 'a calendar event has no checkbox');
+  assert.equal(findAll(section, 'INPUT').length, 1, 'only the own to-do has a checkbox, as under Next 7 days');
+  assert.equal(findAll(reg, 'INPUT').length, 1);
   assert.ok(!allText(section).includes('Weekly class'), 'fixture check: classes are never here');
   const b = moreButtons(host);
   assert.equal(b.length, 1);

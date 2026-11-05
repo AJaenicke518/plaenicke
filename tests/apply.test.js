@@ -6474,6 +6474,134 @@ test('To-do page: a to-do ticked today stays, checked and done, after the undone
   }
 });
 
+// Alex, 2026-11-04: "make it so i can check off things that are due in a
+// couple days. when they are checked off keep it checked off until after that
+// day is over". A tick from Next 7 days goes through the same setDone write.
+test('Today: a to-do ticked from Next 7 days is saved, and stays there, struck through, until its day is over', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
+  const nextSection = () => todayBody().children.find((c) => c._classes && c._classes.has('today-section')
+    && allText(c.children[0]) === 'Next 7 days');
+  try {
+    seed([
+      record({ id: 'nx-hw', type: 'due', title: 'nx Homework 5', date: '2026-10-24' }),
+      record({ id: 'nx-din', type: 'event', title: 'nx Dinner', date: '2026-10-24', time: '19:00' }),
+    ]);
+    click(globalThis.document.getElementById('tab-today'));
+    assert.ok(nextSection(), 'fixture check: Next 7 days is drawn');
+    assert.match(allText(nextSection()), /nx Dinner/, 'fixture check: the event is drawn there');
+    assert.ok(!checkboxFor(nextSection(), 'nx Dinner'), 'an event has no checkbox');
+    const box = checkboxFor(nextSection(), 'nx Homework 5');
+    assert.ok(box, 'the to-do has a checkbox under Next 7 days');
+    box.checked = true;
+    fire(box, 'change');
+    assert.equal(storedById('nx-hw').done, true, 'the tick reached storage');
+    const again = checkboxFor(nextSection(), 'nx Homework 5');
+    assert.ok(again && again.checked, 'still under Next 7 days, ticked');
+    assert.ok(todayRowOf(again)._classes.has('done'), 'struck through');
+    assert.equal(globalThis.document.getElementById('today-tally').hidden, true,
+      'the done/left count still counts Overdue and To do today only');
+
+    // The day itself: in To do today. The day after: gone from Today.
+    t.mock.timers.setTime(new Date(2026, 9, 24, 9, 0).getTime());
+    seed(loadItems());
+    assert.ok(checkboxFor(todayBody(), 'nx Homework 5')?.checked, 'on its day, still shown ticked');
+    t.mock.timers.setTime(new Date(2026, 9, 25, 9, 0).getTime());
+    seed(loadItems());
+    assert.doesNotMatch(allText(todayBody()), /nx Homework 5/, 'the day after its date, it is gone');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+});
+
+test('Today: unticking a to-do under Next 7 days saves done false and keeps the row, unstruck', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
+  try {
+    seed([record({
+      id: 'nx-un', type: 'task', title: 'nx Buy stamps', date: '2026-10-23', done: true,
+      updatedAt: new Date(2026, 9, 19, 9, 0).toISOString(),
+    })]);
+    click(globalThis.document.getElementById('tab-today'));
+    const box = checkboxFor(todayBody(), 'nx Buy stamps');
+    assert.ok(box && box.checked, 'a to-do ticked days ago, dated later, is shown ticked');
+    box.checked = false;
+    fire(box, 'change');
+    assert.equal(storedById('nx-un').done, false, 'the untick reached storage');
+    const again = checkboxFor(todayBody(), 'nx Buy stamps');
+    assert.ok(again && again.checked === false);
+    assert.equal(todayRowOf(again)._classes.has('done'), false);
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+});
+
+// Alex chose the same rule for the To-do page: a ticked to-do stays, struck,
+// until its due day is over (js/today.js doneStillShown).
+test('To-do page: a ticked future to-do stays, checked and done, until its day is over', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
+  const rowOf = (title) => todoList().children.find((li) => allText(li).includes(title));
+  try {
+    seed([
+      record({ id: 'tf-fut', type: 'due', title: 'tf Essay', date: '2026-10-24' }),
+      record({
+        id: 'tf-old', type: 'task', title: 'tf Ticked days ago', date: '2026-10-23', done: true,
+        updatedAt: new Date(2026, 9, 18, 9, 0).toISOString(),
+      }),
+    ]);
+    assert.ok(checkboxFor(todoList(), 'tf Ticked days ago')?.checked,
+      'a to-do ticked on an earlier day, dated later, is still listed, ticked');
+    const box = checkboxFor(todoList(), 'tf Essay');
+    box.checked = true;
+    fire(box, 'change');
+    assert.equal(storedById('tf-fut').done, true, 'the tick reached storage');
+    assert.ok(checkboxFor(todoList(), 'tf Essay')?.checked, 'still listed, ticked');
+    assert.ok(rowOf('tf Essay')._classes.has('done'), 'struck through');
+
+    t.mock.timers.setTime(new Date(2026, 9, 24, 23, 59).getTime());
+    seed(loadItems());
+    assert.ok(checkboxFor(todoList(), 'tf Essay')?.checked, 'on its last minute, still listed');
+    assert.doesNotMatch(allText(todoList()), /tf Ticked days ago/, 'one whose day is over is gone');
+    t.mock.timers.setTime(new Date(2026, 9, 25, 0, 1).getTime());
+    seed(loadItems());
+    assert.doesNotMatch(allText(todoList()), /tf Essay/, 'the day after its date, it is gone');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+  }
+});
+
+// Review, 2026-11-04: an undated to-do (CLAUDE.md: deliberate dead-code
+// tolerance) ticked today stays on the To-do page until midnight, as before.
+test('To-do page: an undated to-do ticked today stays listed, ticked', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
+  try {
+    seed([record({
+      id: 'tu-null', type: 'task', title: 'tu Undated', date: null, done: true,
+      updatedAt: new Date(2026, 9, 21, 8, 0).toISOString(),
+    })]);
+    assert.ok(checkboxFor(todoList(), 'tu Undated')?.checked, 'ticked today: listed, ticked');
+    t.mock.timers.setTime(new Date(2026, 9, 22, 0, 1).getTime());
+    seed(loadItems());
+    assert.doesNotMatch(allText(todoList()), /tu Undated/, 'the next day: gone');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+  }
+});
+
 // The done group reads liveItems(), as the undone group does: a ticked to-do
 // deleted from the To-do page is gone at once, while its Undo is pending.
 test('To-do page: a to-do ticked today and then deleted leaves the page before the Undo expires', async (t) => {
