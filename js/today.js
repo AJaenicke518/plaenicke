@@ -26,35 +26,57 @@ const WEEKDAY = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 'sh
 //   'overdue' every to-do type (due, milestone, task, start) whose date has
 //             passed and that is not done — no age limit (Alex, question 9) —
 //             or that was ticked today: it stays, struck through, until
-//             tomorrow (Alex, 2026-10-22; see tickedToday)
+//             tomorrow (Alex, 2026-10-22; see doneStillShown)
 //   'todo'    every to-do type dated today, done or not: a ticked one stays,
 //             struck through, until tomorrow (question 2)
 //   'events'  an event or general item dated today
-//   'next'    anything scheduled and not done, dated (today, today + 7]
-// Never: ideas, done items outside today, past events (Alex: "i dont want
-// past events included"), or a record with no readable date — '' sorts
-// before every real date and would otherwise read as overdue.
+//   'next'    anything scheduled and not done, dated (today, today + 7] — and
+//             a to-do ticked ahead of its day, which stays, struck through,
+//             until that day is over (Alex, 2026-11-04; doneStillShown)
+// Never: ideas, a done to-do doneStillShown drops, a done event outside
+// today, past events (Alex: "i dont want past events included"), or a record
+// with no readable date — '' sorts before every real date and would otherwise
+// read as overdue.
 export function sectionOf(item, todayISO) {
   if (!isScheduled(item)) return null;
   if (typeof item.date !== 'string' || !ISO_DAY.test(item.date)) return null;
   const done = item.done === true;
   if (item.date < todayISO) {
     if (!isTodoType(item)) return null;
-    return !done || tickedToday(item, todayISO) ? 'overdue' : null;
+    return !done || doneStillShown(item, todayISO) ? 'overdue' : null;
   }
   if (item.date === todayISO) {
     if (isTodoType(item)) return 'todo';
     return EVENT_TYPES.has(item.type) ? 'events' : null;
   }
-  return isUpcomingOwn(item, addDays(todayISO, 1), addDays(todayISO, NEXT_DAYS)) ? 'next' : null;
+  return isUpcomingOwn(item, addDays(todayISO, 1), addDays(todayISO, NEXT_DAYS), todayISO, true) ? 'next' : null;
 }
 
 // isUpcomingOwn: an own item is a row of a run of days [fromISO, toISO] when
 // it is scheduled (no idea), has a readable date in the range, and is not
-// done. sectionOf's 'next' and upcomingRows both ask this; it is the one copy.
-function isUpcomingOwn(item, fromISO, toISO) {
+// done — or, with keepDone (Today's Next 7 days and Coming up), is a done
+// to-do doneStillShown keeps. sectionOf's 'next' and upcomingRows both ask
+// this; it is the one copy.
+function isUpcomingOwn(item, fromISO, toISO, todayISO, keepDone) {
   return isScheduled(item) && typeof item.date === 'string' && ISO_DAY.test(item.date)
-    && item.done !== true && item.date >= fromISO && item.date <= toISO;
+    && (item.done !== true || (keepDone && doneStillShown(item, todayISO)))
+    && item.date >= fromISO && item.date <= toISO;
+}
+
+// doneStillShown: THE rule for how long a ticked to-do stays shown, struck
+// through, so the tick can be undone. A done to-do-type item is shown while
+// its date is today or later — ticked ahead, it stays until its day is over
+// (Alex, 2026-11-04: "when they are checked off keep it checked off until
+// after that day is over") — or, past its date, while it was ticked today
+// (tickedToday; Alex, 2026-10-22); with no readable date, only while ticked
+// today. Not done, or not a to-do type: false. Exported for the To-do page (app.js todoItems),
+// which keeps the same rule (Alex chose it, 2026-11-04); there is one copy.
+export function doneStillShown(item, todayISO) {
+  if (item.done !== true || !isTodoType(item)) return false;
+  // No readable date (deserializeItems' deliberate tolerance): only the
+  // ticked-today half applies, so it stays until midnight, as before.
+  if (typeof item.date !== 'string' || !ISO_DAY.test(item.date)) return tickedToday(item, todayISO);
+  return item.date >= todayISO || tickedToday(item, todayISO);
 }
 
 // tickedToday: no item records when it was ticked, and the spec allows no new
@@ -63,8 +85,7 @@ function isUpcomingOwn(item, fromISO, toISO) {
 // today after being ticked, which shows it struck for the rest of the day
 // (the accepted cost). An unreadable updatedAt is no evidence: not today —
 // an invalid Date's toISO is 'NaN-NaN-NaN', which no todayISO equals.
-// Exported for the To-do page (app.js todoItems), which keeps the same rule
-// (Alex, 2026-10-22); there is one copy of it.
+// doneStillShown is its one reader; app.js reaches it through that.
 export function tickedToday(item, todayISO) {
   return typeof item.updatedAt === 'string' && toISO(new Date(item.updatedAt)) === todayISO;
 }
@@ -131,11 +152,12 @@ export const LOOKAHEAD_DAYS = 30;
 //              one that is over
 //   next       [{ date, label, rows: [{ item }] }]  one entry per day that
 //              has rows; days without rows are left out: upcomingRows over
-//              (today, today + 7]
+//              (today, today + 7], with keepDone (a to-do ticked ahead stays)
 //   later      the same shape over [today + 8, today + 30] ("Coming up",
 //              Alex 2026-10-22), from the look-ahead's instances
 //   emptyLine  the one line shown when Overdue, To do today and Today's
-//              events are all empty; otherwise null
+//              events are all empty; otherwise null. "Nothing coming up."
+//              only when Next 7 days and Coming up are empty too
 // No section is capped (Alex, question 3). No item appears twice: an own
 // item is in sectionOf's one section; a feed instance is under Today's events
 // on today, or under Next 7 days or Coming up once — on its first day there, and not at
@@ -191,8 +213,10 @@ export function buildToday(items, instances, todayISO, nowMinutes, lookahead) {
   // there is not shown again: `instances` holds today's, and the look-ahead
   // holds today + 1 .. today + 7 — a one-off on today and past today + 7 is
   // one plain multi-day event, with a copy on every day between.
-  const next = upcomingRows(items, instances, addDays(todayISO, 1), addDays(todayISO, NEXT_DAYS), todayISO);
-  const later = upcomingRows(items, ahead, addDays(todayISO, NEXT_DAYS + 1), addDays(todayISO, LOOKAHEAD_DAYS), todayISO);
+  const keep = { keepDone: true };
+  const next = upcomingRows(items, instances, addDays(todayISO, 1), addDays(todayISO, NEXT_DAYS), todayISO, keep);
+  const later = upcomingRows(items, ahead, addDays(todayISO, NEXT_DAYS + 1), addDays(todayISO, LOOKAHEAD_DAYS), todayISO,
+    keep);
 
   let emptyLine = null;
   if (overdue.length === 0 && todo.length === 0 && events.length === 0) {
@@ -206,9 +230,11 @@ export function buildToday(items, instances, todayISO, nowMinutes, lookahead) {
       ...ahead.filter((inst) => inst.date > todayISO && inst.date <= lookEnd),
     ];
     const first = sortItemsByDate(candidates)[0];
-    emptyLine = first
-      ? `Nothing due today. Next: ${first.title} · ${dayWord(first.date, todayISO)}.`
-      : 'Nothing coming up.';
+    // "Next:" names the next UNDONE thing. With none, a to-do ticked ahead
+    // may still be drawn struck under Next 7 days or Coming up, so the line
+    // must not claim nothing is coming (controller ruling, 2026-11-04).
+    if (first) emptyLine = `Nothing due today. Next: ${first.title} · ${dayWord(first.date, todayISO)}.`;
+    else emptyLine = next.length > 0 || later.length > 0 ? 'Nothing due today.' : 'Nothing coming up.';
   }
 
   return { overdue, todo, events, next, later, emptyLine };
@@ -229,9 +255,13 @@ export function tally(today) {
 
 // upcomingRows: the rows of the days [fromISO, toISO], grouped by day —
 // [{ date, label, rows: [{ item }] }], one entry per day that has rows, in
-// sortItemsByDate order, each day named by dayWord(date, todayISO). The ONE
+// sortItemsByDate order (done rows last in their day), each day named by
+// dayWord(date, todayISO). The ONE
 // copy of the rule Next 7 days, Coming up and the Week page's list share:
-//   own items   scheduled, not done, dated in the range (isUpcomingOwn)
+//   own items   scheduled, not done, dated in the range (isUpcomingOwn);
+//               with { keepDone: true } (Today's two lists, Alex 2026-11-04)
+//               also a done to-do doneStillShown keeps. The Week list passes
+//               no option and leaves done items out.
 //   instances   never a repeating one (`recurring`); a one-off once per
 //               spanKey (a multi-day one emits one instance per day, sharing
 //               it), on its first day in the range — and not at all when an
@@ -239,7 +269,7 @@ export function tally(today) {
 //               where it was already shown (for Next 7 days: today's events)
 // `instances` may reach past the range on either side; only the range is
 // drawn. Each must carry `recurring` and `spanKey`: an unstamped one throws.
-export function upcomingRows(items, instances, fromISO, toISO, todayISO) {
+export function upcomingRows(items, instances, fromISO, toISO, todayISO, { keepDone = false } = {}) {
   if (typeof todayISO !== 'string' || !ISO_DAY.test(todayISO)) throw new Error('upcomingRows requires todayISO');
   if (typeof fromISO !== 'string' || !ISO_DAY.test(fromISO) || typeof toISO !== 'string' || !ISO_DAY.test(toISO)
     || fromISO > toISO) {
@@ -256,7 +286,8 @@ export function upcomingRows(items, instances, fromISO, toISO, todayISO) {
     shown.push(inst);
   }
   const days = [];
-  const own = items.filter((item) => isUpcomingOwn(item, fromISO, toISO));
+  if (typeof keepDone !== 'boolean') throw new Error('upcomingRows: keepDone must be true or false');
+  const own = items.filter((item) => isUpcomingOwn(item, fromISO, toISO, todayISO, keepDone));
   for (const item of sortItemsByDate([...own, ...shown])) {
     let day = days[days.length - 1];
     if (!day || day.date !== item.date) {
@@ -264,6 +295,11 @@ export function upcomingRows(items, instances, fromISO, toISO, todayISO) {
       days.push(day);
     }
     day.rows.push({ item });
+  }
+  // Within a day, done rows after the undone ones, as in To do today
+  // (controller ruling, 2026-11-04); sortItemsByDate order inside each.
+  for (const day of days) {
+    day.rows = [...day.rows.filter((r) => r.item.done !== true), ...day.rows.filter((r) => r.item.done === true)];
   }
   return days;
 }

@@ -8,7 +8,7 @@ import {
 } from './visibility.js';
 import { followToday, formatDayLabel } from './freshness.js';
 import {
-  makeItem, sortItemsByDate, isScheduled, isTodo, isTodoType, isIdea, sortIdeasNewestFirst,
+  makeItem, sortItemsByDate, isScheduled, isTodo, isIdea, sortIdeasNewestFirst,
 } from './items.js';
 import { normalizeIdea } from './ideas.js';
 import { renderTodoView } from './todoview.js';
@@ -37,7 +37,7 @@ import { renderSyncStatus, syncWriteStarted, syncWriteSettled } from './linkui.j
 import { WORKER_URL } from './config.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
 import { installPress } from './press.js';
-import { buildToday, relativeLabel, NEXT_DAYS, LOOKAHEAD_DAYS, tickedToday, tally } from './today.js';
+import { buildToday, relativeLabel, NEXT_DAYS, LOOKAHEAD_DAYS, doneStillShown, tally } from './today.js';
 import { renderTodayView, renderTally } from './todayview.js';
 import { createCapture } from './capture.js';
 import { createTypeChips, PRIMARY_TYPES, MORE_TYPES } from './typechips.js';
@@ -213,15 +213,16 @@ function feedInstances(start, end) {
 // predicates by ACCIDENT rather than by design — and a feed that ever grew a
 // type-shaped field would start populating the To-do page.
 //
-// Every undone to-do, soonest first; then, last, every to-do ticked TODAY,
-// soonest first, so a tick can be undone until tomorrow (Alex, 2026-10-22:
+// Every undone to-do, soonest first; then, last, every done to-do Today
+// still shows, soonest first, so a tick can be undone (Alex, 2026-10-22:
 // "i also want to see the crossed out version in the to do tab as well").
-// "Ticked today" is Today's own rule, imported, not restated. A to-do ticked
-// on an earlier day does not show.
+// That is Today's own rule (today.js doneStillShown), imported, not
+// restated: a ticked to-do stays until its due day is over (Alex,
+// 2026-11-04), and an overdue one ticked today until midnight.
 function todoItems(todayISO) {
   const live = liveItems();
-  const tickedTodayTodo = (it) => isTodoType(it) && it.done === true && tickedToday(it, todayISO);
-  return [...sortItemsByDate(live.filter(isTodo)), ...sortItemsByDate(live.filter(tickedTodayTodo))];
+  const stillShown = (it) => doneStillShown(it, todayISO);
+  return [...sortItemsByDate(live.filter(isTodo)), ...sortItemsByDate(live.filter(stillShown))];
 }
 
 function ideaItems() { return sortIdeasNewestFirst(liveItems().filter(isIdea)); }

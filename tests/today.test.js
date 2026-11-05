@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   sectionOf, daysBetween, dayWord, relativeLabel, isPastEvent, buildToday, upcomingRows, NEXT_DAYS, LOOKAHEAD_DAYS,
-  tally,
+  tally, doneStillShown,
 } from '../js/today.js';
 import { readFileSync } from 'node:fs';
 import { parseICS } from '../js/ics.js';
@@ -68,9 +68,51 @@ test('sectionOf: a to-do ticked today after its date stays in Overdue until tomo
     null, 'a past event is never overdue, ticked or not');
 });
 
-test('sectionOf: a to-do ticked today stays in To do today; a ticked future one leaves Next 7 days', () => {
+// Alex, 2026-11-04: "make it so i can check off things that are due in a
+// couple days. when they are checked off keep it checked off until after that
+// day is over". A ticked to-do dated later stays in Next 7 days, struck.
+test('sectionOf: a to-do ticked today stays in To do today; a ticked future one stays in Next 7 days', () => {
   assert.equal(sectionOf(own('a', { done: true }), TODAY), 'todo', 'struck through until tomorrow');
-  assert.equal(sectionOf(own('a', { done: true, date: '2026-10-23' }), TODAY), null);
+  assert.equal(sectionOf(own('a', { done: true, date: '2026-10-23' }), TODAY), 'next');
+  for (const type of ['due', 'start', 'milestone', 'task']) {
+    assert.equal(sectionOf(own('a', { type, done: true, date: '2026-10-24' }), TODAY), 'next', type);
+  }
+  assert.equal(sectionOf(own('e', { type: 'event', done: true, date: '2026-10-24' }), TODAY), null,
+    'a done event is still left out: only a to-do can be ticked');
+});
+
+test('sectionOf: a ticked future to-do is gone the day after its date, unless it was ticked that day', () => {
+  const item = own('a', { type: 'due', done: true, date: '2026-10-24', updatedAt: '2026-10-21T19:00:00.000Z' });
+  assert.equal(sectionOf(item, '2026-10-23'), 'next', 'the day before');
+  assert.equal(sectionOf(item, '2026-10-24'), 'todo', 'on its day, in To do today');
+  assert.equal(sectionOf(item, '2026-10-25'), null, 'the day after: gone');
+});
+
+// --- doneStillShown: the one rule for how long a ticked to-do stays shown ----
+
+test('doneStillShown: a done to-do is shown while its date is today or later, or it was ticked today', () => {
+  const TICKED_TODAY = '2026-10-21T19:00:00.000Z';
+  const OLD_TICK = '2026-10-19T19:00:00.000Z';
+  assert.equal(doneStillShown(own('a', { done: true, date: '2026-10-24', updatedAt: OLD_TICK }), TODAY), true, 'in 3 days');
+  assert.equal(doneStillShown(own('a', { done: true, date: TODAY, updatedAt: OLD_TICK }), TODAY), true, 'today');
+  assert.equal(doneStillShown(own('a', { done: true, date: '2026-10-20', updatedAt: OLD_TICK }), TODAY), false,
+    'its day is over and it was not ticked today');
+  assert.equal(doneStillShown(own('a', { done: true, date: '2026-10-20', updatedAt: TICKED_TODAY }), TODAY), true,
+    'overdue, ticked today: until midnight');
+  assert.equal(doneStillShown(own('a', { done: false, date: '2026-10-24' }), TODAY), false, 'not done');
+  for (const type of ['event', 'general', 'idea']) {
+    assert.equal(doneStillShown(own('a', { type, done: true, date: '2026-10-24' }), TODAY), false, type);
+  }
+  for (const date of [null, '', 'soon']) {
+    assert.equal(doneStillShown(own('a', { done: true, date, updatedAt: OLD_TICK }), TODAY), false, JSON.stringify(date));
+  }
+  // An undated to-do (deserializeItems' deliberate tolerance) keeps the old
+  // rule: ticked today, it stays until midnight (review, 2026-11-04).
+  for (const date of [null, '']) {
+    assert.equal(doneStillShown(own('a', { done: true, date, updatedAt: TICKED_TODAY }), TODAY), true, JSON.stringify(date));
+    assert.equal(sectionOf(own('a', { done: true, date, updatedAt: TICKED_TODAY }), TODAY), null,
+      `${JSON.stringify(date)}: still on no Today section`);
+  }
 });
 
 test('sectionOf: events and general items go under Today\'s events today and Next 7 days after', () => {
@@ -691,7 +733,8 @@ test('buildToday: Next 7 days is upcomingRows over today + 1 .. today + 7, row f
   ];
   const t = buildToday(items, instances, TODAY, at(8, 0), none);
   assert.ok(t.next.length >= 3, 'fixture check');
-  assert.deepEqual(t.next, upcomingRows(items, instances, '2026-10-22', '2026-10-28', TODAY));
+  assert.deepEqual(t.next, upcomingRows(items, instances, '2026-10-22', '2026-10-28', TODAY, { keepDone: true }));
+  assert.ok(t.next.some((d) => ids(d.rows).includes('c')), 'a ticked to-do stays under Next 7 days');
 });
 
 test('buildToday: later is upcomingRows over today + 8 .. today + 30, from the look-ahead', () => {
@@ -708,10 +751,11 @@ test('buildToday: later is upcomingRows over today + 8 .. today + 30, from the l
   const t = buildToday(items, [], TODAY, at(8, 0), () => ahead);
   assert.deepEqual(dayRows(t.later), [
     ['2026-10-29', 'Thu, Oct 29', ['p8', 'feedR:i8:2026-10-29:09:25']],
+    ['2026-11-02', 'Mon, Nov 2', ['done']],
     ['2026-11-20', 'Fri, Nov 20', ['p30', 'feedR:i30:2026-11-20:null']],
-  ], '+7 is Next 7 days\' (not later), +8 and +30 are in, +31 is out; done, ideas and classes never');
+  ], '+7 is Next 7 days\' (not later), +8 and +30 are in, +31 is out; a ticked to-do stays; ideas and classes never');
   assert.deepEqual(dayRows(t.next), [['2026-10-28', 'Wed', ['p7']]], 'fixture check: +7 is under Next 7 days');
-  assert.deepEqual(t.later, upcomingRows(items, ahead, '2026-10-29', '2026-11-20', TODAY));
+  assert.deepEqual(t.later, upcomingRows(items, ahead, '2026-10-29', '2026-11-20', TODAY, { keepDone: true }));
 });
 
 test('buildToday: later never repeats what Today or Next 7 days already shows', () => {
@@ -743,6 +787,78 @@ test('buildToday holds no copy of the Next 7 days rule: both day lists come from
   assert.ok(body, 'fixture check: buildToday found');
   assert.equal((body[0].match(/upcomingRows\(/g) || []).length, 2, 'next and later, each from upcomingRows');
   assert.doesNotMatch(body[0], /\.recurring|\bseen\b|spanKey|dayWord\(item/, 'no second copy of the rule');
+});
+
+// Alex, 2026-11-04: a to-do ticked ahead of its day stays, struck, in its
+// day's list until that day is over. The Week page's list (upcomingRows with
+// no option) still leaves done items out.
+test('buildToday: a to-do ticked 3 days ahead stays in Next 7 days, done, and is gone the day after its date', () => {
+  const items = [
+    own('soon', { type: 'due', date: '2026-10-24', done: true, updatedAt: '2026-10-21T19:00:00.000Z' }),
+    own('open', { type: 'task', date: '2026-10-24' }),
+    own('evDone', { type: 'event', date: '2026-10-24', done: true }),
+  ];
+  const t = buildToday(items, [], TODAY, at(8, 0), none);
+  assert.deepEqual(dayRows(t.next), [['2026-10-24', 'Sat', ['open', 'soon']]], 'in date order; the done event is still left out');
+  assert.equal(t.next[0].rows.find((r) => r.item.id === 'soon').item.done, true, 'drawn done (struck)');
+  const day = buildToday(items, [], '2026-10-24', at(8, 0), none);
+  assert.deepEqual(ids(day.todo), ['open', 'soon'], 'on its day, in To do today, after the undone one');
+  const after = buildToday(items, [], '2026-10-25', at(8, 0), none);
+  assert.deepEqual(allRowIds(after), ['open'], 'the day after: gone; only the undone one, overdue');
+  assert.deepEqual(dayRows(upcomingRows(items, [], '2026-10-22', '2026-10-28', TODAY)),
+    [['2026-10-24', 'Sat', ['open']]], 'upcomingRows with no option (the Week list) still leaves done items out');
+});
+
+test('buildToday: a ticked to-do is listed once — today\'s in To do today, never also in Next 7 days', () => {
+  const items = [
+    own('t', { type: 'task', date: TODAY, done: true }),
+    own('n', { type: 'task', date: '2026-10-22', done: true }),
+    own('l', { type: 'task', date: '2026-11-02', done: true }),
+  ];
+  const t = buildToday(items, [], TODAY, at(8, 0), none);
+  const all = [...allRowIds(t), ...t.later.flatMap((d) => ids(d.rows))];
+  assert.deepEqual(all.sort(), ['l', 'n', 't']);
+  assert.deepEqual(ids(t.todo), ['t']);
+});
+
+// Controller ruling, 2026-11-04: the empty line never claims nothing is
+// there while a struck row is drawn under Next 7 days or Coming up. "Next:"
+// still names the next UNDONE thing.
+test('buildToday: with only ticked to-dos ahead, the empty line says nothing is due today, never "Nothing coming up."', () => {
+  const soon = own('s', { type: 'task', date: '2026-10-23', done: true, title: 'Stamps' });
+  const far = own('f', { type: 'task', date: '2026-11-02', done: true, title: 'Far' });
+  assert.equal(buildToday([soon], [], TODAY, at(8, 0), none).emptyLine, 'Nothing due today.', 'struck row in Next 7 days');
+  assert.equal(buildToday([far], [], TODAY, at(8, 0), none).emptyLine, 'Nothing due today.', 'struck row in Coming up');
+  const undone = own('u', { type: 'event', date: '2026-10-25', title: 'Dinner' });
+  assert.equal(buildToday([soon, undone], [], TODAY, at(8, 0), none).emptyLine, 'Nothing due today. Next: Dinner · Sun.',
+    'Next: skips the ticked one and names the next undone thing');
+  assert.equal(buildToday([], [], TODAY, at(8, 0), none).emptyLine, 'Nothing coming up.', 'truly nothing');
+});
+
+// Controller ruling, 2026-11-04: within a day, done rows after undone ones
+// (as in To do today), date/time order kept inside each group.
+test('buildToday: within a day of Next 7 days and Coming up, ticked rows come after the undone ones', () => {
+  const items = [
+    own('d1', { type: 'task', date: '2026-10-23', time: '08:00', done: true }),
+    own('u1', { type: 'task', date: '2026-10-23', time: '09:00' }),
+    own('d2', { type: 'due', date: '2026-10-23', time: '10:00', done: true }),
+    own('u2', { type: 'event', date: '2026-10-23', time: '11:00' }),
+    own('ld', { type: 'task', date: '2026-11-02', time: '07:00', done: true }),
+    own('lu', { type: 'task', date: '2026-11-02', time: '12:00' }),
+  ];
+  const instances = [inst('club', '2026-10-23', { time: '07:30' })];
+  const t = buildToday(items, instances, TODAY, at(8, 0), () => instances);
+  assert.deepEqual(dayRows(t.next), [['2026-10-23', 'Fri', ['feedR:club:2026-10-23:07:30', 'u1', 'u2', 'd1', 'd2']]]);
+  assert.deepEqual(dayRows(t.later), [['2026-11-02', 'Mon, Nov 2', ['lu', 'ld']]]);
+});
+
+const TICKED_AT = '2026-10-21T15:00:00.000Z';
+test('tally: a to-do ticked ahead, now drawn in Next 7 days, is still not counted', () => {
+  const items = [
+    own('t', { type: 'task' }),
+    own('ahead', { type: 'task', date: '2026-10-23', done: true, updatedAt: TICKED_AT }),
+  ];
+  assert.equal(tally(buildToday(items, [], TODAY, at(10, 0), none)), null);
 });
 
 // --- tally: Today's "N DONE · M LEFT" (rewards concept 2, Alex 2026-10-26) --

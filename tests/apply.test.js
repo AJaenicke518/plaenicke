@@ -1381,10 +1381,11 @@ test('runSync never puts a deadline on the write: a slow PUT is waited for and l
   const timers = installManualTimers();
   try {
     for (const fn of globalThis.window._listeners.online) fn();
-    for (let i = 0; i < 200 && !releasePut; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    await drainUntil(() => releasePut);
     assert.deepEqual(requests, ['GET', 'PUT'], 'fixture check: the write is in flight');
     assert.equal(timers.live(FETCH_TIMEOUT_MS), 0, 'no deadline is armed while the write is in flight');
     releasePut();
+    await drainUntil(() => loadSyncState().version === 1);
     await drain();
   } finally {
     timers.restore();
@@ -1610,6 +1611,7 @@ test('runSync records a lastError and lights the indicator when syncOnce itself 
   const timers = installManualTimers();
   try {
     for (const fn of globalThis.window._listeners.online) fn();
+    await drainUntil(() => typeof loadSyncState().lastError === 'string');
     await drain();
   } finally {
     timers.restore();
@@ -5050,6 +5052,7 @@ test('visible-only sync: with no visibilityState at all, the tab syncs as before
     setVisibility(undefined);
     assert.equal(globalThis.document.visibilityState, undefined, 'fixture check');
     for (const fn of globalThis.window._listeners.online) fn();
+    await drainUntil(() => net.requests.length >= 2);
     await drain();
   } finally {
     setVisibility('visible');
@@ -5114,7 +5117,7 @@ test('slow sync write: the shell says so past the threshold, and clears when the
   const timers = installManualTimers();
   try {
     for (const fn of globalThis.window._listeners.online) fn();
-    for (let i = 0; i < 200 && !net.inFlight(); i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    await drainUntil(() => net.inFlight());
     assert.deepEqual(net.requests, ['GET', 'PUT'], 'fixture check: the write is in flight');
     assert.doesNotMatch(shell.textContent, SHELL_SLOW, 'not slow yet');
     assert.equal(timers.live(SLOW_WRITE_MS), 1, 'one repaint is armed for the threshold');
@@ -5160,7 +5163,7 @@ test('slow sync write: a write that settles quickly leaves no timer behind and s
   const timers = installManualTimers();
   try {
     for (const fn of globalThis.window._listeners.online) fn();
-    for (let i = 0; i < 200 && !net.inFlight(); i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    await drainUntil(() => net.inFlight());
     assert.equal(timers.live(SLOW_WRITE_MS), 1, 'fixture check: the repaint was armed when the write began');
     net.release();
     await drain();
@@ -5232,7 +5235,7 @@ test('slow sync write: the line clears when its write settles, even when a retry
   };
   const timers = installManualTimers();
   const waitForPut = async (n) => {
-    for (let i = 0; i < 200 && pending.length < n; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    await drainUntil(() => pending.length >= n);
   };
   try {
     for (const fn of globalThis.window._listeners.online) fn();
@@ -5298,6 +5301,7 @@ test('cross-tab sync: a write from a tab that hid is pushed by the visible tab',
     assert.equal(timers.live(2000), 1, 'the storage event schedules one debounced sync');
     assert.deepEqual(net.requests, [], 'debounced: nothing goes out at once');
     timers.fire(2000);
+    await drainUntil(() => net.requests.length >= 2);
     await drain();
   } finally {
     setVisibility('visible');
@@ -5406,9 +5410,11 @@ test('cross-tab sync: two visible tabs reacting to each other converge — no pi
   // spec-conforming browser would deliver to the other tab.
   const SYNCED = ['plaenicke.items', 'plaenicke.feeds', 'plaenicke.syncTombstones'];
   let changed = new Set();
+  let stateWrites = 0; // a sync records its outcome in syncState as its last act
   const realSet = ls.setItem.bind(ls);
   ls.setItem = (k, v) => {
     if (SYNCED.includes(k) && ls.getItem(k) !== String(v)) changed.add(k);
+    if (k === 'plaenicke.syncState') stateWrites += 1;
     realSet(k, v);
   };
   const requests = [];
@@ -5434,9 +5440,11 @@ test('cross-tab sync: two visible tabs reacting to each other converge — no pi
     for (let round = 0; round < 10 && deliver.length; round += 1) {
       changed = new Set();
       const before = requests.length;
+      const writesBefore = stateWrites;
       for (const key of deliver) storageEvent(key);
       assert.equal(timers.live(2000), 1, `round ${round}: the events schedule one debounced sync`);
       timers.fire(2000);
+      await drainUntil(() => stateWrites > writesBefore);
       await drain();
       rounds.push({ requests: requests.slice(before), changed: [...changed].sort() });
       deliver = [...changed];
@@ -5478,7 +5486,7 @@ test('slow sync write: a slow write that then fails shows the error, not the slo
   const timers = installManualTimers();
   try {
     for (const fn of globalThis.window._listeners.online) fn();
-    for (let i = 0; i < 200 && !rejectPut; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    await drainUntil(() => rejectPut);
     assert.deepEqual(requests, ['GET', 'PUT'], 'fixture check: the write is in flight');
     t.mock.timers.setTime(T0 + SLOW_WRITE_MS);
     timers.fire(SLOW_WRITE_MS);
@@ -5486,6 +5494,7 @@ test('slow sync write: a slow write that then fails shows the error, not the slo
 
     rejectPut(new TypeError('Failed to fetch'));
     rejectPut = null;
+    await drainUntil(() => loadSyncState().lastError === 'offline');
     await drain();
     assert.equal(loadSyncState().lastError, 'offline', 'fixture check: the failed write was recorded');
     assert.doesNotMatch(shell.textContent, SHELL_SLOW, 'a write that failed is no longer in flight');
@@ -5523,6 +5532,7 @@ test('slow sync write: a write fetch that throws at once leaves no slow state', 
   const timers = installManualTimers();
   try {
     for (const fn of globalThis.window._listeners.online) fn();
+    await drainUntil(() => loadSyncState().lastError === 'offline');
     await drain();
     assert.deepEqual(requests, ['GET', 'PUT'], 'fixture check: the write was attempted');
     assert.equal(loadSyncState().lastError, 'offline', 'fixture check: the failed write was recorded');
@@ -5548,7 +5558,7 @@ async function slowWriteInFlight(t, id, T0) {
   const net = holdAccountWrite();
   const timers = installManualTimers();
   for (const fn of globalThis.window._listeners.online) fn();
-  for (let i = 0; i < 200 && !net.inFlight(); i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+  await drainUntil(() => net.inFlight());
   assert.deepEqual(net.requests, ['GET', 'PUT'], 'fixture check: the write is in flight');
   t.mock.timers.setTime(T0 + SLOW_WRITE_MS);
   timers.fire(SLOW_WRITE_MS);
@@ -6468,6 +6478,134 @@ test('To-do page: a to-do ticked today stays, checked and done, after the undone
     assert.equal(rowTexts().length, 2, 'the unticked item is listed once, not in both groups');
     assert.match(rowTexts()[0], /tt Today task/, 'back in date order, first');
     assert.match(rowTexts()[1], /tt Later task/);
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+  }
+});
+
+// Alex, 2026-11-04: "make it so i can check off things that are due in a
+// couple days. when they are checked off keep it checked off until after that
+// day is over". A tick from Next 7 days goes through the same setDone write.
+test('Today: a to-do ticked from Next 7 days is saved, and stays there, struck through, until its day is over', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
+  const nextSection = () => todayBody().children.find((c) => c._classes && c._classes.has('today-section')
+    && allText(c.children[0]) === 'Next 7 days');
+  try {
+    seed([
+      record({ id: 'nx-hw', type: 'due', title: 'nx Homework 5', date: '2026-10-24' }),
+      record({ id: 'nx-din', type: 'event', title: 'nx Dinner', date: '2026-10-24', time: '19:00' }),
+    ]);
+    click(globalThis.document.getElementById('tab-today'));
+    assert.ok(nextSection(), 'fixture check: Next 7 days is drawn');
+    assert.match(allText(nextSection()), /nx Dinner/, 'fixture check: the event is drawn there');
+    assert.ok(!checkboxFor(nextSection(), 'nx Dinner'), 'an event has no checkbox');
+    const box = checkboxFor(nextSection(), 'nx Homework 5');
+    assert.ok(box, 'the to-do has a checkbox under Next 7 days');
+    box.checked = true;
+    fire(box, 'change');
+    assert.equal(storedById('nx-hw').done, true, 'the tick reached storage');
+    const again = checkboxFor(nextSection(), 'nx Homework 5');
+    assert.ok(again && again.checked, 'still under Next 7 days, ticked');
+    assert.ok(todayRowOf(again)._classes.has('done'), 'struck through');
+    assert.equal(globalThis.document.getElementById('today-tally').hidden, true,
+      'the done/left count still counts Overdue and To do today only');
+
+    // The day itself: in To do today. The day after: gone from Today.
+    t.mock.timers.setTime(new Date(2026, 9, 24, 9, 0).getTime());
+    seed(loadItems());
+    assert.ok(checkboxFor(todayBody(), 'nx Homework 5')?.checked, 'on its day, still shown ticked');
+    t.mock.timers.setTime(new Date(2026, 9, 25, 9, 0).getTime());
+    seed(loadItems());
+    assert.doesNotMatch(allText(todayBody()), /nx Homework 5/, 'the day after its date, it is gone');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+});
+
+test('Today: unticking a to-do under Next 7 days saves done false and keeps the row, unstruck', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
+  try {
+    seed([record({
+      id: 'nx-un', type: 'task', title: 'nx Buy stamps', date: '2026-10-23', done: true,
+      updatedAt: new Date(2026, 9, 19, 9, 0).toISOString(),
+    })]);
+    click(globalThis.document.getElementById('tab-today'));
+    const box = checkboxFor(todayBody(), 'nx Buy stamps');
+    assert.ok(box && box.checked, 'a to-do ticked days ago, dated later, is shown ticked');
+    box.checked = false;
+    fire(box, 'change');
+    assert.equal(storedById('nx-un').done, false, 'the untick reached storage');
+    const again = checkboxFor(todayBody(), 'nx Buy stamps');
+    assert.ok(again && again.checked === false);
+    assert.equal(todayRowOf(again)._classes.has('done'), false);
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+    if (restore) click(restore);
+  }
+});
+
+// Alex chose the same rule for the To-do page: a ticked to-do stays, struck,
+// until its due day is over (js/today.js doneStillShown).
+test('To-do page: a ticked future to-do stays, checked and done, until its day is over', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
+  const rowOf = (title) => todoList().children.find((li) => allText(li).includes(title));
+  try {
+    seed([
+      record({ id: 'tf-fut', type: 'due', title: 'tf Essay', date: '2026-10-24' }),
+      record({
+        id: 'tf-old', type: 'task', title: 'tf Ticked days ago', date: '2026-10-23', done: true,
+        updatedAt: new Date(2026, 9, 18, 9, 0).toISOString(),
+      }),
+    ]);
+    assert.ok(checkboxFor(todoList(), 'tf Ticked days ago')?.checked,
+      'a to-do ticked on an earlier day, dated later, is still listed, ticked');
+    const box = checkboxFor(todoList(), 'tf Essay');
+    box.checked = true;
+    fire(box, 'change');
+    assert.equal(storedById('tf-fut').done, true, 'the tick reached storage');
+    assert.ok(checkboxFor(todoList(), 'tf Essay')?.checked, 'still listed, ticked');
+    assert.ok(rowOf('tf Essay')._classes.has('done'), 'struck through');
+
+    t.mock.timers.setTime(new Date(2026, 9, 24, 23, 59).getTime());
+    seed(loadItems());
+    assert.ok(checkboxFor(todoList(), 'tf Essay')?.checked, 'on its last minute, still listed');
+    assert.doesNotMatch(allText(todoList()), /tf Ticked days ago/, 'one whose day is over is gone');
+    t.mock.timers.setTime(new Date(2026, 9, 25, 0, 1).getTime());
+    seed(loadItems());
+    assert.doesNotMatch(allText(todoList()), /tf Essay/, 'the day after its date, it is gone');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+  }
+});
+
+// Review, 2026-11-04: an undated to-do (CLAUDE.md: deliberate dead-code
+// tolerance) ticked today stays on the To-do page until midnight, as before.
+test('To-do page: an undated to-do ticked today stays listed, ticked', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
+  try {
+    seed([record({
+      id: 'tu-null', type: 'task', title: 'tu Undated', date: null, done: true,
+      updatedAt: new Date(2026, 9, 21, 8, 0).toISOString(),
+    })]);
+    assert.ok(checkboxFor(todoList(), 'tu Undated')?.checked, 'ticked today: listed, ticked');
+    t.mock.timers.setTime(new Date(2026, 9, 22, 0, 1).getTime());
+    seed(loadItems());
+    assert.doesNotMatch(allText(todoList()), /tu Undated/, 'the next day: gone');
   } finally {
     t.mock.timers.reset();
     seed([]);

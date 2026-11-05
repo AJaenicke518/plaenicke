@@ -12,6 +12,7 @@
 // an id selector would outrank `[data-press].pressed` (styles.css).
 import { itemTypeClass } from './calendar.js';
 import { formatTime, formatTimeRange } from './timegrid.js';
+import { isTodoType } from './items.js';
 
 const SECTIONS = [
   ['overdue', 'Overdue', true],
@@ -149,14 +150,19 @@ export function renderTodayView(container, today, {
     section(label).appendChild(list);
   }
 
-  // Next 7 days and Coming up draw their days alike.
+  // Next 7 days and Coming up draw their days alike. An own to-do there gets
+  // the checkbox To do today has (Alex, 2026-11-04: "make it so i can check
+  // off things that are due in a couple days"); an event or a calendar row
+  // never does. A ticked one stays, struck, until its day is over
+  // (today.js doneStillShown).
   function days(s, list) {
     for (const day of list) {
       s.appendChild(el('h4', 'today-day', day.label));
       const ul = el('ul', 'today-list');
       for (const r of day.rows) {
         const t = timeText(r.item);
-        ul.appendChild(row(r.item, { meta: t ? [el('span', 'today-time', t)] : [] }));
+        const check = r.item.external !== true && isTodoType(r.item);
+        ul.appendChild(row(r.item, { check, meta: t ? [el('span', 'today-time', t)] : [] }));
       }
       s.appendChild(ul);
     }
