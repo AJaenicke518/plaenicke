@@ -106,6 +106,13 @@ test('doneStillShown: a done to-do is shown while its date is today or later, or
   for (const date of [null, '', 'soon']) {
     assert.equal(doneStillShown(own('a', { done: true, date, updatedAt: OLD_TICK }), TODAY), false, JSON.stringify(date));
   }
+  // An undated to-do (deserializeItems' deliberate tolerance) keeps the old
+  // rule: ticked today, it stays until midnight (review, 2026-11-04).
+  for (const date of [null, '']) {
+    assert.equal(doneStillShown(own('a', { done: true, date, updatedAt: TICKED_TODAY }), TODAY), true, JSON.stringify(date));
+    assert.equal(sectionOf(own('a', { done: true, date, updatedAt: TICKED_TODAY }), TODAY), null,
+      `${JSON.stringify(date)}: still on no Today section`);
+  }
 });
 
 test('sectionOf: events and general items go under Today\'s events today and Next 7 days after', () => {

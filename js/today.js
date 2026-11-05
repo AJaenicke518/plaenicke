@@ -68,12 +68,14 @@ function isUpcomingOwn(item, fromISO, toISO, todayISO, keepDone) {
 // its date is today or later — ticked ahead, it stays until its day is over
 // (Alex, 2026-11-04: "when they are checked off keep it checked off until
 // after that day is over") — or, past its date, while it was ticked today
-// (tickedToday; Alex, 2026-10-22). Not done, not a to-do type, or no
-// readable date: false. Exported for the To-do page (app.js todoItems),
+// (tickedToday; Alex, 2026-10-22); with no readable date, only while ticked
+// today. Not done, or not a to-do type: false. Exported for the To-do page (app.js todoItems),
 // which keeps the same rule (Alex chose it, 2026-11-04); there is one copy.
 export function doneStillShown(item, todayISO) {
   if (item.done !== true || !isTodoType(item)) return false;
-  if (typeof item.date !== 'string' || !ISO_DAY.test(item.date)) return false;
+  // No readable date (deserializeItems' deliberate tolerance): only the
+  // ticked-today half applies, so it stays until midnight, as before.
+  if (typeof item.date !== 'string' || !ISO_DAY.test(item.date)) return tickedToday(item, todayISO);
   return item.date >= todayISO || tickedToday(item, todayISO);
 }
 

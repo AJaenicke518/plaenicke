@@ -6581,6 +6581,27 @@ test('To-do page: a ticked future to-do stays, checked and done, until its day i
   }
 });
 
+// Review, 2026-11-04: an undated to-do (CLAUDE.md: deliberate dead-code
+// tolerance) ticked today stays on the To-do page until midnight, as before.
+test('To-do page: an undated to-do ticked today stays listed, ticked', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 9, 18).getTime() });
+  try {
+    seed([record({
+      id: 'tu-null', type: 'task', title: 'tu Undated', date: null, done: true,
+      updatedAt: new Date(2026, 9, 21, 8, 0).toISOString(),
+    })]);
+    assert.ok(checkboxFor(todoList(), 'tu Undated')?.checked, 'ticked today: listed, ticked');
+    t.mock.timers.setTime(new Date(2026, 9, 22, 0, 1).getTime());
+    seed(loadItems());
+    assert.doesNotMatch(allText(todoList()), /tu Undated/, 'the next day: gone');
+  } finally {
+    t.mock.timers.reset();
+    seed([]);
+  }
+});
+
 // The done group reads liveItems(), as the undone group does: a ticked to-do
 // deleted from the To-do page is gone at once, while its Undo is pending.
 test('To-do page: a to-do ticked today and then deleted leaves the page before the Undo expires', async (t) => {
