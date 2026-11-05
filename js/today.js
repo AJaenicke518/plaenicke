@@ -259,9 +259,9 @@ export function tally(today) {
 // dayWord(date, todayISO). The ONE
 // copy of the rule Next 7 days, Coming up and the Week page's list share:
 //   own items   scheduled, not done, dated in the range (isUpcomingOwn);
-//               with { keepDone: true } (Today's two lists, Alex 2026-11-04)
-//               also a done to-do doneStillShown keeps. The Week list passes
-//               no option and leaves done items out.
+//               with { keepDone: true } (Today's two lists, Alex 2026-11-04,
+//               and the Week list, Alex 2026-11-05) also a done to-do
+//               doneStillShown keeps.
 //   instances   never a repeating one (`recurring`); a one-off once per
 //               spanKey (a multi-day one emits one instance per day, sharing
 //               it), on its first day in the range — and not at all when an

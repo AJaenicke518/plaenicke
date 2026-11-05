@@ -1168,8 +1168,10 @@ function renderCalendar() {
 
 // The grid, and under it the list of the week's days (B2, Alex 2026-10-22).
 // The list's own items come from liveItems(), like Today's: upcomingRows
-// (via buildWeekList) leaves out ideas and done items itself. Its instances
-// are expanded for exactly the days it lists. The arrows re-render both.
+// (via buildWeekList, with keepDone as Next 7 days) leaves out ideas and the
+// done items doneStillShown drops itself. Its instances are expanded for
+// exactly the days it lists. The arrows re-render both. A tick in the list
+// takes Today's path (toggleDoneKeepingFocus → setDone; Alex, 2026-11-05).
 function renderWeek() {
   const end = addDays(viewWeekStart, 6);
   const todayISO = toISO(new Date());
@@ -1186,7 +1188,10 @@ function renderWeek() {
     { onSelectDay: openDay });
   const list = buildWeekList(liveItems(),
     (from, to) => listInsts.filter((i) => i.date >= from && i.date <= to), viewWeekStart, todayISO);
-  renderWeekList(els.weekList, list, { onOpen: openItem, onSelectDay: openDay });
+  renderWeekList(els.weekList, list, {
+    onOpen: openItem, onSelectDay: openDay,
+    onToggleDone: toggleDoneKeepingFocus(els.weekList, 'today-row'), justTicked,
+  });
 }
 
 // Three columns of Day's grid (option A, Alex 2026-10-26). visibleItems, as

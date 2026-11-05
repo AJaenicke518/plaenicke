@@ -7119,9 +7119,10 @@ test('Week: the list under the grid has Friday\'s quiz but not the weekly class;
 
     const text = allText(weekList());
     assert.match(text,
-      /^\s*Rest of this week\s+Thu\s+22\s+All day\s+wl Trip\s+Fri\s+23\s+10:50 AM\s+wl Quiz\s+5:00 PM\s+wl Problem set\s*$/);
+      /^\s*Rest of this week\s+Thu\s+22\s+All day\s+wl Trip\s+Fri\s+23\s+10:50 AM\s+wl Quiz\s+5:00 PM\s+wl Problem set\s+All day\s+wl Done task\s*$/,
+      'a to-do ticked ahead stays in its day, after the undone rows (2026-11-05)');
     assert.equal(allText(doc.getElementById('week-grid')).includes('wl'), false, 'fixture check: the grid draws no titles');
-    for (const gone of ['wl Weekly class', 'wl Done task', 'wl An idea', 'wl Yesterday', 'wl Party']) {
+    for (const gone of ['wl Weekly class', 'wl An idea', 'wl Yesterday', 'wl Party']) {
       assert.ok(!text.includes(gone), `${gone} is not listed`);
     }
 
@@ -7160,6 +7161,94 @@ test('Week: a week with nothing left to list says "Nothing else this week."', as
     assert.equal(labelText('week-label'), weekLabelFor('2026-10-18'), 'fixture check');
     assert.match(allText(weekList()), /^\s*Rest of this week\s+Nothing else this week\.\s*$/);
   } finally {
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+// Alex, 2026-11-05: "the week list should match it" (Today's Next 7 days,
+// 2026-11-04). An own to-do in the Week list gets Today's checkbox; a tick
+// goes through the same setDone write and the row stays, struck, in its day
+// until that day is over; focus follows the box as on Today.
+test('Week list: a to-do ticked there is saved, stays in its day struck through, and is gone after its day', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 22, 9, 0).getTime() });
+  try {
+    seed([
+      record({ id: 'wk-hw', type: 'due', title: 'wk Homework 5', date: '2026-10-23' }),
+      record({ id: 'wk-later', type: 'task', title: 'wk Later task', date: '2026-10-23', time: '20:00' }),
+      record({ id: 'wk-din', type: 'event', title: 'wk Dinner', date: '2026-10-23', time: '19:00' }),
+    ]);
+    click(doc.getElementById('show-week'));
+    assert.equal(labelText('week-label'), weekLabelFor('2026-10-18'), 'fixture check: the week of Thu Oct 22');
+    assert.match(allText(weekList()), /wk Dinner/, 'fixture check: the event is listed');
+    assert.equal(checkboxFor(weekList(), 'wk Dinner'), null, 'an event has no checkbox');
+    const gridBefore = allText(doc.getElementById('week-grid'));
+    const box = checkboxFor(weekList(), 'wk Homework 5');
+    assert.ok(box, 'the to-do has a checkbox in the Week list');
+    assert.equal(box.getAttribute('aria-label'), 'Mark "wk Homework 5" done');
+    box.focus();
+    doc.lastFocusOptions = undefined;
+    box.checked = true;
+    fire(box, 'change');
+    assert.equal(storedById('wk-hw').done, true, 'the tick reached storage');
+    const again = checkboxFor(weekList(), 'wk Homework 5');
+    assert.ok(again && again !== box && again.checked, 'still listed, re-drawn ticked');
+    assert.equal(again.getAttribute('aria-label'), 'Mark "wk Homework 5" not done');
+    assert.ok(todayRowOf(again)._classes.has('done'), 'struck through');
+    assert.match(allText(weekList()), /Fri\s+23\s+7:00 PM\s+wk Dinner\s+8:00 PM\s+wk Later task\s+All day\s+wk Homework 5\s*$/,
+      'the done row sits after the undone rows of its day');
+    assert.equal(doc.activeElement, again, 'focus is on the re-drawn box');
+    assert.deepEqual(doc.lastFocusOptions, { preventScroll: true });
+    assert.equal(allText(doc.getElementById('week-grid')), gridBefore, 'the grid is unchanged');
+
+    // Its day: still there. The day after: gone from the list.
+    t.mock.timers.setTime(new Date(2026, 9, 23, 9, 0).getTime());
+    seed(loadItems());
+    assert.ok(checkboxFor(weekList(), 'wk Homework 5')?.checked, 'on its day, still shown ticked');
+    t.mock.timers.setTime(new Date(2026, 9, 24, 9, 0).getTime());
+    seed(loadItems());
+    assert.doesNotMatch(allText(weekList()), /wk Homework 5/, 'the day after its date, it is gone');
+  } finally {
+    doc.activeElement = null;
+    seed([]);
+    t.mock.timers.reset();
+    if (restore) click(restore);
+  }
+  resume();
+});
+
+test('Week list: unticking saves done false and keeps the row, unstruck; a box without focus moves no focus', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const restore = visiblePageButton();
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 22, 9, 0).getTime() });
+  try {
+    seed([record({
+      id: 'wk-un', type: 'task', title: 'wk Buy stamps', date: '2026-10-24', done: true,
+      updatedAt: new Date(2026, 9, 19, 9, 0).toISOString(),
+    })]);
+    click(doc.getElementById('show-week'));
+    assert.equal(labelText('week-label'), weekLabelFor('2026-10-18'), 'fixture check');
+    const elsewhere = doc.getElementById('entry-text');
+    elsewhere.focus();
+    const box = checkboxFor(weekList(), 'wk Buy stamps');
+    assert.ok(box && box.checked, 'a to-do ticked days ago, dated later, is listed ticked');
+    box.checked = false;
+    fire(box, 'change');
+    assert.equal(storedById('wk-un').done, false, 'the untick reached storage');
+    const again = checkboxFor(weekList(), 'wk Buy stamps');
+    assert.ok(again && again.checked === false);
+    assert.equal(todayRowOf(again)._classes.has('done'), false);
+    assert.equal(doc.activeElement, elsewhere, 'focus stays where it was');
+  } finally {
+    doc.activeElement = null;
     seed([]);
     t.mock.timers.reset();
     if (restore) click(restore);

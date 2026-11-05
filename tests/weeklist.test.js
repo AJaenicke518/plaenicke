@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { makeFakeDocument, allText, findAll } from './fake-dom.js';
+import { makeFakeDocument, allText, findAll, fire } from './fake-dom.js';
 import { buildWeekList, renderWeekList } from '../js/weeklist.js';
 
 // Dates only, but weekday names come from Intl: pin Alex's zone like
@@ -37,6 +37,7 @@ function rangeFeed(all) {
   const fn = (from, to) => { asked.push([from, to]); return all.filter((i) => i.date >= from && i.date <= to); };
   return { fn, asked };
 }
+const openOf = (li) => li.children.find((c) => c._classes.has('wlist-open'));
 const titlesOf = (list) => list.days.flatMap((d) => d.rows.map((r) => r.item.title));
 
 // --- buildWeekList: the range, the heading and the filter -------------------
@@ -84,17 +85,52 @@ test('buildWeekList: a past week shows all seven days as a plain record, headed 
   assert.deepEqual(titlesOf(list), ['Old Mon', 'Old quiz']);
 });
 
-test('buildWeekList: weekly-repeating instances, done items and ideas are left out', () => {
+test('buildWeekList: weekly-repeating instances, a done event and ideas are left out', () => {
   const feed = rangeFeed([
     inst('class', '2026-10-23', { time: '08:00', title: 'Weekly class', recurring: true }),
     inst('quiz', '2026-10-23', { time: '10:50', title: 'Friday quiz' }),
   ]);
   const list = buildWeekList([
-    own('done', { date: '2026-10-23', type: 'task', done: true, title: 'Done task' }),
+    own('doneev', { date: '2026-10-23', type: 'event', done: true, title: 'Done event' }),
     own('idea', { date: '2026-10-23', type: 'idea', title: 'An idea' }),
     own('open', { date: '2026-10-23', type: 'due', title: 'Problem set' }),
   ], feed.fn, THIS_WEEK, TODAY);
   assert.deepEqual(titlesOf(list), ['Problem set', 'Friday quiz']);
+});
+
+// Alex, 2026-11-05: "the week list should match it" (Today's Next 7 days,
+// 2026-11-04). A ticked to-do stays in its day, struck, until its day is over
+// (today.js doneStillShown, the one rule), after the undone rows.
+test('buildWeekList: a done to-do dated today or later stays in its day, after the undone rows', () => {
+  const feed = rangeFeed([inst('quiz', '2026-10-23', { time: '10:50', title: 'Friday quiz' })]);
+  const list = buildWeekList([
+    own('d-fri', { date: '2026-10-23', type: 'task', done: true, title: 'Done task', time: '07:00' }),
+    own('bs-x', { date: '2026-10-23', type: 'due', done: true, title: 'Done deadline' }),
+    own('open', { date: '2026-10-23', type: 'due', title: 'Problem set', time: '17:00' }),
+    own('d-today', { date: TODAY, type: 'milestone', done: true, title: 'Done today' }),
+  ], feed.fn, THIS_WEEK, TODAY);
+  assert.deepEqual(list.days.map((d) => [d.date, d.rows.map((r) => r.item.title)]), [
+    [TODAY, ['Done today']],
+    ['2026-10-23', ['Friday quiz', 'Problem set', 'Done deadline', 'Done task']],
+  ]);
+});
+
+test('buildWeekList: once its day is over, a done to-do drops out unless it was ticked today', () => {
+  // A past week, viewed on TODAY: every to-do here is dated before today.
+  const feed = rangeFeed([]);
+  const items = [
+    own('old', { date: '2026-10-12', type: 'task', done: true, title: 'Ticked long ago',
+      updatedAt: '2026-10-12T18:00:00.000Z' }),
+    own('late', { date: '2026-10-13', type: 'start', done: true, title: 'Ticked today',
+      updatedAt: new Date(2026, 9, 22, 9, 0).toISOString() }),
+    own('open', { date: '2026-10-13', type: 'task', title: 'Still open' }),
+  ];
+  assert.deepEqual(titlesOf(buildWeekList(items, feed.fn, '2026-10-11', TODAY)), ['Still open', 'Ticked today']);
+  // Ticked ahead in the current week: shown through its day, gone the day after.
+  const ahead = [own('fri', { date: '2026-10-23', type: 'task', done: true, title: 'Ahead',
+    updatedAt: '2026-10-20T18:00:00.000Z' })];
+  assert.deepEqual(titlesOf(buildWeekList(ahead, feed.fn, THIS_WEEK, '2026-10-23')), ['Ahead'], 'on its day');
+  assert.deepEqual(titlesOf(buildWeekList(ahead, feed.fn, THIS_WEEK, '2026-10-24')), [], 'the day after');
 });
 
 // The Week list is its own page (controller ruling, 2026-10-22): it does not
@@ -115,10 +151,13 @@ test('buildWeekList: an unreadable week start or today throws', () => {
 
 // --- renderWeekList: B2 -----------------------------------------------------
 
-function draw(list) {
+function draw(list, opts = {}) {
   const host = document.createElement('section');
-  const calls = { open: [], day: [] };
-  renderWeekList(host, list, { onOpen: (it) => calls.open.push(it.id), onSelectDay: (d) => calls.day.push(d) });
+  const calls = { open: [], day: [], done: [] };
+  renderWeekList(host, list, {
+    onOpen: (it) => calls.open.push(it.id), onSelectDay: (d) => calls.day.push(d),
+    onToggleDone: (id, done) => calls.done.push([id, done]), ...opts,
+  });
   return { host, calls };
 }
 const byClass = (root, cls) => {
@@ -160,11 +199,11 @@ test('renderWeekList: each row begins with its time ("All day" when untimed), th
   const { host } = draw(fri());
   const rows = byClass(host, 'today-row');
   assert.deepEqual(rows.map((li) => {
-    const open = li.children[0];
+    const open = openOf(li);
     return [open.children[0].textContent, open.children[1].textContent];
   }), [['All day', 'Fall break'], ['9:25 AM', 'PHYS 2100 Reassessment'], ['5:00 PM', 'CHEM 1210 Problem set 8']]);
   for (const li of rows) {
-    const open = li.children[0];
+    const open = openOf(li);
     assert.ok(open.children[0]._classes.has('today-time'));
     assert.ok(open.children[0]._classes.has('wlist-time'));
     assert.ok(open.children[1]._classes.has('today-text'));
@@ -183,7 +222,7 @@ test('renderWeekList: a feed row takes its feed colour; an own row its type clas
 
 test('renderWeekList: a row opens its item; a day label opens that day', () => {
   const { host, calls } = draw(fri());
-  const open = byClass(host, 'today-row').find((li) => allText(li).includes('CHEM')).children[0];
+  const open = openOf(byClass(host, 'today-row').find((li) => allText(li).includes('CHEM')));
   assert.equal(open.tagName, 'BUTTON');
   assert.ok(open._classes.has('item-open') && open._classes.has('today-open') && open._classes.has('wlist-open'));
   assert.equal(open.getAttribute('data-press'), '');
@@ -205,16 +244,88 @@ test('renderWeekList: with nothing to list, the heading and "Nothing else this w
 
 test('renderWeekList: a re-render replaces what was drawn', () => {
   const host = document.createElement('section');
-  const h = { onOpen() {}, onSelectDay() {} };
+  const h = { onOpen() {}, onSelectDay() {}, onToggleDone() {} };
   renderWeekList(host, fri(), h);
   renderWeekList(host, { heading: 'This week', days: [] }, h);
   assert.equal(host.children.length, 2);
   assert.equal(findAll(host, 'LI').length, 0);
 });
 
-test('renderWeekList: onOpen and onSelectDay are required', () => {
+test('renderWeekList: onOpen, onSelectDay and onToggleDone are required', () => {
   const host = document.createElement('section');
   const list = { heading: 'This week', days: [] };
-  assert.throws(() => renderWeekList(host, list, { onSelectDay() {} }), /onOpen/);
-  assert.throws(() => renderWeekList(host, list, { onOpen() {} }), /onSelectDay/);
+  assert.throws(() => renderWeekList(host, list, { onSelectDay() {}, onToggleDone() {} }), /onOpen/);
+  assert.throws(() => renderWeekList(host, list, { onOpen() {}, onToggleDone() {} }), /onSelectDay/);
+  assert.throws(() => renderWeekList(host, list, { onOpen() {}, onSelectDay() {} }), /onToggleDone/);
+  assert.throws(() => renderWeekList(host, list, { onOpen() {}, onSelectDay() {}, onToggleDone() {}, justTicked: 3 }),
+    /justTicked/);
+});
+
+// --- the checkbox, as Today's Next 7 days has it (Alex, 2026-11-05) --------
+
+const boxOf = (li) => {
+  const tick = li.children.find((c) => c._classes.has('today-tick'));
+  return tick ? tick.children[0] : null;
+};
+const TICKS = () => buildWeekList([
+  own('due', { date: '2026-10-23', type: 'due', title: 'A due' }),
+  own('start', { date: '2026-10-23', type: 'start', title: 'A start' }),
+  own('mile', { date: '2026-10-23', type: 'milestone', title: 'A milestone' }),
+  own('task', { date: '2026-10-23', type: 'task', title: 'A task' }),
+  own('bs-42', { date: '2026-10-23', type: 'due', title: 'A Brightspace deadline' }),
+  own('ev', { date: '2026-10-23', type: 'event', title: 'An event' }),
+  own('gen', { date: '2026-10-23', type: 'general', title: 'A general' }),
+  own('done', { date: '2026-10-23', type: 'task', done: true, title: 'A done task' }),
+], () => [
+  inst('quiz', '2026-10-23', { title: 'A feed row' }),
+  inst('fdue', '2026-10-23', { title: 'A feed due', type: 'due' }),
+], THIS_WEEK, TODAY);
+const rowTitled = (host, t) => byClass(host, 'today-row').find((li) => allText(li).includes(t));
+
+test('renderWeekList: an own to-do row has Today\'s checkbox; an event, a general item and a feed row do not', () => {
+  const { host } = draw(TICKS());
+  const rows = byClass(host, 'today-row');
+  const has = Object.fromEntries(rows.map((li) => [openOf(li).children[1].textContent, boxOf(li) !== null]));
+  assert.deepEqual(has, {
+    'A due': true, 'A start': true, 'A milestone': true, 'A task': true, 'A Brightspace deadline': true,
+    'An event': false, 'A general': false, 'A feed row': false, 'A feed due': false, 'A done task': true,
+  });
+  for (const li of rows.filter((r) => boxOf(r))) {
+    assert.equal(li.children[0].tagName, 'LABEL', 'the box\'s 44px label leads the row');
+    assert.ok(li.children[0]._classes.has('today-tick'));
+    assert.equal(li.children[0].getAttribute('data-press'), null, 'not pressable');
+    const box = boxOf(li);
+    assert.equal(box.tagName, 'INPUT');
+    assert.equal(box.type, 'checkbox');
+    assert.ok(box._classes.has('today-check'));
+    assert.equal(li.children[1], openOf(li), 'the open button is the label\'s sibling');
+  }
+});
+
+test('renderWeekList: the box says what a tap will do, is drawn done, and reports through onToggleDone', () => {
+  const { host, calls } = draw(TICKS());
+  const open = boxOf(rowTitled(host, 'A task'));
+  assert.equal(open.checked, false);
+  assert.equal(open.getAttribute('aria-label'), 'Mark "A task" done');
+  const done = boxOf(rowTitled(host, 'A done task'));
+  assert.equal(done.checked, true);
+  assert.equal(done.getAttribute('aria-label'), 'Mark "A done task" not done');
+  assert.ok(rowTitled(host, 'A done task')._classes.has('done'), 'struck through (styles.css .today-row.done)');
+  open.checked = true;
+  fire(open, 'change');
+  done.checked = false;
+  fire(done, 'change');
+  assert.deepEqual(calls.done, [['task', true], ['done', false]]);
+  assert.deepEqual(calls.open, [], 'a tick opens nothing');
+});
+
+test('renderWeekList: justTicked marks that row tick-just and wraps its title in tick-strike', () => {
+  const { host } = draw(TICKS(), { justTicked: 'done' });
+  const just = byClass(host, 'tick-just');
+  assert.equal(just.length, 1);
+  assert.equal(just[0], rowTitled(host, 'A done task'));
+  assert.equal(byClass(just[0], 'tick-strike').length, 1);
+  assert.equal(byClass(just[0], 'tick-strike')[0].textContent, 'A done task');
+  const { host: plain } = draw(TICKS(), { justTicked: 'task' });
+  assert.equal(byClass(plain, 'tick-just').length, 0, 'only a row drawn done plays it');
 });

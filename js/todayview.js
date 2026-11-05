@@ -32,6 +32,32 @@ function timeText(item) {
   return item.endTime ? formatTimeRange(item.time, item.endTime) : formatTime(item.time);
 }
 
+// tickLabel(item, onToggleDone): a row's checkbox, in its <label
+// class="today-tick">. The one copy: Today's rows and the Week list's
+// (js/weeklist.js, Alex 2026-11-05: "the week list should match it") draw it.
+// A tap reports onToggleDone(id, done) and app.js writes.
+export function tickLabel(item, onToggleDone) {
+  const box = el('input', 'today-check');
+  box.type = 'checkbox';
+  box.checked = item.done === true;
+  // What a tap will do (final review A10).
+  box.setAttribute('aria-label', `Mark "${item.title}" ${box.checked ? 'not done' : 'done'}`);
+  // What the control now holds, never a hard-coded true.
+  box.addEventListener('change', () => onToggleDone(item.id, box.checked === true));
+  // The label is the box's 44x44 hit area (styles.css .today-tick; final
+  // review A8). Not [data-press], and not inside the open button.
+  const tick = el('label', 'today-tick');
+  tick.appendChild(box);
+  return tick;
+}
+
+// upcomingTickable: which row of a run of upcoming days (Next 7 days, Coming
+// up, the Week list) gets that checkbox — an own to-do-type item, never an
+// event or a calendar (feed) row.
+export function upcomingTickable(item) {
+  return item.external !== true && isTodoType(item);
+}
+
 // renderTally(node, tally): Today's "N DONE · M LEFT" (rewards concept 2,
 // Alex 2026-10-26) in the head's right-hand slot (index.html #today-tally),
 // from js/today.js's tally. null: empty and hidden, until the first tick of
@@ -87,20 +113,7 @@ export function renderTodayView(container, today, {
     // className, NOT classList.add: itemTypeClass can return two tokens.
     const li = el('li', `today-row ${itemTypeClass(item)}`);
     if (item.external) li.style.setProperty('--feed-color', item.feedColor);
-    if (check) {
-      const box = el('input', 'today-check');
-      box.type = 'checkbox';
-      box.checked = item.done === true;
-      // What a tap will do (final review A10).
-      box.setAttribute('aria-label', `Mark "${item.title}" ${box.checked ? 'not done' : 'done'}`);
-      // What the control now holds, never a hard-coded true.
-      box.addEventListener('change', () => onToggleDone(item.id, box.checked === true));
-      // The label is the box's 44x44 hit area (styles.css .today-tick; final
-      // review A8). Not [data-press], and not inside the open button.
-      const tick = el('label', 'today-tick');
-      tick.appendChild(box);
-      li.appendChild(tick);
-    }
+    if (check) li.appendChild(tickLabel(item, onToggleDone));
     const open = el('button', 'item-open today-open');
     open.type = 'button';
     open.setAttribute('data-press', '');
@@ -161,7 +174,7 @@ export function renderTodayView(container, today, {
       const ul = el('ul', 'today-list');
       for (const r of day.rows) {
         const t = timeText(r.item);
-        const check = r.item.external !== true && isTodoType(r.item);
+        const check = upcomingTickable(r.item);
         ul.appendChild(row(r.item, { check, meta: t ? [el('span', 'today-time', t)] : [] }));
       }
       s.appendChild(ul);

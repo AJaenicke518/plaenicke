@@ -4,12 +4,13 @@
 // starting with its time).
 //
 // buildWeekList is pure. renderWeekList is presentation only: it NEVER
-// writes; a row reports through onOpen and a day label through onSelectDay,
-// and app.js acts. Rows are styled through classes only: an id selector would
+// writes; a row reports through onOpen, a checkbox through onToggleDone and a
+// day label through onSelectDay, and app.js acts. Rows are styled through classes only: an id selector would
 // outrank `[data-press].pressed` (styles.css).
 import { addDays, formatTime } from './timegrid.js';
 import { itemTypeClass } from './calendar.js';
 import { upcomingRows } from './today.js';
+import { tickLabel, upcomingTickable } from './todayview.js';
 
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 const utcOf = (iso) => { const [y, m, d] = iso.split('-').map(Number); return Date.UTC(y, m - 1, d); };
@@ -24,8 +25,11 @@ const DAY_NAME = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 's
 //   todayISO      the device's today
 // The range is the week's days: from today for the current week ("Rest of
 // this week"), all seven for any other week, past or future ("This week").
-// `days` is upcomingRows over that range — the one row rule Next 7 days and
-// Coming up use: no repeating instance, no done item, no idea; a multi-day
+// `days` is upcomingRows over that range with { keepDone: true } — the one
+// row rule Next 7 days and Coming up use (Alex, 2026-11-05: "the week list
+// should match it"): no repeating instance, no idea, no done item except a
+// done to-do today.js doneStillShown keeps (ticked, it stays in its day until
+// that day is over), done rows after the undone ones in a day; a multi-day
 // one-off once, on its first day in range. The instances are asked for that
 // range only, so nothing is dropped as "already shown before it": the Week
 // list is its own page and lists what Today also shows (controller ruling,
@@ -39,7 +43,7 @@ export function buildWeekList(items, instancesFor, weekStartISO, todayISO) {
   const fromISO = current ? todayISO : weekStartISO;
   return {
     heading: current ? 'Rest of this week' : 'This week',
-    days: upcomingRows(items, instancesFor(fromISO, weekEnd), fromISO, weekEnd, todayISO),
+    days: upcomingRows(items, instancesFor(fromISO, weekEnd), fromISO, weekEnd, todayISO, { keepDone: true }),
   };
 }
 
@@ -50,16 +54,26 @@ function el(tag, className, text) {
   return node;
 }
 
-// renderWeekList(container, { heading, days }, { onOpen, onSelectDay })
+// renderWeekList(container, { heading, days }, { onOpen, onSelectDay,
+//   onToggleDone, justTicked })
 // B2: under the heading, one block per day — a narrow left column with the
 // day ("Fri" over a bold "23"), a button that opens that day in Day view —
 // beside its rows. A row begins with its start time ("All day" when untimed),
 // then the title; a feed row takes its calendar's colour through
 // --feed-color. Nothing to list: "Nothing else this week."
-export function renderWeekList(container, list, { onOpen, onSelectDay } = {}) {
-  // Required: a missing one would draw rows or labels that do nothing on tap.
+//
+// An own to-do row leads with Today's checkbox (todayview.js tickLabel and
+// upcomingTickable, the one copy of each; Alex, 2026-11-05); an event or a
+// feed row never has one. A done row is drawn struck through by its `done`
+// class (styles.css .today-row.done). justTicked is app.js's id for the one
+// render after a tick, as on Today: that row, drawn done, gets `tick-just`
+// and its title a <span class="tick-strike">.
+export function renderWeekList(container, list, { onOpen, onSelectDay, onToggleDone, justTicked = null } = {}) {
+  // Required: a missing one would draw rows, boxes or labels that do nothing on tap.
   if (typeof onOpen !== 'function') throw new Error('renderWeekList requires onOpen');
   if (typeof onSelectDay !== 'function') throw new Error('renderWeekList requires onSelectDay');
+  if (typeof onToggleDone !== 'function') throw new Error('renderWeekList requires onToggleDone');
+  if (justTicked !== null && typeof justTicked !== 'string') throw new Error('renderWeekList: justTicked must be an id or null');
   container.innerHTML = '';
   container.appendChild(el('h3', 'today-label', list.heading));
   if (list.days.length === 0) {
@@ -80,6 +94,12 @@ export function renderWeekList(container, list, { onOpen, onSelectDay } = {}) {
       // className, NOT classList.add: itemTypeClass can return two tokens.
       const li = el('li', `today-row ${itemTypeClass(item)}`);
       if (item.external) li.style.setProperty('--feed-color', item.feedColor);
+      const check = upcomingTickable(item);
+      if (check) li.appendChild(tickLabel(item, onToggleDone));
+      const just = check && item.done === true && item.id === justTicked;
+      if (just) li.classList.add('tick-just');
+      const text = el('span', 'today-text', just ? undefined : item.title);
+      if (just) text.appendChild(el('span', 'tick-strike', item.title));
       const open = el('button', 'item-open today-open wlist-open');
       open.type = 'button';
       open.setAttribute('data-press', '');
@@ -88,7 +108,7 @@ export function renderWeekList(container, list, { onOpen, onSelectDay } = {}) {
       open.addEventListener('click', () => onOpen(item));
       open.append(
         el('span', 'today-time wlist-time', item.time ? formatTime(item.time) : 'All day'),
-        el('span', 'today-text', item.title),
+        text,
       );
       li.appendChild(open);
       ul.appendChild(li);
