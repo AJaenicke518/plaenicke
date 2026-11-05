@@ -1381,10 +1381,11 @@ test('runSync never puts a deadline on the write: a slow PUT is waited for and l
   const timers = installManualTimers();
   try {
     for (const fn of globalThis.window._listeners.online) fn();
-    for (let i = 0; i < 200 && !releasePut; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    await drainUntil(() => releasePut);
     assert.deepEqual(requests, ['GET', 'PUT'], 'fixture check: the write is in flight');
     assert.equal(timers.live(FETCH_TIMEOUT_MS), 0, 'no deadline is armed while the write is in flight');
     releasePut();
+    await drainUntil(() => loadSyncState().version === 1);
     await drain();
   } finally {
     timers.restore();
@@ -1610,6 +1611,7 @@ test('runSync records a lastError and lights the indicator when syncOnce itself 
   const timers = installManualTimers();
   try {
     for (const fn of globalThis.window._listeners.online) fn();
+    await drainUntil(() => typeof loadSyncState().lastError === 'string');
     await drain();
   } finally {
     timers.restore();
@@ -5050,6 +5052,7 @@ test('visible-only sync: with no visibilityState at all, the tab syncs as before
     setVisibility(undefined);
     assert.equal(globalThis.document.visibilityState, undefined, 'fixture check');
     for (const fn of globalThis.window._listeners.online) fn();
+    await drainUntil(() => net.requests.length >= 2);
     await drain();
   } finally {
     setVisibility('visible');
@@ -5114,7 +5117,7 @@ test('slow sync write: the shell says so past the threshold, and clears when the
   const timers = installManualTimers();
   try {
     for (const fn of globalThis.window._listeners.online) fn();
-    for (let i = 0; i < 200 && !net.inFlight(); i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    await drainUntil(() => net.inFlight());
     assert.deepEqual(net.requests, ['GET', 'PUT'], 'fixture check: the write is in flight');
     assert.doesNotMatch(shell.textContent, SHELL_SLOW, 'not slow yet');
     assert.equal(timers.live(SLOW_WRITE_MS), 1, 'one repaint is armed for the threshold');
@@ -5160,7 +5163,7 @@ test('slow sync write: a write that settles quickly leaves no timer behind and s
   const timers = installManualTimers();
   try {
     for (const fn of globalThis.window._listeners.online) fn();
-    for (let i = 0; i < 200 && !net.inFlight(); i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    await drainUntil(() => net.inFlight());
     assert.equal(timers.live(SLOW_WRITE_MS), 1, 'fixture check: the repaint was armed when the write began');
     net.release();
     await drain();
@@ -5232,7 +5235,7 @@ test('slow sync write: the line clears when its write settles, even when a retry
   };
   const timers = installManualTimers();
   const waitForPut = async (n) => {
-    for (let i = 0; i < 200 && pending.length < n; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    await drainUntil(() => pending.length >= n);
   };
   try {
     for (const fn of globalThis.window._listeners.online) fn();
@@ -5298,6 +5301,7 @@ test('cross-tab sync: a write from a tab that hid is pushed by the visible tab',
     assert.equal(timers.live(2000), 1, 'the storage event schedules one debounced sync');
     assert.deepEqual(net.requests, [], 'debounced: nothing goes out at once');
     timers.fire(2000);
+    await drainUntil(() => net.requests.length >= 2);
     await drain();
   } finally {
     setVisibility('visible');
@@ -5406,9 +5410,11 @@ test('cross-tab sync: two visible tabs reacting to each other converge — no pi
   // spec-conforming browser would deliver to the other tab.
   const SYNCED = ['plaenicke.items', 'plaenicke.feeds', 'plaenicke.syncTombstones'];
   let changed = new Set();
+  let stateWrites = 0; // a sync records its outcome in syncState as its last act
   const realSet = ls.setItem.bind(ls);
   ls.setItem = (k, v) => {
     if (SYNCED.includes(k) && ls.getItem(k) !== String(v)) changed.add(k);
+    if (k === 'plaenicke.syncState') stateWrites += 1;
     realSet(k, v);
   };
   const requests = [];
@@ -5434,9 +5440,11 @@ test('cross-tab sync: two visible tabs reacting to each other converge — no pi
     for (let round = 0; round < 10 && deliver.length; round += 1) {
       changed = new Set();
       const before = requests.length;
+      const writesBefore = stateWrites;
       for (const key of deliver) storageEvent(key);
       assert.equal(timers.live(2000), 1, `round ${round}: the events schedule one debounced sync`);
       timers.fire(2000);
+      await drainUntil(() => stateWrites > writesBefore);
       await drain();
       rounds.push({ requests: requests.slice(before), changed: [...changed].sort() });
       deliver = [...changed];
@@ -5478,7 +5486,7 @@ test('slow sync write: a slow write that then fails shows the error, not the slo
   const timers = installManualTimers();
   try {
     for (const fn of globalThis.window._listeners.online) fn();
-    for (let i = 0; i < 200 && !rejectPut; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    await drainUntil(() => rejectPut);
     assert.deepEqual(requests, ['GET', 'PUT'], 'fixture check: the write is in flight');
     t.mock.timers.setTime(T0 + SLOW_WRITE_MS);
     timers.fire(SLOW_WRITE_MS);
@@ -5486,6 +5494,7 @@ test('slow sync write: a slow write that then fails shows the error, not the slo
 
     rejectPut(new TypeError('Failed to fetch'));
     rejectPut = null;
+    await drainUntil(() => loadSyncState().lastError === 'offline');
     await drain();
     assert.equal(loadSyncState().lastError, 'offline', 'fixture check: the failed write was recorded');
     assert.doesNotMatch(shell.textContent, SHELL_SLOW, 'a write that failed is no longer in flight');
@@ -5523,6 +5532,7 @@ test('slow sync write: a write fetch that throws at once leaves no slow state', 
   const timers = installManualTimers();
   try {
     for (const fn of globalThis.window._listeners.online) fn();
+    await drainUntil(() => loadSyncState().lastError === 'offline');
     await drain();
     assert.deepEqual(requests, ['GET', 'PUT'], 'fixture check: the write was attempted');
     assert.equal(loadSyncState().lastError, 'offline', 'fixture check: the failed write was recorded');
@@ -5548,7 +5558,7 @@ async function slowWriteInFlight(t, id, T0) {
   const net = holdAccountWrite();
   const timers = installManualTimers();
   for (const fn of globalThis.window._listeners.online) fn();
-  for (let i = 0; i < 200 && !net.inFlight(); i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+  await drainUntil(() => net.inFlight());
   assert.deepEqual(net.requests, ['GET', 'PUT'], 'fixture check: the write is in flight');
   t.mock.timers.setTime(T0 + SLOW_WRITE_MS);
   timers.fire(SLOW_WRITE_MS);
