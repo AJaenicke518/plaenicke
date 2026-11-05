@@ -197,11 +197,14 @@ function getZonedFormatter(tzid) {
 // answer for a zone and instant cannot change within a page load (same engine
 // tz data; getZonedFormatter's cache already assumes that), and it does not
 // depend on which feed the instant came from, so nothing needs invalidating.
-// Each zone's map is cleared whole when it reaches zonedMemoMax entries. The
-// returned object is FROZEN and shared: callers only read it, and a write
-// throws (module code is strict) instead of corrupting the memo.
+// Each zone's map is cleared whole when it reaches zonedMemoMax entries.
+// Size: about 125 bytes per entry in V8 (measured in review, 2026-11-05), so
+// the 20,000 bound is about 2.4 MB per zone. The bench's working set was 2k-5k
+// entries per zone. The returned object is FROZEN and shared: callers only
+// read it, and a write throws (module code is strict) instead of corrupting
+// the memo.
 const zonedPartsMemo = new Map(); // tzid -> Map(instantMs -> frozen parts)
-let zonedMemoMax = 50000;
+let zonedMemoMax = 20000;
 let zonedPartsUncachedCount = 0;
 export function formatZonedParts(instantMs, tzid) {
   let memo = zonedPartsMemo.get(tzid);
@@ -216,10 +219,17 @@ export function formatZonedParts(instantMs, tzid) {
 }
 
 // Test seams (like feeds.js's seriesComputations): Intl calls actually made,
-// a zone's memo size, and a settable bound (returns the previous one).
+// a zone's memo size, and a settable bound (returns the previous one). The
+// bound must be a positive integer: NaN or undefined would make the size check
+// always false and remove the cap without a word.
 export function zonedPartsUncachedCalls() { return zonedPartsUncachedCount; }
 export function zonedPartsMemoSize(tzid) { const m = zonedPartsMemo.get(tzid); return m ? m.size : 0; }
-export function setZonedMemoMax(n) { const prev = zonedMemoMax; zonedMemoMax = n; return prev; }
+export function setZonedMemoMax(n) {
+  if (!Number.isInteger(n) || n <= 0) throw new TypeError(`setZonedMemoMax: expected a positive integer, got ${String(n)}`);
+  const prev = zonedMemoMax;
+  zonedMemoMax = n;
+  return prev;
+}
 
 function formatZonedPartsUncached(instantMs, tzid) {
   zonedPartsUncachedCount++;
