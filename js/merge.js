@@ -98,11 +98,11 @@ function ts(s) {
 // nextStamp — the updatedAt (or deletedAt) for a user write that replaces a
 // record stamped `prevIso`: now, or one millisecond after the record's own
 // stamp if that is not earlier than now. Used by dedupeState's tombstones
-// below, app.js's Brightspace import, applyRemoteFeeds's removals and
-// settings.js's Track-deadlines toggle — and, through js/edit.js's
-// userWriteStamp (which refuses where this would fall back to now), by every
-// user write: editItem (and so Undo), setDone, the delete commit's tombstone
-// and Settings' calendar Remove.
+// below, app.js's Brightspace import and applyRemoteFeeds's removals — and,
+// through js/edit.js's userWriteStamp (which refuses where this would fall
+// back to now), by every user write: editItem (and so Undo), setDone, the
+// delete commit's tombstone, and Settings' calendar Remove and Track-deadlines
+// toggle.
 //
 // WHY STRICTLY LATER. unionById's ties go to remote (`>=`) and applyTombstones
 // keeps a record whose updatedAt is at or after the deletion. A record written

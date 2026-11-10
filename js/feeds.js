@@ -17,7 +17,7 @@ import { parseICS, expandEvents, parseDuration, icsDateToLocal } from './ics.js'
 import { nowISO } from './dateparse.js';
 import { FEED_PALETTE } from './palette.js';
 import { nextStamp } from './merge.js';
-import { userWriteStamp } from './edit.js';
+import { userWriteStamp, stampExhaustedMessage } from './edit.js';
 import {
   loadFeeds, saveFeeds, loadFeedCache, saveFeedCache, QuotaError, addTombstone,
 } from './storage.js';
@@ -348,6 +348,9 @@ const ERROR_TEXT = {
   storage_full: 'device storage full',
   server: 'sync failed',
   remove_failed: 'could not remove — try again',
+  // A user write refused by edit.js's userWriteStamp (Remove, Track
+  // deadlines): retrying can never succeed, so the row says why instead.
+  stamp_exhausted: stampExhaustedMessage('calendar'),
 };
 
 function errorText(code) {

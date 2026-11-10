@@ -153,8 +153,9 @@ export function typeChangePatch(record, patch) {
 export { nextStamp };
 
 // userWriteStamp — the stamp for a USER write (sync-safety item 2, approved
-// 2026-11-09): app.js's editItem (and so Undo), setDone and deleteItem, and
-// js/feeds.js's removeFeed when Settings calls it with { userWrite: true }.
+// 2026-11-09): app.js's editItem (and so Undo), setDone and deleteItem,
+// js/feeds.js's removeFeed when Settings calls it with { userWrite: true },
+// and settings.js's Track-deadlines toggle.
 // It is nextStamp, except that where nextStamp cannot give a stamp strictly
 // later than a parseable prevIso (a record stamped at the last instant a Date
 // can hold), it THROWS instead of returning now. A now-stamped write there
@@ -171,11 +172,16 @@ export { nextStamp };
 // stamp, so now IS strictly later there.
 export const STAMP_EXHAUSTED_ERROR = 'StampExhaustedError';
 
+// The refusal's text. js/feeds.js shows the same words on a calendar row.
+export function stampExhaustedMessage(what = 'item') {
+  return `This ${what}'s last-changed time is too far in the future to change it — nothing was changed.`;
+}
+
 export function userWriteStamp(nowIso, prevIso, what = 'item') {
   const stamp = nextStamp(nowIso, prevIso);
   const prev = typeof prevIso === 'string' ? Date.parse(prevIso) : NaN;
   if (!Number.isNaN(prev) && !(Date.parse(stamp) > prev)) {
-    const e = new Error(`This ${what}'s last-changed time is too far in the future to change it — nothing was changed.`);
+    const e = new Error(stampExhaustedMessage(what));
     e.name = STAMP_EXHAUSTED_ERROR;
     throw e;
   }
