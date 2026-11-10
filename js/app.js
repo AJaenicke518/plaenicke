@@ -43,14 +43,9 @@ import { createCapture } from './capture.js';
 import { createTypeChips, PRIMARY_TYPES, MORE_TYPES } from './typechips.js';
 
 const els = {
-  text: document.getElementById('entry-text'),
-  date: document.getElementById('entry-date'),
-  time: document.getElementById('entry-time'),
-  end: document.getElementById('entry-end'),
-  types: document.getElementById('entry-types'),
-  add: document.getElementById('add-btn'),
-  message: document.getElementById('message'),
-  preview: document.getElementById('preview'),
+  // The shell's status line (capture date row, 2026-10-27): every message
+  // not about the capture box. The top add box that held it is gone.
+  statusLine: document.getElementById('status-line'),
   calView: document.getElementById('calendar-view'),
   prev: document.getElementById('prev-month'),
   next: document.getElementById('next-month'),
@@ -111,6 +106,12 @@ const els = {
   captureType: document.getElementById('capture-type'),
   captureMessage: document.getElementById('capture-message'),
   capturePreview: document.getElementById('capture-preview'),
+  // The capture box's date row (mockup C2): date, optional time, and the
+  // type chips, which show once a date is picked.
+  captureWhen: document.getElementById('capture-when'),
+  captureDate: document.getElementById('capture-date'),
+  captureTime: document.getElementById('capture-time'),
+  captureTypes: document.getElementById('capture-types'),
 };
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
@@ -118,9 +119,10 @@ const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
 
 // A message line, with a token bumped by EVERY message on it, so a smart add
 // can tell whether the "Thinking…" it set is still the one on screen (see
-// handleAdd). Each capture box has its own line (home-screen spec § 3): the
-// top box's #message, which also carries every message unrelated to capture,
-// and from stage 4 the capture box's #capture-message.
+// handleAdd). Two lines: the shell's #status-line, for every message
+// unrelated to capture (Ideas, ticks, deletes, edits, notices from the other
+// device), and the capture box's own #capture-message. The top add box and
+// its #message were removed on 2026-10-27 (capture date row).
 function messageLine(el) {
   let token = 0;
   return {
@@ -128,7 +130,7 @@ function messageLine(el) {
     token: () => token,
   };
 }
-const topLine = messageLine(els.message);
+const statusLine = messageLine(els.statusLine);
 const captureLine = messageLine(els.captureMessage);
 
 let items = loadItems();
@@ -300,8 +302,8 @@ initSettings({
   deadlines,
 });
 
-// The top box's line: Ideas, ticks, deletes, edits and the top box's own adds.
-function setMessage(t) { topLine.set(t); }
+// The status line: Ideas, ticks, deletes, edits and notices. Never an add's.
+function setMessage(t) { statusLine.set(t); }
 
 export function addItems(list) {
   // createdAt is the local date and time (localStamp), so same-day ideas list
@@ -334,7 +336,8 @@ export function addItems(list) {
   scheduleSync();
 }
 
-// The manual add's type chips (option A, Alex 2026-10-26; js/typechips.js).
+// The manual add's type chips (option A, Alex 2026-10-26; js/typechips.js),
+// in the capture box's date row since 2026-10-27.
 // The row shows only while a date is picked, since only the manual path reads
 // it; whenever it hides it goes back to Event, so a choice the user can no
 // longer see is never brought back or saved. Run on the date box's input and
@@ -342,29 +345,43 @@ export function addItems(list) {
 // every load too: a browser that restores the date box's value, or a page
 // back from the back/forward cache, brings a date back with no input event.
 // Before that first pageshow the row is hidden by index.html.
-const typeChips = createTypeChips(els.types);
+const typeChips = createTypeChips(els.captureTypes);
 const OFFERED_TYPES = [...PRIMARY_TYPES, ...MORE_TYPES];
 function syncTypeRow() {
-  const show = Boolean(els.date.value);
+  const show = Boolean(els.captureDate.value);
   if (!show) typeChips.reset();
-  els.types.hidden = !show;
+  els.captureTypes.hidden = !show;
 }
 
-// Manual add: title box + date box, saved as the type the chips hold (Event
-// unless the user picked another). Works with no network.
-function handleManualAdd(type) {
-  const title = els.text.value.trim();
-  const date = els.date.value;
-  if (!title || !date) { setMessage('For manual add, type a title and pick a date.'); return 'refused'; }
+// Empties the capture box's date row: no date, no time, chips back on Event
+// and hidden. capture.js calls it when the box closes (x), and a manual add
+// calls it once it has landed.
+function clearCaptureWhen() {
+  els.captureDate.value = '';
+  els.captureTime.value = '';
+  syncTypeRow();
+}
+
+// Manual add: the target's text + its date row, saved as the type the chips
+// hold (Event unless the user picked another). Works with no network. No end
+// time: the capture row has none (controller default, 2026-10-27); the item
+// sheet sets one.
+function handleManualAdd(target) {
+  const { field, dates, line } = target;
+  const type = target.type.value();
+  const title = field.value.trim();
+  const date = dates.date.value;
+  if (!title || !date) { line.set('For manual add, type a title and pick a date.'); return 'refused'; }
   // Never saved as a type the chips do not offer: makeItem would quietly turn
   // a missing one into 'general', which no page treats as a to-do.
-  if (!OFFERED_TYPES.includes(type)) { setMessage(`Manual add: unknown type ${type}`); return 'failed'; }
+  if (!OFFERED_TYPES.includes(type)) { line.set(`Manual add: unknown type ${type}`); return 'failed'; }
   try {
-    addItems([{ title, date, type, time: els.time.value || null, endTime: els.end.value || null }]);
-  } catch (e) { setMessage(e.message); return 'failed'; }
-  els.text.value = ''; els.date.value = ''; els.time.value = ''; els.end.value = ''; els.end.hidden = true;
-  syncTypeRow(); // the date is now empty: hides the chips and puts them back on Event
-  setMessage('Added.');
+    addItems([{ title, date, type, time: dates.time.value || null, endTime: null }]);
+  } catch (e) { line.set(e.message); return 'failed'; }
+  field.value = '';
+  clearCaptureWhen(); // hides the chips and puts them back on Event
+  line.set('Added.');
+  target.onAdded();
   return 'added';
 }
 
@@ -382,43 +399,37 @@ function handleManualAdd(type) {
 // the request still adds its items (the Ideas box does not cancel them). The
 // one exception is a failed save of those items: that is shown regardless,
 // since nothing else would tell the user the capture was lost.
+//
+// One box since 2026-10-27, and its Add and Return are latched while a smart
+// add thinks (js/capture.js), so a second Add cannot start while one is in
+// flight: only its Cancel or x (cancelAdd) supersedes one. The duplicate
+// guard and supersedePending that served two boxes were removed with the top
+// box, rather than kept as guards that guard nothing.
 let addGeneration = 0;
-// The box, trimmed text and generation of the smart add in flight, so a second
-// Add of the same text from the same box sends no second (paid) request.
-let pendingSmart = null;
 
-// THE BOXES THAT ADD (home-screen spec § 3). handleAdd keeps one logic and
-// takes the box it was called from: its field, its date row (null for a box
-// without one: smart add only), its message line, its preview container, its
-// "unavailable" text (each names the way that box's user can still add), and
-// what to do once an add from it has landed.
-const topTarget = {
-  field: els.text,
-  dates: { date: els.date, time: els.time, end: els.end },
-  // Read only on the manual path (a date picked), never by smart add.
-  type: typeChips,
-  line: topLine,
-  preview: els.preview,
-  unavailable: 'Smart add is unavailable — pick a date below and tap Add to add it manually.',
-  onAdded() {},
-  onSuperseded() {},
-  onPreviewClosed() {},
-};
-// The capture box has no date row, so its failure names the top box's.
+// THE BOX THAT ADDS (home-screen spec § 3). handleAdd takes it as a target:
+// its field, its date row, its type chips (read only on the manual path), its
+// message line, its preview container, its "unavailable" text, and what to
+// do once an add from it has landed. Since 2026-10-27 the capture box is the
+// only one: the top add box was removed (capture date row).
 // `capture` is created below; these run only after an Add, long after.
 const captureTarget = {
   field: els.captureText,
-  dates: null,
-  type: null,
+  dates: { date: els.captureDate, time: els.captureTime },
+  // The row that holds them. A date the user cannot see is never used: a
+  // browser can restore an input's value with no event (DA, 2026-10-27).
+  when: els.captureWhen,
+  type: typeChips,
   line: captureLine,
   preview: els.capturePreview,
-  unavailable: 'Smart add is unavailable — use the box at the top with a date to add it.',
+  unavailable: 'Smart add is unavailable. Pick a date to save it without smart add.',
+  // The message points at the date row, so it shows, even after a voice-only add.
+  onUnavailable() { capture.showWhen(); },
   onAdded() { capture.added(); },
-  onSuperseded() { capture.released(); },
   // Its own Add is hidden while its preview is open (js/capture.js).
   onPreviewClosed() { capture.previewClosed(); },
 };
-const TARGETS = [topTarget, captureTarget];
+const TARGETS = [captureTarget];
 
 // A new capture closes any open preview, in EVERY box (spec § 3 step 8), and
 // that box's line says so. A preview is open while its container has content
@@ -438,62 +449,44 @@ function closePreviews() {
 
 // Makes the smart add in flight superseded, as a newer Add would: its reply,
 // whenever it comes, changes nothing (spec § 3 step 7: the capture box's
-// Cancel). The same text can then be sent again: the duplicate guard above
-// only holds for the current generation. The request itself is not aborted,
-// so it may still spend credit (spec § 8, Later). Only the capture box calls
-// this, and only while its latch is set; a newer Add from the top box
-// releases that latch at once (supersedePending), so its Cancel can never
-// reach the top box's request.
+// Cancel, or x while thinking). The same text can then be sent again. The
+// request itself is not aborted, so it may still spend credit (spec § 8,
+// Later).
 function cancelAdd() {
   addGeneration += 1;
 }
 
-// A newer Add (either box, manual or smart) is about to supersede the smart
-// add in flight. Its reply will change nothing, so its box is told NOW, not
-// when the reply comes up to SMART_ADD_TIMEOUT_MS later: its "Thinking…" goes
-// (if still showing) and the capture box drops its adding latch. Without this
-// a request superseded from the OTHER box left "Thinking…" up, and the
-// capture box's Cancel then cancelled the NEWER request (DA I1).
-function supersedePending() {
-  if (pendingSmart && pendingSmart.generation === addGeneration) pendingSmart.release();
-}
-
 // Resolves to how it ended: 'refused' (validation; nothing started),
-// 'duplicate' (the same text from the same box is already in flight),
 // 'added', 'preview', 'empty', 'failed', or 'superseded' (a newer Add, or a
 // Cancel, came first, so this request changed nothing).
 async function handleAdd(target) {
-  const { field, dates, line } = target;
+  const { field, line } = target;
+  // The date row counts only while it shows (DA #2): a hidden row's values
+  // are never read, so a spoken add can never turn manual unseen.
+  const dates = target.when.hidden ? null : target.dates;
   if (dates && dates.time.value && !dates.date.value) {
     line.set('Add a date to use that time, or clear the time to use smart add.');
     return 'refused';
   }
   // If a date is picked, treat Add as an explicit MANUAL add — no Worker needed.
-  // This is the always-available fallback (works offline and on iPhone). Only
-  // the top box has a date row.
+  // This is the always-available fallback (works offline and on iPhone).
   if (dates && dates.date.value) {
     // Refused here, before the bump, so a refused manual add (no title) starts
-    // nothing and leaves a pending smart add alone; a landed one supersedes it
-    // and closes any open preview.
+    // nothing; a landed one closes any open preview.
     if (!field.value.trim()) { line.set('For manual add, type a title and pick a date.'); return 'refused'; }
-    supersedePending();
     addGeneration += 1;
     closePreviews();
-    return handleManualAdd(target.type.value());
+    return handleManualAdd(target);
   }
 
   const raw = field.value.trim();
   if (!raw) { line.set('Type something first.'); return 'refused'; }
-  if (pendingSmart && pendingSmart.generation === addGeneration
-    && pendingSmart.target === target && pendingSmart.raw === raw) return 'duplicate';
-  supersedePending();
   const generation = ++addGeneration;
   // An earlier request's preview must not stay confirmable under a new one.
   closePreviews();
   line.set('Thinking…');
   const thinking = line.token();
   const say = (t) => { if (line.token() === thinking) line.set(t); };
-  pendingSmart = { generation, raw, target, release: () => { say(''); target.onSuperseded(); } };
   // Only clear the box if it still holds what was sent: text typed while
   // waiting (or reviewing) is the user's next entry.
   const clearSentText = () => { if (field.value.trim() === raw) field.value = ''; };
@@ -503,13 +496,11 @@ async function handleAdd(target) {
     result = await parseViaWorker(raw);
   } catch (e) {
     if (generation !== addGeneration) return 'superseded';
-    pendingSmart = null;
     if (e.message === 'too_long') say('That was a lot at once — try adding fewer items in one go.');
-    else say(target.unavailable);
+    else { say(target.unavailable); target.onUnavailable(); }
     return 'failed';
   }
   if (generation !== addGeneration) return 'superseded';
-  pendingSmart = null;
 
   const flow = decideFlow(result);
   if (flow === 'empty') { say("I couldn't find anything to add — try rephrasing."); return 'empty'; }
@@ -1429,16 +1420,16 @@ function openDay(dateISO) {
   showView('day');
 }
 
-els.time.addEventListener('input', () => { els.end.hidden = !els.time.value; if (!els.time.value) els.end.value = ''; });
-els.date.addEventListener('input', syncTypeRow);
-els.date.addEventListener('change', syncTypeRow);
+els.captureDate.addEventListener('input', syncTypeRow);
+els.captureDate.addEventListener('change', syncTypeRow);
 window.addEventListener('pageshow', syncTypeRow);
-els.add.addEventListener('click', () => { handleAdd(topTarget); });
-els.text.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleAdd(topTarget); });
-els.tabToday.addEventListener('click', () => showView('today'));
-els.tabCalendar.addEventListener('click', () => showView(lastCalendarView));
-els.tabTodo.addEventListener('click', () => showView('todo'));
-els.tabIdeas.addEventListener('click', () => showView('ideas'));
+// A tab switch clears the status line (Q4, 2026-10-27): a message belongs to
+// the page it was said on. No timer.
+function switchTab(view) { setMessage(''); showView(view); }
+els.tabToday.addEventListener('click', () => switchTab('today'));
+els.tabCalendar.addEventListener('click', () => switchTab(lastCalendarView));
+els.tabTodo.addEventListener('click', () => switchTab('todo'));
+els.tabIdeas.addEventListener('click', () => switchTab('ideas'));
 els.showMonth.addEventListener('click', () => showView('month'));
 els.showWeek.addEventListener('click', () => showView('week'));
 els.showDay.addEventListener('click', () => showView('day'));
@@ -1452,6 +1443,7 @@ const capture = createCapture({
   els: {
     button: els.captureBtn, box: els.captureBox, field: els.captureText, add: els.captureAdd,
     cancel: els.captureCancel, close: els.captureClose, typeInstead: els.captureType, preview: els.capturePreview,
+    when: els.captureWhen,
   },
   line: captureLine,
   voice: { isVoiceSupported, listen, errorKind },
@@ -1461,6 +1453,7 @@ const capture = createCapture({
   submit: () => handleAdd(captureTarget),
   cancelSubmit: cancelAdd,
   closePreviews,
+  clearWhen: clearCaptureWhen,
 });
 // Opening Settings stops a listen and keeps its text (spec § 3 step 4).
 // settings.js's own listener on this button opens or closes the panel.
