@@ -603,6 +603,89 @@ test('settings: every close path returns focus to the Settings button, without s
   }
 });
 
+// --- the iOS keyboard (punchlist L139) --------------------------------------
+//
+// The backdrop is the panel's scroll container, fixed at inset: 0, so it is
+// the LAYOUT viewport's height. The iOS keyboard shrinks only the visual
+// viewport, so the backdrop's lower part — where its scroll ends — sat behind
+// the keyboard and the last section could not be scrolled into view. While
+// the panel is open the backdrop is fitted to the visual viewport, as the
+// item sheet is placed by it (js/viewport.js).
+
+function fakeVisualViewport({ height = 800, offsetTop = 0 } = {}) {
+  const listeners = {};
+  return {
+    height,
+    offsetTop,
+    addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
+    removeEventListener(type, fn) {
+      const list = listeners[type] || [];
+      const i = list.indexOf(fn);
+      if (i !== -1) list.splice(i, 1);
+    },
+    dispatch(type) { [...(listeners[type] || [])].forEach((fn) => fn({ type })); },
+    count() { return Object.values(listeners).reduce((n, l) => n + l.length, 0); },
+  };
+}
+
+const boxOf = (backdrop) => {
+  const { bottom, top, height } = backdrop.style;
+  return { bottom, top, height };
+};
+
+test('settings: while open, the backdrop is fitted to the visual viewport and follows the keyboard', () => {
+  const vv = fakeVisualViewport({ height: 800, offsetTop: 0 });
+  globalThis.visualViewport = vv;
+  try {
+    const { host } = openPanel([]);
+    const backdrop = host.children[0];
+    assert.equal(backdrop.className, 'settings-backdrop', 'fixture check');
+    assert.deepEqual(boxOf(backdrop), { bottom: 'auto', top: '0px', height: '800px' });
+    vv.height = 420;
+    vv.dispatch('resize');
+    vv.offsetTop = 260;
+    vv.dispatch('scroll');
+    assert.deepEqual(boxOf(backdrop), { bottom: 'auto', top: '260px', height: '420px' },
+      'the scroll range ends at the visible bottom, above the keyboard');
+  } finally { delete globalThis.visualViewport; }
+});
+
+test('settings: every close path stops following the visual viewport', () => {
+  const closers = {
+    'the Settings button': ({ button }) => button.click(),
+    Escape: () => document._listeners.keydown.slice().forEach((fn) => fn({ key: 'Escape' })),
+    'a backdrop tap': ({ host }) => host.children[0].click(),
+  };
+  for (const [label, closeIt] of Object.entries(closers)) {
+    const vv = fakeVisualViewport();
+    globalThis.visualViewport = vv;
+    try {
+      const opened = openPanel([]);
+      const backdrop = opened.host.children[0];
+      assert.equal(vv.count(), 2, `fixture check (${label}): following while open`);
+      closeIt(opened);
+      assert.equal(opened.host.childElementCount, 0, `fixture check (${label}): closed`);
+      assert.equal(vv.count(), 0, `${label}: no visualViewport listener left`);
+      assert.deepEqual(boxOf(backdrop), { bottom: undefined, top: undefined, height: undefined },
+        `${label}: inline box removed`);
+    } finally { delete globalThis.visualViewport; }
+  }
+});
+
+test('settings: reopening after a close follows once, not twice', () => {
+  const vv = fakeVisualViewport();
+  globalThis.visualViewport = vv;
+  try {
+    const { button } = openPanel([]);
+    button.click(); // close
+    assert.equal(vv.count(), 0);
+    button.click(); // open again
+    assert.equal(vv.count(), 2);
+    button.click();
+    assert.equal(vv.count(), 0);
+  } finally { delete globalThis.visualViewport; }
+});
+
 // --- a Name that is itself a link (punchlist: secrets F3) -------------------
 //
 // A feed's name is displayed on every row and synced to the account; its URL
