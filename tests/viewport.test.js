@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { followVisualViewport, PLACED_PROPS } from '../js/viewport.js';
+import { followVisualViewport, PLACED_PROPS, fillVisualViewport, FILLED_PROPS } from '../js/viewport.js';
 
 // js/viewport.js on its own (home-screen spec § 3, § 8 stage 4). The item
 // sheet's own placement tests stay in tests/itemsheet.test.js, unchanged:
@@ -108,4 +108,61 @@ test('a maxShare that is not a number in (0, 1] is refused before anything liste
     assert.throws(() => followVisualViewport(element()), /maxShare/, 'no options at all');
     assert.equal(vv.count(), 0);
   });
+});
+
+// --- fillVisualViewport: a full-screen overlay (the Settings backdrop) --------
+//
+// A scroll container fixed at inset: 0 is the layout viewport's height. With
+// the iOS keyboard up, its lower part is behind the keyboard, so scrolling it
+// to its end still leaves the end there (punchlist L139). While it follows,
+// its box IS the visible area: top at the visual viewport's offset, height
+// the visual viewport's height, bottom released.
+
+test('fill: the element\'s box is the visible area — top at offsetTop, height the visible height', () => {
+  withViewport(fakeViewport({ height: 800, offsetTop: 0 }), () => {
+    const el = element();
+    fillVisualViewport(el);
+    assert.deepEqual(inline(el), { bottom: 'auto', top: '0px', height: '800px' });
+  });
+});
+
+test('fill: the keyboard — a resize and then a scroll each refit it to the visible area', () => {
+  const vv = fakeViewport({ height: 800, offsetTop: 0 });
+  withViewport(vv, () => {
+    const el = element();
+    fillVisualViewport(el);
+    vv.height = 420;
+    vv.dispatch('resize');
+    assert.deepEqual(inline(el), { bottom: 'auto', top: '0px', height: '420px' });
+    vv.offsetTop = 260;
+    vv.dispatch('scroll');
+    assert.deepEqual(inline(el), { bottom: 'auto', top: '260px', height: '420px' });
+  });
+});
+
+test('fill: stop removes both listeners and every inline property it set, and a second stop is harmless', () => {
+  assert.deepEqual(FILLED_PROPS, ['bottom', 'top', 'height']);
+  const vv = fakeViewport({ height: 420, offsetTop: 260 });
+  withViewport(vv, () => {
+    const el = element();
+    const stop = fillVisualViewport(el);
+    assert.equal(vv.count(), 2, 'one resize and one scroll listener while following');
+    stop();
+    assert.equal(vv.count(), 0);
+    assert.deepEqual(inline(el), {});
+    stop();
+    vv.height = 300;
+    vv.dispatch('resize');
+    vv.dispatch('scroll');
+    assert.deepEqual(inline(el), {}, 'a later keyboard change reaches nothing');
+  });
+});
+
+test('fill: without visualViewport nothing is set and nothing listens', () => {
+  assert.equal(globalThis.visualViewport, undefined);
+  const el = element();
+  const stop = fillVisualViewport(el);
+  assert.deepEqual(inline(el), {});
+  stop();
+  assert.deepEqual(inline(el), {});
 });

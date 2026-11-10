@@ -26,7 +26,10 @@ export class FakeElement {
     this._classes = new Set();
     this._listeners = {};
     this._attrs = {};
-    this.style = { setProperty(name, val) { this[name] = val; } };
+    this.style = {
+      setProperty(name, val) { this[name] = val; },
+      removeProperty(name) { delete this[name]; },
+    };
     this.dataset = {};
     this.disabled = false;
     this.hidden = false;

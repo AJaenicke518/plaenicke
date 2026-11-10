@@ -635,7 +635,13 @@ button[data-press].pressed { opacity: 1; }
   padding-top: 15vh;
   /* The page behind is scroll-locked (js/scrolllock.js), so a panel taller
      than the screen scrolls here, inside the backdrop, and keeps its last
-     section clear of the home indicator. */
+     section clear of the home indicator. WebKit counts this padding in the
+     scroll range (checked in Playwright WebKit 18.2, 2026-11-09).
+     inset: 0 alone does NOT survive the iOS keyboard: it shrinks only the
+     visual viewport, so this box and the end of its scroll range stay behind
+     the keyboard (punchlist L139). While the panel is open, js/settings.js
+     (js/viewport.js fillVisualViewport) sets top, height and bottom inline
+     from window.visualViewport; inset: 0 is what applies without it. */
   padding-bottom: calc(24px + env(safe-area-inset-bottom));
   overflow-y: auto;
   overscroll-behavior: contain;

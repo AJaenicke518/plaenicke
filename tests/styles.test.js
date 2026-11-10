@@ -1022,6 +1022,22 @@ test('the Settings backdrop scrolls, so a tall panel can be read to its end', ()
   assert.equal(declOf('.settings-backdrop', 'padding-top'), '15vh', 'the panel still opens below the top');
 });
 
+// Punchlist L139: with the iOS keyboard up the backdrop's end sat behind the
+// keyboard. js/settings.js fits it to the visual viewport inline
+// (js/viewport.js fillVisualViewport: top, height, bottom: auto). That inline
+// height is the WHOLE visible height, so it must include the backdrop's
+// padding (border-box), and nothing in the stylesheet may fight it. Without
+// visualViewport the stylesheet's own fixed inset: 0 is what applies.
+test('the Settings backdrop can be fitted to the visual viewport by an inline top and height', () => {
+  assert.equal(declOf('*', 'box-sizing'), 'border-box', 'an inline height includes the padding');
+  assert.equal(declOf('.settings-backdrop', 'box-sizing'), null);
+  assert.equal(declOf('.settings-backdrop', 'position'), 'fixed');
+  assert.equal(declOf('.settings-backdrop', 'inset'), '0', 'the fallback without visualViewport');
+  for (const prop of ['height', 'min-height', 'max-height']) {
+    assert.equal(declOf('.settings-backdrop', prop), null, `${prop} would fight the inline height`);
+  }
+});
+
 test('the toast sits above the tab bar and clears the capture button\'s corner', () => {
   assert.equal(declOf('.toast', 'bottom'), 'calc(56px + 12px + env(safe-area-inset-bottom))');
   assert.equal(declOf('.toast', 'right'), '88px');

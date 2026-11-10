@@ -1,6 +1,7 @@
 // viewport.js — keeps a fixed element inside the VISUAL viewport (the part
 // of the page the user can actually see). Shared by the item sheet
-// (js/itemsheet.js) and the capture box (js/capture.js); moved here from
+// (js/itemsheet.js) and the capture box (js/capture.js); the Settings
+// backdrop uses fillVisualViewport, below, instead. Moved here from
 // itemsheet.js in home-screen stage 4 (spec § 3, § 8), unchanged in
 // behaviour for the sheet.
 //
@@ -49,5 +50,49 @@ export function followVisualViewport(el, { maxShare, transform = 'translateY(-10
     vv.removeEventListener('resize', place);
     vv.removeEventListener('scroll', place);
     for (const prop of PLACED_PROPS) el.style.removeProperty(prop);
+  };
+}
+
+// fillVisualViewport(el) -> stop()
+//
+// For a full-screen overlay that is its own scroll container (the Settings
+// backdrop, js/settings.js), where followVisualViewport's bottom-anchored,
+// content-sized placement does not fit: the overlay must keep covering the
+// whole visible area however short its content is.
+//
+// Why: fixed at inset: 0 the overlay is the LAYOUT viewport's height. With the
+// iOS keyboard up, its lower part — the end of its scroll range — sits behind
+// the keyboard, so scrolling it to its end still leaves its last content out
+// of sight (punchlist L139). While this runs, its box is the visible area:
+// `top` is the visual viewport's offset within the layout viewport (the fixed
+// element's containing block), `height` the visible height, and `bottom` is
+// released so the stylesheet's inset does not stretch it back. The height
+// includes the overlay's padding (styles.css sets border-box on everything).
+//
+// Same lifecycle as followVisualViewport: re-fitted on visualViewport resize
+// and scroll; stop() removes both listeners and every inline property it
+// set, at most once. No visualViewport: nothing is set and nothing listens.
+
+// The inline properties fitting writes, and stop() removes.
+export const FILLED_PROPS = ['bottom', 'top', 'height'];
+
+export function fillVisualViewport(el) {
+  const vv = globalThis.visualViewport;
+  if (!vv) return () => {};
+  const fit = () => {
+    el.style.setProperty('bottom', 'auto');
+    el.style.setProperty('top', `${vv.offsetTop}px`);
+    el.style.setProperty('height', `${vv.height}px`);
+  };
+  vv.addEventListener('resize', fit);
+  vv.addEventListener('scroll', fit);
+  fit();
+  let stopped = false;
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    vv.removeEventListener('resize', fit);
+    vv.removeEventListener('scroll', fit);
+    for (const prop of FILLED_PROPS) el.style.removeProperty(prop);
   };
 }
