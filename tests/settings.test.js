@@ -320,6 +320,28 @@ test('settings: a confirmed Remove removes exactly one calendar and nothing else
   assert.deepEqual(notified, ['view', 'synced'], 'a confirmed Remove is still a synced change');
 });
 
+// Sync-safety item 2 (approved 2026-11-09): the confirmed Remove is a USER
+// write, so a calendar stamped at the last instant a Date can hold is refused
+// (removeFeed with { userWrite: true }) through the row's existing error,
+// rather than removed with a tombstone the next sync would undo.
+test('uws: a confirmed Remove of a calendar stamped at the maximum Date is refused inline and writes nothing', () => {
+  const feeds = twoFeeds();
+  feeds[0].updatedAt = '+275760-09-13T00:00:00.000Z';
+  const { host, notified } = openPanel(feeds);
+  const feedsBefore = JSON.stringify(loadFeeds());
+  notified.length = 0;
+
+  findButtonByText(host, 'Remove').click(); // Classes
+  findButtonByText(host, 'Remove from every device').click();
+
+  assert.equal(JSON.stringify(loadFeeds()), feedsBefore, 'both calendars stay, field for field');
+  assert.deepEqual(loadTombstones(), [], 'no tombstone');
+  assert.ok(allText(host).includes(UWS_CAL_MSG), 'the row shows why, in the error\'s own words');
+  assert.ok(!allText(host).includes('try again'), 'retrying can never succeed, so the row must not say to');
+  assert.deepEqual(notified, [], 'nothing changed, so nothing is announced');
+});
+const UWS_CAL_MSG = "This calendar's last-changed time is too far in the future to change it — nothing was changed.";
+
 // The confirm must follow the CALENDAR, not the row position. A sync can land
 // while the question sits open and re-order the list or insert a calendar
 // ahead of the one being asked about; the next re-render (any row action
@@ -1049,4 +1071,18 @@ test('settings: "Track deadlines" stamps updatedAt strictly later than the recor
   const { host } = openPanel([bsRowFeed({ updatedAt: future })]);
   findButtonByText(host, 'Track deadlines').click();
   assert.ok(loadFeeds()[0].updatedAt > future, `stamped ${loadFeeds()[0].updatedAt}`);
+});
+
+// Sync-safety item 2 (controller ruling 2026-11-09): the toggle is a user
+// write of a synced field, so it takes the strict user-write stamp. At the
+// maximum Date it is refused, writes nothing, and the row says why.
+test('uws: "Track deadlines" on a calendar stamped at the maximum Date is refused inline and writes nothing', () => {
+  const { host, notified } = openPanel([bsRowFeed({ updatedAt: '+275760-09-13T00:00:00.000Z' })]);
+  const before = JSON.stringify(loadFeeds());
+  notified.length = 0;
+  findButtonByText(host, 'Track deadlines').click();
+  assert.equal(JSON.stringify(loadFeeds()), before, 'the calendar is unchanged, field for field');
+  assert.ok(allText(host).includes(UWS_CAL_MSG), 'the row shows why');
+  assert.ok(findButtonByText(host, 'Track deadlines'), 'still offers Track, so it does not look tracked');
+  assert.deepEqual(notified, [], 'nothing changed, so nothing is announced');
 });

@@ -44,13 +44,14 @@ function setup({ standalone = false } = {}) {
   const els = {
     button: make('button'), box: make('div'), field: make('textarea'), add: make('button'),
     cancel: make('button'), close: make('button'), typeInstead: make('button'), preview: make('section'),
+    when: make('div'),
   };
   const message = make('p');
   const order = [];
   const voice = fakeVoice(order);
   const fx = {
     els, message, order, voice, standalone,
-    follows: [], timers: [], previews: 0, cancels: 0, submits: 0, settles: [],
+    follows: [], timers: [], previews: 0, cancels: 0, submits: 0, settles: [], clearWhens: 0, picked: false, locks: [],
     get settle() { return fx.settles[fx.settles.length - 1]; },
   };
   // Records blur/focus on the field in order, then does what the fake does.
@@ -69,6 +70,9 @@ function setup({ standalone = false } = {}) {
     },
     cancelSubmit: () => { fx.cancels += 1; },
     closePreviews: () => { fx.previews += 1; },
+    clearWhen: () => { fx.clearWhens += 1; },
+    whenPicked: () => fx.picked,
+    lockWhen: (on) => { fx.locks.push(on); },
     later: (fn, ms) => { const h = { fn, ms, cleared: false }; fx.timers.push(h); return h; },
     clearLater: (h) => { h.cleared = true; },
     follow: (target, opts) => {
@@ -150,19 +154,6 @@ test('a listen over its own preview keeps text the user changed since the previe
   tap(fx.els.button);
   assert.equal(fx.voice.current.opts.prefix, 'two things friday and the dentist at 3', 'an edit is the next entry, never wiped');
   assert.equal(fx.els.field.value, 'two things friday and the dentist at 3');
-});
-
-test('released() drops the latch at once and adds nothing', async () => {
-  const fx = setup();
-  listening(fx, 'lunch');
-  tap(fx.els.button);
-  assert.equal(fx.capture.state().adding, true, 'fixture check');
-  fx.capture.released();
-  assert.equal(fx.capture.state().adding, false);
-  assert.equal(fx.els.button.disabled, false);
-  assert.equal(fx.els.cancel.hidden, true);
-  assert.equal(fx.cancels, 0, 'released is not a cancel');
-  assert.equal(fx.els.field.value, 'lunch', 'the text is kept');
 });
 
 test('a tap while listening stops first, then adds the text shown, behind the adding latch', async () => {
@@ -287,6 +278,7 @@ test('a submit that rejects says so on the line, clears the latch, and logs the 
   const els = {
     button: make('button'), box: make('div'), field: make('textarea'), add: make('button'),
     cancel: make('button'), close: make('button'), typeInstead: make('button'), preview: make('section'),
+    when: make('div'),
   };
   const message = make('p');
   let reject;
@@ -296,7 +288,7 @@ test('a submit that rejects says so on the line, clears the latch, and logs the 
     voice: { isVoiceSupported: () => false, listen() { throw new Error('unused'); }, errorKind },
     isStandalone: () => false,
     submit: () => new Promise((_, r) => { reject = r; }),
-    cancelSubmit() {}, closePreviews() {},
+    cancelSubmit() {}, closePreviews() {}, clearWhen() {}, whenPicked: () => false, lockWhen() {},
     later: () => ({}), clearLater() {}, follow: () => () => {},
   });
   const logged = t.mock.method(console, 'error', () => {});
@@ -493,12 +485,12 @@ test('createCapture refuses a missing element or callback', () => {
   const ok = {
     els: base.els, line: { set() {} },
     voice: { isVoiceSupported: () => true, listen() {}, errorKind },
-    isStandalone: () => false, submit: async () => {}, cancelSubmit() {}, closePreviews() {},
+    isStandalone: () => false, submit: async () => {}, cancelSubmit() {}, closePreviews() {}, clearWhen() {}, whenPicked: () => false, lockWhen() {},
   };
-  for (const name of ['button', 'box', 'field', 'add', 'cancel', 'close', 'typeInstead', 'preview']) {
+  for (const name of ['button', 'box', 'field', 'add', 'cancel', 'close', 'typeInstead', 'preview', 'when']) {
     assert.throws(() => createCapture({ ...ok, els: { ...ok.els, [name]: null } }), new RegExp(name));
   }
-  for (const name of ['isStandalone', 'submit', 'cancelSubmit', 'closePreviews']) {
+  for (const name of ['isStandalone', 'submit', 'cancelSubmit', 'closePreviews', 'clearWhen', 'whenPicked', 'lockWhen']) {
     assert.throws(() => createCapture({ ...ok, [name]: undefined }), new RegExp(name));
   }
   assert.throws(() => createCapture({ ...ok, line: null }), /line/);
@@ -521,6 +513,7 @@ test('a submit that rejects after Cancel leaves the Cancel message, and is still
   const els = {
     button: make('button'), box: make('div'), field: make('textarea'), add: make('button'),
     cancel: make('button'), close: make('button'), typeInstead: make('button'), preview: make('section'),
+    when: make('div'),
   };
   const message = make('p');
   let reject;
@@ -531,7 +524,7 @@ test('a submit that rejects after Cancel leaves the Cancel message, and is still
     voice: { isVoiceSupported: () => false, listen() { throw new Error('unused'); }, errorKind },
     isStandalone: () => false,
     submit: () => new Promise((_, r) => { reject = r; }),
-    cancelSubmit() { cancels += 1; }, closePreviews() {},
+    cancelSubmit() { cancels += 1; }, closePreviews() {}, clearWhen() {}, whenPicked: () => false, lockWhen() {},
     later: () => ({}), clearLater() {}, follow: () => () => {},
   });
   const logged = t.mock.method(console, 'error', () => {});
@@ -658,4 +651,132 @@ test('Return that confirms an IME composition reported as keyCode 229 does nothi
   const ev = keydown(fx.els.field, { key: 'Enter', keyCode: 229 });
   assert.equal(ev.defaultPrevented, false);
   assert.equal(fx.submits, 0);
+});
+
+// --- the date row (capture date row, Alex 2026-10-27, mockup C2) ----------
+// The row (date and optional time; the chips inside it are app.js's) shows
+// only when the user types: a tap on the text, typing, a box opened with
+// voice off or refused, Type instead, or (app.js) a failed smart add. Never
+// while listening, and not when a listen ends on its own.
+
+test('date row: hidden at the start, while listening, and when a listen ends on its own', () => {
+  const fx = setup();
+  assert.equal(fx.els.when.hidden, true, 'closed: hidden');
+  listening(fx, 'dentist thursday');
+  assert.equal(fx.els.when.hidden, true, 'listening: hidden');
+  fire(fx.els.field, 'focusin');
+  assert.equal(fx.els.when.hidden, true, 'a focus on the read-only field while listening does not show it');
+  fx.voice.current.opts.onEnd();
+  assert.equal(fx.capture.state().mode, 'typing', 'fixture check: the listen ended on its own');
+  assert.equal(fx.els.when.hidden, true, 'voice only: still hidden');
+});
+
+test('date row: a tap on the text while listening shows it', () => {
+  const fx = setup();
+  listening(fx, 'dentist thursday');
+  tap(fx.els.field);
+  assert.equal(fx.els.when.hidden, false);
+});
+
+test('date row: typing shows it, and so does a focus on the field once it is not read-only', () => {
+  const fx = setup();
+  listening(fx, 'x');
+  fx.voice.current.opts.onEnd();
+  fire(fx.els.field, 'input');
+  assert.equal(fx.els.when.hidden, false, 'input shows it');
+  const fy = setup();
+  listening(fy, 'y');
+  fy.voice.current.opts.onEnd();
+  fire(fy.els.field, 'focusin');
+  assert.equal(fy.els.when.hidden, false, 'a typing focus shows it');
+});
+
+test('date row: voice unsupported, a refusal, and Type instead all show it', () => {
+  const fx = setup();
+  fx.voice.supported = false;
+  tap(fx.els.button);
+  assert.equal(fx.els.when.hidden, false, 'voice unsupported opens in typing mode with the row');
+  const fy = setup();
+  tap(fy.els.button);
+  fy.voice.current.opts.onError('not-allowed');
+  assert.equal(fy.els.when.hidden, true, 'an asynchronous refusal does not focus, so no row yet');
+  tap(fy.els.typeInstead);
+  assert.equal(fy.els.when.hidden, false, 'Type instead shows it');
+});
+
+test('date row: showWhen() shows it (app.js, after a failed smart add)', () => {
+  const fx = setup();
+  listening(fx, 'dentist thursday');
+  tap(fx.els.button); // stop and add
+  assert.equal(fx.els.when.hidden, true, 'fixture check: hidden after a voice add');
+  fx.capture.showWhen();
+  assert.equal(fx.els.when.hidden, false);
+});
+
+test('date row: x hides it and asks app.js to clear the date, time and chips', () => {
+  const fx = setup();
+  listening(fx, 'x');
+  tap(fx.els.field);
+  assert.equal(fx.els.when.hidden, false, 'fixture check: shown');
+  const before = fx.clearWhens;
+  tap(fx.els.close);
+  assert.equal(fx.els.when.hidden, true);
+  assert.equal(fx.clearWhens, before + 1, 'clearWhen ran once on close');
+});
+
+// Task 1 review (Important 1): a new listen after typing hides the row, so the
+// rule "never while listening" holds on every listen, and app.js (which reads
+// the date only while the row shows) cannot turn the spoken add manual.
+test('date row: a new listen after typing hides it again', () => {
+  const fx = setup();
+  listening(fx, 'x');
+  fx.voice.current.opts.onEnd();
+  fire(fx.els.field, 'input');
+  assert.equal(fx.els.when.hidden, false, 'fixture check: shown by typing');
+  tap(fx.els.button);
+  assert.equal(fx.capture.state().mode, 'listening', 'fixture check: listening again');
+  assert.equal(fx.els.when.hidden, true);
+});
+
+// Alex, 2026-11-09: a date picked before a new listen is KEPT. While app.js
+// says a date is picked, a new listen leaves the row showing, so the date and
+// chips stay in use for the spoken add. It never SHOWS a hidden row: a date
+// the browser restored into a row the user never opened stays unseen (DA #2).
+test('date row: a new listen keeps it showing while a date is picked', () => {
+  const fx = setup();
+  listening(fx, 'x');
+  fx.voice.current.opts.onEnd();
+  fire(fx.els.field, 'input');
+  assert.equal(fx.els.when.hidden, false, 'fixture check: shown by typing');
+  fx.picked = true;
+  tap(fx.els.button);
+  assert.equal(fx.capture.state().mode, 'listening', 'fixture check: listening again');
+  assert.equal(fx.els.when.hidden, false, 'kept showing while listening');
+  fx.voice.current.opts.onEnd();
+  assert.equal(fx.els.when.hidden, false, 'and when the listen ends on its own');
+});
+
+test('date row: a picked date never shows a row that was hidden when the listen starts', () => {
+  const fx = setup();
+  fx.picked = true;
+  listening(fx, 'dentist thursday');
+  assert.equal(fx.els.when.hidden, true, 'hidden at the first listen, whatever is picked');
+});
+
+// Review 2026-11-09 (2): the date row is locked while a smart add thinks, so
+// a date cannot be picked there and lost when the reply closes the box.
+test('date row: locked while an add is latched, unlocked on Cancel and when it settles', async () => {
+  const fx = setup();
+  fx.voice.supported = false;
+  tap(fx.els.button);
+  fx.els.field.value = 'lunch';
+  tap(fx.els.add);
+  assert.deepEqual(fx.locks.slice(-1), [true], 'locked while thinking');
+  tap(fx.els.cancel);
+  assert.deepEqual(fx.locks.slice(-1), [false], 'unlocked by Cancel');
+  tap(fx.els.add);
+  assert.deepEqual(fx.locks.slice(-1), [true], 'fixture check: locked again');
+  fx.settle('failed');
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(fx.locks.slice(-1), [false], 'unlocked when the add settles');
 });

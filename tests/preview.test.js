@@ -156,9 +156,8 @@ test('changing the type control rewrites the draft', () => {
   assert.equal(confirmed[0].type, 'task');
 });
 
-// Manual add reveals its end-time box only once a start time is set (app.js,
-// #entry-end), and the preview does the same: an end with no start is not a
-// range the record can hold, so it is not offered.
+// The preview reveals its end-time box only once a start time is set: an end
+// with no start is not a range the record can hold, so it is not offered.
 const timeInputs = (container) => findAll(container, 'INPUT').filter((i) => i.type === 'time');
 
 test('the end-time box is hidden until the row has a start time', () => {

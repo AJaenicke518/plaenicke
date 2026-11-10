@@ -18,7 +18,7 @@ import { describeLaunches } from './freshness.js';
 import { initLinkUI } from './linkui.js';
 import { uid } from './uid.js';
 import { nowISO, toISO } from './dateparse.js';
-import { nextStamp } from './merge.js';
+import { userWriteStamp, STAMP_EXHAUSTED_ERROR } from './edit.js';
 import { lock } from './scrolllock.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
 import { FEED_PALETTE } from './palette.js';
@@ -473,12 +473,22 @@ export function initSettings({
           trackBtn.textContent = feed.trackDeadlines ? 'Stop tracking deadlines' : 'Track deadlines';
           trackBtn.disabled = isBusy();
           trackBtn.addEventListener('click', () => {
-            reapplyFeedField(feed.id, (f) => ({
-              trackDeadlines: f.trackDeadlines ? null : { from: toISO(new Date()) },
-              // Strictly later than the record's own stamp (nextStamp), so the
-              // toggle cannot lose to the other device's copy on clock skew.
-              updatedAt: nextStamp(nowISO(), f.updatedAt),
-            }));
+            try {
+              reapplyFeedField(feed.id, (f) => ({
+                trackDeadlines: f.trackDeadlines ? null : { from: toISO(new Date()) },
+                // Strictly later than the record's own stamp (edit.js's
+                // userWriteStamp), so the toggle cannot lose to the other
+                // device's copy on clock skew. Where no such stamp exists it
+                // throws inside computePatch, before saveFeeds: nothing is
+                // written, and the row says why (sync-safety item 2).
+                updatedAt: userWriteStamp(nowISO(), f.updatedAt, 'calendar'),
+              }));
+            } catch (err) {
+              if (!err || err.name !== STAMP_EXHAUSTED_ERROR) throw err;
+              syncErrors[feed.id] = 'stamp_exhausted';
+              renderCalendars();
+              return;
+            }
             renderCalendars();
             notifySyncedChanged();
           });
@@ -517,15 +527,17 @@ export function initSettings({
           confirmRemoveBtn.addEventListener('click', () => {
             confirmingRemoveId = null;
             // Same catch+surface shape as runSync/handleAdd above: removeFeed
-            // only throws on a genuine storage failure (see feeds.js), never
+            // throws on a genuine storage failure, or (userWrite) when the
+            // feed's stamp has no strictly later one (see feeds.js), never
             // include the feed object/URL in the log. On failure, leave
             // `feeds`/`feedCache` untouched — removeFeed's own tombstone-first
             // ordering means a thrown error left the feed still linked, so
             // the row should keep showing it, now with an inline error.
             try {
-              removeFeed(feed.id);
+              removeFeed(feed.id, { userWrite: true });
             } catch (err) {
-              syncErrors[feed.id] = 'remove_failed';
+              // A refused stamp can never succeed on retry: say why instead.
+              syncErrors[feed.id] = err && err.name === STAMP_EXHAUSTED_ERROR ? 'stamp_exhausted' : 'remove_failed';
               console.error('plaenicke: calendar remove failed', err && err.name);
               renderCalendars();
               return;
