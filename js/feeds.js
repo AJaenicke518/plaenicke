@@ -17,6 +17,7 @@ import { parseICS, expandEvents, parseDuration, icsDateToLocal } from './ics.js'
 import { nowISO } from './dateparse.js';
 import { FEED_PALETTE } from './palette.js';
 import { nextStamp } from './merge.js';
+import { userWriteStamp } from './edit.js';
 import {
   loadFeeds, saveFeeds, loadFeedCache, saveFeedCache, QuotaError, addTombstone,
 } from './storage.js';
@@ -793,7 +794,15 @@ export function instancesForRange(feeds, cache, start, end, targetTz) {
 // sanctioned way to remove a feed — settings.js (Task 7) calls this rather
 // than touching storage.js's feeds/cache directly, keeping feeds.js the sole
 // owner of cache lifecycle.
-export function removeFeed(id) {
+//
+// `userWrite` is set ONLY by Settings' confirmed Remove (sync-safety item 2,
+// 2026-11-09): the tombstone is then stamped by edit.js's userWriteStamp,
+// which throws before anything is written when no stamp strictly later than
+// the feed's own exists, so the removal fails loudly instead of being undone
+// by the next sync. applyRemoteFeeds's removals (below) are a sync apply, not
+// a user write, and keep plain nextStamp: a throw there would abort
+// applyState.
+export function removeFeed(id, { userWrite = false } = {}) {
   // Tombstone BEFORE the destructive writes: if addTombstone throws (quota
   // exhausted, or storage blocked as in Safari Private Browsing), the feed
   // is still present locally and nothing else has changed — that converges
@@ -808,7 +817,8 @@ export function removeFeed(id) {
   // applyTombstones keeps it, and the removal is undone by the next sync.
   // This is a READ before the tombstone write; the write order is unchanged.
   const existing = loadFeeds().find((f) => f.id === id);
-  addTombstone(id, 'feed', nextStamp(nowISO(), existing && existing.updatedAt));
+  const prev = existing && existing.updatedAt;
+  addTombstone(id, 'feed', userWrite ? userWriteStamp(nowISO(), prev, 'calendar') : nextStamp(nowISO(), prev));
   saveFeeds(loadFeeds().filter((f) => f.id !== id));
   const cache = loadFeedCache();
   if (Object.prototype.hasOwnProperty.call(cache, id)) {

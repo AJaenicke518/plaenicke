@@ -5,6 +5,7 @@
 import { makeItem } from './items.js';
 import { normalizeIdea, splitIdeaText } from './ideas.js';
 import { addDays } from './timegrid.js';
+import { nextStamp } from './merge.js';
 
 // The ONLY fields an edit may change. Everything else on a record — id,
 // createdAt, done, project, subject, category — is carried over from the
@@ -149,4 +150,34 @@ export function typeChangePatch(record, patch) {
 // It moved there so merge.js's dedupeState can use the same strictly-later
 // rule without merge.js importing anything; js/feeds.js's removeFeed uses it
 // too. One copy of the rule, not three.
-export { nextStamp } from './merge.js';
+export { nextStamp };
+
+// userWriteStamp — the stamp for a USER write (sync-safety item 2, approved
+// 2026-11-09): app.js's editItem (and so Undo), setDone and deleteItem, and
+// js/feeds.js's removeFeed when Settings calls it with { userWrite: true }.
+// It is nextStamp, except that where nextStamp cannot give a stamp strictly
+// later than a parseable prevIso (a record stamped at the last instant a Date
+// can hold), it THROWS instead of returning now. A now-stamped write there
+// loses to the very copy it replaced on the next sync — the user's edit, tick
+// or delete silently undone. Refusing it is loud: each caller surfaces the
+// error through its existing write-failure path, and calls this before
+// writing anything.
+//
+// nextStamp itself is unchanged and still returns now there, because its
+// other callers must not throw: dedupeState runs during adoption, the
+// Brightspace import (applyDeadlinePlan) and applyRemoteFeeds's removals run
+// inside a sync apply. An unparseable or absent prevIso still takes plain
+// now, as nextStamp does: merge.js orders such a record before every real
+// stamp, so now IS strictly later there.
+export const STAMP_EXHAUSTED_ERROR = 'StampExhaustedError';
+
+export function userWriteStamp(nowIso, prevIso, what = 'item') {
+  const stamp = nextStamp(nowIso, prevIso);
+  const prev = typeof prevIso === 'string' ? Date.parse(prevIso) : NaN;
+  if (!Number.isNaN(prev) && !(Date.parse(stamp) > prev)) {
+    const e = new Error(`This ${what}'s last-changed time is too far in the future to change it — nothing was changed.`);
+    e.name = STAMP_EXHAUSTED_ERROR;
+    throw e;
+  }
+  return stamp;
+}

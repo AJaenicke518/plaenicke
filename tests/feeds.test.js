@@ -709,6 +709,48 @@ test('removeFeed: a feed stamped in this device\'s future stays removed after me
     'the second device must apply the removal');
 });
 
+// Sync-safety item 2 (approved 2026-11-09). A feed stamped at the last instant
+// a Date can hold has no strictly later stamp, so a plain-now tombstone would
+// lose to it and the removal would silently come undone. The USER's removal
+// (Settings' confirmed Remove passes { userWrite: true }) is refused and
+// writes nothing. applyRemoteFeeds's removal is a sync apply, not a user
+// write: it keeps plain nextStamp and must never throw out of applyState.
+const UWS_MAX = '+275760-09-13T00:00:00.000Z';
+const rawKeys = () => ['plaenicke.feeds', 'plaenicke.feedCache', 'plaenicke.syncTombstones']
+  .map((k) => localStorage.getItem(k));
+
+test('uws: a user removal of a feed stamped at the maximum Date is refused and writes nothing', () => {
+  resetStorage();
+  saveFeeds([{ ...FEED_A, updatedAt: UWS_MAX }, FEED_B]);
+  saveFeedCache({ feedA: { fetchedAt: '2026-08-01T00:00:00.000Z', events: [], skipped: [] } });
+  const before = rawKeys();
+  assert.throws(() => removeFeed('feedA', { userWrite: true }), {
+    name: 'StampExhaustedError',
+    message: "This calendar's last-changed time is too far in the future to change it — nothing was changed.",
+  });
+  assert.deepEqual(rawKeys(), before, 'feeds, cache and tombstones are unchanged');
+  assert.deepEqual(loadTombstones(), []);
+});
+
+test('uws: a user removal of an ordinary feed still removes it, stamped strictly later', () => {
+  resetStorage();
+  const future = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  saveFeeds([{ ...FEED_A, updatedAt: future }, FEED_B]);
+  removeFeed('feedA', { userWrite: true });
+  assert.deepEqual(loadFeeds().map((f) => f.id), ['feedB']);
+  const [tomb] = loadTombstones();
+  assert.equal(tomb.deletedAt, new Date(Date.parse(future) + 1).toISOString());
+});
+
+test('uws: applyRemoteFeeds still removes a feed stamped at the maximum Date, without throwing', () => {
+  resetStorage();
+  saveFeeds([{ ...FEED_A, updatedAt: UWS_MAX }, FEED_B]);
+  const { removed } = applyRemoteFeeds([FEED_B]);
+  assert.deepEqual(removed, ['feedA']);
+  assert.deepEqual(loadFeeds().map((f) => f.id), ['feedB']);
+  assert.deepEqual(loadTombstones().map((t) => [t.id, t.kind]), [['feedA', 'feed']]);
+});
+
 // MUST NOT CHANGE: removing one feed touches no other feed. Feed URLs are
 // unrecoverable (CLAUDE.md), so every survivor is compared byte for byte —
 // in storage, after this device's merge with the account, after the second

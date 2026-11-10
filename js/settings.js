@@ -517,13 +517,14 @@ export function initSettings({
           confirmRemoveBtn.addEventListener('click', () => {
             confirmingRemoveId = null;
             // Same catch+surface shape as runSync/handleAdd above: removeFeed
-            // only throws on a genuine storage failure (see feeds.js), never
+            // throws on a genuine storage failure, or (userWrite) when the
+            // feed's stamp has no strictly later one (see feeds.js), never
             // include the feed object/URL in the log. On failure, leave
             // `feeds`/`feedCache` untouched — removeFeed's own tombstone-first
             // ordering means a thrown error left the feed still linked, so
             // the row should keep showing it, now with an inline error.
             try {
-              removeFeed(feed.id);
+              removeFeed(feed.id, { userWrite: true });
             } catch (err) {
               syncErrors[feed.id] = 'remove_failed';
               console.error('plaenicke: calendar remove failed', err && err.name);

@@ -28,7 +28,7 @@ import { instancesForRange, syncStale, applyRemoteFeeds } from './feeds.js';
 import { planDeadlineImport, trackedCopyIds, hideTrackedCopies } from './deadlines.js';
 import { openItemSheet } from './itemsheet.js';
 import { showToast } from './toast.js';
-import { applyEdit, typeChangePatch, snapshotOf, nextStamp, EDITABLE_FIELDS } from './edit.js';
+import { applyEdit, typeChangePatch, snapshotOf, nextStamp, userWriteStamp, EDITABLE_FIELDS } from './edit.js';
 import { uid } from './uid.js';
 import { syncOnce, recordSyncFailure, localState } from './sync.js';
 import { isLinked, isAdoptionPending } from './auth.js';
@@ -561,10 +561,12 @@ function deleteItem(id) {
   // item locally with no tombstone to propagate — a silent, self-reversing
   // delete once sync ships.
   //
-  // deletedAt is strictly later than the record's own updatedAt (nextStamp),
-  // or a record from a clock-ahead device outlives its own deletion.
+  // deletedAt is strictly later than the record's own updatedAt
+  // (userWriteStamp), or a record from a clock-ahead device outlives its own
+  // deletion. Where no later stamp exists it throws before anything is
+  // written, and handleDelete shows the message and the item again.
   const rec = items.find((it) => it.id === id);
-  addTombstone(id, 'item', nextStamp(nowISO(), rec && rec.updatedAt));
+  addTombstone(id, 'item', userWriteStamp(nowISO(), rec && rec.updatedAt));
   items = items.filter((it) => it.id !== id);
   saveItems(items);
   render();
@@ -699,7 +701,8 @@ function removeHeldDeadlines() {
 // re-deletable calendar entry rather than lost data, and it is the only horn
 // that converges. js/merge.js's header carries the full reasoning.
 //
-// The stamp is strictly later than the record's own (nextStamp), and a failed
+// The stamp is strictly later than the record's own (userWriteStamp, which
+// throws before any write where no such stamp exists), and a failed
 // save restores the record, as editItem does: `items` is what the next save
 // of any item writes.
 //
@@ -711,7 +714,9 @@ function setDone(id, done) {
   const idx = items.findIndex((it) => it.id === id);
   if (idx < 0) return;
   const before = items[idx];
-  items[idx] = { ...before, done: done === true, updatedAt: nextStamp(nowISO(), before.updatedAt) };
+  // Throws, with nothing written, where no strictly later stamp exists.
+  const updatedAt = userWriteStamp(nowISO(), before.updatedAt);
+  items[idx] = { ...before, done: done === true, updatedAt };
   try {
     saveItems(items);
   } catch (e) {
@@ -748,9 +753,11 @@ function setDone(id, done) {
 // the type while the sheet was open, its diff no longer describes the record:
 // refuse rather than guess. Undo passes none.
 //
-// The stamp is strictly later than the record's own (nextStamp), so an edit —
-// or an Undo in the same millisecond as its edit — never loses to the copy it
-// replaced because of clock skew.
+// The stamp is strictly later than the record's own (userWriteStamp), so an
+// edit — or an Undo in the same millisecond as its edit — never loses to the
+// copy it replaced because of clock skew. Where no strictly later stamp exists
+// (a record stamped at the last instant a Date can hold) the edit is refused
+// with { ok: false, error } before anything is written.
 //
 // `keep` is used ONLY by an Undo that skips fields (sweep F, I1): the fields it
 // promises to leave as they are. applyEdit can still change one of them
@@ -769,7 +776,7 @@ function editItem(id, patch, { toast = true, raw = false, openedType, keep = [] 
   let next;
   try {
     applied = raw ? patch : typeChangePatch(before, patch);
-    next = applyEdit(before, applied, nextStamp(nowISO(), before.updatedAt));
+    next = applyEdit(before, applied, userWriteStamp(nowISO(), before.updatedAt));
   } catch (e) {
     return { ok: false, error: e.message };
   }
