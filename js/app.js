@@ -28,7 +28,7 @@ import { instancesForRange, syncStale, applyRemoteFeeds } from './feeds.js';
 import { planDeadlineImport, trackedCopyIds, hideTrackedCopies } from './deadlines.js';
 import { openItemSheet } from './itemsheet.js';
 import { showToast } from './toast.js';
-import { applyEdit, typeChangePatch, snapshotOf, nextStamp, userWriteStamp, EDITABLE_FIELDS } from './edit.js';
+import { applyEdit, typeChangePatch, snapshotOf, nextStamp, userWriteStamp, STAMP_EXHAUSTED_ERROR, EDITABLE_FIELDS } from './edit.js';
 import { uid } from './uid.js';
 import { syncOnce, recordSyncFailure, localState } from './sync.js';
 import { isLinked, isAdoptionPending } from './auth.js';
@@ -778,7 +778,8 @@ function editItem(id, patch, { toast = true, raw = false, openedType, keep = [] 
     applied = raw ? patch : typeChangePatch(before, patch);
     next = applyEdit(before, applied, userWriteStamp(nowISO(), before.updatedAt));
   } catch (e) {
-    return { ok: false, error: e.message };
+    // `name` lets an Undo tell a refused stamp from a validator's complaint.
+    return { ok: false, error: e.message, name: e && e.name };
   }
   if (keep.some((k) => next[k] !== before[k])) return { ok: false, error: UNDO_REFUSED };
   items[idx] = next;
@@ -836,8 +837,10 @@ function editItem(id, patch, { toast = true, raw = false, openedType, keep = [] 
         if (!current || Object.keys(restore).length > 0) {
           const r = editItem(id, restore, { toast: false, raw: true, keep: skipped });
           // A filtered restore that fails says it could not be undone, never
-          // the validator's text about a field the user did not touch.
-          if (!r.ok) { setMessage(kept ? UNDO_REFUSED : r.error); return; }
+          // the validator's text about a field the user did not touch. A
+          // refused stamp (userWriteStamp) is the real reason whatever was
+          // skipped, so it says that instead.
+          if (!r.ok) { setMessage(kept && r.name !== STAMP_EXHAUSTED_ERROR ? UNDO_REFUSED : r.error); return; }
         }
         if (kept) setMessage('Some changes from your other device were kept.');
       },

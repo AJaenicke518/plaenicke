@@ -3177,6 +3177,8 @@ test('sweep S: a delete of a record stamped in the future stays deleted after a 
 const UWS_MAX = '+275760-09-13T00:00:00.000Z';
 const UWS_MSG = "This item's last-changed time is too far in the future to change it — nothing was changed.";
 const rawTombstones = () => localStorage.getItem('plaenicke.syncTombstones');
+// scheduleSync's debounce is the only 2000 ms setTimeout app.js arms.
+const syncTimerArmed = () => !!mockTimerTracker && [...mockTimerTracker.live.values()].includes(2000);
 
 test('uws: an edit of a record stamped at the maximum Date is refused in the sheet and writes nothing', async (t) => {
   installFakeLocalStorage();
@@ -3193,6 +3195,7 @@ test('uws: an edit of a record stamped at the maximum Date is refused in the she
     assert.equal(rawStored(), itemsBefore, 'items storage is unchanged');
     assert.equal(rawTombstones(), tombsBefore, 'no tombstone');
     assert.equal(toastHost().children.length, 0, 'a refused save offers no Undo');
+    assert.equal(syncTimerArmed(), false, 'a refused save schedules no sync');
     closeSheet();
     resume();
     assert.match(allText(dayOf(far(0))), /Max edit/);
@@ -3221,6 +3224,7 @@ test('uws: a tick of a to-do stamped at the maximum Date is refused with the mes
     assert.equal(rawStored(), itemsBefore, 'items storage is unchanged');
     assert.equal(rawTombstones(), tombsBefore, 'no tombstone');
     assert.equal(checkboxFor(todoList(), 'Max tick').checked, false, 'a refused tick looks refused');
+    assert.equal(syncTimerArmed(), false, 'a refused tick schedules no sync');
   } finally {
     t.mock.timers.tick(5000);
     await resetMockTimers(t);
@@ -3270,6 +3274,7 @@ test('uws: an edit and a tick of an ordinary record are still stamped strictly l
     click(sheetHost().querySelector('.sheet-save'));
     assert.equal(storedById('uws-ok-edit').title, 'Ok edit renamed');
     assert.equal(storedById('uws-ok-edit').updatedAt, '2026-09-23T12:01:00.001Z', 'one millisecond after a clock-ahead record');
+    assert.equal(syncTimerArmed(), true, 'fixture check: a saved edit arms the sync debounce');
     const box = checkboxFor(todoList(), 'Ok tick');
     box.checked = true;
     fire(box, 'change');
@@ -3281,6 +3286,65 @@ test('uws: an edit and a tick of an ordinary record are still stamped strictly l
     await resetMockTimers(t);
   }
   assert.equal(toastHost().children.length, 0);
+  seed([]);
+});
+
+// One millisecond before the end: the edit is stamped AT the maximum, and its
+// Undo then has no later stamp and is refused with the stamp message.
+test('uws: an edit of a record one millisecond before the maximum Date lands at the maximum, and its Undo is refused', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'uws-max1', title: 'Max-1 orig', date: far(0), updatedAt: '+275760-09-12T23:59:59.999Z' })]);
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
+  try {
+    clearMessage();
+    click(openControlFor(dayOf(far(0)), 'Max-1 orig'));
+    sheetHost().querySelector('.sheet-title').value = 'Max-1 edited';
+    click(sheetHost().querySelector('.sheet-save'));
+    assert.equal(storedById('uws-max1').title, 'Max-1 edited');
+    assert.equal(storedById('uws-max1').updatedAt, UWS_MAX, 'stamped at the last instant a Date can hold');
+    const itemsAfterEdit = rawStored();
+    const tombsAfterEdit = rawTombstones();
+    click(toastHost().querySelector('.toast-undo'));
+    assert.equal(messageText(), UWS_MSG);
+    assert.equal(rawStored(), itemsAfterEdit, 'the refused Undo writes nothing');
+    assert.equal(rawTombstones(), tombsAfterEdit);
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    await resetMockTimers(t);
+  }
+  assert.equal(toastHost().children.length, 0);
+  clearMessage();
+  seed([]);
+});
+
+// An Undo that would skip a field a sync changed AND hits a max-Date record:
+// the stamp refusal is the reason nothing happened, so it is what is shown,
+// not UNDO_REFUSED (review minor, 2026-11-09).
+test('uws: a partial Undo on a record a sync stamped at the maximum Date shows the stamp message', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'uws-undo-kept', title: 'Kept orig', notes: 'n orig', date: far(0) })]);
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
+  try {
+    clearMessage();
+    click(openControlFor(dayOf(far(0)), 'Kept orig'));
+    sheetHost().querySelector('.sheet-title').value = 'Kept mine';
+    sheetHost().querySelector('.sheet-notes').value = 'n mine';
+    click(sheetHost().querySelector('.sheet-save'));
+    simulateSync([{ ...storedById('uws-undo-kept'), notes: 'n theirs', updatedAt: UWS_MAX }]);
+    const itemsAfterSync = rawStored();
+    click(toastHost().querySelector('.toast-undo'));
+    assert.equal(messageText(), UWS_MSG);
+    assert.equal(rawStored(), itemsAfterSync, 'the refused Undo writes nothing');
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    await resetMockTimers(t);
+  }
+  assert.equal(toastHost().children.length, 0);
+  clearMessage();
   seed([]);
 });
 
