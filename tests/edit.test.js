@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   EDITABLE_FIELDS, applyEdit, diffPatch, snapshotOf, quickMoves, typeChangePatch, nextStamp,
+  userWriteStamp, STAMP_EXHAUSTED_ERROR,
 } from '../js/edit.js';
 
 // =========================================================================
@@ -437,4 +438,37 @@ test('typeChangePatch from idea: text edited in the same save wins over the reco
 test('sF: nextStamp returns now when one millisecond after the record is not a date', () => {
   const now = '2026-09-23T12:00:00.000Z';
   assert.equal(nextStamp(now, '+275760-09-13T00:00:00.000Z'), now);
+});
+
+// Sync-safety item 2 (approved 2026-11-09): a USER write that cannot be
+// stamped strictly later than the record it replaces must not silently lose.
+// nextStamp (above) still returns now for its merge.js, deadline-import and
+// sync-apply callers; the user-write stamp refuses instead, with an error the
+// write paths already surface.
+const MAX_DATE = '+275760-09-13T00:00:00.000Z';
+
+test('uws: userWriteStamp refuses a record stamped at the last instant a Date can hold', () => {
+  const now = '2026-09-23T12:00:00.000Z';
+  assert.throws(() => userWriteStamp(now, MAX_DATE), (e) => {
+    assert.equal(e.name, STAMP_EXHAUSTED_ERROR);
+    assert.equal(e.message, "This item's last-changed time is too far in the future to change it — nothing was changed.");
+    return true;
+  });
+  assert.throws(() => userWriteStamp(now, MAX_DATE, 'calendar'),
+    { message: "This calendar's last-changed time is too far in the future to change it — nothing was changed." });
+});
+
+test('uws: userWriteStamp equals nextStamp everywhere a strictly later stamp exists', () => {
+  const now = '2026-09-23T12:00:00.000Z';
+  for (const prev of [
+    '2026-09-23T11:00:00.000Z', // earlier: now
+    now, // equal: one millisecond after
+    '2026-09-24T00:00:00.000Z', // clock-ahead: one millisecond after
+    '+275760-09-12T23:59:59.999Z', // one millisecond before the end: the end itself
+    'not a date', undefined, null, // unparseable or absent: now, as nextStamp does
+  ]) {
+    assert.equal(userWriteStamp(now, prev), nextStamp(now, prev), `prev ${prev}`);
+  }
+  assert.equal(userWriteStamp(now, '+275760-09-12T23:59:59.999Z'), MAX_DATE);
+  assert.equal(userWriteStamp(now, now), '2026-09-23T12:00:00.001Z');
 });

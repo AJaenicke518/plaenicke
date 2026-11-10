@@ -3166,6 +3166,185 @@ test('sweep S: a delete of a record stamped in the future stays deleted after a 
   seed([]);
 });
 
+// Sync-safety item 2 (approved 2026-11-09). A record stamped at the last
+// instant a Date can hold has no strictly later stamp; plain nextStamp gives
+// such a write `now`, and the next sync silently brings the old copy back. A
+// user write there is refused instead, through each path's existing failure
+// surface, and writes nothing: no items save, no tombstone.
+const UWS_MAX = '+275760-09-13T00:00:00.000Z';
+const UWS_MSG = "This item's last-changed time is too far in the future to change it — nothing was changed.";
+const rawTombstones = () => localStorage.getItem('plaenicke.syncTombstones');
+// scheduleSync's debounce is the only 2000 ms setTimeout app.js arms.
+const syncTimerArmed = () => !!mockTimerTracker && [...mockTimerTracker.live.values()].includes(2000);
+
+test('uws: an edit of a record stamped at the maximum Date is refused in the sheet and writes nothing', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'uws-edit', title: 'Max edit', date: far(0), updatedAt: UWS_MAX })]);
+  const itemsBefore = rawStored();
+  const tombsBefore = rawTombstones();
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
+  try {
+    click(openControlFor(dayOf(far(0)), 'Max edit'));
+    sheetHost().querySelector('.sheet-title').value = 'Max edit renamed';
+    click(sheetHost().querySelector('.sheet-save'));
+    assert.equal(sheetHost().querySelector('.sheet-error').textContent, UWS_MSG, 'the sheet says why');
+    assert.equal(rawStored(), itemsBefore, 'items storage is unchanged');
+    assert.equal(rawTombstones(), tombsBefore, 'no tombstone');
+    assert.equal(toastHost().children.length, 0, 'a refused save offers no Undo');
+    assert.equal(syncTimerArmed(), false, 'a refused save schedules no sync');
+    closeSheet();
+    resume();
+    assert.match(allText(dayOf(far(0))), /Max edit/);
+    assert.doesNotMatch(allText(dayOf(far(0))), /Max edit renamed/);
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    await resetMockTimers(t);
+  }
+  seed([]);
+});
+
+test('uws: a tick of a to-do stamped at the maximum Date is refused with the message and writes nothing', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'uws-tick', type: 'task', title: 'Max tick', date: '2099-07-02', updatedAt: UWS_MAX })]);
+  const itemsBefore = rawStored();
+  const tombsBefore = rawTombstones();
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
+  try {
+    clearMessage();
+    const box = checkboxFor(todoList(), 'Max tick');
+    box.checked = true;
+    fire(box, 'change');
+    assert.equal(messageText(), UWS_MSG);
+    assert.equal(rawStored(), itemsBefore, 'items storage is unchanged');
+    assert.equal(rawTombstones(), tombsBefore, 'no tombstone');
+    assert.equal(checkboxFor(todoList(), 'Max tick').checked, false, 'a refused tick looks refused');
+    assert.equal(syncTimerArmed(), false, 'a refused tick schedules no sync');
+  } finally {
+    t.mock.timers.tick(5000);
+    await resetMockTimers(t);
+  }
+  clearMessage();
+  seed([]);
+});
+
+test('uws: a delete of a record stamped at the maximum Date is refused at commit, shown again, and writes no tombstone', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'uws-del', title: 'Max delete', date: far(0), updatedAt: UWS_MAX })]);
+  const itemsBefore = rawStored();
+  const tombsBefore = rawTombstones();
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
+  try {
+    clearMessage();
+    click(deleteControlFor(dayOf(far(0)), 'Max delete'));
+    assert.doesNotMatch(allText(dayOf(far(0))), /Max delete/, 'fixture check: hidden while pending');
+    t.mock.timers.tick(5000);
+    assert.equal(messageText(), UWS_MSG);
+    assert.ok(!tombstoned('uws-del'), 'no tombstone');
+    assert.equal(rawTombstones(), tombsBefore, 'tombstone storage is unchanged');
+    assert.equal(rawStored(), itemsBefore, 'items storage is unchanged');
+    assert.match(allText(dayOf(far(0))), /Max delete/, 'a delete that did not happen must not look like it did');
+    assert.equal(toastHost().children.length, 0);
+  } finally {
+    t.mock.timers.tick(5000);
+    await resetMockTimers(t);
+  }
+  clearMessage();
+  seed([]);
+});
+
+test('uws: an edit and a tick of an ordinary record are still stamped strictly later than it', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const prev = '2026-09-23T11:00:00.000Z';
+  seed([
+    record({ id: 'uws-ok-edit', title: 'Ok edit', date: far(0), updatedAt: S_AHEAD }),
+    record({ id: 'uws-ok-tick', type: 'task', title: 'Ok tick', date: '2099-07-02', updatedAt: prev }),
+  ]);
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
+  try {
+    click(openControlFor(dayOf(far(0)), 'Ok edit'));
+    sheetHost().querySelector('.sheet-title').value = 'Ok edit renamed';
+    click(sheetHost().querySelector('.sheet-save'));
+    assert.equal(storedById('uws-ok-edit').title, 'Ok edit renamed');
+    assert.equal(storedById('uws-ok-edit').updatedAt, '2026-09-23T12:01:00.001Z', 'one millisecond after a clock-ahead record');
+    assert.equal(syncTimerArmed(), true, 'fixture check: a saved edit arms the sync debounce');
+    const box = checkboxFor(todoList(), 'Ok tick');
+    box.checked = true;
+    fire(box, 'change');
+    assert.equal(storedById('uws-ok-tick').done, true);
+    assert.equal(storedById('uws-ok-tick').updatedAt, new Date(S_NOW).toISOString(), 'now, for an older record');
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    await resetMockTimers(t);
+  }
+  assert.equal(toastHost().children.length, 0);
+  seed([]);
+});
+
+// One millisecond before the end: the edit is stamped AT the maximum, and its
+// Undo then has no later stamp and is refused with the stamp message.
+test('uws: an edit of a record one millisecond before the maximum Date lands at the maximum, and its Undo is refused', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'uws-max1', title: 'Max-1 orig', date: far(0), updatedAt: '+275760-09-12T23:59:59.999Z' })]);
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
+  try {
+    clearMessage();
+    click(openControlFor(dayOf(far(0)), 'Max-1 orig'));
+    sheetHost().querySelector('.sheet-title').value = 'Max-1 edited';
+    click(sheetHost().querySelector('.sheet-save'));
+    assert.equal(storedById('uws-max1').title, 'Max-1 edited');
+    assert.equal(storedById('uws-max1').updatedAt, UWS_MAX, 'stamped at the last instant a Date can hold');
+    const itemsAfterEdit = rawStored();
+    const tombsAfterEdit = rawTombstones();
+    click(toastHost().querySelector('.toast-undo'));
+    assert.equal(messageText(), UWS_MSG);
+    assert.equal(rawStored(), itemsAfterEdit, 'the refused Undo writes nothing');
+    assert.equal(rawTombstones(), tombsAfterEdit);
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    await resetMockTimers(t);
+  }
+  assert.equal(toastHost().children.length, 0);
+  clearMessage();
+  seed([]);
+});
+
+// An Undo that would skip a field a sync changed AND hits a max-Date record:
+// the stamp refusal is the reason nothing happened, so it is what is shown,
+// not UNDO_REFUSED (review minor, 2026-11-09).
+test('uws: a partial Undo on a record a sync stamped at the maximum Date shows the stamp message', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([record({ id: 'uws-undo-kept', title: 'Kept orig', notes: 'n orig', date: far(0) })]);
+  enableMockTimers(t, { apis: ['setTimeout', 'Date'], now: S_NOW });
+  try {
+    clearMessage();
+    click(openControlFor(dayOf(far(0)), 'Kept orig'));
+    sheetHost().querySelector('.sheet-title').value = 'Kept mine';
+    sheetHost().querySelector('.sheet-notes').value = 'n mine';
+    click(sheetHost().querySelector('.sheet-save'));
+    simulateSync([{ ...storedById('uws-undo-kept'), notes: 'n theirs', updatedAt: UWS_MAX }]);
+    const itemsAfterSync = rawStored();
+    click(toastHost().querySelector('.toast-undo'));
+    assert.equal(messageText(), UWS_MSG);
+    assert.equal(rawStored(), itemsAfterSync, 'the refused Undo writes nothing');
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    await resetMockTimers(t);
+  }
+  assert.equal(toastHost().children.length, 0);
+  clearMessage();
+  seed([]);
+});
+
 // F3: Undo restores a field only while it still holds what the edit wrote. A
 // field the other device changed since is kept, and the user is told.
 test('sweep S: Undo keeps a field a sync changed since the edit, restores the rest, and says so', async (t) => {
