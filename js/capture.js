@@ -25,9 +25,12 @@
 // holds the date and optional time; app.js owns its inputs and the type chips
 // in it. It shows only when the user types: a typing focus on the field, an
 // input, every focusField() tap, and app.js's showWhen() after a failed smart
-// add. Never while listening, and not when a listen ends on its own (voice
-// only). close() hides it and calls `clearWhen`, which empties the date and
-// time and puts the chips back on Event.
+// add. A new listen hides it unless `whenPicked()` (app.js) says a date is
+// picked: a date picked before a listen is kept, showing and in use, so the
+// spoken words become a manual add on that date (Alex, 2026-11-09). A listen
+// never SHOWS a hidden row, and the row does not show when a listen ends on
+// its own (voice only). close() hides it and calls `clearWhen`, which empties
+// the date and time and puts the chips back on Event.
 
 import { followVisualViewport } from './viewport.js';
 
@@ -54,7 +57,7 @@ const M = CAPTURE_MESSAGES;
 const REQUIRED_ELS = ['button', 'box', 'field', 'add', 'cancel', 'close', 'typeInstead', 'preview', 'when'];
 
 export function createCapture({
-  els, line, voice, isStandalone, submit, cancelSubmit, closePreviews, clearWhen,
+  els, line, voice, isStandalone, submit, cancelSubmit, closePreviews, clearWhen, whenPicked,
   later = (fn, ms) => setTimeout(fn, ms),
   clearLater = (handle) => clearTimeout(handle),
   follow = followVisualViewport,
@@ -67,7 +70,7 @@ export function createCapture({
   if (!voice || !['isVoiceSupported', 'listen', 'errorKind'].every((k) => typeof voice[k] === 'function')) {
     throw new Error('createCapture: voice needs isVoiceSupported, listen and errorKind');
   }
-  for (const [name, fn] of Object.entries({ isStandalone, submit, cancelSubmit, closePreviews, clearWhen })) {
+  for (const [name, fn] of Object.entries({ isStandalone, submit, cancelSubmit, closePreviews, clearWhen, whenPicked })) {
     if (typeof fn !== 'function') throw new Error(`createCapture: ${name} must be a function`);
   }
 
@@ -181,10 +184,11 @@ export function createCapture({
   function startListening() {
     line.set('');
     els.typeInstead.hidden = true;
-    // Never while listening, on every listen (Task 1 review). A date already
-    // picked is kept and shows again when the user types; app.js never reads
-    // it while the row is hidden.
-    els.when.hidden = true;
+    // Hidden on every listen (Task 1 review) unless a date is picked: then the
+    // row stays as it is, so a showing date and its chips are kept and used
+    // by the spoken add (Alex, 2026-11-09). Only hides, never shows: a date in
+    // a row the user never opened stays unseen, and app.js never reads it.
+    if (!whenPicked()) els.when.hidden = true;
     // A listen while this box's own preview is open is a NEW capture (spec
     // § 3 step 8): the text that made the preview goes with it, or it would
     // be the new listen's prefix and be sent again (DA I2). Only while the

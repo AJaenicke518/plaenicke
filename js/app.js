@@ -1454,6 +1454,8 @@ const capture = createCapture({
   cancelSubmit: cancelAdd,
   closePreviews,
   clearWhen: clearCaptureWhen,
+  // A picked date survives a new listen (Alex, 2026-11-09).
+  whenPicked: () => Boolean(els.captureDate.value),
 });
 // Opening Settings stops a listen and keeps its text (spec § 3 step 4).
 // settings.js's own listener on this button opens or closes the panel.

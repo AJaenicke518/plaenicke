@@ -8637,6 +8637,64 @@ test('capture: a date in the hidden date row is never read, so a spoken add goes
   seed([]);
 });
 
+// Alex, 2026-11-09: a date picked before a new listen is KEPT when the listen
+// starts. The row stays showing with its date and chips, so the spoken words
+// become the title of a manual add on that date, with no smart add.
+test('capture: a date picked before a new listen is kept, so the spoken add saves on that date and type', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const net = smartAddFetch(async () => smartReply([{ title: 'Wrong', date: '2099-05-15', type: 'event' }]));
+  const timers = installManualTimers();
+  try {
+    click(capEl('capture-btn'));
+    typeDatedEntry('', far(2));
+    chooseType('task');
+    click(capEl('capture-btn'));
+    assert.equal(voice.count(), 2, 'fixture check: a second listen started');
+    assert.equal(capEl('capture-when').hidden, false, 'the row stays showing while listening');
+    assert.equal(capEl('capture-date').value, far(2), 'with its date');
+    voice.last().say('buy stamps');
+    click(capEl('capture-btn'));
+    await settle();
+    assert.deepEqual(net.posts, [], 'no smart add');
+    assert.deepEqual(loadItems().map((it) => [it.title, it.date, it.type]), [['buy stamps', far(2), 'task']],
+      'saved on the picked date as the picked type');
+    timers.fire(250);
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
+    voice.restore();
+    clearAddBox();
+  }
+  seed([]);
+});
+
+// The other half of the same rule: with no date picked, a new listen still
+// hides the row (app.js's whenPicked reads the date box, not a constant).
+test('capture: with no date picked, a new listen after typing hides the date row', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const timers = installManualTimers();
+  try {
+    click(capEl('capture-btn'));
+    typeDatedEntry('buy', '');
+    click(capEl('capture-btn'));
+    assert.equal(voice.count(), 2, 'fixture check: a second listen started');
+    assert.equal(capEl('capture-when').hidden, true);
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    voice.restore();
+    clearAddBox();
+  }
+  seed([]);
+});
+
 // LAST of the capture tests: a refusal lasts the session (js/capture.js).
 test('capture: a refusal in the home-screen app points to Settings and offers Type instead', async () => {
   installFakeLocalStorage();

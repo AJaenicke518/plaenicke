@@ -51,7 +51,7 @@ function setup({ standalone = false } = {}) {
   const voice = fakeVoice(order);
   const fx = {
     els, message, order, voice, standalone,
-    follows: [], timers: [], previews: 0, cancels: 0, submits: 0, settles: [], clearWhens: 0,
+    follows: [], timers: [], previews: 0, cancels: 0, submits: 0, settles: [], clearWhens: 0, picked: false,
     get settle() { return fx.settles[fx.settles.length - 1]; },
   };
   // Records blur/focus on the field in order, then does what the fake does.
@@ -71,6 +71,7 @@ function setup({ standalone = false } = {}) {
     cancelSubmit: () => { fx.cancels += 1; },
     closePreviews: () => { fx.previews += 1; },
     clearWhen: () => { fx.clearWhens += 1; },
+    whenPicked: () => fx.picked,
     later: (fn, ms) => { const h = { fn, ms, cleared: false }; fx.timers.push(h); return h; },
     clearLater: (h) => { h.cleared = true; },
     follow: (target, opts) => {
@@ -286,7 +287,7 @@ test('a submit that rejects says so on the line, clears the latch, and logs the 
     voice: { isVoiceSupported: () => false, listen() { throw new Error('unused'); }, errorKind },
     isStandalone: () => false,
     submit: () => new Promise((_, r) => { reject = r; }),
-    cancelSubmit() {}, closePreviews() {}, clearWhen() {},
+    cancelSubmit() {}, closePreviews() {}, clearWhen() {}, whenPicked: () => false,
     later: () => ({}), clearLater() {}, follow: () => () => {},
   });
   const logged = t.mock.method(console, 'error', () => {});
@@ -483,12 +484,12 @@ test('createCapture refuses a missing element or callback', () => {
   const ok = {
     els: base.els, line: { set() {} },
     voice: { isVoiceSupported: () => true, listen() {}, errorKind },
-    isStandalone: () => false, submit: async () => {}, cancelSubmit() {}, closePreviews() {}, clearWhen() {},
+    isStandalone: () => false, submit: async () => {}, cancelSubmit() {}, closePreviews() {}, clearWhen() {}, whenPicked: () => false,
   };
   for (const name of ['button', 'box', 'field', 'add', 'cancel', 'close', 'typeInstead', 'preview', 'when']) {
     assert.throws(() => createCapture({ ...ok, els: { ...ok.els, [name]: null } }), new RegExp(name));
   }
-  for (const name of ['isStandalone', 'submit', 'cancelSubmit', 'closePreviews', 'clearWhen']) {
+  for (const name of ['isStandalone', 'submit', 'cancelSubmit', 'closePreviews', 'clearWhen', 'whenPicked']) {
     assert.throws(() => createCapture({ ...ok, [name]: undefined }), new RegExp(name));
   }
   assert.throws(() => createCapture({ ...ok, line: null }), /line/);
@@ -522,7 +523,7 @@ test('a submit that rejects after Cancel leaves the Cancel message, and is still
     voice: { isVoiceSupported: () => false, listen() { throw new Error('unused'); }, errorKind },
     isStandalone: () => false,
     submit: () => new Promise((_, r) => { reject = r; }),
-    cancelSubmit() { cancels += 1; }, closePreviews() {}, clearWhen() {},
+    cancelSubmit() { cancels += 1; }, closePreviews() {}, clearWhen() {}, whenPicked: () => false,
     later: () => ({}), clearLater() {}, follow: () => () => {},
   });
   const logged = t.mock.method(console, 'error', () => {});
@@ -734,4 +735,29 @@ test('date row: a new listen after typing hides it again', () => {
   tap(fx.els.button);
   assert.equal(fx.capture.state().mode, 'listening', 'fixture check: listening again');
   assert.equal(fx.els.when.hidden, true);
+});
+
+// Alex, 2026-11-09: a date picked before a new listen is KEPT. While app.js
+// says a date is picked, a new listen leaves the row showing, so the date and
+// chips stay in use for the spoken add. It never SHOWS a hidden row: a date
+// the browser restored into a row the user never opened stays unseen (DA #2).
+test('date row: a new listen keeps it showing while a date is picked', () => {
+  const fx = setup();
+  listening(fx, 'x');
+  fx.voice.current.opts.onEnd();
+  fire(fx.els.field, 'input');
+  assert.equal(fx.els.when.hidden, false, 'fixture check: shown by typing');
+  fx.picked = true;
+  tap(fx.els.button);
+  assert.equal(fx.capture.state().mode, 'listening', 'fixture check: listening again');
+  assert.equal(fx.els.when.hidden, false, 'kept showing while listening');
+  fx.voice.current.opts.onEnd();
+  assert.equal(fx.els.when.hidden, false, 'and when the listen ends on its own');
+});
+
+test('date row: a picked date never shows a row that was hidden when the listen starts', () => {
+  const fx = setup();
+  fx.picked = true;
+  listening(fx, 'dentist thursday');
+  assert.equal(fx.els.when.hidden, true, 'hidden at the first listen, whatever is picked');
 });
