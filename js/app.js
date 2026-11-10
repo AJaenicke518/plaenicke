@@ -431,8 +431,8 @@ const captureTarget = {
 };
 const TARGETS = [captureTarget];
 
-// A new capture closes any open preview, in EVERY box (spec § 3 step 8), and
-// that box's line says so. A preview is open while its container has content
+// A new capture closes any open preview (spec § 3 step 8), and the box's line
+// says so. One target since the top add box went (2026-10-27). A preview is open while its container has content
 // (renderPreview fills it; every close empties it). Called by every Add that
 // passes validation, before its own message, so in the box that started it
 // the newer message replaces this one.

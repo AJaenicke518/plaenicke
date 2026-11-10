@@ -8199,7 +8199,7 @@ test('smart add: a preview from a superseded request cannot be confirmed or canc
 // js/capture.js's state machine is tested on its own in tests/capture.test.js.
 // These check the wiring: it adds through handleAdd with the capture box's own
 // target (its line, its preview, its failure text), Cancel makes the request
-// superseded, previews close across both boxes, and the page hiding, an item
+// superseded, a new capture closes its open preview, and the page hiding, an item
 // sheet or Settings opening stop a listen and keep its text.
 //
 // A fake SpeechRecognition is installed on the fake window for each test and

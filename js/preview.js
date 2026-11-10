@@ -60,8 +60,8 @@ export function renderPreview(container, items, { onConfirm, onCancel }) {
     const end = document.createElement('input');
     end.type = 'time';
     end.value = it.endTime || '';
-    // Hidden until the row has a start time, as manual add's #entry-end is
-    // (app.js): an end with no start is not a range the record can hold.
+    // Hidden until the row has a start time: an end with no start is not a
+    // range the record can hold.
     end.hidden = !time.value;
     time.addEventListener('input', () => {
       draft[i].time = time.value || null;
