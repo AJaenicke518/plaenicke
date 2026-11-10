@@ -3,7 +3,7 @@
 // it never adds an item, and holds no storage or app state. `submit` (app.js's
 // handleAdd for the capture box) adds, and calls `added()` back on success;
 // `cancelSubmit` makes a smart add in flight superseded; `closePreviews`
-// closes an open preview in BOTH boxes (spec § 3 step 8).
+// closes an open preview (spec § 3 step 8).
 //
 // The gesture (Decided): tap = start listening, the box opens and live words
 // appear; tap again = stop and add; tap the text = type instead (listening
@@ -20,6 +20,20 @@
 // Focus: the field is focused only inside a tap (iOS raises the keyboard only
 // from a user gesture). An asynchronous refusal never focuses; it offers
 // "Type instead", whose own tap focuses.
+//
+// The date row (capture date row, Alex 2026-10-27, mockup C2): `els.when`
+// holds the date and optional time; app.js owns its inputs and the type chips
+// in it. It shows only when the user types: a typing focus on the field, an
+// input, every focusField() tap, and app.js's showWhen() after a failed smart
+// add. A new listen hides it unless `whenPicked()` (app.js) says a date or a
+// time is picked: a date picked before a listen is kept, showing and in use,
+// so the spoken words become a manual add on that date (Alex, 2026-11-09); a
+// time alone is kept too, so the add is refused for want of a date rather
+// than the time being dropped. `lockWhen(on)` locks the row while an add is
+// latched. A listen
+// never SHOWS a hidden row, and the row does not show when a listen ends on
+// its own (voice only). close() hides it and calls `clearWhen`, which empties
+// the date and time and puts the chips back on Event.
 
 import { followVisualViewport } from './viewport.js';
 
@@ -43,10 +57,10 @@ export const CAPTURE_MESSAGES = Object.freeze({
 });
 const M = CAPTURE_MESSAGES;
 
-const REQUIRED_ELS = ['button', 'box', 'field', 'add', 'cancel', 'close', 'typeInstead', 'preview'];
+const REQUIRED_ELS = ['button', 'box', 'field', 'add', 'cancel', 'close', 'typeInstead', 'preview', 'when'];
 
 export function createCapture({
-  els, line, voice, isStandalone, submit, cancelSubmit, closePreviews,
+  els, line, voice, isStandalone, submit, cancelSubmit, closePreviews, clearWhen, whenPicked, lockWhen,
   later = (fn, ms) => setTimeout(fn, ms),
   clearLater = (handle) => clearTimeout(handle),
   follow = followVisualViewport,
@@ -59,7 +73,7 @@ export function createCapture({
   if (!voice || !['isVoiceSupported', 'listen', 'errorKind'].every((k) => typeof voice[k] === 'function')) {
     throw new Error('createCapture: voice needs isVoiceSupported, listen and errorKind');
   }
-  for (const [name, fn] of Object.entries({ isStandalone, submit, cancelSubmit, closePreviews })) {
+  for (const [name, fn] of Object.entries({ isStandalone, submit, cancelSubmit, closePreviews, clearWhen, whenPicked, lockWhen })) {
     if (typeof fn !== 'function') throw new Error(`createCapture: ${name} must be a function`);
   }
 
@@ -128,6 +142,8 @@ export function createCapture({
     if (stopFollow) { stopFollow(); stopFollow = null; }
   }
 
+  function showWhen() { els.when.hidden = false; }
+
   // Stop-and-detach. True when it stopped a listen.
   function stopListening() {
     if (!session) return false;
@@ -141,6 +157,7 @@ export function createCapture({
   // Inside a tap only. blur() first: a tap on the read-only field has already
   // focused it, and focus() on a focused field would not raise the keyboard.
   function focusField() {
+    showWhen();
     els.field.readOnly = false;
     els.field.blur();
     els.field.focus();
@@ -151,6 +168,10 @@ export function createCapture({
     els.add.disabled = on;
     els.add.hidden = on || previewOpen;
     els.cancel.hidden = !on;
+    // The date row is locked with the latch (review 2026-11-09): a date picked
+    // while a smart add thinks would be cleared, unseen, when its reply closes
+    // the box.
+    lockWhen(on);
   }
 
   const refusedText = () => (isStandalone() ? M.permission : M.safari);
@@ -170,6 +191,11 @@ export function createCapture({
   function startListening() {
     line.set('');
     els.typeInstead.hidden = true;
+    // Hidden on every listen (Task 1 review) unless a date or time is picked: then the
+    // row stays as it is, so a showing date and its chips are kept and used
+    // by the spoken add (Alex, 2026-11-09). Only hides, never shows: a date in
+    // a row the user never opened stays unseen, and app.js never reads it.
+    if (!whenPicked()) els.when.hidden = true;
     // A listen while this box's own preview is open is a NEW capture (spec
     // § 3 step 8): the text that made the preview goes with it, or it would
     // be the new listen's prefix and be sent again (DA I2). Only while the
@@ -235,6 +261,8 @@ export function createCapture({
     els.field.style.height = '';
     line.set('');
     els.typeInstead.hidden = true;
+    els.when.hidden = true;
+    clearWhen();
     els.preview.hidden = true;
     els.preview.innerHTML = '';
     previewOpen = false;
@@ -283,7 +311,7 @@ export function createCapture({
     stopListening();
     focusField();
   });
-  els.field.addEventListener('input', grow);
+  els.field.addEventListener('input', () => { grow(); showWhen(); });
   // Return adds (Alex, 2026-10-26: "add the item"), through the same path as
   // the box's Add: stop-and-detach first, then the adding latch. Never a
   // newline, while thinking too. Not mid-composition: an IME's Return
@@ -305,6 +333,9 @@ export function createCapture({
   // (DA I4). Moving focus between two such controls keeps it, and a closing
   // box keeps it until it is hidden (DA M1).
   els.box.addEventListener('focusin', (e) => { if (raisesKeyboard(e.target)) els.box.classList.add('typing'); });
+  // A typing focus on the field shows the date row; a read-only one
+  // (listening) does not.
+  els.field.addEventListener('focusin', () => { if (!els.field.readOnly) showWhen(); });
   els.box.addEventListener('focusout', (e) => {
     if (els.box.classList.contains('closing')) return;
     if (raisesKeyboard(e.relatedTarget) && inBox(e.relatedTarget)) return;
@@ -312,6 +343,7 @@ export function createCapture({
   });
 
   els.box.hidden = true;
+  els.when.hidden = true;
   els.cancel.hidden = true;
   els.typeInstead.hidden = true;
   setMode('closed');
@@ -319,14 +351,8 @@ export function createCapture({
   return {
     // Stop a listen and keep its text (page hidden, a sheet or Settings opening).
     stopAndKeep() { if (stopListening()) line.set(M.stopped); },
-    // A newer Add from the other box superseded this box's smart add: its
-    // reply will change nothing, so the latch goes now, not when the reply
-    // comes up to a minute later (DA I1). app.js clears the line.
-    released() {
-      if (adding !== null) { adding = null; setAdding(false); }
-    },
-    // This box's preview closed without being confirmed: a newer Add (from
-    // either box), its Cancel, or a new listen. Its Add shows again.
+    // This box's preview closed without being confirmed: a newer Add, its
+    // Cancel, or a new listen. Its Add shows again.
     previewClosed() {
       previewOpen = false;
       setAdding(adding !== null);
@@ -340,6 +366,8 @@ export function createCapture({
       if (els.field.value.trim()) return;
       close();
     },
+    // app.js: a smart add failed, so the row the message points to shows.
+    showWhen,
     state: () => ({ mode, adding: adding !== null, refused, open: !els.box.hidden }),
   };
 }

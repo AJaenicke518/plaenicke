@@ -1,5 +1,6 @@
-// typechips.js — the type chips under the top add box's date row (option A,
-// Alex 2026-10-26). They draw the choice and report it; app.js decides when
+// typechips.js — the type chips in the capture box's date row (option A,
+// Alex 2026-10-26; moved from the removed top add box on 2026-10-27).
+// They draw the choice and report it; app.js decides when
 // the row shows (only while a date is picked) and what an Add saves (only the
 // manual path reads it: a sentence with no date still goes to smart add,
 // which picks its own type).
