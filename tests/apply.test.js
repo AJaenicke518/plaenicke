@@ -8249,7 +8249,7 @@ function typeDatedEntry(text, date) {
   pickDate(date);
 }
 
-test('capture: tap, speak, tap again adds through smart add, with its messages in the capture box only', async () => {
+test('capture: tap, speak, tap again adds through smart add; its messages in the capture box, and "Added." on the status line', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
   seed([]);
@@ -8280,7 +8280,9 @@ test('capture: tap, speak, tap again adds through smart add, with its messages i
     timers.fire(250);
     assert.equal(capEl('capture-box').hidden, true);
     assert.equal(capEl('capture-btn').disabled, false);
-    assert.equal(messageText(), 'top line');
+    // Review 2026-11-09 (4): the box's line went with the box, so the add is
+    // announced on the status line, replacing what it said before the send.
+    assert.equal(messageText(), 'Added.');
   } finally {
     closeCapture(timers);
     timers.restore();
@@ -8385,7 +8387,7 @@ test('capture: its preview opens in the box, the button stays enabled, and a typ
     assert.equal(capEl('capture-preview').children.length, 0, 'the newer Add closed the preview');
     assert.deepEqual(loadItems().map((it) => it.title), ['Manual dinner'], 'and added only itself');
     assert.ok(capEl('capture-box')._classes.has('closing'), 'a landed manual add closes the box');
-    assert.equal(messageText(), 'top line', 'the status line is not an add\'s line');
+    assert.equal(messageText(), 'Added.', 'the landed add is announced on the status line (review 2026-11-09)');
   } finally {
     closeCapture(timers);
     timers.restore();
@@ -8690,6 +8692,159 @@ test('capture: with no date picked, a new listen after typing hides the date row
     closeCapture(timers);
     timers.restore();
     voice.restore();
+    clearAddBox();
+  }
+  seed([]);
+});
+
+// Review 2026-11-09 (1): a TIME picked with no date is kept on a new listen
+// too, so the spoken add is refused as a typed Add would be, not sent to
+// smart add with the time silently dropped.
+test('capture: a time picked with no date before a new listen is kept, and the spoken add is refused', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const net = smartAddFetch(async () => smartReply([{ title: 'Wrong', date: '2099-05-15', type: 'event' }]));
+  const timers = installManualTimers();
+  try {
+    click(capEl('capture-btn'));
+    typeDatedEntry('', '');
+    capEl('capture-time').value = '09:00';
+    fire(capEl('capture-time'), 'input');
+    click(capEl('capture-btn'));
+    assert.equal(voice.count(), 2, 'fixture check: a second listen started');
+    assert.equal(capEl('capture-when').hidden, false, 'the row stays showing while listening');
+    voice.last().say('dentist');
+    click(capEl('capture-btn'));
+    await settle();
+    assert.deepEqual(net.posts, [], 'no smart add');
+    assert.equal(captureMessage(), 'Add a date to use that time, or clear the time to use smart add.');
+    assert.deepEqual(loadItems(), [], 'nothing added');
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
+    voice.restore();
+    clearAddBox();
+  }
+  seed([]);
+});
+
+// Review 2026-11-09 (2): while a smart add thinks, the date and time boxes
+// are disabled, so a date cannot be picked there and then lost when the
+// reply closes the box. They come back on Cancel and on the reply.
+test('capture: the date row is disabled while a smart add thinks, and back after Cancel or the reply', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const held = [];
+  const net = smartAddFetch(() => new Promise((resolve) => { held.push(resolve); }));
+  const timers = installManualTimers();
+  try {
+    typeIntoAddBox('lunch with sam tomorrow');
+    click(capEl('capture-add'));
+    await settle();
+    assert.equal(captureMessage(), 'Thinking…', 'fixture check: thinking');
+    assert.equal(capEl('capture-date').disabled, true, 'date disabled while thinking');
+    assert.equal(capEl('capture-time').disabled, true, 'time disabled while thinking');
+    click(capEl('capture-cancel'));
+    assert.equal(capEl('capture-date').disabled, false, 'date back after Cancel');
+    assert.equal(capEl('capture-time').disabled, false, 'time back after Cancel');
+    typeIntoAddBox('lunch with sam tomorrow');
+    click(capEl('capture-add'));
+    await settle();
+    assert.equal(capEl('capture-date').disabled, true, 'fixture check: disabled again');
+    held[1](smartReply([{ title: 'Lunch with Sam', date: '2099-06-01', type: 'event' }]));
+    await settle();
+    assert.equal(capEl('capture-date').disabled, false, 'date back after the reply');
+    assert.equal(capEl('capture-time').disabled, false, 'time back after the reply');
+  } finally {
+    held.forEach((r) => r(smartReply([])));
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
+    clearAddBox();
+  }
+  seed([]);
+});
+
+// Review 2026-11-09 (3): when smart add fails and the row it shows already
+// holds a date (one the browser restored, say), the message says to tap Add,
+// not to pick a date.
+test('capture: smart add unavailable with a date already in the row says to tap Add', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const net = smartAddFetch(() => Promise.reject(new TypeError('offline')));
+  const timers = installManualTimers();
+  try {
+    pickDate(far(2));
+    click(capEl('capture-btn'));
+    assert.equal(capEl('capture-when').hidden, true, 'fixture check: hidden while listening');
+    voice.last().say('call the plumber');
+    click(capEl('capture-btn'));
+    await settle();
+    assert.equal(captureMessage(), 'Smart add is unavailable. Tap Add to save it on the date shown.');
+    assert.equal(capEl('capture-when').hidden, false, 'the row with its date shows');
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
+    voice.restore();
+    clearAddBox();
+  }
+  seed([]);
+});
+
+// Review 2026-11-09 (4): a capture-box add closes the box, and close() clears
+// its line, so "Added." also goes on the status line (a live region that
+// stays) — for a manual add, a direct smart add and a confirmed preview.
+test('capture: every landed add says "Added." on the status line, which outlives the box', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const doc = globalThis.document;
+  const replies = [];
+  const net = smartAddFetch(() => Promise.resolve(replies.shift()));
+  const timers = installManualTimers();
+  try {
+    doc.getElementById('status-line').textContent = '';
+    typeIntoAddBox('Typed one', far(1));
+    click(capEl('capture-add'));
+    await settle();
+    assert.equal(loadItems().length, 1, 'fixture check: manual add landed');
+    assert.equal(messageText(), 'Added.', 'manual add');
+    timers.fire(250);
+
+    doc.getElementById('status-line').textContent = '';
+    replies.push(smartReply([{ title: 'Lunch', date: '2099-06-01', type: 'event' }]));
+    typeIntoAddBox('lunch on june 1');
+    click(capEl('capture-add'));
+    await settle();
+    assert.equal(loadItems().length, 2, 'fixture check: direct smart add landed');
+    assert.equal(messageText(), 'Added.', 'direct smart add');
+    timers.fire(250);
+
+    doc.getElementById('status-line').textContent = '';
+    replies.push(previewReply([
+      { title: 'P one', date: '2099-05-01', type: 'task' },
+      { title: 'P two', date: '2099-05-01', type: 'task' },
+    ]));
+    typeIntoAddBox('two things');
+    click(capEl('capture-add'));
+    await settle();
+    assert.ok(capEl('capture-preview').children.length > 0, 'fixture check: preview open');
+    assert.equal(messageText(), '', 'nothing said on the status line yet');
+    const confirm = findAll(capEl('capture-preview'), 'BUTTON').find((b) => /add/i.test(b.textContent));
+    click(confirm);
+    assert.equal(loadItems().length, 4, 'fixture check: preview confirmed');
+    assert.equal(messageText(), 'Added.', 'confirmed preview');
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    net.restore();
     clearAddBox();
   }
   seed([]);

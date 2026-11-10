@@ -381,6 +381,7 @@ function handleManualAdd(target) {
   field.value = '';
   clearCaptureWhen(); // hides the chips and puts them back on Event
   line.set('Added.');
+  setMessage('Added.'); // the box closes and clears its line; this one stays
   target.onAdded();
   return 'added';
 }
@@ -422,29 +423,29 @@ const captureTarget = {
   type: typeChips,
   line: captureLine,
   preview: els.capturePreview,
-  unavailable: 'Smart add is unavailable. Pick a date to save it without smart add.',
+  // A row that already holds a date (one the browser restored) needs only Add.
+  unavailable: () => (els.captureDate.value
+    ? 'Smart add is unavailable. Tap Add to save it on the date shown.'
+    : 'Smart add is unavailable. Pick a date to save it without smart add.'),
   // The message points at the date row, so it shows, even after a voice-only add.
   onUnavailable() { capture.showWhen(); },
   onAdded() { capture.added(); },
   // Its own Add is hidden while its preview is open (js/capture.js).
   onPreviewClosed() { capture.previewClosed(); },
 };
-const TARGETS = [captureTarget];
-
 // A new capture closes any open preview (spec § 3 step 8), and the box's line
-// says so. One target since the top add box went (2026-10-27). A preview is open while its container has content
-// (renderPreview fills it; every close empties it). Called by every Add that
+// says so. A preview is open while its container has content (renderPreview
+// fills it; every close empties it). Called by every Add that
 // passes validation, before its own message, so in the box that started it
 // the newer message replaces this one.
 const PREVIEW_CLOSED = 'Preview closed — nothing was added from it.';
 function closePreviews() {
-  for (const t of TARGETS) {
-    if (t.preview.children.length === 0) continue;
-    t.preview.hidden = true;
-    t.preview.innerHTML = '';
-    t.line.set(PREVIEW_CLOSED);
-    t.onPreviewClosed();
-  }
+  const t = captureTarget;
+  if (t.preview.children.length === 0) return;
+  t.preview.hidden = true;
+  t.preview.innerHTML = '';
+  t.line.set(PREVIEW_CLOSED);
+  t.onPreviewClosed();
 }
 
 // Makes the smart add in flight superseded, as a newer Add would: its reply,
@@ -487,6 +488,10 @@ async function handleAdd(target) {
   line.set('Thinking…');
   const thinking = line.token();
   const say = (t) => { if (line.token() === thinking) line.set(t); };
+  // "Added." also goes on the status line, which outlives the box (close()
+  // clears the box's line) — unless something else spoke there since the
+  // send (the Ideas box's "Kept."), which it leaves alone.
+  const statusAtSend = statusLine.token();
   // Only clear the box if it still holds what was sent: text typed while
   // waiting (or reviewing) is the user's next entry.
   const clearSentText = () => { if (field.value.trim() === raw) field.value = ''; };
@@ -497,7 +502,7 @@ async function handleAdd(target) {
   } catch (e) {
     if (generation !== addGeneration) return 'superseded';
     if (e.message === 'too_long') say('That was a lot at once — try adding fewer items in one go.');
-    else { say(target.unavailable); target.onUnavailable(); }
+    else { say(target.unavailable()); target.onUnavailable(); }
     return 'failed';
   }
   if (generation !== addGeneration) return 'superseded';
@@ -510,6 +515,7 @@ async function handleAdd(target) {
     } catch (e) { line.set(e.message); return 'failed'; }
     clearSentText();
     say('Added.');
+    if (statusLine.token() === statusAtSend) setMessage('Added.');
     target.onAdded();
     return 'added';
   }
@@ -528,6 +534,7 @@ async function handleAdd(target) {
       try { addItems(confirmed); } catch (e) { line.set(e.message); return false; }
       clearSentText();
       line.set('Added.');
+      setMessage('Added.'); // a tap now: it speaks whatever the line held
       target.onAdded();
       return true;
     },
@@ -1454,8 +1461,10 @@ const capture = createCapture({
   cancelSubmit: cancelAdd,
   closePreviews,
   clearWhen: clearCaptureWhen,
-  // A picked date survives a new listen (Alex, 2026-11-09).
-  whenPicked: () => Boolean(els.captureDate.value),
+  // A picked date survives a new listen (Alex, 2026-11-09), and so does a
+  // picked time, so handleAdd refuses it for want of a date (review 2026-11-09).
+  whenPicked: () => Boolean(els.captureDate.value || els.captureTime.value),
+  lockWhen: (on) => { els.captureDate.disabled = on; els.captureTime.disabled = on; },
 });
 // Opening Settings stops a listen and keeps its text (spec § 3 step 4).
 // settings.js's own listener on this button opens or closes the panel.

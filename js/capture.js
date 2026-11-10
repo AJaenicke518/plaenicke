@@ -25,9 +25,12 @@
 // holds the date and optional time; app.js owns its inputs and the type chips
 // in it. It shows only when the user types: a typing focus on the field, an
 // input, every focusField() tap, and app.js's showWhen() after a failed smart
-// add. A new listen hides it unless `whenPicked()` (app.js) says a date is
-// picked: a date picked before a listen is kept, showing and in use, so the
-// spoken words become a manual add on that date (Alex, 2026-11-09). A listen
+// add. A new listen hides it unless `whenPicked()` (app.js) says a date or a
+// time is picked: a date picked before a listen is kept, showing and in use,
+// so the spoken words become a manual add on that date (Alex, 2026-11-09); a
+// time alone is kept too, so the add is refused for want of a date rather
+// than the time being dropped. `lockWhen(on)` locks the row while an add is
+// latched. A listen
 // never SHOWS a hidden row, and the row does not show when a listen ends on
 // its own (voice only). close() hides it and calls `clearWhen`, which empties
 // the date and time and puts the chips back on Event.
@@ -57,7 +60,7 @@ const M = CAPTURE_MESSAGES;
 const REQUIRED_ELS = ['button', 'box', 'field', 'add', 'cancel', 'close', 'typeInstead', 'preview', 'when'];
 
 export function createCapture({
-  els, line, voice, isStandalone, submit, cancelSubmit, closePreviews, clearWhen, whenPicked,
+  els, line, voice, isStandalone, submit, cancelSubmit, closePreviews, clearWhen, whenPicked, lockWhen,
   later = (fn, ms) => setTimeout(fn, ms),
   clearLater = (handle) => clearTimeout(handle),
   follow = followVisualViewport,
@@ -70,7 +73,7 @@ export function createCapture({
   if (!voice || !['isVoiceSupported', 'listen', 'errorKind'].every((k) => typeof voice[k] === 'function')) {
     throw new Error('createCapture: voice needs isVoiceSupported, listen and errorKind');
   }
-  for (const [name, fn] of Object.entries({ isStandalone, submit, cancelSubmit, closePreviews, clearWhen, whenPicked })) {
+  for (const [name, fn] of Object.entries({ isStandalone, submit, cancelSubmit, closePreviews, clearWhen, whenPicked, lockWhen })) {
     if (typeof fn !== 'function') throw new Error(`createCapture: ${name} must be a function`);
   }
 
@@ -165,6 +168,10 @@ export function createCapture({
     els.add.disabled = on;
     els.add.hidden = on || previewOpen;
     els.cancel.hidden = !on;
+    // The date row is locked with the latch (review 2026-11-09): a date picked
+    // while a smart add thinks would be cleared, unseen, when its reply closes
+    // the box.
+    lockWhen(on);
   }
 
   const refusedText = () => (isStandalone() ? M.permission : M.safari);
@@ -184,7 +191,7 @@ export function createCapture({
   function startListening() {
     line.set('');
     els.typeInstead.hidden = true;
-    // Hidden on every listen (Task 1 review) unless a date is picked: then the
+    // Hidden on every listen (Task 1 review) unless a date or time is picked: then the
     // row stays as it is, so a showing date and its chips are kept and used
     // by the spoken add (Alex, 2026-11-09). Only hides, never shows: a date in
     // a row the user never opened stays unseen, and app.js never reads it.

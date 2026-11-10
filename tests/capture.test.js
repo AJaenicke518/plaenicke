@@ -51,7 +51,7 @@ function setup({ standalone = false } = {}) {
   const voice = fakeVoice(order);
   const fx = {
     els, message, order, voice, standalone,
-    follows: [], timers: [], previews: 0, cancels: 0, submits: 0, settles: [], clearWhens: 0, picked: false,
+    follows: [], timers: [], previews: 0, cancels: 0, submits: 0, settles: [], clearWhens: 0, picked: false, locks: [],
     get settle() { return fx.settles[fx.settles.length - 1]; },
   };
   // Records blur/focus on the field in order, then does what the fake does.
@@ -72,6 +72,7 @@ function setup({ standalone = false } = {}) {
     closePreviews: () => { fx.previews += 1; },
     clearWhen: () => { fx.clearWhens += 1; },
     whenPicked: () => fx.picked,
+    lockWhen: (on) => { fx.locks.push(on); },
     later: (fn, ms) => { const h = { fn, ms, cleared: false }; fx.timers.push(h); return h; },
     clearLater: (h) => { h.cleared = true; },
     follow: (target, opts) => {
@@ -287,7 +288,7 @@ test('a submit that rejects says so on the line, clears the latch, and logs the 
     voice: { isVoiceSupported: () => false, listen() { throw new Error('unused'); }, errorKind },
     isStandalone: () => false,
     submit: () => new Promise((_, r) => { reject = r; }),
-    cancelSubmit() {}, closePreviews() {}, clearWhen() {}, whenPicked: () => false,
+    cancelSubmit() {}, closePreviews() {}, clearWhen() {}, whenPicked: () => false, lockWhen() {},
     later: () => ({}), clearLater() {}, follow: () => () => {},
   });
   const logged = t.mock.method(console, 'error', () => {});
@@ -484,12 +485,12 @@ test('createCapture refuses a missing element or callback', () => {
   const ok = {
     els: base.els, line: { set() {} },
     voice: { isVoiceSupported: () => true, listen() {}, errorKind },
-    isStandalone: () => false, submit: async () => {}, cancelSubmit() {}, closePreviews() {}, clearWhen() {}, whenPicked: () => false,
+    isStandalone: () => false, submit: async () => {}, cancelSubmit() {}, closePreviews() {}, clearWhen() {}, whenPicked: () => false, lockWhen() {},
   };
   for (const name of ['button', 'box', 'field', 'add', 'cancel', 'close', 'typeInstead', 'preview', 'when']) {
     assert.throws(() => createCapture({ ...ok, els: { ...ok.els, [name]: null } }), new RegExp(name));
   }
-  for (const name of ['isStandalone', 'submit', 'cancelSubmit', 'closePreviews', 'clearWhen', 'whenPicked']) {
+  for (const name of ['isStandalone', 'submit', 'cancelSubmit', 'closePreviews', 'clearWhen', 'whenPicked', 'lockWhen']) {
     assert.throws(() => createCapture({ ...ok, [name]: undefined }), new RegExp(name));
   }
   assert.throws(() => createCapture({ ...ok, line: null }), /line/);
@@ -523,7 +524,7 @@ test('a submit that rejects after Cancel leaves the Cancel message, and is still
     voice: { isVoiceSupported: () => false, listen() { throw new Error('unused'); }, errorKind },
     isStandalone: () => false,
     submit: () => new Promise((_, r) => { reject = r; }),
-    cancelSubmit() { cancels += 1; }, closePreviews() {}, clearWhen() {}, whenPicked: () => false,
+    cancelSubmit() { cancels += 1; }, closePreviews() {}, clearWhen() {}, whenPicked: () => false, lockWhen() {},
     later: () => ({}), clearLater() {}, follow: () => () => {},
   });
   const logged = t.mock.method(console, 'error', () => {});
@@ -760,4 +761,22 @@ test('date row: a picked date never shows a row that was hidden when the listen 
   fx.picked = true;
   listening(fx, 'dentist thursday');
   assert.equal(fx.els.when.hidden, true, 'hidden at the first listen, whatever is picked');
+});
+
+// Review 2026-11-09 (2): the date row is locked while a smart add thinks, so
+// a date cannot be picked there and lost when the reply closes the box.
+test('date row: locked while an add is latched, unlocked on Cancel and when it settles', async () => {
+  const fx = setup();
+  fx.voice.supported = false;
+  tap(fx.els.button);
+  fx.els.field.value = 'lunch';
+  tap(fx.els.add);
+  assert.deepEqual(fx.locks.slice(-1), [true], 'locked while thinking');
+  tap(fx.els.cancel);
+  assert.deepEqual(fx.locks.slice(-1), [false], 'unlocked by Cancel');
+  tap(fx.els.add);
+  assert.deepEqual(fx.locks.slice(-1), [true], 'fixture check: locked again');
+  fx.settle('failed');
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(fx.locks.slice(-1), [false], 'unlocked when the add settles');
 });

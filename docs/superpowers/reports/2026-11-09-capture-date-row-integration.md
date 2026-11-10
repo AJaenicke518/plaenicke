@@ -117,3 +117,28 @@ No other test of main's is missing. The 21 tests that appeared in the merge are 
 - **`TARGETS`** is now a one-element array, and `closePreviews` loops over it. It works; I left it as is.
 - **Task 2 of the branch** (app.js wiring, index.html, CSS) still has no per-task review of its own. This integration checked leftovers and the merge seams, not the branch's whole wiring.
 - **CACHE was not bumped**, per instructions. Until the release bump, a device offline can be served the new index.html with an old app.js.
+
+## Review fixes (2026-11-09, after independent review)
+
+Each was written test-first: the new test failed on the old code, and a mutation check followed. One `npm test` run afterwards: `# tests 1908 / # pass 1908 / # fail 0 / # cancelled 0`.
+
+1. **A time picked with no date is kept on a new listen.**
+   - Change: `whenPicked` is now `Boolean(captureDate.value || captureTime.value)`. The spoken add is refused with "Add a date to use that time, …", the same as a typed Add.
+   - Mutation checked: with the date-only check, the new apply test fails.
+2. **Picking a date while a smart add thinks.** I chose to lock the row; the other option offered was clearing only what was submitted.
+   - Change: createCapture takes a new required `lockWhen(on)`, which `setAdding` calls. app.js disables `#capture-date` and `#capture-time`.
+   - The chips need no lock: on the smart path no date is picked, so the chips are hidden.
+   - Mutation checked: an app.js no-op `lockWhen` fails the apply test, and removing the call in capture.js fails the new capture unit test.
+3. **"Unavailable" wording when the row already holds a date.**
+   - Change: `unavailable` is now a function. With a date in the row it says "Smart add is unavailable. Tap Add to save it on the date shown."
+   - Mutation checked.
+4. **"Added." on `#status-line`.** It now appears there for a manual add, a direct smart add and a confirmed preview.
+   - A direct smart add writes it only if nothing has spoken on the status line since the send. The "Kept." tests still hold, and an unguarded write fails one of them.
+   - Changed assertions: two existing tests asserted that the status line keeps an older message across an add. That was the rule this fix reverses on purpose:
+     - `capture: tap, speak, tap again …` (now renamed `… and "Added." on the status line`)
+     - `capture: its preview opens in the box … a typed dated Add closes it`
+   - Mutation checked: removing each of the three writes fails the new test.
+5. **Dead class:** the `cap-types` class is removed from index.html.
+6. **`TARGETS`** is removed. `closePreviews` acts on `captureTarget` directly.
+
+There are 5 new tests: 4 in `tests/apply.test.js` and 1 in `tests/capture.test.js`. CACHE was not bumped.
