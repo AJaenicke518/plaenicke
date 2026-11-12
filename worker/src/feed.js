@@ -19,7 +19,8 @@ function cors(headers = {}) {
   return {
     'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'content-type, cache-control',
+    'Access-Control-Allow-Headers': 'content-type, cache-control, authorization',
+    'Access-Control-Max-Age': '86400',
     ...headers,
   };
 }
@@ -163,6 +164,11 @@ export async function handleFeed(request, {
   // never fires in a synthetic "hangs forever" test with nothing else
   // scheduled to keep the event loop alive).
   createTimeoutSignal = (ms) => AbortSignal.timeout(ms),
+  // Session gating (D20). `authenticate` is async and returns an account or
+  // null; absent, it is never called. index.js passes the D1-backed check so
+  // this module stays free of D1 imports.
+  authenticate,
+  requireSession = false,
 } = {}) {
   // Origin allowlist is checked first, unconditionally, for every method —
   // including OPTIONS preflight and any verb other than GET.
@@ -171,6 +177,20 @@ export async function handleFeed(request, {
 
   if (request.method === 'OPTIONS') return new Response(null, { headers: cors() });
   if (request.method !== 'GET') return errorResponse('method_not_allowed', 405);
+
+  // After Origin/OPTIONS/method, BEFORE cache.match: an unauthenticated caller
+  // must not be able to read cached feeds or trigger fetches. /feed is
+  // dispatched outside index.js's try/catch, so a throw is handled here.
+  if (authenticate) {
+    let account;
+    try {
+      account = await authenticate(request);
+    } catch (err) {
+      console.error(err?.name, err?.message);
+      return errorResponse('internal_error', 500);
+    }
+    if (!account && requireSession) return errorResponse('unauthorized', 401);
+  }
 
   const reqUrl = new URL(request.url);
   const target = reqUrl.searchParams.get('url');

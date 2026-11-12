@@ -523,3 +523,187 @@ test('POST /admin/device without accountId returns 400 bad_request', async () =>
     assert.equal((await res.json()).error, 'bad_request');
   }
 });
+
+// --- Task 7: smart-add cap, session gating, /feed auth ---------------------
+
+const NOON = '2026-11-11T12:00:00.000Z';
+const claudeOk = (usage = { input_tokens: 900, output_tokens: 120 }) => new Response(JSON.stringify({
+  stop_reason: 'end_turn',
+  content: [{ type: 'text', text: JSON.stringify({ items: [{ title: 'x', date: '2026-11-12', type: 'task' }], needsReview: false }) }],
+  usage,
+}), { status: 200 });
+
+async function withAnthropic(handler, fn) {
+  const original = globalThis.fetch;
+  const stub = { calls: 0 };
+  globalThis.fetch = async (...a) => { stub.calls += 1; return handler(...a); };
+  try { return await fn(stub); } finally { globalThis.fetch = original; }
+}
+const smart = (env, token, body = { text: 'call mom tomorrow' }) => worker.fetch(new Request('https://worker.example/', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+  body: JSON.stringify(body),
+}), env);
+async function smartEnv(extra = {}) {
+  const env = { ...ENV, DB: makeD1(), NOW: () => NOON, ...extra };
+  const token = await mintDevice(env, 1, 'laptop', NOON);
+  return { env, token };
+}
+const usageRows = (env) => env.DB.prepare('SELECT * FROM usage ORDER BY account_id, day').all().then((r) => r.results);
+
+test('REQUIRE_SESSION=true: smart-add without a token is 401 and never reaches Anthropic', async () => {
+  const { env } = await smartEnv({ REQUIRE_SESSION: 'true' });
+  await withAnthropic(() => claudeOk(), async (stub) => {
+    const res = await smart(env, null);
+    assert.equal(res.status, 401);
+    assert.equal((await res.json()).error, 'unauthorized');
+    assert.equal(stub.calls, 0);
+  });
+});
+
+test('smart-add cap: 50 calls are 200, the 51st is 429 daily_limit with resetsAt; Anthropic called 50 times', async () => {
+  const { env, token } = await smartEnv({ REQUIRE_SESSION: 'true' });
+  await withAnthropic(() => claudeOk(), async (stub) => {
+    for (let i = 1; i <= 50; i += 1) assert.equal((await smart(env, token)).status, 200, `call ${i}`);
+    const res = await smart(env, token);
+    assert.equal(res.status, 429);
+    assert.deepEqual(await res.json(), { error: 'daily_limit', resetsAt: '2026-11-12T00:00:00.000Z' });
+    assert.equal(res.headers.get('Access-Control-Allow-Origin'), ALLOWED_ORIGIN);
+    assert.equal(stub.calls, 50);
+  });
+});
+
+// Real D1 is a network hop per statement; the in-process fake resolves within
+// one tick, which hides read-then-write races. Yield a macrotask per statement.
+function slowDb(db) {
+  const wrap = (st) => ({
+    bind: (...a) => wrap(st.bind(...a)),
+    first: async () => { await new Promise((r) => setImmediate(r)); return st.first(); },
+    run: async () => { await new Promise((r) => setImmediate(r)); return st.run(); },
+    all: async () => { await new Promise((r) => setImmediate(r)); return st.all(); },
+  });
+  return { prepare: (sql) => wrap(db.prepare(sql)), batch: db.batch };
+}
+
+test('55 parallel smart-adds: exactly 50 x 200 and 5 x 429', async () => {
+  const base = await smartEnv();
+  const { token } = base;
+  const env = { ...base.env, DB: slowDb(base.env.DB) };
+  await withAnthropic(() => claudeOk(), async (stub) => {
+    const res = await Promise.all(Array.from({ length: 55 }, () => smart(env, token)));
+    const codes = res.map((r) => r.status);
+    assert.equal(codes.filter((c) => c === 200).length, 50);
+    assert.equal(codes.filter((c) => c === 429).length, 5);
+    assert.equal(stub.calls, 50);
+  });
+});
+
+test('the UTC day rolls over: capped at 23:59Z, open again at 00:00Z', async () => {
+  let now = '2026-11-11T23:59:00.000Z';
+  const { env, token } = await smartEnv({ NOW: () => now });
+  await withAnthropic(() => claudeOk(), async () => {
+    for (let i = 0; i < 50; i += 1) await smart(env, token);
+    assert.equal((await smart(env, token)).status, 429);
+    now = '2026-11-12T00:00:00.000Z';
+    assert.equal((await smart(env, token)).status, 200);
+  });
+});
+
+test('a call straddling midnight records tokens on the request day', async () => {
+  let now = '2026-11-11T23:59:59.000Z';
+  const { env, token } = await smartEnv({ NOW: () => now });
+  await withAnthropic(() => { now = '2026-11-12T00:00:01.000Z'; return claudeOk({ input_tokens: 900, output_tokens: 120 }); }, async () => {
+    assert.equal((await smart(env, token)).status, 200);
+  });
+  assert.deepEqual(await usageRows(env), [{ account_id: 1, day: '2026-11-11', calls: 1, in_tok: 900, out_tok: 120 }]);
+});
+
+test('a Claude failure (500) still consumes a slot', async () => {
+  const { env, token } = await smartEnv();
+  await withAnthropic(() => new Response('boom', { status: 500 }), async () => {
+    assert.equal((await smart(env, token)).status, 502);
+  });
+  assert.equal((await usageRows(env))[0].calls, 1);
+});
+
+test('tolerant mode: no token goes through and writes no usage row; a token is still counted', async () => {
+  const { env, token } = await smartEnv();
+  await withAnthropic(() => claudeOk(), async () => {
+    assert.equal((await smart(env, null)).status, 200);
+    assert.deepEqual(await usageRows(env), []);
+    assert.equal((await smart(env, token)).status, 200);
+  });
+  assert.deepEqual(await usageRows(env), [{ account_id: 1, day: '2026-11-11', calls: 1, in_tok: 900, out_tok: 120 }]);
+});
+
+test('tokens are recorded on the refusal and max_tokens paths too', async () => {
+  for (const [stop, status] of [['refusal', 422], ['max_tokens', 413]]) {
+    const { env, token } = await smartEnv();
+    await withAnthropic(() => new Response(JSON.stringify({ stop_reason: stop, content: [], usage: { input_tokens: 7, output_tokens: 3 } })), async () => {
+      assert.equal((await smart(env, token)).status, status);
+    });
+    assert.deepEqual(await usageRows(env), [{ account_id: 1, day: '2026-11-11', calls: 1, in_tok: 7, out_tok: 3 }]);
+  }
+});
+
+test('a client bug (empty text, bad json) does not burn a slot', async () => {
+  const { env, token } = await smartEnv();
+  await withAnthropic(() => claudeOk(), async () => {
+    assert.equal((await smart(env, token, { text: '  ' })).status, 400);
+  });
+  assert.deepEqual(await usageRows(env), []);
+});
+
+test('a disabled account token is 401 on smart-add under REQUIRE_SESSION and never reaches Anthropic', async () => {
+  const { env, token } = await smartEnv({ REQUIRE_SESSION: 'true' });
+  await env.DB.prepare("UPDATE accounts SET disabled_at = 't' WHERE id = 1").run();
+  await withAnthropic(() => claudeOk(), async (stub) => {
+    assert.equal((await smart(env, token)).status, 401);
+    assert.equal(stub.calls, 0);
+  });
+});
+
+test('the smart-add log line carries counts only', async () => {
+  const { env, token } = await smartEnv();
+  const lines = [];
+  const orig = console.log;
+  console.log = (...a) => lines.push(a.join(' '));
+  try {
+    await withAnthropic(() => claudeOk(), async () => { await smart(env, token, { text: 'SECRET-TEXT' }); });
+  } finally { console.log = orig; }
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^smart-add claude_ms=\d+ status=200 in=900 out=120$/);
+  assert.ok(!lines[0].includes('SECRET'));
+  assert.ok(!lines[0].includes(token));
+});
+
+// /feed through the router: auth is wired with the real authenticateDevice.
+function withCache(fn) {
+  const original = globalThis.caches;
+  const spy = { matches: 0, match: async () => { spy.matches += 1; return undefined; }, put: async () => {} };
+  globalThis.caches = { default: spy };
+  return Promise.resolve(fn(spy)).finally(() => { globalThis.caches = original; });
+}
+const feedReq = (token) => new Request('https://worker.example/feed?url=' + encodeURIComponent('https://cal.example/a.ics'), {
+  headers: { origin: ALLOWED_ORIGIN, ...(token ? { authorization: `Bearer ${token}` } : {}) },
+});
+
+test('/feed via the router: REQUIRE_SESSION and no token is 401 before the cache; a disabled account too', async () => {
+  const { env, token } = await smartEnv({ REQUIRE_SESSION: 'true' });
+  await withCache(async (spy) => {
+    assert.equal((await worker.fetch(feedReq(null), env)).status, 401);
+    await env.DB.prepare("UPDATE accounts SET disabled_at = 't' WHERE id = 1").run();
+    assert.equal((await worker.fetch(feedReq(token), env)).status, 401);
+    assert.equal(spy.matches, 0);
+  });
+});
+
+test('/feed via the router: a valid token reaches the cache', async () => {
+  const { env, token } = await smartEnv({ REQUIRE_SESSION: 'true' });
+  await withCache(async (spy) => {
+    await withAnthropic(() => new Response('BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n', { status: 200 }), async () => {
+      await worker.fetch(feedReq(token), env);
+    });
+    assert.equal(spy.matches, 1);
+  });
+});

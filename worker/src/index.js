@@ -17,6 +17,7 @@ import { handleAccountRoute } from './accounts.js';
 import { handleAdminRoute } from './admin.js';
 import { nowISO } from './clock.js';
 import { authenticateDevice } from './auth.js';
+import { utcDay, nextUtcMidnight, takeSmartAddSlot, recordTokens } from './usage.js';
 
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -31,9 +32,13 @@ function utcTodayISO() {
 // Latency and status ONLY. Never the user's text, never Claude's reply, never
 // the key: worker logs are retained, and the text is the user's own notes.
 // Time is to response headers (the body is read afterwards).
-function logClaudeLatency(ms, status) {
-  console.log(`smart-add claude_ms=${ms} status=${status}`);
+function logClaudeLatency(ms, status, inTok, outTok) {
+  const tokens = inTok === undefined ? '' : ` in=${inTok} out=${outTok}`;
+  console.log(`smart-add claude_ms=${ms} status=${status}${tokens}`);
 }
+
+// Phased release: anything but the exact string 'true' is tolerant.
+const requireSession = (env) => env.REQUIRE_SESSION === 'true';
 
 async function handleSmartAdd(request, env) {
   if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
@@ -49,6 +54,15 @@ async function handleSmartAdd(request, env) {
   // by the monthly spend cap set in the Anthropic Console.
   const text = payload && typeof payload.text === 'string' ? payload.text.trim() : '';
   if (!text) return json({ error: 'empty_text' }, 400);
+
+  // Auth and the slot come after validation so a client bug cannot burn the cap.
+  const device = await authenticateDevice(request, env, nowISO(env));
+  if (!device && requireSession(env)) return json({ error: 'unauthorized' }, 401);
+  const day = utcDay(nowISO(env)); // captured once: a call straddling midnight bills the request's day
+  if (device) {
+    const slot = await takeSmartAddSlot(env, device.accountId, day);
+    if (!slot.ok) return json({ error: 'daily_limit', resetsAt: nextUtcMidnight(day) }, 429);
+  }
 
   const today = ISO.test(payload.today) ? payload.today : utcTodayISO();
   const body = buildRequestBody(text, today);
@@ -69,9 +83,12 @@ async function handleSmartAdd(request, env) {
     logClaudeLatency(Date.now() - startedAt, 'unreachable');
     return json({ error: 'upstream_unreachable' }, 502);
   }
-  logClaudeLatency(Date.now() - startedAt, claudeRes.status);
 
-  if (!claudeRes.ok) return json({ error: 'upstream_error', status: claudeRes.status }, 502);
+  const headersMs = Date.now() - startedAt; // to response headers; the body is read afterwards
+  if (!claudeRes.ok) {
+    logClaudeLatency(headersMs, claudeRes.status);
+    return json({ error: 'upstream_error', status: claudeRes.status }, 502);
+  }
 
   // Its own try: a JSON.parse failure message quotes a fragment of the body,
   // and the outer catch logs err.message.
@@ -79,7 +96,18 @@ async function handleSmartAdd(request, env) {
   try {
     data = await claudeRes.json();
   } catch {
+    logClaudeLatency(headersMs, claudeRes.status);
     return json({ error: 'unparseable_model_output' }, 502);
+  }
+  // Every path where Claude returned a body records its tokens, refusal and
+  // max_tokens included. The log line carries counts only.
+  if (data.usage) {
+    const inTok = data.usage.input_tokens | 0;
+    const outTok = data.usage.output_tokens | 0;
+    logClaudeLatency(headersMs, claudeRes.status, inTok, outTok);
+    if (device) await recordTokens(env, device.accountId, day, inTok, outTok);
+  } else {
+    logClaudeLatency(headersMs, claudeRes.status);
   }
   if (data.stop_reason === 'refusal') return json({ error: 'refused' }, 422);
   if (data.stop_reason === 'max_tokens') return json({ error: 'too_long' }, 413);
@@ -116,7 +144,12 @@ export default {
     // and enforces its own origin allowlist, so the shared preflight below
     // must not intercept it — dispatch here first, unconditionally.
     if (pathname === '/feed') {
-      return handleFeed(request, { fetchImpl: fetch, cache: caches.default });
+      return handleFeed(request, {
+        fetchImpl: fetch,
+        cache: caches.default,
+        requireSession: requireSession(env),
+        authenticate: (req) => authenticateDevice(req, env, nowISO(env)),
+      });
     }
 
     // Everything below is wrapped so an unexpected throw (a D1 outage, say)

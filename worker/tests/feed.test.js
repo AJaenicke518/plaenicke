@@ -513,3 +513,75 @@ test('never logs the feed URL', async () => {
     assert.ok(!line.includes('secret-token-abc123'), `log line leaked the feed URL: ${line}`);
   }
 });
+
+// --- Task 7: session gating (D20) ------------------------------------------
+
+function spyCache() {
+  const c = fakeCache();
+  const spy = { matches: 0, match: async (...a) => { spy.matches += 1; return c.match(...a); }, put: (...a) => c.put(...a) };
+  return spy;
+}
+const FEED = 'https://worker.example/feed?url=' + encodeURIComponent('https://cal.example/a.ics');
+const noFetch = async () => { throw new Error('must not fetch'); };
+
+test('requireSession + no account: 401 and cache.match is never called', async () => {
+  const cache = spyCache();
+  const res = await handleFeed(req(FEED), { fetchImpl: noFetch, cache, requireSession: true, authenticate: async () => null });
+  assert.equal(res.status, 401);
+  assert.equal((await res.json()).error, 'unauthorized');
+  assert.equal(res.headers.get('Access-Control-Allow-Origin'), ALLOWED_ORIGIN);
+  assert.equal(cache.matches, 0);
+});
+
+test('requireSession + valid account reaches the cache', async () => {
+  const cache = spyCache();
+  await handleFeed(req(FEED), {
+    fetchImpl: async () => fakeResponse({ headers: { 'content-type': 'text/calendar' } }),
+    cache, requireSession: true, authenticate: async () => ({ accountId: 1 }),
+  });
+  assert.equal(cache.matches, 1);
+});
+
+test('tolerant mode: no account still reaches the cache', async () => {
+  const cache = spyCache();
+  await handleFeed(req(FEED), { fetchImpl: noFetch, cache, authenticate: async () => null });
+  assert.equal(cache.matches, 1);
+});
+
+test('OPTIONS preflight ignores the session check, lists authorization, Max-Age 86400', async () => {
+  let called = 0;
+  const res = await handleFeed(req(FEED, { method: 'OPTIONS' }), {
+    fetchImpl: noFetch, cache: spyCache(), requireSession: true, authenticate: async () => { called += 1; return null; },
+  });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('Access-Control-Allow-Headers'), /authorization/);
+  assert.equal(res.headers.get('Access-Control-Max-Age'), '86400');
+  assert.equal(called, 0);
+});
+
+test('a bad Origin is 403 before the token is checked', async () => {
+  let called = 0;
+  const res = await handleFeed(req(FEED, { origin: 'https://evil.example' }), {
+    fetchImpl: noFetch, cache: spyCache(), requireSession: true, authenticate: async () => { called += 1; return null; },
+  });
+  assert.equal(res.status, 403);
+  assert.equal(called, 0);
+});
+
+test('a wrong method is 405 before the token is checked', async () => {
+  let called = 0;
+  const res = await handleFeed(req(FEED, { method: 'POST' }), {
+    fetchImpl: noFetch, cache: spyCache(), requireSession: true, authenticate: async () => { called += 1; return null; },
+  });
+  assert.equal(res.status, 405);
+  assert.equal(called, 0);
+});
+
+test('an authenticate that throws is a 500 internal_error with CORS, cache untouched', async () => {
+  const cache = spyCache();
+  const res = await handleFeed(req(FEED), { fetchImpl: noFetch, cache, authenticate: async () => { throw new Error('d1 down'); } });
+  assert.equal(res.status, 500);
+  assert.equal((await res.json()).error, 'internal_error');
+  assert.equal(res.headers.get('Access-Control-Allow-Origin'), ALLOWED_ORIGIN);
+  assert.equal(cache.matches, 0);
+});

@@ -251,7 +251,7 @@ const goodAnswer = (p) => ({
 
 test('runSmoke POSTs each phrase exactly once to url/ with text and today — no retry', async () => {
   const w = fakeWorker(goodAnswer);
-  const results = await runSmoke({ fetchImpl: w.fetchImpl, url: 'https://w.test', today: TODAY });
+  const results = await runSmoke({ fetchImpl: w.fetchImpl, url: 'https://w.test', today: TODAY, token: 'T' });
   assert.equal(w.calls.length, PHRASES.length);
   assert.deepEqual(w.calls.map((c) => JSON.parse(c.init.body).text), PHRASES.map((p) => p.text));
   for (const c of w.calls) {
@@ -268,7 +268,7 @@ test('runSmoke does not retry a failing phrase and still runs the rest', async (
   const w = fakeWorker((p) => (p.type === 'event'
     ? { status: 502, body: { error: 'upstream_error' } }
     : goodAnswer(p)));
-  const results = await runSmoke({ fetchImpl: w.fetchImpl, url: 'https://w.test', today: TODAY });
+  const results = await runSmoke({ fetchImpl: w.fetchImpl, url: 'https://w.test', today: TODAY, token: 'T' });
   assert.equal(w.calls.length, PHRASES.length);
   assert.equal(results.filter((r) => !r.pass).length, 1);
   assert.equal(results.find((r) => !r.pass).phrase.type, 'event');
@@ -278,21 +278,21 @@ test('runSmoke reports a coerced type from the real wire shape', async () => {
   const w = fakeWorker((p) => ({
     body: { needsReview: false, items: [item({ type: 'event', time: '14:00', date: TODAY })] },
   }));
-  const results = await runSmoke({ fetchImpl: w.fetchImpl, url: 'https://w.test', today: TODAY });
+  const results = await runSmoke({ fetchImpl: w.fetchImpl, url: 'https://w.test', today: TODAY, token: 'T' });
   const failed = results.filter((r) => !r.pass).map((r) => r.phrase.type).sort();
   assert.deepEqual(failed, ITEM_TYPES.filter((t) => t !== 'event').sort());
 });
 
 test('runSmoke reads the response ACAO header (a missing one fails every phrase)', async () => {
   const w = fakeWorker((p) => ({ ...goodAnswer(p), acao: null }));
-  const results = await runSmoke({ fetchImpl: w.fetchImpl, url: 'https://w.test', today: TODAY });
+  const results = await runSmoke({ fetchImpl: w.fetchImpl, url: 'https://w.test', today: TODAY, token: 'T' });
   assert.ok(results.every((r) => !r.pass));
 });
 
 test('runSmoke records a rejected fetch as a failure and continues', async () => {
   let n = 0;
   const fetchImpl = async () => { n += 1; throw new TypeError('fetch failed'); };
-  const results = await runSmoke({ fetchImpl, url: 'https://w.test', today: TODAY });
+  const results = await runSmoke({ fetchImpl, url: 'https://w.test', today: TODAY, token: 'T' });
   assert.equal(n, PHRASES.length);
   assert.ok(results.every((r) => !r.pass && r.failures.some((f) => /fetch failed/.test(f))));
 });
@@ -301,7 +301,7 @@ test('runSmoke records an unparseable body as a failure', async () => {
   const fetchImpl = async () => new Response('<html>1101</html>', {
     status: 200, headers: { 'Access-Control-Allow-Origin': EXPECTED_ORIGIN },
   });
-  const results = await runSmoke({ fetchImpl, url: 'https://w.test', today: TODAY });
+  const results = await runSmoke({ fetchImpl, url: 'https://w.test', today: TODAY, token: 'T' });
   assert.ok(results.every((r) => !r.pass));
 });
 
@@ -389,7 +389,7 @@ test('runAll makes ZERO phrase POSTs when the deployed version is wrong', async 
     calls.push({ url, init });
     return new Response(JSON.stringify({ version: 'worker-OLD' }), { status: 200 });
   };
-  const out = await runAll({ fetchImpl, url: 'https://w.test', today: TODAY, expected: VERSION });
+  const out = await runAll({ fetchImpl, url: 'https://w.test', today: TODAY, expected: VERSION, token: 'T' });
   assert.equal(out.ok, false);
   assert.equal(out.results, null);
   assert.equal(calls.length, 1);
@@ -405,9 +405,36 @@ test('runAll checks the version first, then runs every phrase once', async () =>
     if (new URL(url).pathname === '/version') return new Response(JSON.stringify({ version: VERSION }));
     return w.fetchImpl(url, init);
   };
-  const out = await runAll({ fetchImpl, url: 'https://w.test', today: TODAY, expected: VERSION });
+  const out = await runAll({ fetchImpl, url: 'https://w.test', today: TODAY, expected: VERSION, token: 'T' });
   assert.equal(out.ok, true);
   assert.equal(order[0], '/version');
   assert.equal(order.length, 1 + PHRASES.length);
   assert.equal(out.results.length, PHRASES.length);
+});
+
+// --- session token (Task 7) ---------------------------------------------------
+
+test('readToken throws a clear message when PLAENICKE_SMOKE_TOKEN is unset or blank', () => {
+  assert.throws(() => smoke.readToken({}), /PLAENICKE_SMOKE_TOKEN/);
+  assert.throws(() => smoke.readToken({ PLAENICKE_SMOKE_TOKEN: '  ' }), /PLAENICKE_SMOKE_TOKEN/);
+  assert.equal(smoke.readToken({ PLAENICKE_SMOKE_TOKEN: 'abc' }), 'abc');
+});
+
+test('main with the variable unset rejects BEFORE any fetch', async () => {
+  const before = offlineFetchCalls();
+  await assert.rejects(smoke.main({ env: {} }), /PLAENICKE_SMOKE_TOKEN/);
+  assert.equal(offlineFetchCalls(), before);
+});
+
+test('runSmoke sends the token as a Bearer header on every phrase POST', async () => {
+  const w = fakeWorker(goodAnswer);
+  await runSmoke({ fetchImpl: w.fetchImpl, url: 'https://w.test', today: TODAY, token: 'tok-1' });
+  assert.equal(w.calls.length, PHRASES.length);
+  for (const c of w.calls) assert.equal(c.init.headers.authorization, 'Bearer tok-1');
+});
+
+test('runSmoke and runAll require a token (never silently tokenless)', async () => {
+  const ok = async () => new Response('{}');
+  await assert.rejects(runSmoke({ fetchImpl: ok, url: 'https://w.test', today: TODAY }), /token/);
+  await assert.rejects(runAll({ fetchImpl: ok, url: 'https://w.test', today: TODAY, expected: VERSION }), /token/);
 });
