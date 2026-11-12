@@ -3202,3 +3202,65 @@ test('W2-I3: a sign-in whose owner write fails leaves the device unlinked, never
   assert.equal(isLinked(), false);
   assert.deepEqual(calls, [], 'nothing reached the network');
 });
+
+// --- sweep W2-C3: re-sign-in merges WITHOUT dedupe -------------------------
+//
+// Merge on adoption runs dedupeState, which tombstones every record sharing a
+// title, date and time with another — right for a device joining an account
+// for the first time (the same appointment typed on both), wrong for a device
+// signing back in to the account its data came from: two genuinely distinct
+// records (two courses' "Weekly quiz" on one day) lost one, and the tombstone
+// went to every device (scen/s4.mjs).
+
+// A device holding `owner`'s data, signing in to `accountId` against an
+// account that holds data too, so the dialog is offered. Returns the
+// adoptChoice each write was given.
+async function signInWithDialog({ owner, accountId }) {
+  installFakeLocalStorage();
+  const doc = installDom();
+  if (owner !== null) saveLocalOwner(owner);
+  saveItems([it('local')]);
+  const encKey = generateEncKey();
+  const blob = await encryptBlob(encKey, st({ items: [it('r')] }));
+  const readFetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ version: 4, blob }) });
+  const choices = [];
+  const syncOnceImpl = async (d) => { choices.push(d.adoptChoice); return { status: 'ok', pushed: false }; };
+  const deps = { fetchImpl: noNetwork([]), readFetchImpl, syncOnceImpl };
+  const first = mountPanel(doc, deps);
+  const code = composeLinkCode(bytesToBase64url(generateEncKey()), encKey);
+  assert.equal(await first.ui.linkAndAdopt(code, { accountId }), 'linked');
+  assert.ok(findButton(first.host, 'Merge'), 'fixture check: the dialog is offered');
+  return { doc, deps, first, choices };
+}
+
+test('W2-C3: signing back in to the account that owns this device\'s data merges without dedupe', async () => {
+  const { first, choices } = await signInWithDialog({ owner: 5, accountId: 5 });
+  findButton(first.host, 'Merge').click();
+  await first.ui.settled();
+  assert.deepEqual(choices, ['adopt-bootstrap'], 'a plain merge: union, no dedupe');
+});
+
+test('W2-C3: the first link of a device with no owner still merges with dedupe', async () => {
+  const { first, choices } = await signInWithDialog({ owner: null, accountId: 5 });
+  findButton(first.host, 'Merge').click();
+  await first.ui.settled();
+  assert.deepEqual(choices, ['adopt-merge']);
+});
+
+test('W2-C3: the plain-merge decision survives a reload of the panel while the dialog is pending', async () => {
+  const { doc, deps, choices } = await signInWithDialog({ owner: 5, accountId: 5 });
+  const again = mountPanel(doc, deps);   // Settings closed and reopened, or the app reloaded
+  await again.ui.settled();
+  const merge = findButton(again.host, 'Merge');
+  assert.ok(merge, 'the reopened panel previews and asks again');
+  merge.click();
+  await again.ui.settled();
+  assert.deepEqual(choices, ['adopt-bootstrap']);
+});
+
+test('W2-C3: the dialog does not promise to fold duplicates on a plain merge', async () => {
+  const plain = await signInWithDialog({ owner: 5, accountId: 5 });
+  assert.equal(allText(plain.first.host).includes('folds together'), false, allText(plain.first.host));
+  const dedupe = await signInWithDialog({ owner: null, accountId: 5 });
+  assert.ok(allText(dedupe.first.host).includes('folds together'));
+});

@@ -287,8 +287,14 @@ export function clearAuth() { localStorage.removeItem(AUTH_KEY); }
 // tests/auth.test.js asserts loadSyncState() deep-equals this object after
 // unlink, so a field added here without being cleared, or without being added
 // to loadSyncState's projection below, fails rather than drifting.
+//
+// plainAdoption (sweep W2-C3): set by linkWithCode, in the same write that
+// raises the gate, when the link is a sign-in back to the account that owns
+// this device's data. The adoption's Merge then unions WITHOUT dedupe —
+// dedupe is for a device joining an account for the first time. Fails toward
+// today's behaviour: anything but an explicit true reads false.
 export const ZERO_SYNC_STATE = {
-  version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false,
+  version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false, plainAdoption: false,
 };
 
 export function loadSyncState() {
@@ -312,6 +318,7 @@ export function loadSyncState() {
     // that omits the key would then read as lifted, which is the exact
     // fail-open this guard exists to prevent.
     adoptionPending: parsed.adoptionPending !== false,
+    plainAdoption: parsed.plainAdoption === true,
   };
 }
 

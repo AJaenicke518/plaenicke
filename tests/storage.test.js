@@ -329,12 +329,12 @@ test('auth round-trips and clears', () => {
 test('loadSyncState returns a zeroed state when nothing is stored', () => {
   installFakeLocalStorage();
   assert.deepEqual(loadSyncState(),
-    { version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false });
+    { version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false, plainAdoption: false });
 });
 
 test('syncState round-trips including adoptionPending', () => {
   installFakeLocalStorage();
-  const s = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-08-02T00:00:00.000Z', lastError: null, adoptionPending: true };
+  const s = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-08-02T00:00:00.000Z', lastError: null, adoptionPending: true, plainAdoption: true };
   saveSyncState(s);
   assert.deepEqual(loadSyncState(), s);
 });
@@ -429,7 +429,7 @@ test('saveSyncState preserves adoptionPending on a partial update instead of res
 // were a plain setter.
 test('saveSyncState merges a one-field patch over every existing field', () => {
   installFakeLocalStorage();
-  const full = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-10-01T00:00:00.000Z', lastError: 'offline', adoptionPending: true };
+  const full = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-10-01T00:00:00.000Z', lastError: 'offline', adoptionPending: true, plainAdoption: true };
   saveSyncState(full);
   saveSyncState({ lastError: null });
   assert.deepEqual(loadSyncState(), { ...full, lastError: null });
@@ -439,10 +439,10 @@ test('saveSyncState merges a one-field patch over every existing field', () => {
 // a caller supplying every field still gets exactly that object back.
 test('saveSyncState with a complete object overwrites every field, including lifting adoptionPending', () => {
   installFakeLocalStorage();
-  saveSyncState({ version: 1, tokenHash: 'h', lastSyncedAt: null, lastError: null, adoptionPending: true });
-  saveSyncState({ version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false });
+  saveSyncState({ version: 1, tokenHash: 'h', lastSyncedAt: null, lastError: null, adoptionPending: true, plainAdoption: true });
+  saveSyncState({ version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false, plainAdoption: false });
   assert.deepEqual(loadSyncState(),
-    { version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false });
+    { version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false, plainAdoption: false });
 });
 
 // --- launch log (Phase 0 baseline) ------------------------------------------
@@ -660,4 +660,16 @@ test('W2-C1: a quota failure on legacyOwner is a QuotaError', () => {
   installFakeLocalStorage();
   localStorage.setItem = () => { const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; };
   assert.throws(() => storageNs.saveLegacyOwner(1), QuotaError);
+});
+
+test('W2-C3: plainAdoption reads true ONLY from an explicit true (a cursor stored before the field existed reads false)', () => {
+  installFakeLocalStorage();
+  for (const v of [undefined, null, 'true', 1, {}]) {
+    const stored = { version: 1, tokenHash: 'h', lastSyncedAt: null, lastError: null, adoptionPending: true };
+    if (v !== undefined) stored.plainAdoption = v;
+    localStorage.setItem('plaenicke.syncState', JSON.stringify(stored));
+    assert.equal(loadSyncState().plainAdoption, false, JSON.stringify(v));
+  }
+  localStorage.setItem('plaenicke.syncState', JSON.stringify({ adoptionPending: true, plainAdoption: true }));
+  assert.equal(loadSyncState().plainAdoption, true);
 });

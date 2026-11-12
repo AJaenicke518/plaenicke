@@ -778,3 +778,36 @@ test('e2e 8: an unlinked legacy-owned device re-links with an account-1 code, an
   assert.equal(accountModeFromStorage(), 'legacy');
   assert.deepEqual(ids((await serverState(w, 1, encKey1)).items), ids([a1, l1]));
 });
+
+// Sweep W2-C3 (scen/s4.mjs): two Brightspace deadlines with the same title
+// and date — distinct records — survive a sign-out and a sign-in back to the
+// same account. The adoption Merge used to dedupe them: one was tombstoned
+// and the tombstone pushed to the account.
+test('e2e 9: re-signing in to the same account keeps two same-title, same-date records', async () => {
+  const w = world();
+  const A = device('A');
+  await invite(w.env, 'INVITE-Q');
+  await use(A);
+  mountLinkUI(A, w);
+  const t = new Date().toISOString();
+  const q1 = makeItem({ title: 'Weekly quiz', date: '2026-11-20', type: 'task' }, { id: 'bs-COURSE1-quiz', createdAt: t, updatedAt: t });
+  const q2 = makeItem({ title: 'Weekly quiz', date: '2026-11-20', type: 'task' }, { id: 'bs-COURSE2-quiz', createdAt: t, updatedAt: t });
+  addLocal(q1, q2);
+  const up = await account.signUp({ invite: 'INVITE-Q', email: EMAIL, password: PW, deviceName: 'A', ...w.api });
+  assert.equal(await linkAndAdopt(A, up.code, up.accountId), 'linked');
+  const dek = getLink().encKey;
+  assert.deepEqual(ids((await serverState(w, up.accountId, dek)).items), ids([q1, q2]), 'fixture check: both on the server');
+
+  assert.deepEqual(await account.logOut({ link: getLink(), ...w.api }), { revoked: true });
+  assert.equal(signOutLocal(), 'signed_out');
+  mountLinkUI(A, w);
+  const li = await account.logIn({ email: EMAIL, password: PW, deviceName: 'A', ...w.api });
+  assert.equal(await linkAndAdopt(A, li.code, li.accountId), 'linked');
+  if (findButton(A.host, 'Merge')) await clickMerge(A);
+  await pollUntil(() => loadSyncState().adoptionPending === false, 'the re-sign-in adoption');
+
+  const server = await serverState(w, up.accountId, dek);
+  assert.deepEqual(ids(server.items), ids([q1, q2]), 'both deadlines are still in the account');
+  assert.deepEqual(server.tombstones, [], 'no tombstone was pushed');
+  assert.deepEqual(ids(loadItems()), ids([q1, q2]), 'and both are still on the device');
+});

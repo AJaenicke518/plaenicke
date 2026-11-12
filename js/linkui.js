@@ -890,6 +890,10 @@ export function initLinkUI(options = {}) {
     // GET /account right after the link and BEFORE any preview or adoption;
     // any other account, or no answer, unlinks again.
     const owner = loadLocalOwner();
+    // RE-SIGN-IN (sweep W2-C3): the data here already belongs to the account
+    // being signed in to, so its adoption merges without dedupe. Decided from
+    // the owner BEFORE it is written below, and stored with the gate.
+    const plainAdoption = accountId !== null && owner === accountId;
     let mustBeOwner = null;
     if (accountId === null && owner !== null) {
       if (ownerHasLogin()) {
@@ -911,7 +915,7 @@ export function initLinkUI(options = {}) {
       if (loadLegacyOwner() === accountId) clearLegacyOwner();
     }
     try {
-      await linkWithCode(raw);
+      await linkWithCode(raw, { plainAdoption });
     } catch (err) {
       // `raw` is NEVER interpolated: on a transient failure it is a real
       // link code. crypto.js/auth.js messages never echo their input.
@@ -1115,6 +1119,11 @@ export function initLinkUI(options = {}) {
     stage = 'busy';
     stageData = { text: 'Combining…' };
     render();
+    // MERGE ON A RE-SIGN-IN IS A PLAIN UNION (sweep W2-C3). 'adopt-bootstrap'
+    // is exactly that — merge both sides, no dedupe; js/sync.js dedupes on
+    // 'adopt-merge' alone. Read from the gate's own record, so a reopened
+    // panel or a reload decides the same way.
+    const choice = adoptChoice === 'adopt-merge' && loadSyncState().plainAdoption ? 'adopt-bootstrap' : adoptChoice;
     // From here until syncOnceImpl settles there is an unabandonable write in
     // flight. No mount may take over from it — see `writeInFlight`.
     let res;
@@ -1126,7 +1135,7 @@ export function initLinkUI(options = {}) {
     armSlowWriteRepaint(() => stage === 'busy', (h) => { slowTimer = h; });
     try {
       res = await syncOnceImpl({
-        fetchImpl, readFetchImpl, now, apiBase, applyState, adoptChoice, expectVersion,
+        fetchImpl, readFetchImpl, now, apiBase, applyState, adoptChoice: choice, expectVersion,
       });
     } finally {
       writeInFlight = false;
@@ -1443,7 +1452,9 @@ export function initLinkUI(options = {}) {
     wrap.append(mergeBtn, cancelBtn);
     wrap.appendChild(el('p', {
       className: 'note',
-      text: 'Merge keeps everything from both sides and folds together anything that is obviously the same.',
+      text: loadSyncState().plainAdoption
+        ? 'Merge keeps everything from both sides.'
+        : 'Merge keeps everything from both sides and folds together anything that is obviously the same.',
     }));
   }
 
