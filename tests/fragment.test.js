@@ -58,3 +58,21 @@ test('near-miss keys are not intents', () => {
     assert.equal(e.calls.length, 0, h);
   }
 });
+
+// Sweep W2-I7 (SEC #10): the boot fragment carries an invite or a recovery
+// code. app.js read it near the END of module evaluation, so anything above
+// that threw (a missing element, a storage error) left the code in the URL —
+// in history, and on screen. It must be the first statement app.js runs
+// after its imports. Checked on the source: app.js is evaluated once per
+// test process, so a behavioural test of an early throw cannot re-run it.
+import { readFileSync } from 'node:fs';
+test('W2-I7: app.js reads (and strips) the boot fragment before any other statement', () => {
+  const src = readFileSync(new URL('../js/app.js', import.meta.url), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n').map((l) => l.replace(/(^|\s)\/\/.*$/, '$1')).join('\n');
+  // Drop the import declarations (single- and multi-line), then blank lines.
+  const body = src.replace(/^import[\s\S]*?from\s+'[^']+';\s*$/gm, '').split('\n').filter((l) => l.trim() !== '');
+  assert.match(body[0], /^const bootIntent = readBootIntent\(\{ location: window\.location, history: window\.history \}\);$/,
+    `first statement after the imports: ${body[0]}`);
+  assert.equal(src.match(/readBootIntent\(/g).length, 1, 'read exactly once');
+});

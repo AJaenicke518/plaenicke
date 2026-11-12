@@ -174,3 +174,16 @@ test('golden: recovery recAuthKey and wrapKey match independent derivation', asy
   assert.deepEqual(await unwrapDek(wrapKey, wrapped, 'rec'), dek);
   await assert.rejects(unwrapDek(wrapKey, wrapped, 'pw'), { message: 'unwrap_failed' });
 });
+
+// Sweep W2-I6: the client caps kdfIters at 10,000,000 (the Worker refuses
+// higher too, W1-I8). Exactly the cap is allowed; derivation is not run here
+// at the cap (it would take seconds) — only the refusal above it.
+import * as keysNs from '../js/keys.js';
+test('W2-I6: derivePasswordKeys refuses kdfIters above MAX_KDF_ITERS before deriving', async () => {
+  assert.equal(keysNs.MAX_KDF_ITERS, 10000000);
+  const salt = 'AAAAAAAAAAAAAAAAAAAAAA';
+  await assert.rejects(keysNs.derivePasswordKeys('pw', salt, 10000001), /kdf_iters_out_of_range/);
+  await assert.rejects(keysNs.derivePasswordKeys('pw', salt, 10000001, { minKdfIters: 1 }), /kdf_iters_out_of_range/);
+  // Below the cap the floor check still answers first.
+  await assert.rejects(keysNs.derivePasswordKeys('pw', salt, 1000), /kdf_iters_too_low/);
+});

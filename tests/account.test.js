@@ -218,3 +218,56 @@ test('logIn forwards minKdfIters (a 1000-iteration prelogin is accepted when the
     (e) => e.code === 'bad_credentials'); // wrong derived key, but the request WAS sent
   assert.ok(s.calls.includes('/auth/login'));
 });
+
+// Sweep W2-I2: /auth/login minted a session before the device's own checks
+// (unwrap, dek_check, the answer's shape). A throw after it left a device row
+// nothing holds — a session that never expires. It is revoked, then the
+// error propagates unchanged.
+const deviceRows = async (env, accountId) => (await env.DB.prepare('SELECT COUNT(*) AS n FROM devices WHERE account_id = ?').bind(accountId).first()).n;
+
+test('W2-I2: a login whose dek_check fails revokes the session it was given, then throws dek_check_failed', async () => {
+  const { env, s, su } = await setup();
+  const before = await deviceRows(env, su.accountId);
+  s.stub('/auth/login', (b) => ({ ...b, dekCheck: 'b'.repeat(64) }));
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'Mac', ...s }), (e) => e.code === 'dek_check_failed');
+  assert.equal(await deviceRows(env, su.accountId), before, 'no orphan device row');
+  assert.ok(s.calls.includes('/auth/logout'));
+});
+
+test('W2-I2: a login whose wrapped key does not unwrap revokes the session, then throws unwrap_failed', async () => {
+  const { env, s, su } = await setup();
+  const before = await deviceRows(env, su.accountId);
+  s.stub('/auth/login', (b) => ({ ...b, wrappedDekPw: btoa('x'.repeat(60)) }));
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'Mac', ...s }), (e) => e.code === 'unwrap_failed');
+  assert.equal(await deviceRows(env, su.accountId), before);
+});
+
+test('W2-I2: a login answer of the wrong shape that still carries a token revokes it, then throws server', async () => {
+  const { env, s, su } = await setup();
+  const before = await deviceRows(env, su.accountId);
+  s.stub('/auth/login', ({ recoveryConfirmed, ...rest }) => rest);
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'Mac', ...s }), (e) => e.code === 'server');
+  assert.equal(await deviceRows(env, su.accountId), before);
+});
+
+test('W2-I2: a revoke that fails does not mask the original error', async () => {
+  const { s } = await setup();
+  s.stub('/auth/login', (b) => ({ ...b, dekCheck: 'b'.repeat(64) }));
+  const fetchImpl = async (url, opts) => {
+    if (new URL(url).pathname === '/auth/logout') throw new TypeError('offline');
+    return s.fetchImpl(url, opts);
+  };
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'Mac', ...s, fetchImpl }), (e) => e.code === 'dek_check_failed');
+});
+
+// Sweep W2-I6 (SEC #8, client half): the server answers prelogin with the
+// account's kdfIters; an absurd value is a denial of service on this device
+// (PBKDF2 runs on it). Refused before any derivation, and no login is sent.
+test('W2-I6: a server-sent kdfIters above 10,000,000 gives kdf_iters_out_of_range and sends no login', async () => {
+  const { s } = await setup();
+  s.stub('/auth/prelogin', (b) => ({ ...b, kdfIters: 10000001 }));
+  s.calls.length = 0;
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'Mac', ...s }),
+    (e) => e instanceof AccountError && e.code === 'kdf_iters_out_of_range');
+  assert.ok(!s.calls.includes('/auth/login'));
+});

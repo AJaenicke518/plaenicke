@@ -44,6 +44,13 @@ import { renderTodayView, renderTally } from './todayview.js';
 import { createCapture } from './capture.js';
 import { createTypeChips, PRIMARY_TYPES, MORE_TYPES } from './typechips.js';
 
+// THE BOOT FRAGMENT IS READ FIRST (sweep W2-I7). #invite=<code> and
+// #recover=<code> are secrets in the URL; readBootIntent strips them with
+// history.replaceState. Read anywhere later, a throw in between (a missing
+// element, a storage error) left the code in the address bar and in history.
+// The intent is kept here and acted on at the end of boot, as before.
+const bootIntent = readBootIntent({ location: window.location, history: window.history });
+
 const els = {
   // The shell's status line (capture date row, 2026-10-27): every message
   // not about the capture box. The top add box that held it is gone.
@@ -1950,10 +1957,10 @@ runSync();
 // recovery link.
 initAccountBanner({ onOpen: () => settings.open({ kind: 'new-recovery' }) });
 
-// A boot link (#invite= / #recover=, D24): read and stripped from the URL at
-// once (js/fragment.js), then Settings opens on the matching form. NO request
-// is made for it — a link scanner opening the URL must not spend the invite.
-const bootIntent = readBootIntent({ location: window.location, history: window.history });
+// A boot link (#invite= / #recover=, D24): read and stripped from the URL
+// before anything else (top of this file), then Settings opens on the
+// matching form. NO request is made for it — a link scanner opening the URL
+// must not spend the invite.
 if (bootIntent) settings.open(bootIntent);
 
 // GET /account on EVERY linked device, legacy included (§ 6.7 step 4): paints

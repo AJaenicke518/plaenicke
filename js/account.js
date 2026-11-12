@@ -20,7 +20,7 @@ export class AccountError extends Error {
   }
 }
 
-const KEY_ERRORS = new Set(['kdf_iters_too_low', 'unwrap_failed', 'bad_salt', 'bad_recovery_code']);
+const KEY_ERRORS = new Set(['kdf_iters_too_low', 'kdf_iters_out_of_range', 'unwrap_failed', 'bad_salt', 'bad_recovery_code']);
 
 // Every failure inside becomes an AccountError: known js/keys.js codes keep
 // their code, anything else is 'server' (never a bare Error). Caller-supplied
@@ -104,16 +104,32 @@ export async function signUp({ invite, email, password, deviceName, iters = KDF_
   });
 }
 
+// The server has minted a session (`answer` carries its token) and a check
+// on this device then failed (sweep W2-I2): nothing will ever hold that
+// session, and a device row nobody can sign out never expires. Revoked best
+// effort — logOut never throws — and the original error propagates.
+async function revokeOnThrow(c, answer, fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    if (answer && isStr(answer.token)) await logOut({ link: { authToken: answer.token }, fetchImpl: c.fetchImpl, apiBase: c.apiBase });
+    throw err;
+  }
+}
+
 export async function logIn({ email, password, deviceName, ...o }) {
   const c = ctx(o);
   return keyOp(async () => {
     const pre = await prelogin(c, email);
     const { authKey, wrapKey } = await derivePasswordKeys(password, pre.kdfSalt, pre.kdfIters, { minKdfIters: c.minKdfIters });
-    const res = shape(await post(c, '/auth/login', { email, authKey, deviceName }),
-      { token: isStr, accountId: isId, wrappedDekPw: isStr, dekCheck: isStr, recoveryConfirmed: (v) => typeof v === 'boolean' });
-    const dek = await unwrapDek(wrapKey, res.wrappedDekPw, 'pw');
-    if (await dekCheck(dek) !== res.dekCheck) throw new AccountError('dek_check_failed');
-    return { code: composeLinkCode(res.token, dek), accountId: res.accountId, recoveryConfirmed: res.recoveryConfirmed };
+    const answer = await post(c, '/auth/login', { email, authKey, deviceName });
+    return revokeOnThrow(c, answer, async () => {
+      const res = shape(answer,
+        { token: isStr, accountId: isId, wrappedDekPw: isStr, dekCheck: isStr, recoveryConfirmed: (v) => typeof v === 'boolean' });
+      const dek = await unwrapDek(wrapKey, res.wrappedDekPw, 'pw');
+      if (await dekCheck(dek) !== res.dekCheck) throw new AccountError('dek_check_failed');
+      return { code: composeLinkCode(res.token, dek), accountId: res.accountId, recoveryConfirmed: res.recoveryConfirmed };
+    });
   });
 }
 

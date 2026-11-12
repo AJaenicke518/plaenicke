@@ -6,6 +6,10 @@ import { bytesToBase64url, base64urlToBytes, KEY_BYTES, IV_BYTES } from './crypt
 
 export const MIN_KDF_ITERS = 600000;
 export const KDF_ITERS = 600000;
+// The ceiling (sweep W2-I6; the Worker refuses the same, W1-I8). prelogin
+// tells the device how many iterations to run, and PBKDF2 runs HERE: an
+// absurd count from a broken or hostile server would hang the device.
+export const MAX_KDF_ITERS = 10000000;
 const SALT_BYTES = 16;
 const RECOVERY_BYTES = 16;
 
@@ -51,6 +55,7 @@ async function hkdfKeys(ikmBytes, authInfo, wrapInfo) {
 
 export async function derivePasswordKeys(password, saltB64u, iters, { minKdfIters = MIN_KDF_ITERS } = {}) {
   if (!Number.isInteger(iters) || iters < minKdfIters) throw new Error('kdf_iters_too_low');
+  if (iters > MAX_KDF_ITERS) throw new Error('kdf_iters_out_of_range');
   let salt;
   try { salt = base64urlToBytes(saltB64u); } catch { throw new Error('bad_salt'); }
   if (salt.length !== SALT_BYTES) throw new Error('bad_salt');
