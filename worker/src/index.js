@@ -13,6 +13,8 @@ import { handleFeed } from './feed.js';
 import { VERSION } from './version.js';
 import { cors, json } from './cors.js';
 import { handleGetData, handlePutData } from './data.js';
+import { handleAccountRoute } from './accounts.js';
+import { nowISO } from './clock.js';
 import {
   authenticateDevice, isAdmin, mintDevice, revokeDevice,
 } from './auth.js';
@@ -95,16 +97,15 @@ async function handleSmartAdd(request, env) {
   return json(normalizeClaudeJson(parsed));
 }
 
-// The single clock boundary for this router. authenticateDevice and
+// The clock boundary is clock.js's nowISO(env). authenticateDevice and
 // handlePutData take `now` as a parameter rather than reading the clock
-// themselves, so tests can inject a fixed instant — see auth.js/data.js.
-function nowISO() { return new Date().toISOString(); }
+// themselves, so tests can inject a fixed instant (env.NOW) — see auth.js/data.js.
 
 async function handleData(request, env) {
-  const device = await authenticateDevice(request, env, nowISO());
+  const device = await authenticateDevice(request, env, nowISO(env));
   if (!device) return json({ error: 'unauthorized' }, 401);
   if (request.method === 'GET') return handleGetData(env, device.accountId);
-  if (request.method === 'PUT') return handlePutData(request, env, nowISO(), device.accountId);
+  if (request.method === 'PUT') return handlePutData(request, env, nowISO(env), device.accountId);
   return json({ error: 'method_not_allowed' }, 405);
 }
 
@@ -132,7 +133,7 @@ async function handleAdminDevice(request, env) {
     const accountId = payload ? payload.accountId : undefined;
     if (!name || !Number.isInteger(accountId) || accountId <= 0) return json({ error: 'bad_request' }, 400);
     // The token is returned here and never again — only its hash is stored.
-    const token = await mintDevice(env, accountId, name, nowISO());
+    const token = await mintDevice(env, accountId, name, nowISO(env));
     return json({ token, name });
   }
 
@@ -172,6 +173,9 @@ export default {
       if (pathname === '/') return await handleSmartAdd(request, env);
       if (pathname === '/data') return await handleData(request, env);
       if (pathname === '/admin/device') return await handleAdminDevice(request, env);
+
+      const accountRes = await handleAccountRoute(pathname, request, env);
+      if (accountRes) return accountRes;
 
       return json({ error: 'not_found' }, 404);
     } catch (err) {
