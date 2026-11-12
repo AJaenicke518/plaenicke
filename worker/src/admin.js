@@ -80,8 +80,7 @@ async function handleDisable(request, env) {
     ]);
     landed = results[0].results.length === 1;
   } else {
-    const res = await env.DB.prepare('UPDATE accounts SET disabled_at = NULL WHERE id = ? RETURNING id').bind(b.id).run();
-    landed = res.results.length === 1;
+    landed = Boolean(await env.DB.prepare('UPDATE accounts SET disabled_at = NULL WHERE id = ? RETURNING id').bind(b.id).first());
   }
   if (!landed) return json({ error: 'no_account' }, 404);
   return json({ id: b.id, disabled: b.disabled });

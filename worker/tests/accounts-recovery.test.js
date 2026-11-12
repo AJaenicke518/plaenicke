@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  b64u, b64, post, get, one, count, login, signedUp, envWith,
+  b64u, b64, post, get, one, count, login, signedUp, envWith, T0,
 } from './account-helpers.js';
 import { mintDevice } from '../src/auth.js';
 
@@ -34,7 +34,7 @@ test('1. recover/start returns the unsealed rec wrap; a wrong key is 401 and not
 test('2. recover/finish replaces all credentials, signs out every device, adds exactly one', async () => {
   const { env, token, accountId } = await signedUp();
   const second = (await (await login(env)).json()).token;
-  await post(env, '/account/recovery/confirm', undefined, token);
+  assert.equal((await post(env, '/account/recovery/confirm', { recAuthKey: b64u(32, 3) }, token)).status, 200);
   const res = await post(env, '/auth/recover/finish', fin());
   assert.equal(res.status, 200);
   const j = await res.json();
@@ -101,27 +101,45 @@ test('5. password change: new key logs in; others stay unless signOutOthers', as
   assert.equal((await get(env, '/data', second)).status, 401);
 });
 
-test('6. wrong current key: 401 counted; 50th sets lock; 51st is 429; /data unaffected; success resets', async () => {
-  const { env, token } = await signedUp();
+test('6. wrong current key: counted per device; 10th sets that device\'s lock; 11th is 429; account counter untouched', async () => {
+  const { env, token } = await signedUp({ ...envWith(), NOW: () => T0 });
+  const second = (await (await login(env)).json()).token;
   const bad = pw({ currentAuthKey: b64u(32, 9) });
-  for (let i = 1; i <= 49; i += 1) assert.equal((await post(env, '/account/password', bad, token)).status, 401, `attempt ${i}`);
-  assert.equal((await acct(env)).locked_until, null);
-  const r50 = await post(env, '/account/password', bad, token);
-  assert.equal(r50.status, 401);
-  assert.equal((await r50.json()).error, 'bad_credentials');
-  assert.notEqual((await acct(env)).locked_until, null);
-  const r51 = await post(env, '/account/password', bad, token);
-  assert.equal(r51.status, 429);
-  const j = await r51.json();
-  assert.equal(j.error, 'locked'); assert.ok(j.retryAt);
+  for (let i = 1; i <= 9; i += 1) assert.equal((await post(env, '/account/password', bad, token)).status, 401, `attempt ${i}`);
+  const r10 = await post(env, '/account/password', bad, token);
+  assert.equal(r10.status, 401);
+  assert.equal((await r10.json()).error, 'bad_credentials');
+  const r11 = await post(env, '/account/password', bad, token);
+  assert.equal(r11.status, 429);
+  assert.deepEqual(await r11.json(), { error: 'locked', retryAt: '2026-11-11T13:00:00.000Z' });
+  // the right key is refused too while this device is locked, on both password-gated routes
+  assert.equal((await post(env, '/account/password', pw(), token)).status, 429);
+  assert.equal((await post(env, '/account/recovery', { currentAuthKey: b64u(32, 2), recAuthKey: b64u(32, 7), wrappedDekRec: b64(60, 8) }, token)).status, 429);
+  // never touches the account counter: login works, the other device works, /data works
+  const a = await acct(env);
+  assert.equal(a.failed_logins, 0); assert.equal(a.locked_until, null);
+  assert.equal((await login(env)).status, 200);
   assert.equal((await get(env, '/data', token)).status, 200);
+  assert.equal((await post(env, '/account/recovery', { currentAuthKey: b64u(32, 2), recAuthKey: b64u(32, 7), wrappedDekRec: b64(60, 8) }, second)).status, 200);
+  // the lock ends after an hour, exactly at retryAt
+  env.NOW = () => '2026-11-11T13:00:00.000Z';
+  assert.equal((await post(env, '/account/password', pw(), token)).status, 200);
 
+  // success resets the device counter
   const s2 = await signedUp();
   await post(s2.env, '/account/password', pw({ currentAuthKey: b64u(32, 9) }), s2.token);
   await post(s2.env, '/account/password', pw({ currentAuthKey: b64u(32, 9) }), s2.token);
-  assert.equal((await acct(s2.env)).failed_logins, 2);
+  assert.equal((await one(s2.env, 'SELECT failed_pw FROM devices')).failed_pw, 2);
   assert.equal((await post(s2.env, '/account/password', pw(), s2.token)).status, 200);
-  assert.equal((await acct(s2.env)).failed_logins, 0);
+  assert.equal((await one(s2.env, 'SELECT failed_pw FROM devices')).failed_pw, 0);
+});
+
+test('I7. an account locked by 50 anonymous login failures does not block the signed-in owner', async () => {
+  const { env, token } = await signedUp();
+  await lockNow(env);
+  assert.equal((await login(env)).status, 429);
+  assert.equal((await post(env, '/account/recovery', { currentAuthKey: b64u(32, 2), recAuthKey: b64u(32, 7), wrappedDekRec: b64(60, 8) }, token)).status, 200);
+  assert.equal((await post(env, '/account/password', pw(), token)).status, 200);
 });
 
 test('6b. password change and new recovery link require a bearer token', async () => {
@@ -140,6 +158,12 @@ test('10. unknown email is 401 bad_recovery; disabled is 403 and nothing changes
   }
   await env.DB.prepare('UPDATE accounts SET disabled_at = ? WHERE email IS NOT NULL').bind('t').run();
   const before = await acct(env);
+  // SEC #7: a wrong recovery key on a disabled account is 401, not 403 — no disabled oracle
+  for (const [p, b] of [['/auth/recover/start', rec({ recAuthKey: b64u(32, 9) })], ['/auth/recover/finish', fin({ recAuthKey: b64u(32, 9) })]]) {
+    const res = await post(env, p, b);
+    assert.equal(res.status, 401, p);
+    assert.equal((await res.json()).error, 'bad_recovery');
+  }
   for (const [p, b] of [['/auth/recover/start', rec()], ['/auth/recover/finish', fin()]]) {
     const res = await post(env, p, b);
     assert.equal(res.status, 403, p);
@@ -184,7 +208,7 @@ test('11. password change and new recovery link on legacy account 1 are 409 no_p
 
 test('7. new recovery link replaces rec mac and wrap and clears confirmation', async () => {
   const { env, token } = await signedUp();
-  await post(env, '/account/recovery/confirm', undefined, token);
+  assert.equal((await post(env, '/account/recovery/confirm', { recAuthKey: b64u(32, 3) }, token)).status, 200);
   const b = { currentAuthKey: b64u(32, 2), recAuthKey: b64u(32, 7), wrappedDekRec: b64(60, 8) };
   const res = await post(env, '/account/recovery', b, token);
   assert.deepEqual(await res.json(), { ok: true });
@@ -195,7 +219,8 @@ test('7. new recovery link replaces rec mac and wrap and clears confirmation', a
   const bad = await post(env, '/account/recovery', { ...b, currentAuthKey: b64u(32, 9) }, token);
   assert.equal(bad.status, 401);
   assert.equal((await bad.json()).error, 'bad_credentials');
-  assert.equal((await acct(env)).failed_logins, 1);
+  assert.equal((await acct(env)).failed_logins, 0);
+  assert.equal((await one(env, 'SELECT failed_pw FROM devices WHERE account_id = ?', (await acct(env)).id)).failed_pw, 1);
   assert.equal((await post(env, '/account/recovery', { ...b, recAuthKey: 'x' }, token)).status, 400);
 });
 
@@ -329,4 +354,49 @@ test('C1d. concurrent upgrades: same code twice, or two codes — exactly one 20
     assert.equal((await one(env, 'SELECT email FROM accounts WHERE id = 1')).email, winnerEmail);
     assert.equal((await one(env, 'SELECT COUNT(*) AS n FROM upgrade_codes WHERE used_at IS NOT NULL')).n, 1);
   }
+});
+
+// --- sweep W1-I3: recovery confirm is tied to the code on screen -------------
+
+test('I3a. recovery confirm requires recAuthKey: missing or malformed is 400', async () => {
+  const { env, token, accountId } = await signedUp();
+  for (const b of [undefined, {}, { recAuthKey: 'short' }]) {
+    const res = await post(env, '/account/recovery/confirm', b, token);
+    assert.equal(res.status, 400, JSON.stringify(b));
+    assert.equal((await res.json()).error, 'bad_request');
+  }
+  assert.equal((await one(env, 'SELECT recovery_confirmed_at FROM accounts WHERE id = ?', accountId)).recovery_confirmed_at, null);
+});
+
+test('I3b. confirming an old code after a new link was made elsewhere is 409 recovery_changed and confirms nothing', async () => {
+  const { env, token, accountId } = await signedUp();
+  const t2 = (await (await login(env)).json()).token;
+  assert.equal((await post(env, '/account/recovery', { currentAuthKey: b64u(32, 2), recAuthKey: b64u(32, 7), wrappedDekRec: b64(60, 8) }, t2)).status, 200);
+  const stale = await post(env, '/account/recovery/confirm', { recAuthKey: b64u(32, 3) }, token);
+  assert.equal(stale.status, 409);
+  assert.equal((await stale.json()).error, 'recovery_changed');
+  assert.equal((await one(env, 'SELECT recovery_confirmed_at FROM accounts WHERE id = ?', accountId)).recovery_confirmed_at, null);
+  assert.equal((await post(env, '/account/recovery/confirm', { recAuthKey: b64u(32, 7) }, token)).status, 200);
+  assert.notEqual((await one(env, 'SELECT recovery_confirmed_at FROM accounts WHERE id = ?', accountId)).recovery_confirmed_at, null);
+});
+
+test('I3c. recovery confirm on the legacy account (no recovery key) is 409 recovery_changed', async () => {
+  const env = envWith();
+  const t1 = await mintDevice(env, 1, 'old', 't');
+  const res = await post(env, '/account/recovery/confirm', { recAuthKey: b64u(32, 3) }, t1);
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).error, 'recovery_changed');
+});
+
+// --- sweep W1-I8: kdfIters upper bound on every route that sets it -----------
+
+test('I8b. kdfIters above 10,000,000 is 400 on recover/finish, password change and upgrade', async () => {
+  const { env, token } = await signedUp();
+  const big = { kdfIters: 10_000_001 };
+  assert.equal((await post(env, '/auth/recover/finish', fin(big))).status, 400);
+  assert.equal((await post(env, '/account/password', pw(big), token)).status, 400);
+  const t1 = await mintDevice(env, 1, 'old', 't');
+  const code = await mintUpgradeCode(env);
+  assert.equal((await post(env, '/account/upgrade', up({ ...big, upgradeCode: code }), t1)).status, 400);
+  assert.equal((await one(env, 'SELECT used_at FROM upgrade_codes')).used_at, null);
 });

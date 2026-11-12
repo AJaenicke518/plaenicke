@@ -7,6 +7,7 @@ import {
   listDevices, signOutOthers, confirmRecovery, logOut, recoveryLink, mailtoHref,
 } from '../js/account.js';
 import { parseLinkCode, generateEncKey, encryptBlob } from '../js/crypto.js';
+import { deriveRecoveryKeys } from '../js/keys.js';
 import { APP_URL } from '../js/config.js';
 
 
@@ -147,14 +148,21 @@ test('newRecoveryLink issues a code that recovers, and getAccount/listDevices/co
   const link = linkOf(su.code);
   const { recoveryCode } = await newRecoveryLink({ link, email: EMAIL, currentPassword: PW, ...s });
   assert.equal(recoveryCode.length, 22);
-  await recover({ email: EMAIL, recoveryCode, newPassword: 'brand-new-pw-2#', deviceName: 'Mac', ...s });
+  const recovered = await recover({ email: EMAIL, recoveryCode, newPassword: 'brand-new-pw-2#', deviceName: 'Mac', ...s });
   // recovery signed every device out; log in again for a fresh link
   const li = await logIn({ email: EMAIL, password: 'brand-new-pw-2#', deviceName: 'B', ...s });
   const l2 = linkOf(li.code);
   const acct = await getAccount({ link: l2, ...s });
   assert.equal(acct.email, EMAIL);
   assert.equal(acct.recoveryConfirmed, false);
-  await confirmRecovery({ link: l2, ...s });
+  // Sweep W1-I3: POST /account/recovery/confirm now requires {recAuthKey} of
+  // the code on screen. js/account.js sends it from W3 on; until then this
+  // test-only wrapper adds it for the code recover() just minted.
+  const { recAuthKey } = await deriveRecoveryKeys(recovered.recoveryCode);
+  const withKey = async (url, opts) => (new URL(url).pathname === '/account/recovery/confirm'
+    ? s.fetchImpl(url, { ...opts, headers: { ...opts.headers, 'content-type': 'application/json' }, body: JSON.stringify({ recAuthKey }) })
+    : s.fetchImpl(url, opts));
+  await confirmRecovery({ link: l2, ...s, fetchImpl: withKey });
   assert.equal((await getAccount({ link: l2, ...s })).recoveryConfirmed, true);
   const devs = await listDevices({ link: l2, ...s });
   assert.ok(devs.devices.some((d) => d.current));

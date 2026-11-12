@@ -34,3 +34,50 @@ export async function signedUp(env = envWith()) {
 }
 export const T0 = '2026-11-11T12:00:00.000Z';
 
+
+// hookDb(env, hooks) -> a copy of env whose DB runs a chosen interleaving.
+// Each hook {re, before, once = true} fires when a statement whose SQL
+// matches `re` is about to execute (alone, or as part of a batch, before the
+// batch starts): `before()` is awaited first — run the competing request
+// there, against the ORIGINAL env, so it does not re-enter the hooks.
+export function hookDb(env, hooks) {
+  const real = env.DB;
+  const fire = async (sql) => {
+    for (const h of hooks) {
+      if (!h.re.test(sql) || (h.once !== false && h.fired)) continue;
+      h.fired = true;
+      await h.before();
+    }
+  };
+  const wrap = (st, sql) => ({
+    _sql: sql,
+    _st: st,
+    bind: (...a) => wrap(st.bind(...a), sql),
+    first: async () => { await fire(sql); return st.first(); },
+    run: async () => { await fire(sql); return st.run(); },
+    all: async () => { await fire(sql); return st.all(); },
+  });
+  return {
+    ...env,
+    DB: {
+      prepare: (sql) => wrap(real.prepare(sql), sql),
+      batch: async (stmts) => {
+        for (const s of stmts) await fire(s._sql);
+        return real.batch(stmts.map((s) => s._st));
+      },
+    },
+  };
+}
+
+// A DB whose batch results carry no per-statement meta: what a handler may
+// rely on inside a real-D1 batch is RETURNING rows, not meta.changes.
+export function noBatchMeta(env) {
+  const real = env.DB;
+  return {
+    ...env,
+    DB: {
+      prepare: (sql) => real.prepare(sql),
+      batch: async (stmts) => (await real.batch(stmts)).map((r) => ({ success: true, results: r.results, meta: {} })),
+    },
+  };
+}

@@ -60,11 +60,15 @@ test('5. a duplicate email is 409 and the second invite is not consumed', async 
   assert.equal(row.used_at, null);
 });
 
-test('6. a batch that throws rolls back everything', async () => {
+test('6. a batch whose LAST statement fails rolls back the earlier ones (invite, account, data)', async () => {
   const env = envWith();
   await invite(env);
   const real = env.DB;
-  const res = await post({ ...env, DB: { ...real, batch: async () => { throw new Error('boom'); } } }, '/auth/signup', body());
+  const failingLast = {
+    prepare: (sql) => real.prepare(sql),
+    batch: (stmts) => real.batch([...stmts.slice(0, -1), real.prepare('INSERT INTO nosuch_table VALUES (1)')]),
+  };
+  const res = await post({ ...env, DB: failingLast }, '/auth/signup', body());
   assert.equal(res.status, 500);
   assert.equal((await res.json()).error, 'internal_error');
   assert.equal(await count(env, 'accounts'), 1); // legacy account 1 only
@@ -147,9 +151,12 @@ test('11 + 20. 60 concurrent wrong logins: exactly 50 x 401, 10 x 429, all with 
   assert.equal((await one(env, 'SELECT failed_logins FROM accounts WHERE email IS NOT NULL')).failed_logins, 50);
 });
 
-test('12. a disabled account is 403 disabled on login', async () => {
+test('12. a disabled account is 403 disabled on login — only after the key matched (no disabled oracle)', async () => {
   const { env } = await signedUp();
   await env.DB.prepare('UPDATE accounts SET disabled_at = ? WHERE email IS NOT NULL').bind('t').run();
+  const wrong = await login(env, { authKey: b64u(32, 9) });
+  assert.equal(wrong.status, 401);
+  assert.equal((await wrong.json()).error, 'bad_credentials');
   const res = await login(env);
   assert.equal(res.status, 403);
   assert.equal((await res.json()).error, 'disabled');
@@ -185,7 +192,7 @@ test('15. recovery confirm sets recovery_confirmed_at; login reports it', async 
   const { env, token, accountId } = await signedUp();
   const acct = await (await get(env, '/account', token)).json();
   assert.deepEqual(acct, { accountId, email: 'tester@example.com', recoveryConfirmed: false });
-  const res = await post(env, '/account/recovery/confirm', undefined, token);
+  const res = await post(env, '/account/recovery/confirm', { recAuthKey: b64u(32, 3) }, token);
   assert.deepEqual(await res.json(), { ok: true });
   assert.notEqual((await one(env, 'SELECT recovery_confirmed_at FROM accounts WHERE id = ?', accountId)).recovery_confirmed_at, null);
   assert.equal((await (await login(env)).json()).recoveryConfirmed, true);
@@ -232,7 +239,13 @@ test('17. responses and logs never contain the email or the auth key', async () 
     captured.push(await r2.text());
     const r3 = await login(env);
     captured.push(await r3.text().then((t) => t.replace(/"wrappedDekPw":"[^"]*"/, '')));
+    // a 500 path while the console is captured: internal_error logs name + message only
+    const broken = { ...env, DB: { prepare: env.DB.prepare, batch: async () => { throw new Error('D1 down'); } } };
+    const r4 = await login(broken);
+    assert.equal(r4.status, 500);
+    captured.push(await r4.text());
   } finally { console.log = origLog; console.error = origErr; }
+  assert.ok(captured.some((s) => s.includes('D1 down')), 'the 500 path logged');
   for (const s of captured) {
     assert.ok(!s.toLowerCase().includes('tester@example.com'));
     assert.ok(!s.includes(body().authKey));
@@ -261,4 +274,59 @@ test('19. validation failures are 400 and consume no invite', async () => {
     assert.equal((await res.json()).error, 'bad_request');
   }
   assert.equal((await one(env, 'SELECT used_at FROM invites')).used_at, null);
+});
+
+// --- sweep W1 (I5, I8, I9, TEST M2/M3) ---------------------------------------
+
+test('I5. login with an unsealable wrap is 500 bad_seal and mints no session', async () => {
+  const { env, accountId } = await signedUp();
+  await env.DB.prepare("UPDATE accounts SET wrapped_dek_pw_sealed = 'k1:AAAA', failed_logins = 3 WHERE id = ?").bind(accountId).run();
+  const res = await login(env);
+  assert.equal(res.status, 500);
+  assert.equal((await res.json()).error, 'bad_seal');
+  assert.equal((await one(env, 'SELECT COUNT(*) AS n FROM devices WHERE account_id = ?', accountId)).n, 1);
+});
+
+test('I8. kdfIters above 10,000,000 is 400 on sign-up; exactly 10,000,000 is accepted', async () => {
+  const env = envWith();
+  await invite(env);
+  const res = await post(env, '/auth/signup', body({ kdfIters: 10_000_001 }));
+  assert.equal(res.status, 400);
+  assert.equal((await one(env, 'SELECT used_at FROM invites')).used_at, null);
+  assert.equal((await post(env, '/auth/signup', body({ kdfIters: 10_000_000 }))).status, 200);
+});
+
+test('I9. the devices list and sign-out-others are scoped to the caller\'s account', async () => {
+  const { env, token } = await signedUp();
+  await invite(env, 'INVITE-2');
+  const other = await (await post(env, '/auth/signup', body({ invite: 'INVITE-2', email: 'two@example.com', deviceName: 'OtherPhone' }))).json();
+  const otherSecond = (await (await login(env, { email: 'two@example.com', deviceName: 'OtherMac' })).json()).token;
+  const second = (await (await login(env)).json()).token;
+  const list = await (await get(env, '/account/devices', token)).json();
+  assert.deepEqual(list.devices.map((d) => d.name).sort(), ['Mac', 'iPhone']);
+  const so = await post(env, '/account/devices/signout-others', undefined, token);
+  assert.deepEqual(await so.json(), { signedOut: 1 });
+  assert.equal((await get(env, '/data', second)).status, 401);
+  for (const t of [other.token, otherSecond]) assert.equal((await get(env, '/data', t)).status, 200);
+  assert.equal((await one(env, 'SELECT COUNT(*) AS n FROM devices WHERE account_id = ?', other.accountId)).n, 2);
+});
+
+test('M2. login at exactly retryAt succeeds', async () => {
+  const { env } = await signedUp();
+  env.NOW = () => T0;
+  for (let i = 1; i <= 50; i += 1) await login(env, { authKey: b64u(32, 9) });
+  const locked = await (await login(env)).json();
+  assert.equal(locked.retryAt, '2026-11-11T13:00:00.000Z');
+  env.NOW = () => locked.retryAt;
+  assert.equal((await login(env)).status, 200);
+});
+
+test('M3. prelogin and login treat an account with an email but no password as unknown (404)', async () => {
+  const env = envWith();
+  await env.DB.prepare("INSERT INTO accounts (id, email, kdf_salt, kdf_iters, created_at) VALUES (9, 'half@example.com', ?, 600000, 't')")
+    .bind(b64u(16, 1)).run();
+  const pre = await post(env, '/auth/prelogin', { email: 'half@example.com' });
+  assert.equal(pre.status, 404);
+  assert.equal((await pre.json()).error, 'no_account');
+  assert.equal((await login(env, { email: 'half@example.com' })).status, 404);
 });
