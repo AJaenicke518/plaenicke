@@ -118,7 +118,7 @@ test('syncFeed: success writes the cache entry and preserves other feeds', async
   const fetchImpl = async (url, opts) => { capturedUrl = url; capturedOpts = opts; return fakeOkResponse(ics); };
   const now = () => new Date('2026-07-28T12:00:00.000Z');
 
-  const result = await syncFeed(FEED_A, { fetchImpl, now });
+  const result = await syncFeed(FEED_A, { authToken: 'tok', fetchImpl, now });
 
   assert.equal(result.ok, true);
   assert.deepEqual(result.skipped, []);
@@ -138,7 +138,7 @@ test('syncFeed: manual sync sends Cache-Control: no-cache', async () => {
   resetStorage();
   let capturedOpts = null;
   const fetchImpl = async (url, opts) => { capturedOpts = opts; return fakeOkResponse(icsWith()); };
-  await syncFeed(FEED_A, { fetchImpl, now: () => new Date(), manual: true });
+  await syncFeed(FEED_A, { authToken: 'tok', fetchImpl, now: () => new Date(), manual: true });
   assert.equal(capturedOpts.headers['Cache-Control'], 'no-cache');
 });
 
@@ -146,7 +146,7 @@ test('syncFeed: non-manual sync omits Cache-Control header', async () => {
   resetStorage();
   let capturedOpts = null;
   const fetchImpl = async (url, opts) => { capturedOpts = opts; return fakeOkResponse(icsWith()); };
-  await syncFeed(FEED_A, { fetchImpl, now: () => new Date(), manual: false });
+  await syncFeed(FEED_A, { authToken: 'tok', fetchImpl, now: () => new Date(), manual: false });
   assert.equal(Object.prototype.hasOwnProperty.call(capturedOpts.headers, 'Cache-Control'), false);
 });
 
@@ -162,7 +162,7 @@ test('syncFeed: a feed removed while its fetch was in flight writes no cache ent
   const ics = icsWith(vevent({ uid: 'e1', summary: 'Lecture', dtstart: '20260801T090000Z' }));
   const fetchImpl = async () => fakeOkResponse(ics);
 
-  const result = await syncFeed(FEED_A, { fetchImpl, now: () => new Date('2026-07-28T12:00:00.000Z') });
+  const result = await syncFeed(FEED_A, { authToken: 'tok', fetchImpl, now: () => new Date('2026-07-28T12:00:00.000Z') });
 
   assert.equal(result.ok, true);
   assert.equal(result.removed, true);
@@ -177,7 +177,7 @@ test('syncFeed: a feed still present in stored feeds writes its cache entry as n
   const ics = icsWith(vevent({ uid: 'e1', summary: 'Lecture', dtstart: '20260801T090000Z' }));
   const fetchImpl = async () => fakeOkResponse(ics);
 
-  const result = await syncFeed(FEED_A, { fetchImpl, now: () => new Date('2026-07-28T12:00:00.000Z') });
+  const result = await syncFeed(FEED_A, { authToken: 'tok', fetchImpl, now: () => new Date('2026-07-28T12:00:00.000Z') });
 
   assert.equal(result.ok, true);
   assert.equal(result.removed, undefined);
@@ -191,7 +191,7 @@ test('syncFeed: upstream error response keeps last-good cache and reports the er
   saveFeedCache({ feedA: { fetchedAt: '2026-07-01T00:00:00.000Z', events: [{ uid: 'good' }], skipped: [] } });
   const fetchImpl = async () => fakeErrorResponse(422, 'not_an_ics_feed');
 
-  const result = await syncFeed(FEED_A, { fetchImpl, now: () => new Date() });
+  const result = await syncFeed(FEED_A, { authToken: 'tok', fetchImpl, now: () => new Date() });
 
   assert.equal(result.ok, false);
   assert.equal(result.error, 'not_an_ics_feed');
@@ -205,7 +205,7 @@ test('syncFeed: network failure (fetchImpl throws) reports unreachable and keeps
   saveFeedCache({ feedA: { fetchedAt: '2026-07-01T00:00:00.000Z', events: [{ uid: 'good' }], skipped: [] } });
   const fetchImpl = async () => { throw new Error('DNS failure'); };
 
-  const result = await syncFeed(FEED_A, { fetchImpl, now: () => new Date() });
+  const result = await syncFeed(FEED_A, { authToken: 'tok', fetchImpl, now: () => new Date() });
 
   assert.equal(result.ok, false);
   assert.equal(result.error, 'unreachable');
@@ -228,7 +228,7 @@ test('syncFeed: QuotaError prunes out-of-window events and retries once, succeed
   const fetchImpl = async () => fakeOkResponse(ics);
   const now = () => new Date('2026-07-28T12:00:00.000Z');
 
-  const result = await syncFeed(FEED_A, { fetchImpl, now });
+  const result = await syncFeed(FEED_A, { authToken: 'tok', fetchImpl, now });
 
   assert.equal(result.ok, true);
   assert.equal(result.quotaPruned, true);
@@ -273,7 +273,7 @@ test('syncFeed: quota prune keeps events whose RANGE overlaps the window, not ju
   const fetchImpl = async () => fakeOkResponse(icsWith(vevent({ uid: 'e1', summary: 'New', dtstart: '20260801T090000Z' })));
   const now = () => new Date('2026-07-28T12:00:00.000Z');
 
-  const result = await syncFeed(FEED_A, { fetchImpl, now });
+  const result = await syncFeed(FEED_A, { authToken: 'tok', fetchImpl, now });
 
   assert.equal(result.ok, true);
   assert.equal(result.quotaPruned, true);
@@ -303,7 +303,7 @@ test('syncFeed: quota prune keeps a recurring master whose UNTIL still reaches t
   const fetchImpl = async () => fakeOkResponse(icsWith(vevent({ uid: 'e1', summary: 'New', dtstart: '20260801T090000Z' })));
   const now = () => new Date('2026-07-28T12:00:00.000Z');
 
-  await syncFeed(FEED_A, { fetchImpl, now });
+  await syncFeed(FEED_A, { authToken: 'tok', fetchImpl, now });
 
   const keptUids = loadFeedCache().feedB.events.map((e) => e.uid).sort();
   assert.deepEqual(keptUids, ['until-future']);
@@ -326,7 +326,7 @@ test('syncFeed: QuotaError survives prune+retry, drops the largest feed cache, a
   const fetchImpl = async () => fakeOkResponse(ics);
   const now = () => new Date('2026-07-28T12:00:00.000Z');
 
-  const result = await syncFeed(FEED_A, { fetchImpl, now });
+  const result = await syncFeed(FEED_A, { authToken: 'tok', fetchImpl, now });
 
   assert.equal(result.ok, true);
   assert.equal(result.quotaDropped, true);
@@ -347,7 +347,7 @@ test('syncFeed: QuotaError that persists even after dropping the largest feed re
   saveFeedCache({});
   globalThis.localStorage = new QuotaThrottledLocalStorage(inner, 3); // every attempt overflows
   const fetchImpl = async () => fakeOkResponse(icsWith());
-  const result = await syncFeed(FEED_A, { fetchImpl, now: () => new Date() });
+  const result = await syncFeed(FEED_A, { authToken: 'tok', fetchImpl, now: () => new Date() });
   assert.equal(result.ok, false);
   assert.equal(result.error, 'storage_full');
 });
@@ -361,7 +361,7 @@ test('syncStale: a feed 29 minutes old is not stale and is not synced', async ()
   let called = false;
   const fetchImpl = async () => { called = true; return fakeOkResponse(icsWith()); };
 
-  const results = await syncStale([FEED_A], cache, { fetchImpl, now });
+  const results = await syncStale([FEED_A], cache, { authToken: 'tok', fetchImpl, now });
 
   assert.equal(called, false);
   assert.deepEqual(results, {});
@@ -375,7 +375,7 @@ test('syncStale: a feed 31 minutes old is stale and gets synced', async () => {
   let called = false;
   const fetchImpl = async () => { called = true; return fakeOkResponse(icsWith()); };
 
-  const results = await syncStale([FEED_A], cache, { fetchImpl, now });
+  const results = await syncStale([FEED_A], cache, { authToken: 'tok', fetchImpl, now });
 
   assert.equal(called, true);
   assert.equal(results.feedA.ok, true);
@@ -386,7 +386,7 @@ test('syncStale: a feed with no cache entry at all is treated as stale', async (
   saveFeeds([FEED_A]); // stored, so syncFeed's remove-during-sync guard lets the write through
   let called = false;
   const fetchImpl = async () => { called = true; return fakeOkResponse(icsWith()); };
-  const results = await syncStale([FEED_A], {}, { fetchImpl, now: () => new Date() });
+  const results = await syncStale([FEED_A], {}, { authToken: 'tok', fetchImpl, now: () => new Date() });
   assert.equal(called, true);
   assert.ok(results.feedA);
 });
@@ -1439,12 +1439,12 @@ test('series memo: a refetch that replaces the cache entry is never answered fro
   const on14 = (cache) => instancesForRange([FEED_A], cache, '2026-09-14', '2026-09-14', 'UTC')
     .map((i) => [i.uid, i.recurring, i.guessedSeries]);
 
-  assert.equal((await syncFeed(FEED_A, { fetchImpl: async () => fakeOkResponse(weekly(4)), now })).ok, true);
+  assert.equal((await syncFeed(FEED_A, { authToken: 'tok', fetchImpl: async () => fakeOkResponse(weekly(4)), now })).ok, true);
   const snapshot = loadFeedCache(); // as app.js holds it: one object, rendered many times
   for (let k = 0; k < 3; k += 1) assert.deepEqual(on14(snapshot), [['m0', true, true]]);
-  assert.equal((await syncFeed(FEED_A, { fetchImpl: async () => fakeOkResponse(weekly(2)), now })).ok, true);
+  assert.equal((await syncFeed(FEED_A, { authToken: 'tok', fetchImpl: async () => fakeOkResponse(weekly(2)), now })).ok, true);
   assert.deepEqual(on14(loadFeedCache()), [['m0', false, false]], 'two weeks after the refetch: no longer a series');
-  assert.equal((await syncFeed(FEED_A, { fetchImpl: async () => fakeOkResponse(weekly(4)), now })).ok, true);
+  assert.equal((await syncFeed(FEED_A, { authToken: 'tok', fetchImpl: async () => fakeOkResponse(weekly(4)), now })).ok, true);
   assert.deepEqual(on14(loadFeedCache()), [['m0', true, true]], 'and back');
 });
 
@@ -1459,4 +1459,63 @@ test('series memo: the zone is part of the key — the same array in another zon
   assert.deepEqual(on9(TZ_LA), [true]);
   assert.deepEqual(on9('UTC'), [false]);
   assert.deepEqual(on9(TZ_LA), [true]);
+});
+
+// --- the account bearer (accounts spec § 6.8, D20/D21) -----------------------
+//
+// `authToken` is a REQUIRED key (plan review I10): a forgotten call site throws
+// instead of silently reading as "signed out". null is signed out: no fetch,
+// and the cache is left exactly as it was so it keeps rendering.
+
+test('syncFeed: sends Authorization: Bearer <token>', async () => {
+  resetStorage();
+  saveFeeds([FEED_A]);
+  let capturedOpts = null;
+  const fetchImpl = async (url, opts) => { capturedOpts = opts; return fakeOkResponse(icsWith()); };
+  await syncFeed(FEED_A, { fetchImpl, now: () => new Date(), authToken: 'tok-9' });
+  assert.equal(capturedOpts.headers.authorization, 'Bearer tok-9');
+});
+
+test('syncFeed: authToken null → {ok:false, error:signed_out}, fetchImpl never called, cache untouched', async () => {
+  resetStorage();
+  saveFeeds([FEED_A]);
+  const cached = { feedA: { fetchedAt: '2026-07-01T00:00:00.000Z', events: [{ uid: 'keep' }], skipped: [] } };
+  saveFeedCache(cached);
+  let called = false;
+  const fetchImpl = async () => { called = true; return fakeOkResponse(icsWith()); };
+  const result = await syncFeed(FEED_A, { fetchImpl, now: () => new Date(), authToken: null });
+  assert.deepEqual(result, { ok: false, error: 'signed_out' });
+  assert.equal(called, false);
+  assert.deepEqual(loadFeedCache(), cached);
+});
+
+test('syncFeed: authToken omitted throws authToken required', async () => {
+  resetStorage();
+  let called = false;
+  const fetchImpl = async () => { called = true; return fakeOkResponse(icsWith()); };
+  await assert.rejects(syncFeed(FEED_A, { fetchImpl, now: () => new Date() }),
+    (e) => e instanceof TypeError && e.message === 'authToken required');
+  await assert.rejects(syncFeed(FEED_A), (e) => e instanceof TypeError && e.message === 'authToken required');
+  assert.equal(called, false);
+});
+
+test('syncStale: forwards the token to every syncFeed; omitted throws; null fetches nothing', async () => {
+  resetStorage();
+  saveFeeds([FEED_A, FEED_B]);
+  const seen = [];
+  const fetchImpl = async (url, opts) => { seen.push(opts.headers.authorization); return fakeOkResponse(icsWith()); };
+  const results = await syncStale([FEED_A, FEED_B], {}, { fetchImpl, now: () => new Date(), authToken: 'tok-s' });
+  assert.deepEqual(seen, ['Bearer tok-s', 'Bearer tok-s']);
+  assert.equal(results.feedA.ok, true);
+  assert.equal(results.feedB.ok, true);
+  await assert.rejects(syncStale([FEED_A], {}, { fetchImpl, now: () => new Date() }),
+    (e) => e instanceof TypeError && e.message === 'authToken required');
+  seen.length = 0;
+  const out = await syncStale([FEED_A, FEED_B], {}, { fetchImpl, now: () => new Date(), authToken: null });
+  assert.deepEqual(seen, []);
+  assert.deepEqual(out, { feedA: { ok: false, error: 'signed_out' }, feedB: { ok: false, error: 'signed_out' } });
+});
+
+test('feedStatus: signed_out reads as a sign-in prompt, not a generic failure', () => {
+  assert.equal(feedStatus(FEED_A, { error: 'signed_out' }, new Date()), 'error: sign in to refresh');
 });

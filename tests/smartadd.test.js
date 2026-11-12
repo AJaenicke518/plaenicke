@@ -39,6 +39,9 @@ test('no items → empty', () => {
 
 // setImmediate is not mocked here (apis: ['setTimeout'] only), so this lets
 // every pending promise chain run to completion.
+// Every pre-account test is a linked device's call.
+const AUTH = { authToken: 'tok' };
+
 const flush = async () => { for (let i = 0; i < 5; i += 1) await new Promise((r) => { setImmediate(r); }); };
 
 function stubFetch(respond) {
@@ -67,7 +70,7 @@ test('parseViaWorker: success returns the parsed reply, and leaves no deadline a
   const net = stubFetch(async () => response(200, { json: async () => reply }));
   t.mock.timers.enable({ apis: ['setTimeout'] });
   try {
-    assert.deepEqual(await parseViaWorker('dentist on jan 2'), reply);
+    assert.deepEqual(await parseViaWorker('dentist on jan 2', AUTH), reply);
     assert.equal(net.calls.length, 1);
     assert.equal(net.calls[0].url, WORKER_URL);
     assert.equal(net.calls[0].init.method, 'POST');
@@ -85,7 +88,7 @@ test('parseViaWorker: 413 → too_long, and the body is read so no deadline stay
   const net = stubFetch(async () => response(413, { text: async () => { bodyRead = true; return '{"error":"too_long"}'; } }));
   t.mock.timers.enable({ apis: ['setTimeout'] });
   try {
-    await assert.rejects(parseViaWorker('x'), { message: 'too_long' });
+    await assert.rejects(parseViaWorker('x', AUTH), { message: 'too_long' });
     assert.equal(bodyRead, true, 'the error body is read before throwing');
     await new Promise((r) => setImmediate(r)); // let the drained body settle
     t.mock.timers.tick(SMART_ADD_TIMEOUT_MS);
@@ -102,7 +105,7 @@ test('parseViaWorker: an items array holding a non-object → server, not a raw 
   for (const items of [[null], [1], ['x'], [[]]]) {
     const net = stubFetch(async () => response(200, { json: async () => ({ items, needsReview: false }) }));
     try {
-      await assert.rejects(parseViaWorker('x'), { message: 'server' }, JSON.stringify(items));
+      await assert.rejects(parseViaWorker('x', AUTH), { message: 'server' }, JSON.stringify(items));
     } finally {
       net.restore();
     }
@@ -114,7 +117,7 @@ test('parseViaWorker: a 413 whose body stalls still rejects at once', async (t) 
   t.mock.timers.enable({ apis: ['setTimeout'] });
   try {
     let outcome = 'pending';
-    parseViaWorker('x').then(() => { outcome = 'resolved'; }, (e) => { outcome = e.message; });
+    parseViaWorker('x', AUTH).then(() => { outcome = 'resolved'; }, (e) => { outcome = e.message; });
     await new Promise((r) => setImmediate(r));
     assert.equal(outcome, 'too_long', 'no tick of the deadline was needed');
   } finally {
@@ -128,7 +131,7 @@ test('parseViaWorker: 500 → server, and the body is read so no deadline stays 
   const net = stubFetch(async () => response(500, { text: async () => { bodyRead = true; return 'oops'; } }));
   t.mock.timers.enable({ apis: ['setTimeout'] });
   try {
-    await assert.rejects(parseViaWorker('x'), { message: 'server' });
+    await assert.rejects(parseViaWorker('x', AUTH), { message: 'server' });
     assert.equal(bodyRead, true, 'the error body is read before throwing');
     await new Promise((r) => setImmediate(r)); // let the drained body settle
     t.mock.timers.tick(SMART_ADD_TIMEOUT_MS);
@@ -143,7 +146,7 @@ test('parseViaWorker: an error body that fails to read still gives the status er
   const net = stubFetch(async () => response(500, { text: async () => { throw new TypeError('body lost'); } }));
   t.mock.timers.enable({ apis: ['setTimeout'] });
   try {
-    await assert.rejects(parseViaWorker('x'), { message: 'server' });
+    await assert.rejects(parseViaWorker('x', AUTH), { message: 'server' });
   } finally {
     t.mock.timers.reset();
     net.restore();
@@ -154,7 +157,7 @@ test('parseViaWorker: a fetch that rejects → unreachable', async (t) => {
   const net = stubFetch(() => Promise.reject(new TypeError('offline')));
   t.mock.timers.enable({ apis: ['setTimeout'] });
   try {
-    await assert.rejects(parseViaWorker('x'), { message: 'unreachable' });
+    await assert.rejects(parseViaWorker('x', AUTH), { message: 'unreachable' });
   } finally {
     t.mock.timers.reset();
     net.restore();
@@ -166,7 +169,7 @@ test('parseViaWorker: a Worker that never answers → unreachable at the budget,
   t.mock.timers.enable({ apis: ['setTimeout'] });
   try {
     let outcome = null;
-    parseViaWorker('x').then(() => { outcome = 'resolved'; }, (err) => { outcome = err.message; });
+    parseViaWorker('x', AUTH).then(() => { outcome = 'resolved'; }, (err) => { outcome = err.message; });
     await flush();
     t.mock.timers.tick(SMART_ADD_TIMEOUT_MS - 1);
     await flush();
@@ -186,7 +189,7 @@ test('parseViaWorker: a reply body that stalls → unreachable at the budget', a
   t.mock.timers.enable({ apis: ['setTimeout'] });
   try {
     let outcome = null;
-    parseViaWorker('x').then(() => { outcome = 'resolved'; }, (err) => { outcome = err.message; });
+    parseViaWorker('x', AUTH).then(() => { outcome = 'resolved'; }, (err) => { outcome = err.message; });
     await flush();
     t.mock.timers.tick(SMART_ADD_TIMEOUT_MS);
     await flush();
@@ -201,7 +204,7 @@ test('parseViaWorker: a 200 whose body is not JSON → server', async (t) => {
   const net = stubFetch(async () => response(200, { json: async () => { throw new SyntaxError('Unexpected token'); } }));
   t.mock.timers.enable({ apis: ['setTimeout'] });
   try {
-    await assert.rejects(parseViaWorker('x'), { message: 'server' });
+    await assert.rejects(parseViaWorker('x', AUTH), { message: 'server' });
   } finally {
     t.mock.timers.reset();
     net.restore();
@@ -215,7 +218,7 @@ test('parseViaWorker: a JSON parse failure raised as a DOMException SyntaxError 
   const net = stubFetch(async () => response(200, { json: async () => { throw new DOMException('x', 'SyntaxError'); } }));
   t.mock.timers.enable({ apis: ['setTimeout'] });
   try {
-    await assert.rejects(parseViaWorker('x'), { message: 'server' });
+    await assert.rejects(parseViaWorker('x', AUTH), { message: 'server' });
   } finally {
     t.mock.timers.reset();
     net.restore();
@@ -230,7 +233,7 @@ for (const [label, body] of [['null', null], ['an array', []], ['a number', 3], 
     const net = stubFetch(async () => response(200, { json: async () => body }));
     t.mock.timers.enable({ apis: ['setTimeout'] });
     try {
-      await assert.rejects(parseViaWorker('x'), { message: 'server' });
+      await assert.rejects(parseViaWorker('x', AUTH), { message: 'server' });
     } finally {
       t.mock.timers.reset();
       net.restore();
@@ -245,7 +248,7 @@ for (const status of [413, 500]) {
     const net = stubFetch(async () => response(status, { text: () => new Promise(() => {}) }));
     t.mock.timers.enable({ apis: ['setTimeout'] });
     try {
-      await assert.rejects(parseViaWorker('x'), { message: status === 413 ? 'too_long' : 'server' });
+      await assert.rejects(parseViaWorker('x', AUTH), { message: status === 413 ? 'too_long' : 'server' });
       await flush();
       t.mock.timers.tick(SMART_ADD_TIMEOUT_MS - 1);
       assert.equal(net.calls[0].init.signal.aborted, false, 'not aborted before the budget');
@@ -257,3 +260,78 @@ for (const status of [413, 500]) {
     }
   });
 }
+
+// --- the account bearer (accounts spec § 6.8, D21) ---------------------------
+//
+// parseViaWorker takes the token as a parameter, never imports getLink, so this
+// file stays storage-free. The key is REQUIRED: a call site that forgets it
+// fails loudly rather than reading as "signed out".
+
+test('parseViaWorker: authToken is a required key — omitted throws TypeError, no request', async () => {
+  const net = stubFetch(async () => response(200, { json: async () => ({ items: [] }) }));
+  try {
+    await assert.rejects(parseViaWorker('x'), (e) => e instanceof TypeError && e.message === 'authToken required');
+    await assert.rejects(parseViaWorker('x', {}), (e) => e instanceof TypeError && e.message === 'authToken required');
+    assert.equal(net.calls.length, 0);
+  } finally {
+    net.restore();
+  }
+});
+
+test('parseViaWorker: authToken null means signed out — Error(signed_out), no request', async () => {
+  const net = stubFetch(async () => response(200, { json: async () => ({ items: [] }) }));
+  try {
+    await assert.rejects(parseViaWorker('x', { authToken: null }), (e) => !(e instanceof TypeError) && e.message === 'signed_out');
+    assert.equal(net.calls.length, 0, 'a signed-out device makes no request');
+  } finally {
+    net.restore();
+  }
+});
+
+test('parseViaWorker: sends Authorization: Bearer <token> when linked', async () => {
+  const net = stubFetch(async () => response(200, { json: async () => ({ items: [] }) }));
+  try {
+    await parseViaWorker('x', { authToken: 'tok-123' });
+    assert.equal(net.calls[0].init.headers.authorization, 'Bearer tok-123');
+    assert.equal(net.calls[0].init.headers['content-type'], 'application/json');
+  } finally {
+    net.restore();
+  }
+});
+
+test('parseViaWorker: 429 daily_limit → Error(limit) carrying resetsAt', async (t) => {
+  const net = stubFetch(async () => response(429, { json: async () => ({ error: 'daily_limit', resetsAt: '2026-11-12T00:00:00.000Z' }) }));
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    await assert.rejects(parseViaWorker('x', AUTH), (e) => e.message === 'limit' && e.resetsAt === '2026-11-12T00:00:00.000Z');
+    await flush();
+    t.mock.timers.tick(SMART_ADD_TIMEOUT_MS);
+    assert.equal(net.calls[0].init.signal.aborted, false, 'the 429 body was read, so the deadline is disarmed');
+  } finally {
+    t.mock.timers.reset();
+    net.restore();
+  }
+});
+
+test('parseViaWorker: a 429 that is not daily_limit (or has no resetsAt) → server, never limit', async () => {
+  for (const body of [{ error: 'other' }, { error: 'daily_limit' }, null]) {
+    const net = stubFetch(async () => response(429, { json: async () => body }));
+    try {
+      await assert.rejects(parseViaWorker('x', AUTH), { message: 'server' }, JSON.stringify(body));
+    } finally {
+      net.restore();
+    }
+  }
+});
+
+test('parseViaWorker: 401 → unauthorized', async () => {
+  let bodyRead = false;
+  const net = stubFetch(async () => response(401, { text: async () => { bodyRead = true; return '{"error":"unauthorized"}'; } }));
+  try {
+    await assert.rejects(parseViaWorker('x', AUTH), { message: 'unauthorized' });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(bodyRead, true, 'the body is drained');
+  } finally {
+    net.restore();
+  }
+});

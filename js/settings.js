@@ -16,6 +16,7 @@ import {
 import { loadFeeds, saveFeeds, loadFeedCache, loadLaunches, QuotaError } from './storage.js';
 import { describeLaunches } from './freshness.js';
 import { initLinkUI } from './linkui.js';
+import { getLink } from './auth.js';
 import { uid } from './uid.js';
 import { nowISO, toISO } from './dateparse.js';
 import { userWriteStamp, STAMP_EXHAUSTED_ERROR } from './edit.js';
@@ -392,7 +393,7 @@ export function initSettings({
       renderCalendars();
       let result;
       try {
-        result = await syncFeed(feed, { fetchImpl: fetchWithTimeout, manual: true });
+        result = await syncFeed(feed, { fetchImpl: fetchWithTimeout, manual: true, authToken: getLink()?.authToken ?? null });
       } catch (err) {
         // syncFeed only throws on a genuine non-quota storage bug (see
         // feeds.js); never include the feed object/URL in the log, same
@@ -412,6 +413,16 @@ export function initSettings({
     function renderCalendars() {
       body.innerHTML = '';
       const visMap = loadVisibility();
+
+      // Signed out (spec D21): the Worker's /feed needs a session, so nothing
+      // refreshes; the cached events keep rendering. Read at each render, so a
+      // sign-in or sign-out while the panel is open is reflected.
+      if (getLink() === null) {
+        const signIn = document.createElement('p');
+        signIn.className = 'note feed-signin-note';
+        signIn.textContent = 'Sign in to refresh calendars.';
+        body.appendChild(signIn);
+      }
 
       if (feeds.length === 0) {
         const empty = document.createElement('p');
@@ -696,7 +707,7 @@ export function initSettings({
 
         let result;
         try {
-          result = await syncFeed(feed, { fetchImpl: fetchWithTimeout, manual: true });
+          result = await syncFeed(feed, { fetchImpl: fetchWithTimeout, manual: true, authToken: getLink()?.authToken ?? null });
         } catch (err) {
           result = { ok: false, error: 'server' };
           console.error('plaenicke: initial calendar sync failed', err && err.name);

@@ -4,11 +4,11 @@ import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
 import { makeFakeDocument, makeFakeWindow, allText } from './fake-dom.js';
 import {
-  loadFeeds, saveFeeds, saveItems, loadItems, loadSyncState, loadTombstones, loadFeedCache, saveFeedCache,
+  loadFeeds, saveFeeds, saveItems, loadItems, loadSyncState, loadTombstones, loadFeedCache, saveFeedCache, saveAuth,
 } from '../js/storage.js';
 import { initSettings } from '../js/settings.js';
 import { linkWithCode } from '../js/auth.js';
-import { bytesToBase64url, generateEncKey, encryptBlob } from '../js/crypto.js';
+import { bytesToBase64url, generateEncKey, encryptBlob, composeLinkCode } from '../js/crypto.js';
 import { SCHEMA_VERSION } from '../js/merge.js';
 
 // --- fake DOM: tests/fake-dom.js ---------------------------------------------
@@ -57,6 +57,13 @@ function openPanel(feeds, seed = () => {}, deadlineStatus = { note: null, held: 
   });
   button.click(); // host.childElementCount === 0 -> open()
   return { host, notified, button, fetched, removed };
+}
+
+// A linked device: calendars refresh only with a session (accounts spec D21).
+// A stored link code and nothing else — no adoption pending, so mounting the
+// Sync section makes no request.
+function session() {
+  saveAuth(composeLinkCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(32))), generateEncKey()));
 }
 
 // --- the second-writer fix --------------------------------------------------
@@ -741,7 +748,7 @@ for (const [label, start] of [
     globalThis.fetch = (url, init) => { signals.push(init && init.signal); return new Promise(() => {}); };
     t.mock.timers.enable({ apis: ['setTimeout'] });
     try {
-      const { host } = openPanel(label === 'Sync' ? [feedA] : []);
+      const { host } = openPanel(label === 'Sync' ? [feedA] : [], session);
       start(host);
       await settleMicro();
       assert.equal(signals.length, 1, 'fixture check: one fetch in flight');
@@ -791,7 +798,7 @@ test('settings: a manual Sync and an Add each report their fetch result, before 
     ? { ok: true, status: 200, text: async () => '' }
     : { ok: false, status: 502, json: async () => ({ error: 'upstream_error' }) });
   try {
-    const { host, fetched, notified } = openPanel([feedA]);
+    const { host, fetched, notified } = openPanel([feedA], session);
     const order = [];
     notified.push = (x) => { order.push(`view:${x}`); return Array.prototype.push.call(notified, x); };
     fetched.push = (x) => { order.push(`fetched:${x[1]}`); return Array.prototype.push.call(fetched, x); };
@@ -1168,4 +1175,47 @@ test('uws: "Track deadlines" on a calendar stamped at the maximum Date is refuse
   assert.ok(allText(host).includes(UWS_CAL_MSG), 'the row shows why');
   assert.ok(findButtonByText(host, 'Track deadlines'), 'still offers Track, so it does not look tracked');
   assert.deepEqual(notified, [], 'nothing changed, so nothing is announced');
+});
+
+// --- signed out: calendars need an account (accounts spec D21, § 6.8) ---------
+
+test('settings: signed out, the Calendars list says to sign in, and Sync fetches nothing', async () => {
+  const feedA = {
+    id: 'feedO', url: 'https://example.com/o.ics', name: 'O', color: 'var(--feed-palette-1)', hidden: false,
+    updatedAt: '2026-07-01T00:00:00.000Z',
+  };
+  const originalFetch = globalThis.fetch;
+  let fetched = 0;
+  globalThis.fetch = async () => { fetched += 1; return { ok: true, status: 200, text: async () => '' }; };
+  try {
+    const { host, fetched: results } = openPanel([feedA]);
+    assert.match(allText(host), /Sign in to refresh calendars\./);
+    findButtonByText(host, 'Sync').click();
+    await waitFor(() => results.length === 1, 'the manual Sync to settle');
+    assert.equal(fetched, 0, 'no request without a session');
+    assert.deepEqual(results[0], ['feedO', false]);
+    assert.match(allText(host), /error: sign in to refresh/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('settings: linked, the Calendars list has no sign-in note, and Sync sends the bearer', async () => {
+  const feedA = {
+    id: 'feedL', url: 'https://example.com/l.ics', name: 'L', color: 'var(--feed-palette-1)', hidden: false,
+    updatedAt: '2026-07-01T00:00:00.000Z',
+  };
+  const originalFetch = globalThis.fetch;
+  const auths = [];
+  globalThis.fetch = async (url, init) => { auths.push(init.headers.authorization); return { ok: true, status: 200, text: async () => '' }; };
+  try {
+    const { host, fetched } = openPanel([feedA], session);
+    assert.doesNotMatch(allText(host), /Sign in to refresh calendars/);
+    findButtonByText(host, 'Sync').click();
+    await waitFor(() => fetched.length === 1, 'the manual Sync to settle');
+    const { getLink } = await import('../js/auth.js');
+    assert.deepEqual(auths, [`Bearer ${getLink().authToken}`]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

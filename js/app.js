@@ -31,7 +31,7 @@ import { showToast } from './toast.js';
 import { applyEdit, typeChangePatch, snapshotOf, nextStamp, userWriteStamp, STAMP_EXHAUSTED_ERROR, EDITABLE_FIELDS } from './edit.js';
 import { uid } from './uid.js';
 import { syncOnce, recordSyncFailure, localState } from './sync.js';
-import { isLinked, isAdoptionPending } from './auth.js';
+import { isLinked, isAdoptionPending, getLink } from './auth.js';
 import { merge } from './merge.js';
 import { renderSyncStatus, syncWriteStarted, syncWriteSettled } from './linkui.js';
 import { WORKER_URL } from './config.js';
@@ -498,11 +498,24 @@ async function handleAdd(target) {
 
   let result;
   try {
-    result = await parseViaWorker(raw);
+    // The session token, read at send time (spec § 6.8): null when signed
+    // out, which parseViaWorker answers without a request.
+    result = await parseViaWorker(raw, { authToken: getLink()?.authToken ?? null });
   } catch (e) {
     if (generation !== addGeneration) return 'superseded';
     if (e.message === 'too_long') say('That was a lot at once — try adding fewer items in one go.');
-    else { say(target.unavailable()); target.onUnavailable(); }
+    // Each account refusal has its own line, and each still shows the date
+    // row: a date picked by hand adds without smart add.
+    else if (e.message === 'limit') {
+      say(`You've used today's smart adds. They reset at ${clockLabel(new Date(e.resetsAt))}. You can still add it by picking a date.`);
+      target.onUnavailable();
+    } else if (e.message === 'unauthorized') {
+      say('Signed out — sign in again to use smart add.');
+      target.onUnavailable();
+    } else if (e.message === 'signed_out') {
+      say('Sign in to use smart add.');
+      target.onUnavailable();
+    } else { say(target.unavailable()); target.onUnavailable(); }
     return 'failed';
   }
   if (generation !== addGeneration) return 'superseded';
@@ -1571,7 +1584,10 @@ function backgroundSyncFeeds(feedList) {
       backgroundSyncFeeds(feeds.filter((f) => queued.has(f.id)));
     }
   };
-  syncStale(feedList, feedCache, { fetchImpl: fetchWithTimeout }).then((results) => {
+  // The session token, read when the batch starts (spec § 6.8): null when
+  // signed out, and syncFeed then fetches nothing ({ok:false,
+  // error:'signed_out'}) while the cache keeps rendering.
+  syncStale(feedList, feedCache, { fetchImpl: fetchWithTimeout, authToken: getLink()?.authToken ?? null }).then((results) => {
     // A per-feed failure comes back as {ok:false}, never as a rejection.
     settle(results);
   }, (err) => {
