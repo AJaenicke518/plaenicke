@@ -363,6 +363,8 @@ const ERROR_TEXT = {
   server: 'sync failed',
   // No session on this device (spec D21): /feed needs one.
   signed_out: 'sign in to refresh',
+  // /feed refused this device's session: it was deleted (§ 6.10, sweep W3-I7).
+  unauthorized: 'signed out — sign in again',
   remove_failed: 'could not remove — try again',
   // A user write refused by edit.js's userWriteStamp (Remove, Track
   // deadlines): retrying can never succeed, so the row says why instead.

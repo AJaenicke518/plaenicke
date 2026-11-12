@@ -35,18 +35,23 @@ test('no hash returns null and does not touch history', () => {
   assert.equal(e.calls.length, 0);
 });
 
-test('empty code returns null but still strips the hash', () => {
-  for (const h of ['#invite=', '#recover=']) {
+// Sweep W3-I6: a damaged link used to be dropped silently (null), so the
+// tester tapped a link and nothing happened. It now opens the form, says the
+// link is damaged, and carries no code.
+test('empty code is a malformed intent, and the hash is still stripped', () => {
+  for (const [h, kind] of [['#invite=', 'invite'], ['#recover=', 'recover']]) {
     const e = env(h);
-    assert.equal(readBootIntent(e), null);
+    assert.deepEqual(readBootIntent(e), { kind, code: null, malformed: true });
     assert.deepEqual(e.calls, [[null, '', '/plaenicke/?x=1']]);
   }
 });
 
-test('non-base64url code returns null but still strips the hash', () => {
+test('non-base64url code is a malformed intent, and the hash is still stripped', () => {
   for (const h of ['#invite=ab+c', '#invite=a/b', '#recover=a=b', '#invite=ab c', '#invite=ab&x=1', '#invite=a=']) {
     const e = env(h);
-    assert.equal(readBootIntent(e), null, h);
+    const got = readBootIntent(e);
+    assert.equal(got.malformed, true, h);
+    assert.equal(got.code, null, h);
     assert.equal(e.calls.length, 1, h);
   }
 });

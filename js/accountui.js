@@ -961,6 +961,8 @@ export function initAccountUI({
         recovery: kind === 'recover' ? (next.code || '') : '',
       };
       goForm(kind === 'invite' ? 'signup' : kind === 'recover' ? 'forgot' : 'login');
+      // W3-I6: js/fragment.js could not read a code out of the link.
+      if (next.malformed) showError('That link looks damaged — paste the code instead.');
       return;
     }
     if (kind === 'new-recovery') {

@@ -1653,3 +1653,14 @@ test('W3 #25: an account device with a pending Merge points to the Sync section'
   mount(host, { api: fakeApi().api });
   assert.match(allText(host), /This device isn't syncing yet — choose how to combine it in Sync below\./);
 });
+
+test('W3-I6: a damaged boot link opens its form empty and says to paste the code instead', () => {
+  for (const [kind, field] of [['invite', 'acct-invite-code'], ['recover', 'acct-recovery-code']]) {
+    const { host } = setup();
+    const { api, calls } = fakeApi();
+    mountWith(host, { api, intent: { kind, code: null, malformed: true } });
+    assert.equal(byId(host, field).value, '');
+    assert.equal(errorText(host), 'That link looks damaged — paste the code instead.');
+    assert.equal(calls.length, 0);
+  }
+});

@@ -169,6 +169,11 @@ let feedCache = loadFeedCache();
 // stampFromFeeds). Fed by every fetch this page makes: each background batch
 // and Settings' own Sync and Add calendar (onFeedFetched below).
 const failedFeedIds = new Set();
+// The session token /feed last refused (401 unauthorized, sweep W3-I7), or
+// null. While this device still holds THAT token the stamp says signed out
+// instead of "Couldn't refresh"; a new sign-in holds another token, and a
+// fetch that succeeds with this one clears it.
+let feedRefusedToken = null;
 // Which feed series this device hides, and where (js/visibility.js; option A,
 // 2026-10-26). DEVICE-LOCAL, NEVER SYNCED: nothing in this file that touches
 // it calls scheduleSync. Re-read at the top of every render(), so a write from
@@ -1589,6 +1594,7 @@ function backgroundSyncFeeds(feedList) {
   }
   if (feedList.length === 0) return;
   feedBatch = new Set(feedList.map((f) => f.id));
+  const batchToken = getLink()?.authToken ?? null;
   // results is syncStale's per-feed map (only the calendars it fetched), or
   // null when the whole batch failed and which calendars it reached is
   // unknown: then every one in it counts as failed. A calendar this batch did
@@ -1603,6 +1609,8 @@ function backgroundSyncFeeds(feedList) {
     else for (const [id, r] of Object.entries(results)) {
       if (r.ok) failedFeedIds.delete(id);
       else if (r.error !== 'signed_out') failedFeedIds.add(id);
+      if (r.ok && feedRefusedToken === batchToken) feedRefusedToken = null;
+      if (!r.ok && r.error === 'unauthorized') feedRefusedToken = batchToken;
     }
     importDeadlines();
     stampFromFeeds();
@@ -1615,7 +1623,7 @@ function backgroundSyncFeeds(feedList) {
   // The session token, read when the batch starts (spec § 6.8): null when
   // signed out, and syncFeed then fetches nothing ({ok:false,
   // error:'signed_out'}) while the cache keeps rendering.
-  syncStale(feedList, feedCache, { fetchImpl: fetchWithTimeout, authToken: getLink()?.authToken ?? null }).then((results) => {
+  syncStale(feedList, feedCache, { fetchImpl: fetchWithTimeout, authToken: batchToken }).then((results) => {
     // A per-feed failure comes back as {ok:false}, never as a rejection.
     settle(results);
   }, (err) => {
@@ -1888,6 +1896,10 @@ function stampFromFeeds() {
   // failure to report — the cached events still render.
   if (getLink() === null) {
     els.updatedStamp.textContent = 'Sign in to refresh calendars.';
+    return;
+  }
+  if (feedRefusedToken !== null && feedRefusedToken === getLink().authToken) {
+    els.updatedStamp.textContent = 'Signed out — sign in again.';
     return;
   }
   if (visible.some((f) => failedFeedIds.has(f.id))) {

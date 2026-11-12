@@ -3783,6 +3783,28 @@ test('sweep D: a calendar fetch that fails says so instead of a time', async (t)
   resume();
 });
 
+// Sweep W3-I7: /feed answers 401 once the session was deleted. "Couldn't
+// refresh" sends the user looking at the calendar; the fix is signing in.
+test('W3-I7: a calendar refresh refused as unauthorized says signed out, not a failure', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  withSession();
+  seedFeedsWithCache([sdFeed('sD-fu')], { 'sD-fu': cacheAt(localAt(8, 40)) });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: false, status: 401, json: async () => ({ error: 'unauthorized' }) });
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 40).getTime() });
+  try {
+    resume();
+    await settle();
+  } finally {
+    t.mock.timers.reset();
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(stampEl().textContent, 'Signed out — sign in again.');
+  unseedFeeds();
+  resume();
+});
+
 // syncStale REJECTS (rather than reporting {ok:false}) on a storage error that
 // is not about quota. That is a failed refresh too.
 test('sweep D: a calendar refresh that rejects also says so', async (t) => {

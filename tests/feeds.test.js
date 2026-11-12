@@ -1519,3 +1519,9 @@ test('syncStale: forwards the token to every syncFeed; omitted throws; null fetc
 test('feedStatus: signed_out reads as a sign-in prompt, not a generic failure', () => {
   assert.equal(feedStatus(FEED_A, { error: 'signed_out' }, new Date()), 'error: sign in to refresh');
 });
+
+// Sweep W3-I7: /feed answers 401 {error:'unauthorized'} once this device's
+// session was deleted. It read as the generic "sync failed".
+test('W3-I7: an unauthorized refresh says the device was signed out', async () => {
+  assert.equal(feedStatus(FEED_A, { error: 'unauthorized' }, new Date()), 'error: signed out — sign in again');
+});
