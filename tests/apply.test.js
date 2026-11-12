@@ -356,11 +356,12 @@ test('app.js paints the shell sync indicator at load, so a stuck adoption is vis
   // because this is the only test that sees app.js's module-scope code run.
   assert.equal(loadLaunches().length, 1, 'loading the app must record one launch');
   // The boot fragment: stripped at once, and Settings opened on it. This device
-  // is linked, so the reset form is refused (D17) instead of shown.
+  // is a linked LEGACY device (sweep W3 #19): the reset form keeps the code
+  // and says to unlink in Sync first; its submit stays refused (D17).
   assert.deepEqual(globalThis.window.history.calls, [[null, '', '/plaenicke/']], 'the fragment is stripped');
   const settingsHost = globalThis.document.getElementById('settings-host');
   assert.ok(settingsHost.childElementCount > 0, 'Settings opened for the boot link');
-  assert.match(allText(settingsHost), /This device is already signed in\. Sign out first\./);
+  assert.match(allText(settingsHost), /This device is linked to Alex's legacy account — unlink it in Sync first\./);
   // The load-time GET /account (an offline one, here): asked, and on failure
   // the banner keeps its last painted state — hidden.
   assert.ok(loadRequests.some((u) => u.endsWith('/account')), 'the load asks the account for its recovery state');

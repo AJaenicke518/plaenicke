@@ -154,6 +154,8 @@ async function pollUntil(pred, what, ms = 20000) {
 
 // The legacy paste field (Settings → Sync → Link this device / Re-link).
 async function pasteLink(dev, code) {
+  const reveal = findButton(dev.host, 'Advanced: link with a code'); // sweep W3-I10
+  if (reveal) fire(reveal, 'click');
   const input = findAll(dev.host, 'INPUT').find((i) => i.getAttribute('aria-label') === 'Link code');
   assert.ok(input, `${dev.name}: the paste field is rendered`);
   input.value = code;
@@ -758,7 +760,7 @@ test('e2e 8: an unlinked legacy-owned device re-links with an account-1 code, an
   // Another account's code: refused, nothing linked, that account untouched.
   await pasteLink(L, codeForT);
   assert.equal(getLink(), null, 'not linked to the tester\'s account');
-  assert.ok(allText(L.host).includes(ACCOUNT_COPY.owned_device), allText(L.host));
+  assert.ok(allText(L.host).includes(ACCOUNT_COPY.legacy_wrong_account), allText(L.host)); // sweep W3: a legacy owner cannot sign in
   assert.equal(loadLocalOwner(), 1);
   assert.deepEqual(ids(loadItems()), ids([a1, l1]));
   const tAfter = await w.row(upT.accountId);

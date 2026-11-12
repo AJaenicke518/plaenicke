@@ -949,7 +949,8 @@ function pressTab(shiftKey = false) {
 test('settings: Tab from the last control wraps to the first, and Shift+Tab from the first wraps to the last', () => {
   const { host } = openPanel(twoFeeds());
   const first = findButtonByText(host, 'Light');
-  const last = findButtonByText(host, 'Link this device');
+  // A new device's Sync section ends in the W3-I10 disclosure.
+  const last = findButtonByText(host, 'Advanced: link with a code');
   assert.ok(first && last, 'fixture check: the first and last controls');
   last.focus();
   assert.equal(pressTab(), true, 'Tab on the last control is taken over');
@@ -970,11 +971,12 @@ test('settings: Tab from the heading, or from anywhere outside the panel, goes t
   assert.equal(document.activeElement, findButtonByText(host, 'Light'));
   button.focus(); // the gear, outside the panel, as the nav would be
   assert.equal(pressTab(true), true, 'Shift+Tab from outside is taken over too');
-  assert.equal(document.activeElement, findButtonByText(host, 'Link this device'));
+  assert.equal(document.activeElement, findButtonByText(host, 'Advanced: link with a code'));
 });
 
 test('settings: a control drawn after the panel opened is inside the Tab order; a disabled one is not', () => {
   const { host } = openPanel(twoFeeds());
+  findButtonByText(host, 'Advanced: link with a code').click(); // sweep W3-I10: show the paste field
   findButtonByText(host, 'Remove').click(); // draws the question's two buttons
   const confirm = findButtonByText(host, 'Remove from every device');
   assert.ok(confirm, 'fixture check: the question is drawn');

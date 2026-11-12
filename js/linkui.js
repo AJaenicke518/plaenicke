@@ -76,6 +76,17 @@ export const ACCOUNT_COPY = {
   signed_out_unlinked: 'This device is signed out. Sign in to sync it again.',
   signed_out_notice: 'Signed out. Everything on this device was kept — items, calendars and all.',
   sign_out_refused: 'A sync is finishing — try signing out again in a moment.',
+  // A device owned by a LEGACY account (no login yet: Alex's account 1 before
+  // its upgrade) has no sign-in to fall back on (sweep W3, carried from the
+  // W2 re-review), so its refusals say what it CAN do.
+  legacy_wrong_account: "That code belongs to a different account from the one this device's planner came from, so it was not linked. Paste a code from one of your own linked devices.",
+  legacy_check_failed: "Couldn't check which account that code belongs to, so it was not linked. Try again when you're online.",
+  legacy_link_unchecked: "This device's link hasn't been shown to belong to the account its planner came from, so it won't sync. Use Check again in Account above when you're online, or unlink it.",
+  // A raw 43-character token on an owned device: linkWithCode would
+  // bootstrap, minting a fresh key for an account that already has data.
+  owned_token: 'That is a 43-character device token. On this device it would start a new encryption key for an account that already has a planner, so it was not linked. Paste the 86-character code from one of your linked devices instead.',
+  // D17 on a linked legacy device (sweep W3 #19): its way out is Unlink.
+  already_linked_legacy: "This device is linked to Alex's legacy account — unlink it in Sync first.",
 };
 const ACCOUNT_SIGNED_OUT_TEXT = ACCOUNT_COPY.signed_out;
 
@@ -752,6 +763,7 @@ export function initLinkUI(options = {}) {
   let stageData = {};
   let notice = '';
   let mintedCode = '';
+  let showPaste = false; // W3-I10: the disclosure on a new device
   let inflight = Promise.resolve();
   let joinTimer = null;
   // Bumped whenever THIS mount starts an episode of its own — see joinActive.
@@ -925,6 +937,12 @@ export function initLinkUI(options = {}) {
         return 'blocked';
       }
       mustBeOwner = owner;
+      if (isBareToken(raw)) {
+        notice = ACCOUNT_COPY.owned_token;
+        stage = null;
+        render();
+        return 'blocked';
+      }
       let token;
       try {
         token = pastedToken(raw);
@@ -935,8 +953,9 @@ export function initLinkUI(options = {}) {
         render();
         return 'link_failed';
       }
-      if (!(await tokenBelongsTo(token, owner))) {
-        notice = ACCOUNT_COPY.owned_device;
+      const verdict = await tokenBelongsTo(token, owner);
+      if (verdict !== 'owner') {
+        notice = verdict === 'other' ? ACCOUNT_COPY.legacy_wrong_account : ACCOUNT_COPY.legacy_check_failed;
         stage = null;
         render();
         return 'blocked';
@@ -976,15 +995,23 @@ export function initLinkUI(options = {}) {
     return parseLinkCode(trimmed).authToken;
   }
 
-  // True only when GET /account, asked with `token`, names `owner`. No
-  // answer, an error or a malformed body is false. Never throws.
+  // A 43-character token, which linkWithCode would BOOTSTRAP (a fresh key).
+  function isBareToken(raw) {
+    try { return base64urlToBytes(String(raw || '').trim()).length === TOKEN_BYTES; } catch { return false; }
+  }
+
+  // What GET /account, asked with `token`, says about `owner`: 'owner' when
+  // it names that account, 'other' when it names a different one, and
+  // 'unknown' for no answer, an error or a malformed body. Only 'owner'
+  // links. Never throws.
   async function tokenBelongsTo(token, owner) {
     try {
       const body = await getAccount({ link: { authToken: token }, fetchImpl: readFetchImpl, apiBase });
-      return Boolean(body) && body.accountId === owner;
+      if (!body || !Number.isSafeInteger(body.accountId)) return 'unknown';
+      return body.accountId === owner ? 'owner' : 'other';
     } catch (err) {
       console.error('plaenicke: account check before link failed', err && (err.code || err.name));
-      return false;
+      return 'unknown';
     }
   }
 
@@ -1031,7 +1058,7 @@ export function initLinkUI(options = {}) {
     if (linkNotShownOwners()) {
       stage = null;
       stageData = {};
-      notice = ACCOUNT_COPY.owned_device;
+      notice = ownerHasLogin() ? ACCOUNT_COPY.owned_device : ACCOUNT_COPY.legacy_link_unchecked;
       render();
       return;
     }
@@ -1333,6 +1360,18 @@ export function initLinkUI(options = {}) {
       wrap.appendChild(el('p', { className: 'note', text: ACCOUNT_COPY.signed_out_unlinked }));
       return;
     }
+    // A NEW device (no owner recorded: never linked to anything this client
+    // knows of) is a tester's (sweep W3-I10). Testers sign in; the
+    // 86-character field is Alex's legacy tool, one tap away. A legacy-owned
+    // device keeps it in view — that is today's UI for it (§ 6.11).
+    if (loadLocalOwner() === null && !showPaste) {
+      wrap.appendChild(el('p', { className: 'note', text: 'New here? Sign in or use your invite in Account above.' }));
+      const more = el('button', { type: 'button', text: 'Advanced: link with a code' });
+      more.setAttribute('aria-expanded', 'false');
+      more.addEventListener('click', () => { showPaste = true; render(); });
+      wrap.appendChild(more);
+      return;
+    }
     pasteField(wrap, 'Link this device',
       'Link this device to keep your items and calendar subscriptions in step with your other devices. '
       + 'Everything is encrypted here first — the server only ever holds ciphertext.');
@@ -1361,10 +1400,18 @@ export function initLinkUI(options = {}) {
   // it shows what is actually happening rather than doing nothing. The button
   // itself must stay: omitting it is what leaves 'unauthorized' and
   // 'undecryptable' with no way to stop syncing at all.
+  //
+  // THE MODE IS READ AT THE CLICK (sweep W3-I5). A panel rendered while the
+  // device was legacy keeps this button after an upgrade (here, or another
+  // device's answer arriving): a bare unlink then would leave a live session
+  // nobody can revoke. In account mode it is Sign out (D27).
   function unlinkButton(text) {
     const btn = el('button', { type: 'button', className: 'remove', text });
     btn.addEventListener('click', () => {
       if (activeAdoption && writeInFlight) return joinActive();
+      if (accountModeFromStorage() === 'account' && onSignOut) {
+        return run(async () => { afterSignOut(await onSignOut()); });
+      }
       return doUnlink();
     });
     return btn;
@@ -1491,7 +1538,8 @@ export function initLinkUI(options = {}) {
 
   function renderAdoptionEntry(wrap) {
     if (linkNotShownOwners()) {
-      wrap.appendChild(el('p', { className: 'note', text: ACCOUNT_COPY.owned_device }));
+      // A legacy owner has no sign-in to go to (sweep W3, carried).
+      wrap.appendChild(el('p', { className: 'note', text: ownerHasLogin() ? ACCOUNT_COPY.owned_device : ACCOUNT_COPY.legacy_link_unchecked }));
       appendStopControl(wrap, accountModeFromStorage());
       return;
     }

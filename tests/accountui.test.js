@@ -1664,3 +1664,26 @@ test('W3-I6: a damaged boot link opens its form empty and says to paste the code
     assert.equal(calls.length, 0);
   }
 });
+
+test('W3 #19: a boot link on a linked LEGACY device keeps its code in the form and says to unlink in Sync first', async () => {
+  const { host } = setup();
+  saveAuth(newCode()); // legacy: linked, no owner with a login
+  const { api, calls } = fakeApi();
+  mountWith(host, { api, intent: { kind: 'invite', code: 'INVITE_KEPT' } });
+  assert.equal(byId(host, 'acct-invite-code').value, 'INVITE_KEPT', 'the stripped code is not lost');
+  assert.equal(errorText(host), ACCOUNT_COPY.already_linked_legacy);
+  input(host, 'acct-email', 'a@x.de');
+  input(host, 'acct-password', GOOD_PW);
+  input(host, 'acct-password2', GOOD_PW);
+  await submit(host);
+  assert.equal(errorText(host), ACCOUNT_COPY.already_linked_legacy, 'a submit is refused the same way');
+  assert.equal(calls.length, 0);
+});
+
+test('W3 #19: on a linked ACCOUNT device a boot link still lands on the home with already_linked (D17)', () => {
+  const { host } = setup();
+  linkedAccount(5);
+  mountWith(host, { api: fakeApi().api, intent: { kind: 'recover', code: 'R' } });
+  assert.equal(byId(host, 'acct-form'), null);
+  assert.equal(errorText(host), ACCOUNT_COPY.already_linked);
+});

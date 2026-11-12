@@ -1832,6 +1832,8 @@ test('an unlinked device warns that a bare device token creates a NEW account', 
     now: () => NOW,
     syncOnceImpl: async () => ({ status: 'ok' }),
   });
+  // Sweep W3-I10: a new device shows the paste field behind a disclosure.
+  findButton(host, 'Advanced: link with a code').click();
   const input = findInput(host, 'Link code');
   assert.ok(input, 'an unlinked device must offer a paste field');
   input.value = bytesToBase64url(generateEncKey());
@@ -2033,6 +2035,8 @@ test('a link attempt that throws renders the error and never echoes the pasted c
     now: () => NOW,
     syncOnceImpl: async () => ({ status: 'ok' }),
   });
+  // Sweep W3-I10: a new device shows the paste field behind a disclosure.
+  findButton(host, 'Advanced: link with a code').click();
   const input = findInput(host, 'Link code');
   input.value = 'this is not a link code';
   findButton(host, 'Link this device').click();
@@ -2089,6 +2093,8 @@ test('pasting a valid link code links the device AND goes straight on to the cho
   await ui.settled();
   assert.deepEqual(fetchCalls, [], 'fixture check: an unlinked device fires nothing on mount');
 
+  // Sweep W3-I10: a new device shows the paste field behind a disclosure.
+  findButton(host, 'Advanced: link with a code').click();
   const input = findInput(host, 'Link code');
   assert.ok(input, 'fixture check: an unlinked device offers the paste field');
   input.value = code;
@@ -3120,6 +3126,8 @@ test('W2-C2: signOutBlocked() is true while an ordinary sync holds the turn, and
 // --- sweep W2-C1 / W2-I3: owner tags and the legacy mode --------------------
 
 const pasteInto = (host, code, buttonText = 'Link this device') => {
+  const reveal = findButton(host, 'Advanced: link with a code'); // sweep W3-I10
+  if (reveal) reveal.click();
   const input = findAll(host, 'INPUT').find((i) => i.getAttribute('aria-label') === 'Link code');
   assert.ok(input, 'the paste field is rendered');
   input.value = code;
@@ -3170,7 +3178,7 @@ test('W2-C1: a pasted code on a legacy-owned device is unlinked again when the a
   assert.equal(loadAuth(), null, 'not linked: the code\'s account is unknown');
   assert.deepEqual(calls.map((c) => c.url), ['https://w.example/account'], 'only the account check — no preview');
   assert.equal(loadLocalOwner(), 1);
-  assert.ok(allText(host).includes(linkuiNs.ACCOUNT_COPY.owned_device), allText(host));
+  assert.ok(allText(host).includes(linkuiNs.ACCOUNT_COPY.legacy_check_failed), allText(host)); // sweep W3: not "Sign in"
 });
 
 test('W2-C1: a pasted code on a legacy-owned device whose account check names another account is refused', async () => {
@@ -3189,7 +3197,7 @@ test('W2-C1: a pasted code on a legacy-owned device whose account check names an
   assert.equal(loadAuth(), null);
   assert.deepEqual(calls.map((c) => c.url), ['https://w.example/account']);
   assert.equal(loadLocalOwner(), 1, 'the owner is not handed to the other account');
-  assert.ok(allText(host).includes(linkuiNs.ACCOUNT_COPY.owned_device));
+  assert.ok(allText(host).includes(linkuiNs.ACCOUNT_COPY.legacy_wrong_account)); // sweep W3: not "Sign in"
 });
 
 test('W2-C1: a sign-in clears the legacy marker for the account it links (that account has a login)', async () => {
@@ -3528,7 +3536,10 @@ test('W2-rr: a legacy-owned paste stores nothing while the account check is out,
   assert.ok(!calls.includes('https://w.example/data'), 'the foreign account was never even read');
 });
 
-test('W2-rr: the check uses the token half of an 86-character code, and the input itself for a 43-character token', async () => {
+// Sweep W3 (carried): a bare 43-character token is now refused on an owned
+// device before any check (it would bootstrap a fresh key), so the account
+// check is asked only for an 86-character code — with its token half.
+test('W2-rr: the check uses the token half of an 86-character code; a 43-character token is refused unchecked', async () => {
   for (const kind of ['code', 'token']) {
     await legacyOwnedDevice();
     const doc = installDom();
@@ -3542,7 +3553,7 @@ test('W2-rr: the check uses the token half of an 86-character code, and the inpu
     const { host, ui } = mountPanel(doc, { fetchImpl: noNetwork([]), readFetchImpl });
     pasteInto(host, raw);
     await ui.settled();
-    assert.deepEqual(seen, [`Bearer ${parseLinkCode(code).authToken}`], kind);
+    assert.deepEqual(seen, kind === 'code' ? [`Bearer ${parseLinkCode(code).authToken}`] : [], kind);
     assert.equal(loadAuth(), null, kind);
   }
 });
@@ -3562,7 +3573,7 @@ test('W2-rr defence: a pending adoption on an owned device whose link was never 
   await ui.settled();
   assert.deepEqual(calls, [], 'no preview on mount');
   assert.deepEqual(writes, []);
-  assert.ok(allText(host).includes(linkuiNs.ACCOUNT_COPY.owned_device), allText(host));
+  assert.ok(allText(host).includes(linkuiNs.ACCOUNT_COPY.legacy_link_unchecked), allText(host)); // legacy owner: sweep W3
   assert.equal(findButton(host, 'Continue'), null, 'no control that would preview and adopt it');
   assert.ok(findButton(host, 'Unlink') || findButton(host, 'Sign out'), 'a way out is offered');
 });
@@ -3645,4 +3656,99 @@ test('W2-rr defence: a dialog left open while another tab stores an unshown link
   assert.deepEqual(writes, []);
   assert.equal(calls.length, 1, 'the unshown link was never read');
   assert.ok(allText(host).includes(linkuiNs.ACCOUNT_COPY.owned_device), allText(host));
+});
+
+// =========================================================================
+// sweep W3 — linkui copy and controls
+// =========================================================================
+
+test('W3-I10: a fresh unlinked device hides the legacy paste field behind "Advanced: link with a code"', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  const { host } = mountPanel(doc, { fetchImpl: noNetwork([]), readFetchImpl: noNetwork([]) });
+  assert.equal(findInput(host, 'Link code'), null, 'no 86-character field for a new tester');
+  const more = findButton(host, 'Advanced: link with a code');
+  assert.ok(more);
+  assert.equal(more.getAttribute('aria-expanded'), 'false');
+  assert.match(allText(host), /sign in or use your invite in Account above/i);
+  more.click();
+  assert.ok(findInput(host, 'Link code'), 'one tap shows it');
+  assert.ok(findButton(host, 'Link this device'));
+});
+
+test('W3-I10: a legacy-owned unlinked device still shows the paste field at once', () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  saveLocalOwner(1);
+  storageNs.saveLegacyOwner(1);
+  const { host } = mountPanel(doc, { fetchImpl: noNetwork([]), readFetchImpl: noNetwork([]) });
+  assert.ok(findInput(host, 'Link code'));
+  assert.equal(findButton(host, 'Advanced: link with a code'), null);
+});
+
+test('W3-I5: Unlink checks the mode at the click — on a device that became an account device it signs out', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  await linkWithCode(freshLinkCode().code);
+  clearAdoptionPending();
+  const signOuts = [];
+  const { host, ui } = mountPanel(doc, {
+    fetchImpl: noNetwork([]), readFetchImpl: noNetwork([]),
+    onSignOut: async () => { signOuts.push(true); return linkuiNs.signOutLocal(); },
+  });
+  const unlinkBtn = findButton(host, 'Unlink this device');
+  assert.ok(unlinkBtn, 'fixture check: legacy UI');
+  saveLocalOwner(1); // upgraded meanwhile: an owner with a login
+  unlinkBtn.click();
+  await ui.settled();
+  assert.equal(signOuts.length, 1, 'routed to Sign out (revokes the session), not a bare unlink');
+});
+
+test('W3 carried: a legacy-owned paste whose code belongs to another account says so, not "Sign in"', async () => {
+  await legacyOwnedDevice();
+  const doc = installDom();
+  const readFetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ accountId: 77, email: 'x@y.de', recoveryConfirmed: true }) });
+  const { host, ui } = mountPanel(doc, { fetchImpl: noNetwork([]), readFetchImpl });
+  pasteInto(host, freshLinkCode().code);
+  await ui.settled();
+  assert.equal(loadAuth(), null);
+  const text = allText(host);
+  assert.ok(text.includes(linkuiNs.ACCOUNT_COPY.legacy_wrong_account), text);
+  assert.ok(!text.includes(linkuiNs.ACCOUNT_COPY.owned_device), 'a legacy owner cannot sign in');
+});
+
+test('W3 carried: a legacy-owned paste that could not be checked says try again online', async () => {
+  await legacyOwnedDevice();
+  const doc = installDom();
+  const readFetchImpl = async () => { throw new TypeError('Failed to fetch'); };
+  const { host, ui } = mountPanel(doc, { fetchImpl: noNetwork([]), readFetchImpl });
+  pasteInto(host, freshLinkCode().code);
+  await ui.settled();
+  assert.equal(loadAuth(), null);
+  assert.ok(allText(host).includes(linkuiNs.ACCOUNT_COPY.legacy_check_failed), allText(host));
+  assert.match(linkuiNs.ACCOUNT_COPY.legacy_check_failed, /Try again when you're online\./);
+});
+
+test('W3 carried: a raw 43-character token pasted on an owned device is refused before any request', async () => {
+  await legacyOwnedDevice();
+  const doc = installDom();
+  const calls = [];
+  const { host, ui } = mountPanel(doc, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls) });
+  pasteInto(host, bytesToBase64url(generateEncKey()));
+  await ui.settled();
+  assert.equal(loadAuth(), null, 'a bootstrap would mint a fresh key for an account that has data');
+  assert.deepEqual(calls, []);
+  assert.ok(allText(host).includes(linkuiNs.ACCOUNT_COPY.owned_token), allText(host));
+  assert.match(linkuiNs.ACCOUNT_COPY.owned_token, /86-character/);
+});
+
+test('W3 carried: an unshown link on a legacy-owned device gets legacy copy (Check again), not "Sign in"', async () => {
+  await legacyOwnedDevice();
+  const doc = installDom();
+  await linkWithCode(freshLinkCode().code);
+  const { host, ui } = mountPanel(doc, { fetchImpl: noNetwork([]), readFetchImpl: noNetwork([]) });
+  await ui.settled();
+  const text = allText(host);
+  assert.ok(text.includes(linkuiNs.ACCOUNT_COPY.legacy_link_unchecked), text);
+  assert.ok(!text.includes(linkuiNs.ACCOUNT_COPY.owned_device));
 });

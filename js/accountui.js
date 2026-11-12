@@ -113,6 +113,12 @@ export function errorCopy(code, extra = {}) {
   return `Unexpected error: ${code}`;
 }
 
+// D17's refusal, in the words this device can act on (sweep W3 #19): a
+// legacy device's way out is Unlink in Sync, not Sign out.
+function alreadyLinkedCopy() {
+  return accountModeFromStorage() === 'legacy' ? ACCOUNT_COPY.already_linked_legacy : ACCOUNT_COPY.already_linked;
+}
+
 function copyFor(err) {
   if (err instanceof AccountError) return errorCopy(err.code, err.extra);
   console.error('plaenicke: account action failed', err && err.name);
@@ -446,7 +452,7 @@ export function initAccountUI({
       // D16 before anything is sent (plan review I4): sign-up has no account
       // id yet, so any other owner's data blocks it.
       const blocker = adoptionBlocker(null);
-      if (blocker) { showError(errorCopy(blocker)); return; }
+      if (blocker) { showError(blocker === 'already_linked' ? alreadyLinkedCopy() : errorCopy(blocker)); return; }
       const res = await api.signUp({ invite: v.invite, email: v.email, password: v.newPassword, deviceName: deviceName() });
       // Link FIRST (§ 6.1 step 6), so the credential is stored before the
       // recovery screen sends the user off to Mail and the app is evicted.
@@ -465,7 +471,7 @@ export function initAccountUI({
     },
     async login(v) {
       // Up front only D17: the account id is unknown until the answer.
-      if (adoptionBlocker(null) === 'already_linked') { showError(errorCopy('already_linked')); return; }
+      if (adoptionBlocker(null) === 'already_linked') { showError(alreadyLinkedCopy()); return; }
       const res = await api.logIn({ email: v.email, password: v.password, deviceName: deviceName() });
       const blocker = adoptionBlocker(res.accountId);
       if (blocker) {
@@ -482,7 +488,7 @@ export function initAccountUI({
       sayIfAdoptFailed(linked);
     },
     async forgot(v) {
-      if (adoptionBlocker(null) === 'already_linked') { showError(errorCopy('already_linked')); return; }
+      if (adoptionBlocker(null) === 'already_linked') { showError(alreadyLinkedCopy()); return; }
       let res;
       try {
         res = await api.recover({
@@ -950,9 +956,10 @@ export function initAccountUI({
     if (!next) { view = 'home'; render(); return; }
     const { kind } = next;
     if (kind === 'invite' || kind === 'recover' || kind === 'login') {
-      if (getLink() !== null) {
+      const legacyHolder = getLink() !== null && accountModeFromStorage() === 'legacy';
+      if (getLink() !== null && !(legacyHolder && next.code)) {
         view = 'home';
-        error = errorCopy('already_linked');
+        error = alreadyLinkedCopy();
         render();
         return;
       }
@@ -963,6 +970,10 @@ export function initAccountUI({
       goForm(kind === 'invite' ? 'signup' : kind === 'recover' ? 'forgot' : 'login');
       // W3-I6: js/fragment.js could not read a code out of the link.
       if (next.malformed) showError('That link looks damaged — paste the code instead.');
+      // #19: a boot link opened on a linked legacy device. js/fragment.js has
+      // already stripped it from the URL, so the form keeps it; its submit
+      // stays refused (D17) until the device is unlinked in Sync.
+      else if (legacyHolder) showError(alreadyLinkedCopy());
       return;
     }
     if (kind === 'new-recovery') {
