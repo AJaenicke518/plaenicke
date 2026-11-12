@@ -193,8 +193,13 @@ export async function newRecoveryLink({ link, email, currentPassword, ...o }) {
   });
 }
 
-export async function upgrade({ link, email, password, iters = KDF_ITERS, ...o }) {
+// `upgradeCode` is the one-time code Alex mints with POST /admin/upgrade-code
+// (sweep W1-C1): the server refuses an upgrade without it, so a missing one is
+// refused here before any key is derived or anything is sent.
+export async function upgrade({ link, email, password, upgradeCode, iters = KDF_ITERS, ...o }) {
   const c = ctx(o);
+  const code = typeof upgradeCode === 'string' ? upgradeCode.trim() : '';
+  if (!code) throw new AccountError('missing_upgrade_code');
   return keyOp(async () => {
     await checkDeviceKey(c, link);
     const recoveryCode = newRecoveryCode();
@@ -204,7 +209,7 @@ export async function upgrade({ link, email, password, iters = KDF_ITERS, ...o }
     const res = shape(await post(c, '/account/upgrade', {
       email, kdfSalt: salt, kdfIters: iters, authKey, recAuthKey: rec.recAuthKey,
       wrappedDekPw: await wrapDek(wrapKey, link.encKey, 'pw'), wrappedDekRec: await wrapDek(rec.wrapKey, link.encKey, 'rec'),
-      dekCheck: await dekCheck(link.encKey),
+      dekCheck: await dekCheck(link.encKey), upgradeCode: code,
     }, link.authToken), { accountId: isId });
     return { recoveryCode, accountId: res.accountId };
   });
@@ -213,7 +218,17 @@ export async function upgrade({ link, email, password, iters = KDF_ITERS, ...o }
 export const getAccount = ({ link, ...o }) => call(ctx(o), 'GET', '/account', { token: link.authToken });
 export const listDevices = ({ link, ...o }) => call(ctx(o), 'GET', '/account/devices', { token: link.authToken });
 export const signOutOthers = ({ link, ...o }) => post(ctx(o), '/account/devices/signout-others', undefined, link.authToken);
-export const confirmRecovery = ({ link, ...o }) => post(ctx(o), '/account/recovery/confirm', undefined, link.authToken);
+
+// Confirms THE CODE ON SCREEN (sweep W1-I3 / W3-I2): the server sets
+// recovery_confirmed_at only when this recAuthKey is the account's current
+// one, so a link replaced on another device meanwhile answers 409
+// recovery_changed instead of confirming a code nobody saved. A malformed
+// code throws bad_recovery_code before anything is sent.
+export async function confirmRecovery({ link, recoveryCode, ...o }) {
+  const c = ctx(o);
+  const { recAuthKey } = await keyOp(() => deriveRecoveryKeys(recoveryCode));
+  return post(c, '/account/recovery/confirm', { recAuthKey }, link.authToken);
+}
 
 // Never throws. 401 means the session is already gone, which is the goal.
 export async function logOut({ link, ...o }) {

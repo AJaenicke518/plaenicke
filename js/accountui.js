@@ -48,6 +48,8 @@ export const REVOKE_FAILED_TEXT = "This device's session could not be revoked �
 const KEYS_BROKEN = "Something is wrong with this account's keys. Nothing was changed. Tell Alex.";
 const SERVER_BROKEN = "The server isn't set up right. Tell Alex.";
 const CHANGED_ELSEWHERE = 'Your account changed on another device. Try again.';
+// Done on a recovery screen whose code was replaced meanwhile (W3-I2).
+const REPLACED_ELSEWHERE = 'This recovery link was replaced on another device — make a new one.';
 const ERROR_COPY = {
   bad_credentials: 'Email or password is wrong.',
   invalid_invite: "That invite code doesn't work. Ask Alex for a new one.",
@@ -65,6 +67,8 @@ const ERROR_COPY = {
   at_rest_key_mismatch: SERVER_BROKEN,
   server: SERVER_BROKEN,
   no_password: 'This account has no password yet. Use Create your login.',
+  invalid_upgrade_code: "That upgrade code doesn't work — it may be used or expired. Mint a new one (docs/admin.md).",
+  missing_upgrade_code: 'Paste the upgrade code first.',
   password_changed: CHANGED_ELSEWHERE,
   recovery_changed: CHANGED_ELSEWHERE,
   // A bearer route answered 401: this device's session is gone (§ 6.10).
@@ -253,7 +257,7 @@ const FORMS = {
   forgot: { title: 'Reset your password', fields: ['recovery', 'email', 'newPassword', 'password2'], policy: true, submit: 'Reset password' },
   change: { title: 'Change password', fields: ['email', 'current', 'newPassword', 'password2', 'signOutOthers'], policy: true, submit: 'Change password' },
   'new-recovery': { title: 'Make a new recovery link', fields: ['email', 'current'], policy: false, submit: 'Make a new link' },
-  upgrade: { title: 'Create your login', fields: ['email', 'newPassword', 'password2'], policy: true, submit: 'Create login' },
+  upgrade: { title: 'Create your login', fields: ['upgradeCode', 'email', 'newPassword', 'password2'], policy: true, submit: 'Create login' },
 };
 
 export function initAccountUI({
@@ -438,7 +442,7 @@ export function initAccountUI({
     },
     async upgrade(v) {
       const link = requireLink();
-      const res = await api.upgrade({ link, email: v.email, password: v.newPassword });
+      const res = await api.upgrade({ link, email: v.email, password: v.newPassword, upgradeCode: v.upgradeCode });
       // Plan review I6: the data here now belongs to an account with a login
       // — no longer a legacy one (sweep W2-C1).
       saveLocalOwner(res.accountId);
@@ -543,6 +547,9 @@ export function initAccountUI({
     const plain = { autocapitalize: 'off', spellcheck: false };
     if (kind === 'invite') refs.invite = make('acct-invite-code', 'Invite code', { type: 'text', autocomplete: 'off', value: prefill.invite, ...plain });
     else if (kind === 'recovery') refs.recovery = make('acct-recovery-code', 'Recovery code', { type: 'text', autocomplete: 'off', value: prefill.recovery, ...plain });
+    // Sweep W1-C1 / W3-I3: the server upgrades only with a one-time code Alex
+    // mints with curl (docs/admin.md).
+    else if (kind === 'upgradeCode') refs.upgradeCode = make('acct-upgrade-code', 'Upgrade code from Alex', { type: 'text', autocomplete: 'off', ...plain });
     else if (kind === 'email') refs.email = make('acct-email', 'Email', { type: 'email', autocomplete: 'username', value: emailKnown(), ...plain });
     else if (kind === 'password') refs.password = make('acct-password', 'Password', { type: 'password', autocomplete: 'current-password' });
     else if (kind === 'current') refs.current = make('acct-current-password', 'Current password', { type: 'password', autocomplete: 'current-password' });
@@ -579,6 +586,7 @@ export function initAccountUI({
     const values = () => ({
       invite: refs.invite ? refs.invite.value.trim() : undefined,
       recovery: refs.recovery ? refs.recovery.value.trim() : undefined,
+      upgradeCode: refs.upgradeCode ? refs.upgradeCode.value.trim() : undefined,
       email: refs.email ? refs.email.value.trim() : undefined,
       password: refs.password ? refs.password.value : undefined,
       current: refs.current ? refs.current.value : undefined,
@@ -674,7 +682,9 @@ export function initAccountUI({
       showError('');
       try {
         const link = requireLink();
-        await api.confirmRecovery({ link });
+        // The code ON SCREEN is what is confirmed (sweep W3-I2): a link
+        // replaced on another device meanwhile answers recovery_changed.
+        await api.confirmRecovery({ link, recoveryCode: code });
         const info = currentInfo();
         if (info) remember(link, { ...info, recoveryConfirmed: true });
         recovery = null;
@@ -682,7 +692,15 @@ export function initAccountUI({
         notice = 'Recovery link saved.';
         render();
       } catch (err) {
-        showError(copyFor(err));
+        if (err instanceof AccountError && err.code === 'recovery_changed') {
+          // This code is no longer the account's: saving it would be saving
+          // a dead link. Off the screen; the banner stays (still unconfirmed).
+          recovery = null;
+          view = 'home';
+          notice = '';
+          error = REPLACED_ELSEWHERE;
+          render();
+        } else showError(copyFor(err));
       } finally {
         busy = false;
         if (view === 'recovery') done.disabled = saved.checked !== true;

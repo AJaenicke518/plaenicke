@@ -8,6 +8,7 @@ import {
 } from '../js/account.js';
 import { parseLinkCode, generateEncKey, encryptBlob } from '../js/crypto.js';
 import { deriveRecoveryKeys } from '../js/keys.js';
+import { mintDevice } from '../worker/src/auth.js';
 import { APP_URL } from '../js/config.js';
 
 
@@ -122,7 +123,7 @@ test('upgrade with a key that cannot decrypt the blob gives wrong_key_on_device,
   await env.DB.prepare('UPDATE data SET blob = ? WHERE id = ?').bind(await encryptBlob(keyA, { items: [] }), su.accountId).run();
   const link = { authToken: parseLinkCode(su.code).authToken, encKey: generateEncKey() };
   s.calls.length = 0;
-  await assert.rejects(upgrade({ link, email: 'new@example.com', password: PW, ...s }),
+  await assert.rejects(upgrade({ link, email: 'new@example.com', password: PW, upgradeCode: 'AAAAAAAAAAAAAAAAAAAAAA', ...s }),
     (e) => e.code === 'wrong_key_on_device');
   assert.ok(!s.calls.includes('/account/upgrade'));
 });
@@ -155,14 +156,7 @@ test('newRecoveryLink issues a code that recovers, and getAccount/listDevices/co
   const acct = await getAccount({ link: l2, ...s });
   assert.equal(acct.email, EMAIL);
   assert.equal(acct.recoveryConfirmed, false);
-  // Sweep W1-I3: POST /account/recovery/confirm now requires {recAuthKey} of
-  // the code on screen. js/account.js sends it from W3 on; until then this
-  // test-only wrapper adds it for the code recover() just minted.
-  const { recAuthKey } = await deriveRecoveryKeys(recovered.recoveryCode);
-  const withKey = async (url, opts) => (new URL(url).pathname === '/account/recovery/confirm'
-    ? s.fetchImpl(url, { ...opts, headers: { ...opts.headers, 'content-type': 'application/json' }, body: JSON.stringify({ recAuthKey }) })
-    : s.fetchImpl(url, opts));
-  await confirmRecovery({ link: l2, ...s, fetchImpl: withKey });
+  await confirmRecovery({ link: l2, recoveryCode: recovered.recoveryCode, ...s });
   assert.equal((await getAccount({ link: l2, ...s })).recoveryConfirmed, true);
   const devs = await listDevices({ link: l2, ...s });
   assert.ok(devs.devices.some((d) => d.current));
@@ -270,4 +264,90 @@ test('W2-I6: a server-sent kdfIters above 10,000,000 gives kdf_iters_out_of_rang
   await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'Mac', ...s }),
     (e) => e instanceof AccountError && e.code === 'kdf_iters_out_of_range');
   assert.ok(!s.calls.includes('/auth/login'));
+});
+
+// --- sweep W3-I2 / W3-I3: the client side of W1's contracts -----------------
+
+// W1-I3: POST /account/recovery/confirm takes {recAuthKey} of the code on
+// screen. confirmRecovery derives it from that code, so a link replaced on
+// another device meanwhile answers 409 recovery_changed instead of
+// confirming a code nobody saved.
+test('W3-I2: confirmRecovery sends the recAuthKey of the code it is given', async () => {
+  const { s, su } = await setup();
+  const link = linkOf(su.code);
+  let sent;
+  const spy = async (url, opts) => {
+    if (new URL(url).pathname === '/account/recovery/confirm') sent = JSON.parse(opts.body);
+    return s.fetchImpl(url, opts);
+  };
+  await confirmRecovery({ link, recoveryCode: su.recoveryCode, ...s, fetchImpl: spy });
+  assert.deepEqual(sent, { recAuthKey: (await deriveRecoveryKeys(su.recoveryCode)).recAuthKey });
+  assert.equal((await getAccount({ link, ...s })).recoveryConfirmed, true);
+});
+
+test('W3-I2: confirming a code that was replaced on another device is 409 recovery_changed, nothing confirmed', async () => {
+  const { s, su } = await setup();
+  const link = linkOf(su.code);
+  await newRecoveryLink({ link, email: EMAIL, currentPassword: PW, ...s }); // "another device"
+  await assert.rejects(confirmRecovery({ link, recoveryCode: su.recoveryCode, ...s }),
+    (e) => e instanceof AccountError && e.code === 'recovery_changed' && e.status === 409);
+  assert.equal((await getAccount({ link, ...s })).recoveryConfirmed, false);
+});
+
+test('W3-I2: confirmRecovery without a well-formed code sends nothing', async () => {
+  const { s, su } = await setup();
+  const link = linkOf(su.code);
+  for (const recoveryCode of [undefined, '', 'not a code']) {
+    s.calls.length = 0;
+    await assert.rejects(confirmRecovery({ link, recoveryCode, ...s }),
+      (e) => e instanceof AccountError && e.code === 'bad_recovery_code', String(recoveryCode));
+    assert.deepEqual(s.calls, []);
+  }
+});
+
+// W1-C1: /account/upgrade needs a one-time upgrade code Alex mints with
+// POST /admin/upgrade-code. upgrade() sends it; a missing one is refused on
+// the device before any key is derived or request made.
+async function legacyAccount1() {
+  const env = envWith();
+  const s = server(env);
+  const token = await mintDevice(env, 1, 'A', '2026-11-11T12:00:00.000Z');
+  const link = { authToken: token, encKey: generateEncKey() };
+  await env.DB.prepare('UPDATE data SET blob = ? WHERE id = 1').bind(await encryptBlob(link.encKey, { items: [] })).run();
+  const mint = async () => {
+    const res = await worker.fetch(new Request('https://w/admin/upgrade-code', {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${env.ADMIN_SECRET}` },
+      body: JSON.stringify({ accountId: 1 }),
+    }), env);
+    assert.equal(res.status, 200);
+    return (await res.json()).upgradeCode;
+  };
+  return { env, s, link, mint };
+}
+
+test('W3-I3: upgrade sends the upgrade code and succeeds with one Alex minted', async () => {
+  const { s, link, mint } = await legacyAccount1();
+  const upgradeCode = await mint();
+  let sent;
+  const spy = async (url, opts) => {
+    if (new URL(url).pathname === '/account/upgrade') sent = JSON.parse(opts.body);
+    return s.fetchImpl(url, opts);
+  };
+  const up = await upgrade({ link, email: EMAIL, password: PW, upgradeCode: ` ${upgradeCode} `, ...s, fetchImpl: spy });
+  assert.equal(up.accountId, 1);
+  assert.equal(sent.upgradeCode, upgradeCode, 'trimmed');
+  assert.equal((await getAccount({ link, ...s })).email, EMAIL);
+});
+
+test('W3-I3: a wrong upgrade code is 403 invalid_upgrade_code; a missing one sends nothing', async () => {
+  const { s, link } = await legacyAccount1();
+  await assert.rejects(upgrade({ link, email: EMAIL, password: PW, upgradeCode: 'AAAAAAAAAAAAAAAAAAAAAA', ...s }),
+    (e) => e instanceof AccountError && e.code === 'invalid_upgrade_code');
+  for (const upgradeCode of [undefined, '', '   ']) {
+    s.calls.length = 0;
+    await assert.rejects(upgrade({ link, email: EMAIL, password: PW, upgradeCode, ...s }),
+      (e) => e instanceof AccountError && e.code === 'missing_upgrade_code');
+    assert.deepEqual(s.calls, []);
+  }
+  assert.equal((await getAccount({ link, ...s })).email, null);
 });

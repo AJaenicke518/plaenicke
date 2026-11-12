@@ -57,28 +57,22 @@ const T0 = '2026-11-11T12:00:00.000Z';
 
 function world(extraEnv = {}) {
   const env = { ...envWith(), ...extraEnv };
-  // Sweep W1-C1: POST /account/upgrade now requires a one-time upgradeCode
-  // (minted by POST /admin/upgrade-code). js/account.js gains that field in
-  // W3; until then this test-only shim mints one through the real admin route
-  // and adds it to the upgrade body. Every other request passes through.
-  const fetchImpl = async (u, o) => {
-    if (new URL(u).pathname === '/account/upgrade' && o && typeof o.body === 'string') {
-      const minted = await worker.fetch(new Request(`${API}/admin/upgrade-code`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${env.ADMIN_SECRET}` },
-        body: JSON.stringify({ accountId: 1 }),
-      }), env);
-      if (minted.status === 200) {
-        const { upgradeCode } = await minted.json();
-        o = { ...o, body: JSON.stringify({ ...JSON.parse(o.body), upgradeCode }) };
-      }
-    }
-    return worker.fetch(new Request(u, o), env);
-  };
+  const fetchImpl = (u, o) => worker.fetch(new Request(u, o), env);
   const api = { fetchImpl, apiBase: API };
   const row = (id) => env.DB.prepare('SELECT version, blob FROM data WHERE id = ?').bind(id).first();
   const deviceCount = async (id) => (await env.DB.prepare('SELECT COUNT(*) AS n FROM devices WHERE account_id = ?').bind(id).first()).n;
-  return { env, fetchImpl, api, row, deviceCount };
+  // What Alex runs with curl before Create your login (sweep W1-C1): a
+  // one-time upgrade code through the real admin route.
+  const upgradeCode = async (accountId = 1) => {
+    const res = await worker.fetch(new Request(`${API}/admin/upgrade-code`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${env.ADMIN_SECRET}` },
+      body: JSON.stringify({ accountId }),
+    }), env);
+    assert.equal(res.status, 200);
+    return (await res.json()).upgradeCode;
+  };
+  return { env, fetchImpl, api, row, deviceCount, upgradeCode };
 }
 
 // account.js with the in-process Worker bound in — the shape accountui's
@@ -303,7 +297,7 @@ test('e2e 2: legacy upgrade — B keeps syncing with no action, both converge, a
   // A upgrades. accountui's ACTIONS.upgrade then records the owner; mirrored
   // here because accountui's form is not under test in this scenario.
   const before = await w.row(1);
-  const up = await account.upgrade({ link: getLink(), email: EMAIL, password: PW, ...w.api });
+  const up = await account.upgrade({ link: getLink(), email: EMAIL, password: PW, upgradeCode: await w.upgradeCode(), ...w.api });
   assert.equal(up.accountId, 1);
   saveLocalOwner(up.accountId);
   const after = await w.row(1);
@@ -449,7 +443,7 @@ test('e2e 4: cross-account guard — account-1 device A, signed out, cannot log 
   mountLinkUI(A, w);
   addLocal(newItem('pay rent'), newItem('call mom'));
   await pasteLink(A, tokA);
-  const up = await account.upgrade({ link: getLink(), email: EMAIL, password: PW, ...w.api });
+  const up = await account.upgrade({ link: getLink(), email: EMAIL, password: PW, upgradeCode: await w.upgradeCode(), ...w.api });
   saveLocalOwner(up.accountId);
 
   // D: someone else's account, with data on the server.

@@ -284,7 +284,34 @@ test('accountui: Done is disabled until "I saved my recovery link" is ticked, th
   const confirm = calls.find((c) => c.name === 'confirmRecovery');
   assert.ok(confirm);
   assert.equal(confirm.args.link.authToken, parseLinkCode(code).authToken);
+  assert.equal(confirm.args.recoveryCode, 'RECOVERYCODE1234567890', 'W3-I2: the code on screen is what is confirmed');
   assert.equal(banner.hidden, true);
+});
+
+test('W3-I2: a code replaced on another device (409 recovery_changed) says so, leaves the screen and keeps the banner', async () => {
+  const { host, banner } = setup();
+  initAccountBanner({ onOpen: () => {} });
+  const { api } = fakeApi({
+    signUp: async () => ({ code: newCode(), accountId: 7, recoveryCode: 'RECOVERYCODE1234567890' }),
+    confirmRecovery: async () => { throw new AccountError('recovery_changed', {}, 409); },
+  });
+  mount(host, { api });
+  click(byId(host, 'acct-invite'));
+  input(host, 'acct-invite-code', 'INVITE123');
+  input(host, 'acct-email', 'tester@example.com');
+  input(host, 'acct-password', GOOD_PW);
+  input(host, 'acct-password2', GOOD_PW);
+  submit(host);
+  assert.ok(await until(() => byId(host, 'acct-recovery-screen')));
+  const saved = byId(host, 'acct-recovery-saved');
+  saved.checked = true;
+  for (const fn of saved._listeners.change || []) fn({ target: saved });
+  click(byId(host, 'acct-recovery-done'));
+  assert.ok(await until(() => byId(host, 'acct-recovery-screen') === null));
+  assert.equal(errorText(host), 'This recovery link was replaced on another device — make a new one.');
+  assert.equal(byId(host, 'acct-recovery-value'), null, 'the dead code is no longer on screen');
+  assert.ok(byId(host, 'acct-new-recovery'), 'Make a new recovery link is one tap away');
+  assert.equal(banner.hidden, false, 'still unconfirmed: the banner stays');
 });
 
 test('accountui: a failed confirmRecovery keeps the recovery screen and says why', async () => {
@@ -443,6 +470,7 @@ test('W2-C1: Create your login turns a legacy device into an account device', as
   assert.equal(accountModeFromStorage(), 'legacy', 'fixture check');
   mount(host, { api });
   click(byId(host, 'acct-upgrade'));
+  input(host, 'acct-upgrade-code', 'UPGRADECODE12345678901');
   input(host, 'acct-email', 'alex@example.com');
   input(host, 'acct-password', GOOD_PW);
   input(host, 'acct-password2', GOOD_PW);
@@ -881,6 +909,8 @@ test('accountui: upgrade (Create your login) saves localOwner, then shows the re
   await refreshAccount({ api });
   mount(host, { api });
   click(byId(host, 'acct-upgrade'));
+  assert.equal(byId(byId(host, 'acct-upgrade-code').parentNode, 'acct-upgrade-code').parentNode.children[0].textContent, 'Upgrade code from Alex');
+  input(host, 'acct-upgrade-code', 'UPGRADECODE12345678901');
   input(host, 'acct-email', 'alex@example.com');
   input(host, 'acct-password', GOOD_PW);
   input(host, 'acct-password2', GOOD_PW);
@@ -888,7 +918,8 @@ test('accountui: upgrade (Create your login) saves localOwner, then shows the re
   assert.ok(await until(() => byId(host, 'acct-recovery-screen')));
   assert.equal(loadLocalOwner(), 1, 'plan review I6');
   const up = calls.find((c) => c.name === 'upgrade');
-  assert.deepEqual(Object.keys(up.args).sort(), ['email', 'link', 'password']);
+  assert.deepEqual(Object.keys(up.args).sort(), ['email', 'link', 'password', 'upgradeCode']);
+  assert.equal(up.args.upgradeCode, 'UPGRADECODE12345678901', 'W3-I3');
   assert.equal(up.args.link.authToken, token);
   assert.equal(byId(host, 'acct-recovery-value').textContent, 'UPGRADERECOVERY1234567');
   assertNoMinKdfIters(calls);
@@ -1108,4 +1139,9 @@ test('W2-rr: an owner-mismatch answer records nothing about the link', async () 
   console.error = () => {};
   try { assert.equal(await refreshAccount({ api }), 'failed'); } finally { console.error = origErr; }
   assert.equal(loadSyncState().linkOwner, null);
+});
+
+test('W3-I3: upgrade-code refusals have their own copy', () => {
+  assert.equal(errorCopy('invalid_upgrade_code'), "That upgrade code doesn't work — it may be used or expired. Mint a new one (docs/admin.md).");
+  assert.equal(errorCopy('missing_upgrade_code'), 'Paste the upgrade code first.');
 });
