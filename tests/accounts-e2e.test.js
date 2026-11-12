@@ -435,10 +435,12 @@ test('e2e 3: recovery signs B out; B shows "signed out", signs back in with the 
   assert.deepEqual(byId((await serverState(w, accountId, dek)).items), byId(itemsB));
 });
 
-test('e2e 4: cross-account guard — account-1 device A, signed out, cannot log in to another account; that account is unchanged', async () => {
+test('e2e 4: cross-account guard — account-1 device A, signed out, cannot log in to another account; that account is unchanged', async (t) => {
   const w = world();
   const A = device('A');
   const D = device('D');
+  const prevWindow = globalThis.window;
+  t.after(() => { globalThis.window = prevWindow; });
   globalThis.window = makeFakeWindow();
 
   // A: legacy account 1 with items, upgraded (owner 1).

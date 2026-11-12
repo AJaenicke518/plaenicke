@@ -90,12 +90,15 @@ function input(host, id, value) {
   return el;
 }
 
+// Returns the handlers' own promises, so a test can await the submit itself
+// settling — a deterministic signal, never a fixed number of ticks.
 function submit(host) {
   const form = byId(host, 'acct-form');
   assert.ok(form, 'the form is rendered');
   let prevented = false;
-  for (const fn of form._listeners.submit || []) fn({ target: form, preventDefault() { prevented = true; } });
+  const settled = (form._listeners.submit || []).map((fn) => fn({ target: form, preventDefault() { prevented = true; } }));
   assert.equal(prevented, true, 'submit never navigates');
+  return Promise.all(settled);
 }
 
 function click(el) {
@@ -711,8 +714,7 @@ test('accountui: a gated form refuses a submit (Enter) while the policy fails, a
   input(host, 'acct-email', 'a@x.de');
   input(host, 'acct-password', 'short');
   input(host, 'acct-password2', 'short');
-  submit(host);
-  await until(() => false, 20);
+  await submit(host); // the handler has returned: refused, or it would have called signUp
   assert.equal(calls.length, 0);
 });
 

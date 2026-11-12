@@ -1279,7 +1279,8 @@ test('a preview whose read never answers gives up at the deadline and reads as o
       fetchImpl: async () => { throw new Error('the preview must not use the write fetch'); },
       syncOnceImpl: async () => { throw new Error('nothing may be adopted'); },
     });
-    for (let i = 0; i < 20; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    // Polled (setImmediate: setTimeout is mocked here), never a fixed count.
+    for (let i = 0; i < 200 && reads < 1; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
     assert.equal(reads, 1, 'fixture check: the preview read went out through the default');
     assert.match(allText(host), /Checking the account/, 'fixture check: still waiting before the deadline');
     t.mock.timers.tick(FETCH_TIMEOUT_MS);
@@ -2785,9 +2786,13 @@ test('acct 11: while an adoption write is in flight, signOutBlocked() is true an
   assert.equal(loadAuth(), authBefore);
   assert.ok(allText(acctHost).includes(linkuiNs.ACCOUNT_COPY.sign_out_refused));
   const button = findAll(acctHost, 'BUTTON').find((b) => b.id === 'acct-signout');
+  // The refusal is decided before the handler's first await, and a call to
+  // logOut would be made before it too — so checking straight after the
+  // click is deterministic, not a fixed wait.
+  acctHost.innerHTML = '';
   button.click();
-  await settleUntil(() => false, 20);
   assert.deepEqual(apiCalls, [], 'the button refuses the same way');
+  assert.ok(allText(acctHost).includes(linkuiNs.ACCOUNT_COPY.sign_out_refused), 'and says why again');
 
   f.letWriteFinish();
   await a.ui.settled();
@@ -2832,7 +2837,7 @@ test('acct 10: signOutLocal refuses while an adoption write is in flight, and ot
   assert.equal(shell.hidden, true, 'the shell indicator is repainted');
 });
 
-test('acct 11: a preview that throws after a successful link still leaves the owner recorded', async () => {
+test('acct 11b: a preview that throws after a successful link still leaves the owner recorded', async () => {
   installFakeLocalStorage();
   const doc = installDom();
   const calls = [];

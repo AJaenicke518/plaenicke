@@ -5963,11 +5963,19 @@ test('slow sync write: a pending adoption outranks the slow line', async (t) => 
 // the scheduleSync an add arms stays off the network (runSync returns at the
 // gate), and unlinked again on restore. The bearer itself is asserted in
 // tests/smartadd.test.js; the signed-out copy has its own test below.
+// Every session withSession starts is ended after its test (sweep W2
+// observation): most callers dropped the returned restore, leaving the
+// session for whatever ran next in the same storage.
+const sessionEnds = [];
+afterEach(() => { while (sessionEnds.length) sessionEnds.pop()(); });
 function withSession() {
   if (getLink() !== null) return () => {};
   saveAuth(composeLinkCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))), generateEncKey()));
   saveSyncState({ adoptionPending: true });
-  return () => { unlink(); };
+  let ended = false;
+  const end = () => { if (!ended) { ended = true; unlink(); } };
+  sessionEnds.push(end);
+  return end;
 }
 function smartAddFetch(respond) {
   const posts = [];
