@@ -23,7 +23,13 @@ CREATE TABLE devices_v2 (
   account_id   INTEGER NOT NULL REFERENCES accounts(id),
   name         TEXT NOT NULL,
   created_at   TEXT NOT NULL,
-  last_seen_at TEXT
+  last_seen_at TEXT,
+  -- Per-device counter for password checks made WITH a session (change
+  -- password, new recovery link): 10 failures lock this device's checks for
+  -- 1 h. Separate from accounts.failed_logins so an anonymous /auth/login
+  -- guesser cannot lock a signed-in owner out of their own settings.
+  failed_pw       INTEGER NOT NULL DEFAULT 0,
+  pw_locked_until TEXT
 );
 INSERT INTO devices_v2 (token_hash, account_id, name, created_at, last_seen_at)
   SELECT token_hash, 1, name, created_at, last_seen_at FROM devices;
@@ -50,3 +56,14 @@ CREATE TABLE usage (
   PRIMARY KEY (account_id, day)
 );
 CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL);   -- 'key-check' written on first use
+
+-- One-time codes that authorise POST /account/upgrade for the legacy account
+-- (minted by POST /admin/upgrade-code). Only the SHA-256 hex of the code is
+-- stored; used_at is set in the same batch as the upgrade UPDATE.
+CREATE TABLE upgrade_codes (
+  hash       TEXT PRIMARY KEY,
+  account_id INTEGER NOT NULL REFERENCES accounts(id),
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at    TEXT
+);

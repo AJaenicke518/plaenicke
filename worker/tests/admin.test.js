@@ -17,7 +17,7 @@ test('every admin route returns 401 without the secret or with a wrong one', asy
   const routes = [
     ['POST', '/admin/invite'], ['DELETE', '/admin/invite'], ['GET', '/admin/accounts'],
     ['POST', '/admin/account/disable'], ['POST', '/admin/account/email'], ['DELETE', '/admin/account'],
-    ['POST', '/admin/device'], ['DELETE', '/admin/device'],
+    ['POST', '/admin/device'], ['DELETE', '/admin/device'], ['POST', '/admin/upgrade-code'],
   ];
   for (const [m, p] of routes) {
     for (const secret of [null, 'wrong']) {
@@ -34,6 +34,7 @@ test('wrong method on an admin route is 405 after auth, before the body', async 
   assert.equal((await call(env, 'GET', '/admin/account/disable')).status, 405);
   assert.equal((await call(env, 'DELETE', '/admin/account/email', {})).status, 405);
   assert.equal((await call(env, 'POST', '/admin/account', {})).status, 405);
+  assert.equal((await call(env, 'GET', '/admin/upgrade-code')).status, 405);
 });
 
 test('POST /admin/invite returns a 22-char code, stores only its hash, usable once', async () => {
@@ -119,8 +120,13 @@ test('disable deletes devices in one batch, blocks login with 403, and disabled:
   const bad = await call(env, 'POST', '/admin/account/disable', { id: accountId, disabled: 'yes' });
   assert.equal(bad.status, 400);
   assert.equal((await call(env, 'POST', '/admin/account/disable', { id: 999, disabled: true })).status, 404);
+  const batches = [];
+  const orig = env.DB.batch.bind(env.DB);
+  env.DB.batch = (stmts) => { batches.push(stmts.length); return orig(stmts); };
   const res = await call(env, 'POST', '/admin/account/disable', { id: accountId, disabled: true });
+  env.DB.batch = orig;
   assert.equal(res.status, 200);
+  assert.deepEqual(batches, [2]);
   assert.ok((await one(env, 'SELECT disabled_at FROM accounts WHERE id = ?', accountId)).disabled_at);
   assert.equal(await count(env, 'devices'), 0);
   assert.equal((await get(env, '/data', token)).status, 401);
@@ -167,7 +173,7 @@ test('delete account: wrong confirm is 400, correct confirm removes everything i
   env.DB.batch = (stmts) => { batches.push(stmts.length); return orig(stmts); };
   const ok = await call(env, 'DELETE', '/admin/account', { id: accountId, confirm: 'Tester@example.com' });
   assert.equal(ok.status, 200);
-  assert.deepEqual(batches, [4]);
+  assert.deepEqual(batches, [5]);
   for (const t of ['usage', 'devices']) assert.equal(await count(env, t), 0);
   assert.equal(await count(env, 'accounts'), 1);
   assert.equal((await one(env, 'SELECT COUNT(*) AS n FROM data WHERE id = ?', accountId)).n, 0);
@@ -198,4 +204,98 @@ test('email change on the legacy account (no password set) is 409 not_upgraded',
   assert.equal(res.status, 409);
   assert.equal((await res.json()).error, 'not_upgraded');
   assert.equal((await one(env, 'SELECT email FROM accounts WHERE id = 1')).email, null);
+});
+
+// --- sweep W1 (Task 6 deferred, W1-C1 admin half) ---------------------------
+
+test('POST /admin/device for a disabled account is 409 disabled and mints nothing', async () => {
+  const { env, accountId } = await signedUp();
+  await env.DB.prepare('UPDATE accounts SET disabled_at = ? WHERE id = ?').bind('t', accountId).run();
+  const before = await count(env, 'devices');
+  const res = await call(env, 'POST', '/admin/device', { name: 'x', accountId });
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).error, 'disabled');
+  assert.equal(await count(env, 'devices'), before);
+});
+
+test('disable of an account deleted after the existence check is 404, not a silent 200', async () => {
+  const { env, accountId } = await signedUp();
+  const real = env.DB;
+  // Interleave: the admin delete lands between disable's SELECT and its batch.
+  const raced = {
+    ...real,
+    prepare: (sql) => real.prepare(sql),
+    batch: async (stmts) => {
+      for (const t of [['usage', 'account_id'], ['devices', 'account_id'], ['data', 'id'], ['accounts', 'id']]) {
+        await real.prepare(`DELETE FROM ${t[0]} WHERE ${t[1]} = ?`).bind(accountId).run();
+      }
+      return real.batch(stmts);
+    },
+  };
+  const res = await call({ ...env, DB: raced }, 'POST', '/admin/account/disable', { id: accountId, disabled: true });
+  assert.equal(res.status, 404);
+  assert.equal((await res.json()).error, 'no_account');
+});
+
+test('enable of an account deleted after the existence check is 404 too', async () => {
+  const { env, accountId } = await signedUp();
+  const real = env.DB;
+  let selects = 0;
+  const raced = {
+    ...real,
+    prepare: (sql) => {
+      const st = real.prepare(sql);
+      if (/^SELECT id FROM accounts/.test(sql)) {
+        selects += 1;
+        return { bind: (...a) => ({ first: async () => {
+          const row = await st.bind(...a).first();
+          for (const t of [['usage', 'account_id'], ['devices', 'account_id'], ['data', 'id'], ['accounts', 'id']]) {
+            await real.prepare(`DELETE FROM ${t[0]} WHERE ${t[1]} = ?`).bind(accountId).run();
+          }
+          return row;
+        } }) };
+      }
+      return st;
+    },
+  };
+  const res = await call({ ...env, DB: raced }, 'POST', '/admin/account/disable', { id: accountId, disabled: false });
+  assert.equal(selects, 1);
+  assert.equal(res.status, 404);
+});
+
+test('POST /admin/upgrade-code mints a 22-char single-use code for the legacy account, stores only its hash, expires in 24 h', async () => {
+  const env = { ...envWith(), NOW: () => T0 };
+  const res = await call(env, 'POST', '/admin/upgrade-code', { accountId: 1 });
+  assert.equal(res.status, 200);
+  const { upgradeCode, ...rest } = await res.json();
+  assert.deepEqual(rest, {});
+  assert.match(upgradeCode, /^[A-Za-z0-9_-]{22}$/);
+  const row = await one(env, 'SELECT * FROM upgrade_codes');
+  assert.deepEqual(row, { hash: await sha256Hex(upgradeCode), account_id: 1, created_at: T0, expires_at: '2026-11-12T12:00:00.000Z', used_at: null });
+  const second = await (await call(env, 'POST', '/admin/upgrade-code', { accountId: 1 })).json();
+  assert.notEqual(second.upgradeCode, upgradeCode);
+});
+
+test('POST /admin/upgrade-code: bad id 400, unknown 404, an account with an email 409 already_upgraded', async () => {
+  const { env, accountId } = await signedUp();
+  for (const b of [{}, { accountId: '1' }, { accountId: 0 }, { accountId: 1.5 }]) {
+    const r = await call(env, 'POST', '/admin/upgrade-code', b);
+    assert.equal(r.status, 400, JSON.stringify(b));
+    assert.equal((await r.json()).error, 'bad_request');
+  }
+  const unk = await call(env, 'POST', '/admin/upgrade-code', { accountId: 424242 });
+  assert.equal(unk.status, 404);
+  assert.equal((await unk.json()).error, 'no_account');
+  const up = await call(env, 'POST', '/admin/upgrade-code', { accountId });
+  assert.equal(up.status, 409);
+  assert.equal((await up.json()).error, 'already_upgraded');
+  assert.equal(await count(env, 'upgrade_codes'), 0);
+});
+
+test('delete account also removes its upgrade codes (FK on)', async () => {
+  const { env, accountId } = await signedUp();
+  await env.DB.prepare("INSERT INTO upgrade_codes (hash, account_id, created_at, expires_at, used_at) VALUES ('h', ?, 't', 't', 't')").bind(accountId).run();
+  const ok = await call(env, 'DELETE', '/admin/account', { id: accountId, confirm: 'tester@example.com' });
+  assert.equal(ok.status, 200);
+  assert.equal(await count(env, 'upgrade_codes'), 0);
 });

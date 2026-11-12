@@ -9,11 +9,11 @@ import {
 } from './auth.js';
 import { json } from './cors.js';
 import { nowISO, addMinutes } from './clock.js';
+import { normEmail, validEmail, readBody } from './input.js';
 
 const MIN_ITERS = 600000;
 const MAX_FAILED = 50;
 const LOCK_MINUTES = 60;
-const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
 // 2 + a random integer in [0, 2^52): two Uint32 words, the high one masked to 20 bits.
 export function randomAccountId() {
@@ -35,11 +35,6 @@ function decodedLength(s, url) {
 const isB64u = (s, n) => decodedLength(s, true) === n;
 const isB64 = (s, n) => decodedLength(s, false) === n;
 const validName = (s) => typeof s === 'string' && s.length >= 1 && s.length <= 100;
-const normEmail = (s) => (typeof s === 'string' ? s.trim().toLowerCase() : '');
-
-async function readBody(request) {
-  try { return await request.json(); } catch { return null; }
-}
 
 // Attempt reservation (spec § 6.2 step 3): one UPDATE, so concurrent wrong
 // guesses cannot out-run the limit. Also restarts an expired lock window.
@@ -64,7 +59,7 @@ async function handleSignup(request, env, A) {
   const b = await readBody(request);
   const email = normEmail(b && b.email);
   if (!b || typeof b.invite !== 'string' || !b.invite || b.invite.length > 200
-    || !EMAIL_RE.test(email) || email.length > 254
+    || !validEmail(email)
     || !isB64u(b.kdfSalt, 16) || !Number.isInteger(b.kdfIters) || b.kdfIters < MIN_ITERS
     || !isB64u(b.authKey, 32) || !isB64u(b.recAuthKey, 32)
     || !isB64(b.wrappedDekPw, 60) || !isB64(b.wrappedDekRec, 60)
@@ -120,7 +115,7 @@ async function handlePrelogin(request, env) {
 async function handleLogin(request, env, A) {
   const b = await readBody(request);
   const email = normEmail(b && b.email);
-  if (!b || !EMAIL_RE.test(email) || !isB64u(b.authKey, 32) || !validName(b.deviceName)) {
+  if (!b || !validEmail(email) || !isB64u(b.authKey, 32) || !validName(b.deviceName)) {
     return json({ error: 'bad_request' }, 400);
   }
   const row = await env.DB.prepare(
@@ -167,7 +162,7 @@ async function recoveryRow(env, A, email, recAuthKey) {
 async function handleRecoverStart(request, env, A) {
   const b = await readBody(request);
   const email = normEmail(b && b.email);
-  if (!b || !EMAIL_RE.test(email) || !isB64u(b.recAuthKey, 32)) return json({ error: 'bad_request' }, 400);
+  if (!b || !validEmail(email) || !isB64u(b.recAuthKey, 32)) return json({ error: 'bad_request' }, 400);
   const { row, res } = await recoveryRow(env, A, email, b.recAuthKey);
   if (res) return res;
   return json({
@@ -180,7 +175,7 @@ async function handleRecoverStart(request, env, A) {
 async function handleRecoverFinish(request, env, A) {
   const b = await readBody(request);
   const email = normEmail(b && b.email);
-  if (!b || !EMAIL_RE.test(email) || !isB64u(b.recAuthKey, 32) || !validKdf(b)
+  if (!b || !validEmail(email) || !isB64u(b.recAuthKey, 32) || !validKdf(b)
     || !isB64u(b.authKey, 32) || !isB64u(b.recAuthKey2, 32)
     || !isB64(b.wrappedDekPw, 60) || !isB64(b.wrappedDekRec2, 60) || !validName(b.deviceName)) {
     return json({ error: 'bad_request' }, 400);
@@ -270,30 +265,49 @@ async function handleNewRecovery(request, env, A, device, now) {
   return json({ ok: true });
 }
 
-async function handleUpgrade(request, env, A, device) {
+// Legacy account 1 sets its email and password (spec § 6.7). A bearer token
+// alone is not enough (sweep W1-C1): the body must carry a one-time
+// upgradeCode minted by POST /admin/upgrade-code for this account. The code
+// is claimed with a per-request nonce and the account UPDATE is conditioned
+// on that claim, in ONE batch — the sign-up invite pattern — so the code is
+// consumed exactly when the upgrade lands (an email_taken throw rolls both
+// back and leaves the code usable).
+async function handleUpgrade(request, env, A, device, now) {
   const b = await readBody(request);
   const email = normEmail(b && b.email);
-  if (!b || !EMAIL_RE.test(email) || email.length > 254 || !validKdf(b)
+  if (!b || !validEmail(email) || !validKdf(b)
     || !isB64u(b.authKey, 32) || !isB64u(b.recAuthKey, 32)
     || !isB64(b.wrappedDekPw, 60) || !isB64(b.wrappedDekRec, 60)
-    || typeof b.dekCheck !== 'string' || !/^[0-9a-f]{64}$/.test(b.dekCheck)) {
+    || typeof b.dekCheck !== 'string' || !/^[0-9a-f]{64}$/.test(b.dekCheck)
+    || typeof b.upgradeCode !== 'string' || !b.upgradeCode || b.upgradeCode.length > 200) {
     return json({ error: 'bad_request' }, 400);
   }
   const { accountId } = device;
   const pw = await A.seal('wrapped_dek_pw_sealed', accountId, b.wrappedDekPw);
   const recW = await A.seal('wrapped_dek_rec_sealed', accountId, b.wrappedDekRec);
-  let res;
+  const codeHash = await sha256Hex(b.upgradeCode);
+  const nonce = `${now}|${crypto.randomUUID()}`;
+  let results;
   try {
-    res = await env.DB.prepare(`UPDATE accounts SET email=?, kdf_salt=?, kdf_iters=?, auth_mac=?, rec_auth_mac=?,
-        wrapped_dek_pw_sealed=?, wrapped_dek_rec_sealed=?, dek_check=?, recovery_confirmed_at=NULL
-        WHERE id=? AND email IS NULL`)
-      .bind(email, b.kdfSalt, b.kdfIters, await A.mac(b.authKey), await A.mac(b.recAuthKey), pw, recW, b.dekCheck, accountId).run();
+    results = await env.DB.batch([
+      env.DB.prepare(`UPDATE upgrade_codes SET used_at = ? WHERE hash = ? AND account_id = ? AND used_at IS NULL AND expires_at > ?
+                        AND EXISTS (SELECT 1 FROM accounts WHERE id = ? AND email IS NULL)`)
+        .bind(nonce, codeHash, accountId, now, accountId),
+      env.DB.prepare(`UPDATE accounts SET email=?, kdf_salt=?, kdf_iters=?, auth_mac=?, rec_auth_mac=?,
+          wrapped_dek_pw_sealed=?, wrapped_dek_rec_sealed=?, dek_check=?, recovery_confirmed_at=NULL
+          WHERE id=? AND email IS NULL AND EXISTS (SELECT 1 FROM upgrade_codes WHERE hash = ? AND account_id = ? AND used_at = ?)
+          RETURNING id`)
+        .bind(email, b.kdfSalt, b.kdfIters, await A.mac(b.authKey), await A.mac(b.recAuthKey), pw, recW, b.dekCheck,
+          accountId, codeHash, accountId, nonce),
+    ]);
   } catch (err) {
     if (/UNIQUE constraint failed: accounts\.email/.test(String(err && err.message))) return json({ error: 'email_taken' }, 409);
     throw err;
   }
-  if (res.meta.changes !== 1) return json({ error: 'already_upgraded' }, 409);
-  return json({ ok: true, accountId });
+  if (results[1].results.length === 1) return json({ ok: true, accountId });
+  const cur = await env.DB.prepare('SELECT email FROM accounts WHERE id = ?').bind(accountId).first();
+  if (!cur || cur.email !== null) return json({ error: 'already_upgraded' }, 409);
+  return json({ error: 'invalid_upgrade_code' }, 403);
 }
 
 async function handleBearer(path, request, env, A, now) {
@@ -302,7 +316,7 @@ async function handleBearer(path, request, env, A, now) {
   const { accountId, tokenHash } = device;
   if (path === '/account/password') return handlePasswordChange(request, env, A, device, now);
   if (path === '/account/recovery') return handleNewRecovery(request, env, A, device, now);
-  if (path === '/account/upgrade') return handleUpgrade(request, env, A, device);
+  if (path === '/account/upgrade') return handleUpgrade(request, env, A, device, now);
   if (path === '/auth/logout') {
     await env.DB.prepare('DELETE FROM devices WHERE token_hash = ?').bind(tokenHash).run();
     return json({ ok: true });

@@ -202,36 +202,47 @@ test('7. new recovery link replaces rec mac and wrap and clears confirmation', a
 const up = (over = {}) => ({
   email: 'Alex@Example.com', kdfSalt: b64u(16, 1), kdfIters: 600000, authKey: b64u(32, 2), recAuthKey: b64u(32, 3),
   wrappedDekPw: b64(60, 4), wrappedDekRec: b64(60, 5), dekCheck: 'b'.repeat(64), ...over });
+const mintUpgradeCode = async (env, accountId = 1) => {
+  const res = await post(env, '/admin/upgrade-code', { accountId }, 'adm');
+  assert.equal(res.status, 200);
+  return (await res.json()).upgradeCode;
+};
 
 test('8. upgrade of legacy account 1; a second upgrade is already_upgraded', async () => {
   const env = envWith();
   const t1 = await mintDevice(env, 1, 'old', 't');
-  const res = await post(env, '/account/upgrade', up(), t1);
+  const code = await mintUpgradeCode(env);
+  const res = await post(env, '/account/upgrade', up({ upgradeCode: code }), t1);
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { ok: true, accountId: 1 });
   const a = await one(env, 'SELECT * FROM accounts WHERE id = 1');
   assert.equal(a.email, 'alex@example.com'); assert.equal(a.dek_check, 'b'.repeat(64));
   assert.notEqual(a.auth_mac, null); assert.notEqual(a.rec_auth_mac, null);
   assert.ok(a.wrapped_dek_pw_sealed.startsWith('k1:'));
-  const again = await post(env, '/account/upgrade', up({ email: 'z@example.com' }), t1);
+  assert.notEqual((await one(env, 'SELECT used_at FROM upgrade_codes')).used_at, null);
+  const again = await post(env, '/account/upgrade', up({ email: 'z@example.com', upgradeCode: code }), t1);
   assert.equal(again.status, 409);
   assert.equal((await again.json()).error, 'already_upgraded');
   assert.equal((await one(env, 'SELECT email FROM accounts WHERE id = 1')).email, 'alex@example.com');
 });
 
-test('8b. non-legacy token is already_upgraded; taken email is email_taken; bad input is 400', async () => {
+test('8b. non-legacy token is already_upgraded; taken email is email_taken (code not consumed); bad input is 400', async () => {
   const { env, token } = await signedUp();
-  const r = await post(env, '/account/upgrade', up({ email: 'new@example.com' }), token);
+  const t1 = await mintDevice(env, 1, 'old', 't');
+  const code = await mintUpgradeCode(env);
+  const r = await post(env, '/account/upgrade', up({ email: 'new@example.com', upgradeCode: code }), token);
   assert.equal(r.status, 409);
   assert.equal((await r.json()).error, 'already_upgraded');
   assert.equal((await one(env, 'SELECT email FROM accounts WHERE id = 1')).email, null);
-  const t1 = await mintDevice(env, 1, 'old', 't');
-  const taken = await post(env, '/account/upgrade', up({ email: 'TESTER@example.com' }), t1);
+  const taken = await post(env, '/account/upgrade', up({ email: 'TESTER@example.com', upgradeCode: code }), t1);
   assert.equal(taken.status, 409);
   assert.equal((await taken.json()).error, 'email_taken');
   assert.equal((await one(env, 'SELECT email FROM accounts WHERE id = 1')).email, null);
-  assert.equal((await post(env, '/account/upgrade', up({ dekCheck: 'a'.repeat(63) }), t1)).status, 400);
-  assert.equal((await post(env, '/account/upgrade', up(), undefined)).status, 401);
+  assert.equal((await one(env, 'SELECT used_at FROM upgrade_codes')).used_at, null);
+  assert.equal((await post(env, '/account/upgrade', up({ dekCheck: 'a'.repeat(63), upgradeCode: code }), t1)).status, 400);
+  assert.equal((await post(env, '/account/upgrade', up({ upgradeCode: code }), undefined)).status, 401);
+  // the code survived all of that and still works
+  assert.equal((await post(env, '/account/upgrade', up({ upgradeCode: code }), t1)).status, 200);
 });
 
 test('9. after upgrade, the data row is byte-identical and both account-1 tokens work', async () => {
@@ -240,8 +251,82 @@ test('9. after upgrade, the data row is byte-identical and both account-1 tokens
   const before = await one(env, 'SELECT * FROM data WHERE id = 1');
   const t1 = await mintDevice(env, 1, 'a', 't');
   const t2 = await mintDevice(env, 1, 'b', 't');
-  assert.equal((await post(env, '/account/upgrade', up(), t1)).status, 200);
+  assert.equal((await post(env, '/account/upgrade', up({ upgradeCode: await mintUpgradeCode(env) }), t1)).status, 200);
   assert.deepEqual(await one(env, 'SELECT * FROM data WHERE id = 1'), before);
   for (const t of [t1, t2]) assert.equal((await get(env, '/data', t)).status, 200);
   assert.equal(await count(env, 'devices'), 2);
+});
+
+// --- sweep W1-C1: an account-1 bearer alone cannot upgrade ------------------
+
+test('C1a. upgrade without upgradeCode is 400 bad_request and changes nothing', async () => {
+  const env = envWith();
+  const t1 = await mintDevice(env, 1, 'smoke', 't');
+  for (const over of [{}, { upgradeCode: 5 }, { upgradeCode: '' }, { upgradeCode: 'x'.repeat(201) }]) {
+    const res = await post(env, '/account/upgrade', up(over), t1);
+    assert.equal(res.status, 400, JSON.stringify(over));
+    assert.equal((await res.json()).error, 'bad_request');
+  }
+  assert.equal((await one(env, 'SELECT email, auth_mac FROM accounts WHERE id = 1')).auth_mac, null);
+});
+
+test('C1b. a wrong, used, expired or other-account code is 403 invalid_upgrade_code and changes nothing', async () => {
+  let now = '2026-11-11T12:00:00.000Z';
+  const env = { ...envWith(), NOW: () => now };
+  const t1 = await mintDevice(env, 1, 'smoke', 't');
+  const before = await one(env, 'SELECT * FROM accounts WHERE id = 1');
+  const expect403 = async (code, label) => {
+    const res = await post(env, '/account/upgrade', up({ upgradeCode: code }), t1);
+    assert.equal(res.status, 403, label);
+    assert.equal((await res.json()).error, 'invalid_upgrade_code', label);
+    assert.deepEqual(await one(env, 'SELECT * FROM accounts WHERE id = 1'), before, label);
+  };
+  await expect403(b64u(16, 7), 'wrong');
+  // expired: valid for 24 h, refused at exactly expires_at
+  const code = await mintUpgradeCode(env);
+  now = '2026-11-12T12:00:00.000Z';
+  await expect403(code, 'expired');
+  assert.equal((await one(env, 'SELECT used_at FROM upgrade_codes')).used_at, null);
+  // used: mark it used directly
+  now = '2026-11-11T13:00:00.000Z';
+  const used = await mintUpgradeCode(env);
+  const { sha256Hex } = await import('../src/auth.js');
+  await env.DB.prepare("UPDATE upgrade_codes SET used_at = 'earlier' WHERE hash = ?").bind(await sha256Hex(used)).run();
+  await expect403(used, 'used');
+  // other account: a code row bound to a different legacy-shaped account
+  await env.DB.prepare("INSERT INTO accounts (id, created_at) VALUES (7, 't')").run();
+  const other = await mintUpgradeCode(env, 7);
+  await expect403(other, 'other account');
+});
+
+test('C1c. the code is consumed by a successful upgrade and only then; one minute before expiry still works', async () => {
+  let now = '2026-11-11T12:00:00.000Z';
+  const env = { ...envWith(), NOW: () => now };
+  const t1 = await mintDevice(env, 1, 'old', 't');
+  const code = await mintUpgradeCode(env);
+  now = '2026-11-12T11:59:00.000Z';
+  assert.equal((await post(env, '/account/upgrade', up({ upgradeCode: code }), t1)).status, 200);
+  const row = await one(env, 'SELECT used_at FROM upgrade_codes');
+  assert.notEqual(row.used_at, null);
+});
+
+test('C1d. concurrent upgrades: same code twice, or two codes — exactly one 200, the code(s) used at most once', async () => {
+  for (const twoCodes of [false, true]) {
+    const env = envWith({ yieldPerStatement: true });
+    const t1 = await mintDevice(env, 1, 'a', 't');
+    const t2 = await mintDevice(env, 1, 'b', 't');
+    const c1 = await mintUpgradeCode(env);
+    const c2 = twoCodes ? await mintUpgradeCode(env) : c1;
+    const rs = await Promise.all([
+      post(env, '/account/upgrade', up({ email: 'one@example.com', authKey: b64u(32, 61), upgradeCode: c1 }), t1),
+      post(env, '/account/upgrade', up({ email: 'two@example.com', authKey: b64u(32, 62), upgradeCode: c2 }), t2),
+    ]);
+    const st = rs.map((r) => r.status);
+    assert.equal(st.filter((s) => s === 200).length, 1, `${twoCodes}: ${st}`);
+    const loser = rs.find((r) => r.status !== 200);
+    assert.ok([403, 409].includes(loser.status), `${twoCodes}: ${st}`);
+    const winnerEmail = rs[0].status === 200 ? 'one@example.com' : 'two@example.com';
+    assert.equal((await one(env, 'SELECT email FROM accounts WHERE id = 1')).email, winnerEmail);
+    assert.equal((await one(env, 'SELECT COUNT(*) AS n FROM upgrade_codes WHERE used_at IS NOT NULL')).n, 1);
+  }
 });

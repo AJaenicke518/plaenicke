@@ -55,7 +55,24 @@ const T0 = '2026-11-11T12:00:00.000Z';
 
 function world(extraEnv = {}) {
   const env = { ...envWith(), ...extraEnv };
-  const fetchImpl = (u, o) => worker.fetch(new Request(u, o), env);
+  // Sweep W1-C1: POST /account/upgrade now requires a one-time upgradeCode
+  // (minted by POST /admin/upgrade-code). js/account.js gains that field in
+  // W3; until then this test-only shim mints one through the real admin route
+  // and adds it to the upgrade body. Every other request passes through.
+  const fetchImpl = async (u, o) => {
+    if (new URL(u).pathname === '/account/upgrade' && o && typeof o.body === 'string') {
+      const minted = await worker.fetch(new Request(`${API}/admin/upgrade-code`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${env.ADMIN_SECRET}` },
+        body: JSON.stringify({ accountId: 1 }),
+      }), env);
+      if (minted.status === 200) {
+        const { upgradeCode } = await minted.json();
+        o = { ...o, body: JSON.stringify({ ...JSON.parse(o.body), upgradeCode }) };
+      }
+    }
+    return worker.fetch(new Request(u, o), env);
+  };
   const api = { fetchImpl, apiBase: API };
   const row = (id) => env.DB.prepare('SELECT version, blob FROM data WHERE id = ?').bind(id).first();
   const deviceCount = async (id) => (await env.DB.prepare('SELECT COUNT(*) AS n FROM devices WHERE account_id = ?').bind(id).first()).n;

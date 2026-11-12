@@ -21,10 +21,10 @@ test('0002 applies on a populated 0001 database and preserves data and devices b
   db.applyMigration('0002');
   const data = await db.prepare('SELECT id, version, blob, updated_at FROM data').first();
   assert.deepEqual(data, { id: 1, version: 7, blob: 'CIPHER', updated_at: '2026-11-01T00:00:00.000Z' });
-  const devs = (await db.prepare('SELECT token_hash, account_id, name, created_at, last_seen_at FROM devices ORDER BY token_hash').all()).results;
+  const devs = (await db.prepare('SELECT token_hash, account_id, name, created_at, last_seen_at, failed_pw, pw_locked_until FROM devices ORDER BY token_hash').all()).results;
   assert.deepEqual(devs, [
-    { token_hash: 'h1', account_id: 1, name: 'laptop', created_at: '2026-08-28T00:00:00.000Z', last_seen_at: '2026-11-10T00:00:00.000Z' },
-    { token_hash: 'h2', account_id: 1, name: 'iphone', created_at: '2026-08-28T00:00:01.000Z', last_seen_at: null },
+    { token_hash: 'h1', account_id: 1, name: 'laptop', created_at: '2026-08-28T00:00:00.000Z', last_seen_at: '2026-11-10T00:00:00.000Z', failed_pw: 0, pw_locked_until: null },
+    { token_hash: 'h2', account_id: 1, name: 'iphone', created_at: '2026-08-28T00:00:01.000Z', last_seen_at: null, failed_pw: 0, pw_locked_until: null },
   ]);
   const acct = await db.prepare('SELECT id, email, failed_logins, invite_hash FROM accounts').first();
   assert.deepEqual(acct, { id: 1, email: null, failed_logins: 0, invite_hash: null });
@@ -83,4 +83,18 @@ test('usage upsert with WHERE … RETURNING returns no row once the cap is reach
   assert.deepEqual(await db.prepare(sql).first(), { calls: 1 });
   assert.deepEqual(await db.prepare(sql).first(), { calls: 2 });
   assert.equal(await db.prepare(sql).first(), null);
+});
+
+test('0002 creates upgrade_codes (hash PK, account FK, expiry, single use) and the per-device password counter', async () => {
+  const db = await seeded0001();
+  db.applyMigration('0002');
+  const cols = (await db.prepare('PRAGMA table_info(upgrade_codes)').all()).results;
+  assert.deepEqual(cols.map((c) => [c.name, c.notnull, c.pk]), [
+    ['hash', 0, 1], ['account_id', 1, 0], ['created_at', 1, 0], ['expires_at', 1, 0], ['used_at', 0, 0],
+  ]);
+  await assert.rejects(db.prepare("INSERT INTO upgrade_codes (hash, account_id, created_at, expires_at) VALUES ('c', 99, 't', 't')").run());
+  const dcols = (await db.prepare('PRAGMA table_info(devices)').all()).results;
+  const fp = dcols.find((c) => c.name === 'failed_pw');
+  assert.equal(fp.notnull, 1); assert.equal(fp.dflt_value, '0');
+  assert.ok(dcols.some((c) => c.name === 'pw_locked_until'));
 });
