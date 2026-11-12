@@ -1352,7 +1352,7 @@ test('W3-I1a: the recovery screen says to tick and tap Done right after sending'
   assert.match(allText(host), /Tick the box and tap Done right after sending — Mail may close this app\./);
 });
 
-test('W3-I1b: the handle holds the panel open while the recovery screen is up or a submit is busy', async () => {
+test('W3-I1b: the handle holds the panel open while the recovery screen is up (not merely while busy)', async () => {
   const { host } = setup();
   let release;
   const { api } = fakeApi({
@@ -1368,7 +1368,7 @@ test('W3-I1b: the handle holds the panel open while the recovery screen is up or
   assert.equal(handle.holdsPanel(), false, 'a form being filled');
   const settled = submit(host);
   assert.ok(await until(() => release));
-  assert.equal(handle.holdsPanel(), true, 'busy');
+  assert.equal(handle.holdsPanel(), false, 'busy alone does not hold the panel (W3 re-review: a request that never settles must not trap the user)');
   release();
   await settled;
   assert.ok(byId(host, 'acct-recovery-screen'));
@@ -1697,4 +1697,87 @@ test('W3 #27: the remembered email is the server\'s form (trimmed, lowercased, D
   input(host, 'acct-password', 'whatever');
   await submit(host);
   assert.match(allText(host), /Signed in as alex@example\.com/);
+});
+
+
+// --- W3 re-review fixes -------------------------------------------------------
+
+test('W3-rr 2: a detached mount is told nothing — a late answer that changes the mode does not re-mount linkui', async () => {
+  const { host } = setup();
+  saveAuth(newCode());
+  let email = null;
+  const { api } = fakeApi({ getAccount: async () => ({ accountId: 1, email, recoveryConfirmed: false }) });
+  await refreshAccount({ api });
+  let changed = 0;
+  const handle = mountWith(host, { api, onAccountChanged: () => { changed += 1; } });
+  handle.detach();
+  email = 'alex@example.com';
+  await refreshAccount({ api });
+  assert.equal(accountModeFromStorage(), 'account', 'fixture check: the mode did change');
+  assert.equal(changed, 0);
+});
+
+test('W3-rr 3: codeFrom strips trailing punctuation, brackets and quotes, and decodes percent-encoding', async () => {
+  const { codeFrom } = await import('../js/accountui.js');
+  const C = 'AAAAAAAAAAAAAAAAAAAAAA';
+  for (const raw of [
+    `https://x.github.io/plaenicke/#recover=${C}.`,
+    `<https://x.github.io/plaenicke/#recover=${C}>`,
+    `(https://x.github.io/plaenicke/#recover=${C})`,
+    `"https://x.github.io/plaenicke/#recover=${C}",`,
+    `https://x.github.io/plaenicke/%23recover%3D${C}]`,
+    `“${C}”`,
+  ]) assert.equal(codeFrom(raw, 'recover'), C, raw);
+  assert.equal(codeFrom('AB%ZZCD', 'recover'), 'AB%ZZCD', 'undecodable text is not decoded (keys.js refuses it later)');
+});
+
+test('W3-rr 3: a recovery link in the invite field (and an invite link in the recovery field) is named, nothing sent', async () => {
+  for (const [opener, field, pasted, copy] of [
+    ['acct-invite', 'acct-invite-code', 'https://x/#recover=AAAAAAAAAAAAAAAAAAAAAA', "That's a recovery link — use Forgot password."],
+    ['acct-forgot', 'acct-recovery-code', 'https://x/%23invite%3DINVITE123', "That's an invite link — use I have an invite."],
+  ]) {
+    const { host } = setup();
+    const { api, calls } = fakeApi();
+    mount(host, { api });
+    openForm(host, opener);
+    input(host, field, pasted);
+    input(host, 'acct-email', 'a@x.de');
+    input(host, 'acct-password', GOOD_PW);
+    input(host, 'acct-password2', GOOD_PW);
+    await submit(host);
+    assert.equal(errorText(host), copy, opener);
+    assert.equal(calls.length, 0, opener);
+  }
+});
+
+test('W3-rr 4: a write that starts during Sign in\'s revoke is refused visibly, not silently', async () => {
+  const { host } = setup();
+  const { linkWithCode, clearAdoptionPending } = await import('../js/auth.js');
+  await linkWithCode(newCode()); // a cursor for this token, so a sync reaches its read
+  clearAdoptionPending();
+  saveLocalOwner(5);
+  const { syncOnce } = await import('../js/sync.js');
+  let releaseRead;
+  let syncDone;
+  const { api } = fakeApi({
+    logOut: async () => {
+      // An ordinary sync takes the turn while the revoke is on the network.
+      syncDone = syncOnce({
+        readFetchImpl: () => new Promise((_, reject) => { releaseRead = () => reject(new TypeError('offline')); }),
+        fetchImpl: async () => { throw new Error('no write expected'); },
+        applyState: (x) => x, now: () => new Date(), apiBase: 'https://w',
+      });
+      assert.ok(await until(() => typeof releaseRead === 'function'), 'fixture check: the sync holds the turn');
+      return { revoked: true };
+    },
+  });
+  const handle = mount(host, { api });
+  try {
+    assert.equal(await handle.signIn(), 'refused_write_in_flight');
+    assert.equal(errorText(host), ACCOUNT_COPY.sign_out_refused);
+    assert.ok(loadAuth(), 'still linked: the next 401 brings the device back to Sign in');
+  } finally {
+    if (releaseRead) releaseRead();
+    await syncDone;
+  }
 });

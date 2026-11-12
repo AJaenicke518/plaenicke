@@ -4,6 +4,7 @@
 // degrades silently.
 
 import { WORKER_URL, APP_URL } from './config.js';
+import { fetchWithTimeout } from './fetchtimeout.js';
 import {
   MIN_KDF_ITERS, KDF_ITERS, newSalt, newRecoveryCode, derivePasswordKeys, deriveRecoveryKeys,
   wrapDek, unwrapDek, dekCheck,
@@ -42,11 +43,19 @@ function shape(res, checks) {
   return res;
 }
 
+// EVERY REQUEST HAS A DEADLINE (sweep W3 re-review). A bare fetch that never
+// answered kept accountui busy for ever. Account requests and answers are a
+// few hundred bytes, so 30 s is generous on weak cellular; PBKDF2 runs on the
+// device before or after a request, never inside this budget. A timeout is
+// reported as 'unreachable', like any other failure to get an answer.
+export const ACCOUNT_TIMEOUT_MS = 30000;
+
 function ctx(o = {}) {
   return {
     fetchImpl: o.fetchImpl || ((...a) => fetch(...a)),
     apiBase: o.apiBase || WORKER_URL,
     minKdfIters: o.minKdfIters ?? MIN_KDF_ITERS,
+    timeoutMs: o.timeoutMs ?? ACCOUNT_TIMEOUT_MS,
   };
 }
 
@@ -58,12 +67,18 @@ async function call(c, method, path, { body, token } = {}) {
   if (token) headers.authorization = `Bearer ${token}`;
   let res;
   try {
-    res = await c.fetchImpl(`${c.apiBase}${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    res = await fetchWithTimeout(`${c.apiBase}${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) },
+      c.timeoutMs, c.fetchImpl);
   } catch {
     throw new AccountError('unreachable');
   }
   let json;
-  try { json = await res.json(); } catch { throw new AccountError('server'); }
+  try {
+    json = await res.json();
+  } catch (err) {
+    // The deadline can also fire while the body downloads.
+    throw new AccountError(err && err.message === 'timeout' ? 'unreachable' : 'server');
+  }
   if (!res.ok) {
     if (!json || typeof json.error !== 'string') throw new AccountError('server');
     const { error, ...extra } = json;
@@ -112,7 +127,7 @@ async function revokeOnThrow(c, answer, fn) {
   try {
     return await fn();
   } catch (err) {
-    if (answer && isStr(answer.token)) await logOut({ link: { authToken: answer.token }, fetchImpl: c.fetchImpl, apiBase: c.apiBase });
+    if (answer && isStr(answer.token)) await logOut({ link: { authToken: answer.token }, fetchImpl: c.fetchImpl, apiBase: c.apiBase, timeoutMs: c.timeoutMs });
     throw err;
   }
 }

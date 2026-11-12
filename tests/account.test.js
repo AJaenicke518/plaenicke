@@ -351,3 +351,25 @@ test('W3-I3: a wrong upgrade code is 403 invalid_upgrade_code; a missing one sen
   }
   assert.equal((await getAccount({ link, ...s })).email, null);
 });
+
+// W3 re-review 1: every account request has a deadline. A request that never
+// answers used to keep its caller busy for ever.
+test('W3-rr 1: a request that never answers gives up at the deadline as unreachable', async () => {
+  const held = [];
+  const fetchImpl = (url, init) => new Promise((_, reject) => { held.push(init.signal); init.signal.addEventListener('abort', () => reject(new Error('aborted'))); });
+  await assert.rejects(getAccount({ link: { authToken: 'a'.repeat(43) }, fetchImpl, apiBase: 'https://w', timeoutMs: 20 }),
+    (e) => e instanceof AccountError && e.code === 'unreachable');
+  assert.equal(held.length, 1);
+  assert.equal(held[0].aborted, true, 'the request is aborted, not merely abandoned');
+});
+
+test('W3-rr 1: a body that never arrives also gives up as unreachable', async () => {
+  const fetchImpl = async () => ({ ok: true, status: 200, json: () => new Promise(() => {}) });
+  await assert.rejects(getAccount({ link: { authToken: 'a'.repeat(43) }, fetchImpl, apiBase: 'https://w', timeoutMs: 20 }),
+    (e) => e instanceof AccountError && e.code === 'unreachable');
+});
+
+test('W3-rr 1: the default account deadline is 30 s', async () => {
+  const { ACCOUNT_TIMEOUT_MS } = await import('../js/account.js');
+  assert.equal(ACCOUNT_TIMEOUT_MS, 30000);
+});

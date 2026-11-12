@@ -1319,9 +1319,12 @@ test('settings: Sign out in the Account section re-renders the Sync section as s
 
 // Sweep W3-I1b: a recovery code on screen, or a submit still out, is not
 // thrown away by Escape, a backdrop tap or the Settings button.
-test('W3-I1b: Escape, a backdrop tap and the Settings button leave the panel open while the Account section holds it', async () => {
+// W3 re-review 1: a busy submit no longer holds the panel — a request that
+// never settled used to trap the user in Settings. Only a recovery code on
+// screen holds it (the accountui tests pin that half).
+test('W3-rr 1: Escape closes Settings while a (non-recovery) submit is still pending', async () => {
   let release;
-  const { host, button, settings } = openPanel([], () => {}, undefined, {
+  const { host, settings } = openPanel([], () => {}, undefined, {
     accountImpl: { signUp: () => new Promise((_, reject) => { release = () => reject(new Error('no')); }) },
   });
   settings.open({ kind: 'invite', code: 'INV' });
@@ -1333,19 +1336,49 @@ test('W3-I1b: Escape, a backdrop tap and the Settings button leave the panel ope
   const settled = Promise.all(form._listeners.submit.map((fn) => fn({ target: form, preventDefault() {} })));
   await waitFor(() => typeof release === 'function', 'signUp to be called');
   document._listeners.keydown.slice().forEach((fn) => fn({ key: 'Escape' }));
+  assert.equal(host.childElementCount, 0, 'Escape closes');
+  release();
+  await settled;
+});
+
+test('W3-I1b: Escape, a backdrop tap and the Settings button leave the panel open while a recovery code is on screen', async () => {
+  const { host, button, settings } = openPanel([], () => {}, undefined, {
+    accountImpl: { signUp: async () => ({ code: composeLinkCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(32))), generateEncKey()), accountId: 7, recoveryCode: 'RECOVERYCODE1234567890' }), logOut: async () => ({ revoked: true }) },
+  });
+  settings.open({ kind: 'invite', code: 'INV' });
+  const fill = (id, v) => { const el = byIdIn(host, id); el.value = v; (el._listeners.input || []).forEach((fn) => fn({ target: el })); };
+  fill('acct-email', 'a@x.de');
+  fill('acct-password', 'correct-horse-7!');
+  fill('acct-password2', 'correct-horse-7!');
+  const form = byIdIn(host, 'acct-form');
+  await Promise.all(form._listeners.submit.map((fn) => fn({ target: form, preventDefault() {} })));
+  await waitFor(() => byIdIn(host, 'acct-recovery-screen') !== null, 'the recovery screen');
+  document._listeners.keydown.slice().forEach((fn) => fn({ key: 'Escape' }));
   assert.equal(host.childElementCount, 1, 'Escape');
   host.children[0].click();
   assert.equal(host.childElementCount, 1, 'backdrop tap');
   button.click();
   assert.equal(host.childElementCount, 1, 'Settings button');
-  release();
-  await settled;
-  document._listeners.keydown.slice().forEach((fn) => fn({ key: 'Escape' }));
-  assert.equal(host.childElementCount, 0, 'once the submit settled, Escape closes as before');
 });
 
-// Sweep W3 #20: a sign-in from the Account section must refetch calendars
-// with the new session; without the wire nothing would until the next launch.
+// W3 re-review 2: a mount that is gone must not re-mount linkui into a
+// detached slot (an invisible adoption preview could start there).
+test('W3-rr 2: after close, a late GET /account answer that changes the mode does not re-mount the old Sync section', async () => {
+  const { refreshAccount } = await import('../js/accountui.js');
+  let email = null;
+  const api = { getAccount: async () => ({ accountId: 1, email, recoveryConfirmed: false }) };
+  const { host, settings } = openPanel([], () => { session(); }, undefined, { open: false });
+  assert.equal(await refreshAccount({ api }), 'ok');
+  settings.open();
+  const slot = sectionTitled(host, 'Sync').children[1];
+  const mounted = slot.children[0];
+  document._listeners.keydown.slice().forEach((fn) => fn({ key: 'Escape' }));
+  assert.equal(host.childElementCount, 0, 'fixture check: closed');
+  email = 'alex@example.com';
+  assert.equal(await refreshAccount({ api }), 'ok');
+  assert.equal(slot.children[0], mounted, 'nothing was mounted into the detached slot');
+});
+
 test('W3 #20: initSettings refuses to mount without an onSignedIn callback', () => {
   globalThis.window = makeFakeWindow();
   globalThis.document = makeFakeDocument();

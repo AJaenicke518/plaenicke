@@ -191,6 +191,7 @@ export function initSettings({
   // scrolling, for the same reason.
   function close() {
     repaintRows = null;
+    if (accountHandle) accountHandle.detach();
     accountHandle = null;
     host.innerHTML = '';
     if (releaseScroll) { releaseScroll(); releaseScroll = null; }
@@ -843,7 +844,10 @@ export function initSettings({
       onSignedOut: () => { mountLink(); refreshCalendars(); },
       // Legacy -> account (an upgrade, here or on another device): linkui's
       // section still shows Unlink and the code tools until re-mounted.
-      onAccountChanged: () => { mountLink(); },
+      // Only for the mount on screen (W3 re-review): a closed panel's slot
+      // is detached, and a linkui mounted there could start an invisible
+      // adoption preview.
+      onAccountChanged: () => { if (accountHandle === acct) mountLink(); },
       onSignedIn: () => { refreshCalendars(); onSignedIn(); },
       focusTarget: acH,
     });

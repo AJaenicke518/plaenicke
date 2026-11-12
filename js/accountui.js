@@ -289,13 +289,30 @@ function el(tag, props = {}) {
 
 // What a code field holds: the code itself, or a whole link carrying it
 // (W3-C1). Testers paste the link they were sent, so the text after
-// '#<kind>=' is the code; anything else is taken as typed. Trimmed either
-// way; a malformed code is the server's (or keys.js's) to refuse.
-export function codeFrom(raw, kind) {
+// '#<kind>=' is the code; anything else is taken as typed. A link copied out
+// of Mail or a chat can arrive percent-encoded ('%23recover%3D…') or wrapped
+// in punctuation ('<…>', '(…).', quotes), so it is decoded first (undecodable
+// text is taken as typed) and the code loses any leading or trailing
+// character outside the base64url alphabet (W3 re-review). A malformed code
+// is still the server's (or keys.js's) to refuse.
+function decoded(raw) {
   const text = String(raw || '').trim();
+  try { return decodeURIComponent(text); } catch { return text; }
+}
+
+export function codeFrom(raw, kind) {
+  const text = decoded(raw);
   const marker = `#${kind}=`;
   const at = text.lastIndexOf(marker);
-  return (at === -1 ? text : text.slice(at + marker.length)).trim();
+  const code = at === -1 ? text : text.slice(at + marker.length);
+  return code.trim().replace(/^[^A-Za-z0-9_-]+/, '').replace(/[^A-Za-z0-9_-]+$/, '');
+}
+
+// The OTHER kind's link pasted into this field ('invite' <-> 'recover'):
+// sending it would only earn a refusal for the wrong reason (W3 re-review).
+function otherKindIn(raw, kind) {
+  const other = kind === 'invite' ? 'recover' : 'invite';
+  return decoded(raw).includes(`#${other}=`) ? other : null;
 }
 
 // True only where iOS says this is a Safari tab rather than the Home Screen
@@ -790,6 +807,14 @@ export function initAccountUI({
       e.preventDefault();
       // Enter in a field submits even while the button is disabled.
       if (busy || !gateOk()) return;
+      if (refs.invite && otherKindIn(refs.invite.value, 'invite')) {
+        showError("That's a recovery link — use Forgot password.");
+        return;
+      }
+      if (refs.recovery && otherKindIn(refs.recovery.value, 'recover')) {
+        showError("That's an invite link — use I have an invite.");
+        return;
+      }
       if (refs.email && !EMAIL_RE.test(refs.email.value.trim())) {
         showError(errorCopy('invalid_email'));
         return;
@@ -851,8 +876,9 @@ export function initAccountUI({
     screen.appendChild(actionsRow);
     // The one deliberate way off this screen besides Done (W3-I1b): Escape
     // and a backdrop tap no longer close the panel here.
+    // Not gated on `busy` (W3 re-review): a Done still out answers into the
+    // home view, which is harmless; a gate here was part of a trap.
     const later = button('acct-recovery-later', recovery.linked ? 'Not now' : 'Close', () => {
-      if (busy) return;
       recovery = null;
       view = 'home';
       error = '';
@@ -1037,6 +1063,13 @@ export function initAccountUI({
       render();
       return 'refused_write_in_flight';
     }
+    // The check above and the revoke below have no await between them.
+    // RESIDUAL WINDOW (controller ruling R13, as for signOut): an adoption
+    // write or sync that starts while logOut is on the network still gets
+    // revoke-then-refuse. It is one request long; that write then meets a 401
+    // (no data loss), the refusal is SAID below, and the next 401 brings the
+    // device back to Sign in, where a retry is safe (logOut treats a 401 as
+    // revoked).
     const link = getLink();
     if (link) await api.logOut({ link });
     const result = signOutLocal();
@@ -1051,22 +1084,32 @@ export function initAccountUI({
     return result;
   }
 
-  live = {
+  const mine = {
     refresh: () => { if (view === 'home') render(); },
     modeChanged: () => onAccountChanged(),
   };
+  live = mine;
 
   if (intent) { open(intent); reveal(); } else render();
 
   // settings.js asks before Escape or a backdrop tap closes the panel (sweep
-  // W3-I1b): not while a recovery code is on screen, nor while a submit is
-  // out (its answer would land in a panel no longer there).
-  const holdsPanel = () => view === 'recovery' || busy;
+  // W3-I1b): not while a recovery code is on screen. NOT while a submit is
+  // merely out (W3 re-review): a request that never settled locked the user
+  // in Settings. A submit whose answer lands after the panel closed renders
+  // into the detached host; an unconfirmed recovery link is then caught by
+  // D8's banner.
+  const holdsPanel = () => view === 'recovery';
+
+  // settings.js calls this on close (W3 re-review): a late GET /account
+  // answer must not re-mount linkui into a panel that is gone.
+  function detach() {
+    if (live === mine) live = null;
+  }
 
   function openFromOutside(next) {
     open(next);
     if (next) reveal();
   }
 
-  return { open: openFromOutside, signOut, signIn, holdsPanel };
+  return { open: openFromOutside, signOut, signIn, holdsPanel, detach };
 }

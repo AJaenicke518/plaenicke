@@ -29,7 +29,11 @@ export const FETCH_TIMEOUT_MS = 60000;
 // A budget that is not a positive finite number throws a TypeError at once:
 // setTimeout reads one as 0–1 ms (or never, for Infinity), so a typo would
 // abort every request instantly or never. Only an omitted budget defaults.
-export function fetchWithTimeout(url, init = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+//
+// `fetchFn` (optional, sweep W3 re-review): js/account.js takes an injected
+// fetch and still needs the deadline around it. Omitted, the global fetch is
+// read at call time, as before.
+export function fetchWithTimeout(url, init = {}, timeoutMs = FETCH_TIMEOUT_MS, fetchFn = null) {
   if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new TypeError(`fetchWithTimeout: timeoutMs must be a positive finite number, got ${String(timeoutMs)}`);
   }
@@ -42,7 +46,7 @@ export function fetchWithTimeout(url, init = {}, timeoutMs = FETCH_TIMEOUT_MS) {
   const guarded = (p) => Promise.race([p, timedOut]);
   let started;
   try {
-    started = fetch(url, { ...init, signal: ac.signal });
+    started = (fetchFn || fetch)(url, { ...init, signal: ac.signal });
   } catch (err) {
     disarm(); // a fetch that throws at once must not leave the timer armed
     return Promise.reject(err);
