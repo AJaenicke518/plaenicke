@@ -417,7 +417,8 @@ export function initSettings({
       feedCache = loadFeedCache();
       syncingFeedId = null;
       renderCalendars();
-      onFeedFetched(feed.id, result.ok);
+      // A signed-out result made no request: there is no fetch to report.
+      if (result.error !== 'signed_out') onFeedFetched(feed.id, result.ok);
       notifyViewChanged();
     }
 
@@ -729,7 +730,8 @@ export function initSettings({
         addBusy = false;
         syncingFeedId = null;
         renderCalendars();
-        onFeedFetched(feed.id, result.ok);
+        // A signed-out result made no request: there is no fetch to report.
+      if (result.error !== 'signed_out') onFeedFetched(feed.id, result.ok);
         notifyViewChanged();
       }
 

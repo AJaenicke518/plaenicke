@@ -537,8 +537,16 @@ let activeStartedAt = 0;
 // unlink() keeps local data (js/auth.js) and this never touches
 // plaenicke.localOwner: the data on this device still belongs to that account
 // and D16 needs the tag to stop a different account adopting it.
+// True while signOutLocal() would refuse. accountui asks BEFORE it revokes
+// the session (account.logOut), as signOutButton below checks before
+// onSignOut: revoking and then being refused would leave this device linked
+// on a dead session while the write goes on pushing with it.
+export function signOutBlocked() {
+  return Boolean(activeAdoption && writeInFlight);
+}
+
 export function signOutLocal() {
-  if (activeAdoption && writeInFlight) return 'refused_write_in_flight';
+  if (signOutBlocked()) return 'refused_write_in_flight';
   unlink();
   renderSyncStatus();
   return 'signed_out';

@@ -108,8 +108,12 @@ async function until(pred, rounds = 200) {
   return pred();
 }
 
+const downloadTimers = [];
 function mount(host, { api, linkui = fakeLinkui(), intent = null, onSignedOut = () => {} }) {
-  return initAccountUI({ host, api, linkui: () => linkui, intent, onSignedOut });
+  return initAccountUI({
+    host, api, linkui: () => linkui, intent, onSignedOut,
+    setTimeoutImpl: (fn, ms) => { downloadTimers.push({ fn, ms }); },
+  });
 }
 
 // A linked account device: credential + owner.
@@ -493,7 +497,7 @@ test('accountui: other_account_data from linkAndAdopt shows its copy, leaves not
   input(host, 'acct-password2', GOOD_PW);
   submit(host);
   assert.ok(await until(() => errorText(host) !== ''));
-  assert.equal(errorText(host), ACCOUNT_COPY.other_account_data);
+  assert.equal(errorText(host), `${ACCOUNT_COPY.other_account_data} Your account was created — log in on another device, then make a new recovery link.`);
   assert.equal(loadAuth(), null, 'not linked');
   assert.equal(loadLocalOwner(), 5, 'the owner is untouched');
   assert.equal(byId(host, 'acct-recovery-screen'), null);
@@ -505,7 +509,8 @@ test('accountui: other_account_data from linkAndAdopt shows its copy, leaves not
 test('accountui: a linkAndAdopt that rejects (a post-link throw) shows a specific error and revokes nothing', async () => {
   const { host } = setup();
   const { api, calls } = fakeApi({ logIn: async () => ({ code: newCode(), accountId: 7, recoveryConfirmed: true }) });
-  const linkui = { linkAndAdopt: async () => { throw new TypeError('preview blew up'); } };
+  // linkui rejects only AFTER the link landed (the preview threw).
+  const linkui = { linkAndAdopt: async (code, { accountId }) => { saveAuth(code); saveLocalOwner(accountId); throw new TypeError('preview blew up'); } };
   mount(host, { api, linkui });
   click(byId(host, 'acct-login'));
   input(host, 'acct-email', 'a@x.de');
@@ -945,9 +950,74 @@ test('accountui: the recovery screen\'s Download saves a .txt holding the link a
     assert.ok(text.includes(recoveryLink('RECOVERYCODE1234567890')));
     assert.ok(text.includes('If you forget your password, open this link to reset it.'));
     assert.deepEqual(anchors, [{ href: 'blob:fake', download: 'plaenicke-recovery-link.txt' }]);
+    const revoke = downloadTimers.pop();
+    assert.equal(revoke.ms, 1000, 'the blob URL is revoked a moment later, by an injected timer');
   } finally {
     URL.createObjectURL = realCreate;
     URL.revokeObjectURL = realRevoke;
     document.createElement = realCreateEl;
   }
+});
+
+// --- review fixes: a link that landed still owes its recovery code ----------
+
+test('accountui: sign-up whose linkAndAdopt rejects AFTER the link still shows the recovery screen, with the error', async () => {
+  const { host } = setup();
+  const { api, calls } = fakeApi({ signUp: async () => ({ code: newCode(), accountId: 7, recoveryCode: 'RECOVERYCODE1234567890' }) });
+  const linkui = { linkAndAdopt: async (code, { accountId }) => { saveAuth(code); saveLocalOwner(accountId); throw new TypeError('preview blew up'); } };
+  mount(host, { api, linkui });
+  click(byId(host, 'acct-invite'));
+  input(host, 'acct-invite-code', 'INV');
+  input(host, 'acct-email', 'tester@example.com');
+  input(host, 'acct-password', GOOD_PW);
+  input(host, 'acct-password2', GOOD_PW);
+  submit(host);
+  assert.ok(await until(() => byId(host, 'acct-recovery-screen')));
+  assert.equal(byId(host, 'acct-recovery-value').textContent, 'RECOVERYCODE1234567890');
+  assert.equal(errorText(host), 'Signed in, but this device could not finish linking. See Sync below.');
+  assert.deepEqual(calls.map((c) => c.name), ['signUp'], 'linked: nothing revoked');
+});
+
+test('accountui: a reset whose linkAndAdopt rejects AFTER the link still shows the NEW recovery code', async () => {
+  const { host } = setup();
+  const { api } = fakeApi({
+    recover: async ({ onAccountKnown }) => { await onAccountKnown(6); return { code: newCode(), accountId: 6, recoveryCode: 'NEWRECOVERYCODE1234567' }; },
+  });
+  const linkui = { linkAndAdopt: async (code, { accountId }) => { saveAuth(code); saveLocalOwner(accountId); throw new TypeError('x'); } };
+  mount(host, { api, linkui, intent: { kind: 'recover', code: 'RECOVERYFROMLINK123456' } });
+  input(host, 'acct-email', 'b@x.de');
+  input(host, 'acct-password', GOOD_PW);
+  input(host, 'acct-password2', GOOD_PW);
+  submit(host);
+  assert.ok(await until(() => byId(host, 'acct-recovery-screen')));
+  assert.equal(byId(host, 'acct-recovery-value').textContent, 'NEWRECOVERYCODE1234567');
+  assert.equal(errorText(host), 'Signed in, but this device could not finish linking. See Sync below.');
+});
+
+test('accountui: a reset blocked after recover/finish says the password was reset', async () => {
+  const { host } = setup();
+  const { api } = fakeApi({
+    recover: async () => ({ code: newCode(), accountId: 6, recoveryCode: 'NEWRECOVERYCODE1234567' }),
+    logOut: async () => ({ revoked: true }),
+  });
+  mount(host, { api, linkui: { linkAndAdopt: async () => 'link_failed' }, intent: { kind: 'recover', code: 'RECOVERYFROMLINK123456' } });
+  input(host, 'acct-email', 'b@x.de');
+  input(host, 'acct-password', GOOD_PW);
+  input(host, 'acct-password2', GOOD_PW);
+  submit(host);
+  assert.ok(await until(() => errorText(host) !== ''));
+  assert.equal(errorText(host), 'Unexpected error: link_failed Your password was reset — log in with it, then make a new recovery link.');
+});
+
+test('accountui: a new recovery link before any account check still shows the code, and leaves the banner to the next check', async () => {
+  const { host, banner } = setup();
+  linkedAccount(5);
+  const { api } = fakeApi({ newRecoveryLink: async () => ({ recoveryCode: 'FRESHRECOVERY123456789' }) });
+  const handle = mount(host, { api });
+  handle.open({ kind: 'new-recovery' });
+  input(host, 'acct-email', 'a@x.de');
+  input(host, 'acct-current-password', 'old-one-1!');
+  submit(host);
+  assert.ok(await until(() => byId(host, 'acct-recovery-screen')));
+  assert.equal(banner.hidden, true, 'no account id was confirmed for this session, so nothing is remembered');
 });

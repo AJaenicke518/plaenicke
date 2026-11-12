@@ -1210,10 +1210,9 @@ test('settings: signed out, the Calendars list says to sign in, and Sync fetches
     const { host, fetched: results } = openPanel([feedA]);
     assert.match(allText(host), /Sign in to refresh calendars\./);
     findButtonByText(host, 'Sync').click();
-    await waitFor(() => results.length === 1, 'the manual Sync to settle');
+    await waitFor(() => /error: sign in to refresh/.test(allText(host)), 'the manual Sync to settle');
     assert.equal(fetched, 0, 'no request without a session');
-    assert.deepEqual(results[0], ['feedO', false]);
-    assert.match(allText(host), /error: sign in to refresh/);
+    assert.deepEqual(results, [], 'no request, so no fetch result is reported (no "Couldn\'t refresh")');
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -23,7 +23,9 @@
 
 import * as accountApi from './account.js';
 import { AccountError, recoveryLink, mailtoHref, RECOVERY_NOTE } from './account.js';
-import { ACCOUNT_COPY, adoptionBlocker, accountModeFromStorage, signOutLocal } from './linkui.js';
+import {
+  ACCOUNT_COPY, adoptionBlocker, accountModeFromStorage, signOutLocal, signOutBlocked,
+} from './linkui.js';
 import { getLink } from './auth.js';
 import { loadLocalOwner, saveLocalOwner } from './storage.js';
 import { checkPassword } from './password-policy.js';
@@ -230,6 +232,8 @@ const FORMS = {
 
 export function initAccountUI({
   host, api = accountApi, linkui, intent = null, onSignedOut = () => {},
+  // Injected so tests leave no timer behind (the Download handler's revoke).
+  setTimeoutImpl = (fn, ms) => setTimeout(fn, ms),
 } = {}) {
   // The live linkui handle, read at use: settings.js re-mounts linkui after a
   // sign-out from here, and linkAndAdopt must reach the mount on screen.
@@ -290,27 +294,30 @@ export function initAccountUI({
     await api.logOut({ link: { authToken } });
   }
 
-  // linkAndAdopt, and what to do with each outcome. true only when linked.
-  async function adopt(code, accountId) {
+  // linkAndAdopt, and what to do with each outcome. Resolves 'linked',
+  // 'adopt_failed' (linked, but the step after the link threw), or null (not
+  // linked: the error is already shown, with `notLinkedNote` after it).
+  async function adopt(code, accountId, notLinkedNote = '') {
     let outcome;
     try {
       outcome = await linkui().linkAndAdopt(code, { accountId });
     } catch (err) {
       // The link landed and the preview (or onLinked) threw: linked, so the
-      // session is NOT revoked; linkui's section shows the failure.
+      // session is NOT revoked; linkui's section shows the failure. The
+      // caller still shows what it owes a linked device (a recovery code).
       console.error('plaenicke: account link failed', err && err.name);
-      showError(errorCopy('adopt_failed'));
-      return false;
+      return 'adopt_failed';
     }
-    if (outcome === 'linked') return true;
+    if (outcome === 'linked') return 'linked';
     await revokeFresh(code);
-    if (outcome === 'blocked') {
-      const why = adoptionBlocker(accountId);
-      showError(errorCopy(why || 'blocked'));
-    } else {
-      showError(errorCopy(outcome));
-    }
-    return false;
+    const copy = outcome === 'blocked' ? errorCopy(adoptionBlocker(accountId) || 'blocked') : errorCopy(outcome);
+    showError(notLinkedNote ? `${copy} ${notLinkedNote}` : copy);
+    return null;
+  }
+
+  // After a recovery screen is up: the link landed but its next step threw.
+  function sayIfAdoptFailed(result) {
+    if (result === 'adopt_failed') showError(errorCopy('adopt_failed'));
   }
 
   function showRecovery(code, email) {
@@ -330,9 +337,12 @@ export function initAccountUI({
       const res = await api.signUp({ invite: v.invite, email: v.email, password: v.newPassword, deviceName: deviceName() });
       // Link FIRST (§ 6.1 step 6), so the credential is stored before the
       // recovery screen sends the user off to Mail and the app is evicted.
-      if (!(await adopt(res.code, res.accountId))) return;
+      const linked = await adopt(res.code, res.accountId,
+        'Your account was created — log in on another device, then make a new recovery link.');
+      if (!linked) return;
       remember(getLink(), { accountId: res.accountId, email: v.email, recoveryConfirmed: false });
       showRecovery(res.recoveryCode, v.email);
+      sayIfAdoptFailed(linked);
     },
     async login(v) {
       // Up front only D17: the account id is unknown until the answer.
@@ -344,10 +354,12 @@ export function initAccountUI({
         showError(errorCopy(blocker));
         return;
       }
-      if (!(await adopt(res.code, res.accountId))) return;
+      const linked = await adopt(res.code, res.accountId);
+      if (!linked) return;
       remember(getLink(), { accountId: res.accountId, email: v.email, recoveryConfirmed: res.recoveryConfirmed });
       view = 'home';
       render();
+      sayIfAdoptFailed(linked);
     },
     async forgot(v) {
       if (adoptionBlocker(null) === 'already_linked') { showError(errorCopy('already_linked')); return; }
@@ -369,9 +381,14 @@ export function initAccountUI({
         if (err instanceof Blocked) { showError(errorCopy(err.code)); return; }
         throw err;
       }
-      if (!(await adopt(res.code, res.accountId))) return;
+      // recover/finish already replaced the old recovery code: the new one
+      // is shown whenever this device is linked, even if a later step threw.
+      const linked = await adopt(res.code, res.accountId,
+        'Your password was reset — log in with it, then make a new recovery link.');
+      if (!linked) return;
       remember(getLink(), { accountId: res.accountId, email: v.email, recoveryConfirmed: false });
       showRecovery(res.recoveryCode, v.email);
+      sayIfAdoptFailed(linked);
     },
     async change(v) {
       const link = requireLink();
@@ -387,7 +404,10 @@ export function initAccountUI({
       const link = requireLink();
       const res = await api.newRecoveryLink({ link, email: v.email, currentPassword: v.current });
       // The server cleared recovery_confirmed_at: the banner shows until Done.
-      remember(link, { accountId: loadLocalOwner(), email: v.email, recoveryConfirmed: false });
+      // The account id this session last confirmed; unknown (no check has
+      // answered yet) leaves the banner to the next successful check.
+      const info = currentInfo();
+      if (info) remember(link, { ...info, email: v.email, recoveryConfirmed: false });
       showRecovery(res.recoveryCode, v.email);
     },
     async upgrade(v) {
@@ -607,7 +627,7 @@ export function initAccountUI({
       a.click();
       // Revoked a moment later, not at once: some browsers start the save
       // after the click returns.
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setTimeoutImpl(() => URL.revokeObjectURL(url), 1000);
     });
     const actionsRow = el('div', { className: 'account-recovery-actions' });
     actionsRow.append(mail, copy, download);
@@ -712,6 +732,16 @@ export function initAccountUI({
   // own Sign out (options.onSignOut) shows when it is a refusal (ruling R12).
   // A retry after a refusal is safe: logOut treats a 401 as revoked.
   async function signOut() {
+    // Asked FIRST: logOut revokes the session, and a signOutLocal() refusal
+    // after that would leave this device linked on a dead one (linkui's own
+    // Sign out checks the same way before onSignOut). No request is made.
+    if (signOutBlocked()) {
+      view = 'home';
+      error = ACCOUNT_COPY.sign_out_refused;
+      notice = '';
+      render();
+      return 'refused_write_in_flight';
+    }
     const link = getLink();
     let revoked = true;
     if (link) revoked = (await api.logOut({ link })).revoked === true;

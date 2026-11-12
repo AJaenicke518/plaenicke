@@ -2745,6 +2745,47 @@ test('acct 9: an account device hides the paste field and Link another device, a
   assert.equal(findButton(bare.host, 'Sign out'), null);
 });
 
+// Review fix (Task 13): accountui's own Sign out revokes the session BEFORE
+// signOutLocal() — so it must ask linkui first, as linkui's own button does,
+// or a refusal would leave this device linked on a revoked session.
+test('acct 11: while an adoption write is in flight, signOutBlocked() is true and accountui\'s Sign out sends nothing and says why', async (t) => {
+  const { initAccountUI } = await import('../js/accountui.js');
+  const f = await concurrencyFixture();
+  t.after(() => f.releaseAll());
+  saveLocalOwner(5);
+  const a = f.mount();
+  f.releaseGet(0);
+  await a.ui.settled();
+  assert.equal(linkuiNs.signOutBlocked(), false, 'no write yet');
+  f.holdNextWrite();
+  findButton(a.host, 'Merge').click();
+  await settleUntil(() => f.syncCalls.length > 0);
+  assert.equal(f.syncCalls.length, 1, 'fixture check: the write is in flight');
+  assert.equal(linkuiNs.signOutBlocked(), true);
+
+  const acctHost = f.doc.createElement('div');
+  f.doc.body.appendChild(acctHost);
+  const apiCalls = [];
+  const api = { logOut: async (args) => { apiCalls.push(args); return { revoked: true }; } };
+  const acct = initAccountUI({ host: acctHost, api, linkui: () => a.ui });
+  const authBefore = loadAuth();
+  assert.equal(await acct.signOut(), 'refused_write_in_flight');
+  assert.deepEqual(apiCalls, [], 'no logOut: the session is not revoked under the write');
+  assert.equal(loadAuth(), authBefore);
+  assert.ok(allText(acctHost).includes(linkuiNs.ACCOUNT_COPY.sign_out_refused));
+  const button = findAll(acctHost, 'BUTTON').find((b) => b.id === 'acct-signout');
+  button.click();
+  await settleUntil(() => false, 20);
+  assert.deepEqual(apiCalls, [], 'the button refuses the same way');
+
+  f.letWriteFinish();
+  await a.ui.settled();
+  assert.equal(linkuiNs.signOutBlocked(), false);
+  assert.equal(await acct.signOut(), 'signed_out');
+  assert.equal(apiCalls.length, 1);
+  assert.equal(loadAuth(), null);
+});
+
 test('acct 10: signOutLocal refuses while an adoption write is in flight, and otherwise unlinks keeping the owner and data', async (t) => {
   const f = await concurrencyFixture();
   t.after(() => f.releaseAll());

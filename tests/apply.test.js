@@ -250,8 +250,17 @@ mountIds(globalThis.document, indexHtmlIds(readFileSync(new URL('../index.html',
 const untrackedSetTimeout = globalThis.setTimeout;
 const untrackedClearTimeout = globalThis.clearTimeout;
 const realSyncTimers = new Set();
+// PARKED (dropped), not scheduled, while a bsD refresh fixture runs
+// (refreshWith): those tests are linked, so the 2 s sync an import's write
+// arms (app.js's scheduleSync) would otherwise run a REAL sync at a moment of
+// its choosing — inside the next refresh, between its resume and its wait —
+// writing items and moving lastSyncedAt under the fixture. refreshWith also
+// cancels any still pending when it starts, and parks only while it runs: a
+// test that relies on a re-armed sync after it (the hide test) still gets one.
+let parkRealSyncTimers = false;
 globalThis.setTimeout = function trackingSetTimeout(fn, ms, ...args) {
   if (typeof fn !== 'function' || fn.name !== 'runSync') return untrackedSetTimeout(fn, ms, ...args);
+  if (parkRealSyncTimers) return { parkedSyncTimer: true };
   const handle = untrackedSetTimeout((...a) => { realSyncTimers.delete(handle); fn(...a); }, ms, ...args);
   realSyncTimers.add(handle);
   return handle;
@@ -264,6 +273,7 @@ const pendingRealSyncTimers = () => [...realSyncTimers];
 afterEach(() => {
   for (const handle of realSyncTimers) untrackedClearTimeout(handle);
   realSyncTimers.clear();
+  parkRealSyncTimers = false;
 });
 
 const item = (id, updatedAt) => ({ id, title: `t-${id}`, date: '2026-08-02', time: null, updatedAt });
@@ -1480,12 +1490,14 @@ test('a sync whose apply runs out of storage on plaenicke.items reads as out of 
 // but memory and storage disagree (plan 2026-10-20 Task 2, adjudication I4/I5).
 // setItem is restored BEFORE the follow-up add, so it is the add's own save
 // that would persist the stale record.
-function refuseItemsWrites({ after = 0 } = {}) {
+// `holding`: refuse only an items write whose value contains this text (an
+// id), so a write that is not the one under test — a sync's — still lands.
+function refuseItemsWrites({ after = 0, holding = null } = {}) {
   const realSet = localStorage.setItem.bind(localStorage);
   let seen = 0;
   let refused = 0;
   localStorage.setItem = (k, v) => {
-    if (k === 'plaenicke.items') {
+    if (k === 'plaenicke.items' && (holding === null || String(v).includes(holding))) {
       seen += 1;
       if (seen > after) {
         refused += 1;
@@ -1930,6 +1942,38 @@ test('accounts: the background calendar refresh sends the linked device\'s beare
   const feedCalls = calls.filter((c) => c.url.includes('/feed?url='));
   assert.ok(feedCalls.length > 0, 'fixture check: the resume refreshed the stale calendar');
   for (const c of feedCalls) assert.equal(c.opts.headers.authorization, `Bearer ${link.authToken}`);
+  saveFeeds([]);
+  reloadFromStorage('plaenicke.feeds');
+});
+
+// Spec § 6.8 (review fix): signed out, the background refresh makes no request
+// and that is not a failure — the stamp says to sign in, never "Couldn't
+// refresh calendars".
+test('accounts: signed out, the calendar stamp says to sign in, not that the refresh failed', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const feed = { id: 'feedSO', url: 'https://example.com/so.ics', name: 'SO', color: 'var(--feed-palette-1)', hidden: false, updatedAt: '2026-08-01T00:00:00.000Z' };
+  saveFeeds([feed]);
+  // Cached, and stale, so the resume's batch asks for it (and is told signed_out).
+  localStorage.setItem('plaenicke.feedCache', JSON.stringify({ feedSO: { fetchedAt: '2026-01-01T09:00:00.000Z', events: [], skipped: [] } }));
+  reloadFromStorage('plaenicke.feeds');
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => { calls.push(String(url)); return originalFetch(url, opts); };
+  try {
+    stampEl().textContent = 'sentinel';
+    resume();
+    await drainUntil(() => stampEl().textContent !== 'sentinel' && !stampEl().textContent.startsWith('Updated'));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual(calls.filter((u) => u.includes('/feed?url=')), [], 'no request without a session');
+  assert.equal(stampEl().textContent, 'Sign in to refresh calendars.');
+  // Signed in again, a repaint that fetches nothing (a colour tap) shows the
+  // cached time: the signed-out round was not remembered as a failed fetch.
+  withSession();
+  tapColourDot('SO');
+  assert.match(stampEl().textContent, /^Updated /, 'not "Couldn\'t refresh calendars"');
   saveFeeds([]);
   reloadFromStorage('plaenicke.feeds');
 });
@@ -3660,6 +3704,7 @@ const cacheAt = (d) => ({ fetchedAt: d.toISOString(), events: [], skipped: [] })
 test('sweep D: with calendars, the stamp is the OLDEST fetch among the visible ones', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
+  withSession(); // a signed-out device's stamp says to sign in (§ 6.8)
   // All three are fresh at 10:40, so nothing is fetched. The hidden one is the
   // oldest, and must not count: its events are not on screen.
   seedFeedsWithCache(
@@ -4830,6 +4875,7 @@ test('sF3: a finished download is never aborted afterwards', async (t) => {
 test('sF3: a fetch that throws at once fails cleanly, with no stray timeout', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
+  withSession(); // a signed-out device's stamp says to sign in (§ 6.8)
   seed([]);
   seedFeedsWithCache([sdFeed('sF3-throw')], {});
   const originalFetch = globalThis.fetch;
@@ -5042,6 +5088,7 @@ const failingFeed = () => ({ ok: false, status: 502, json: async () => ({ error:
 test('stamp: a colour tap in Settings after a failed refresh keeps "Couldn\'t refresh"', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
+  withSession(); // a signed-out device's stamp says to sign in (§ 6.8)
   seed([]);
   seedFeedsWithCache([sdFeed('sP-bad'), sdFeed('sP-good')],
     { 'sP-bad': cacheAt(localAt(7, 0)), 'sP-good': cacheAt(localAt(7, 0)) });
@@ -5064,6 +5111,7 @@ test('stamp: a colour tap in Settings after a failed refresh keeps "Couldn\'t re
 test('stamp: a fetch time from an earlier day names the day', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
+  withSession(); // a signed-out device's stamp says to sign in (§ 6.8)
   seed([]);
   seedFeedsWithCache([sdFeed('sP-old')], { 'sP-old': cacheAt(new Date(2026, 8, 21, 9, 2)) });
   t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() }); // Wed Sep 23
@@ -5085,6 +5133,7 @@ test('stamp: a fetch time from an earlier day names the day', async (t) => {
 test('stamp: a visible calendar not yet fetched for the first time is not a failure', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
+  withSession(); // a signed-out device's stamp says to sign in (§ 6.8)
   seed([]);
   seedFeedsWithCache([sdFeed('sP-fetched'), sdFeed('sP-new')], { 'sP-fetched': cacheAt(localAt(9, 30)) });
   t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() });
@@ -7684,6 +7733,7 @@ test('tabs: the shell title names the tab; on Today it is "Today", visually hidd
 test('Today: a tick on a new day repaints the stamp from the visible calendars', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
+  withSession(); // a signed-out device's stamp says to sign in (§ 6.8)
   const restore = visiblePageButton();
   t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 23, 50).getTime() });
   try {
@@ -9345,36 +9395,57 @@ async function staleBsCache(ms) {
 // device the import waits for this visit's first successful sync (final review
 // C2). So the refresh runs on a linked device (linked here unless the test
 // already is, gate down) against an empty account that accepts every push, and
-// waits for BOTH the feed fetch and a sync that succeeded after the resume —
-// only then has the import run, or been decided against.
+// waits for an import that judged THIS fetch (deadlines.lastImport), which on
+// a linked device only runs after this visit's sync succeeded — so a test's
+// "nothing was imported" assertion runs after the import, never before it.
 // linkWithCode, not a bare saveAuth: syncOnce raises the adoption gate again
 // for a token whose hash the cursor does not hold.
 async function bsSession() {
+  parkRealSyncTimers = true;
+  for (const handle of realSyncTimers) untrackedClearTimeout(handle);
+  realSyncTimers.clear();
   if (getLink() !== null) return;
   await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
   clearAdoptionPending();
 }
 async function refreshWith(ics) {
+  ({ deadlines: appDeadlinesHooks } = await import('../js/app.js'));
   await bsSession();
   const original = globalThis.fetch;
   globalThis.fetch = async (url, opts = {}) => {
     const u = String(url);
     if (u.includes('/feed?url=')) return { ok: true, status: 200, text: async () => ics };
-    if (u.includes('/data')) return ((opts && opts.method) || 'GET') === 'GET' ? emptyAccount() : putAccepted();
+    if (u.includes('/data')) {
+      const method = (opts && opts.method) || 'GET';
+      accountRequests.push(method);
+      return method === 'GET' ? emptyAccount() : putAccepted();
+    }
     return original(url, opts);
   };
+  const accountRequests = [];
   try {
     await staleBsCache(); // the resume refetches
     reloadFromStorage('plaenicke.feeds');
-    const syncedBefore = loadSyncState().lastSyncedAt;
     resume();
-    await drainUntil(() => JSON.parse(localStorage.getItem('plaenicke.feedCache') || '{}')['bsD-feed']?.fetchedAt > '2001'
-      && loadSyncState().lastSyncedAt !== syncedBefore);
-    assert.notEqual(loadSyncState().lastSyncedAt, syncedBefore, 'fixture check: a sync succeeded after the resume');
+    const fetchedNow = () => JSON.parse(localStorage.getItem('plaenicke.feedCache') || '{}')['bsD-feed']?.fetchedAt;
+    // An import that read THIS fetch. On a linked device the import runs only
+    // after a sync STARTED in this visit succeeded (app.js's C2 gate), so this
+    // is also the evidence that such a sync ran. lastSyncedAt is NOT used: a
+    // fast sync can land in the same millisecond as the previous one
+    // (measured: resume, GET, PUT and the previous lastSyncedAt all at one ms),
+    // so "it changed" is not a reliable signal.
+    const judged = () => fetchedNow() > '2001' && appDeadlines().lastImport().fetchedAt['bsD-feed'] === fetchedNow();
+    await drainUntil(judged);
+    assert.ok(judged(), 'fixture check: an import judged this fetch');
+    assert.ok(accountRequests.includes('GET'), 'fixture check: this visit\'s sync reached the account');
+    assert.equal(loadSyncState().lastError, null, 'fixture check: and succeeded');
   } finally {
     globalThis.fetch = original;
+    parkRealSyncTimers = false;
   }
 }
+let appDeadlinesHooks = null;
+const appDeadlines = () => appDeadlinesHooks;
 function bsCleanup() {
   saveFeeds([]);
   localStorage.removeItem('plaenicke.feedCache');
@@ -9704,10 +9775,11 @@ test('bsD: an import whose items write fails says so, keeps the baseline, and th
     assert.ok(baselineBefore['bsD-feed'], 'fixture check: the first import recorded a baseline');
     const changed = bsIcs([{ uid: 'bsD-i4', summary: 'HW I4 - Due', date: far(4) }, { uid: 'bsD-i4b', summary: 'HW I4b - Due', date: far(5) }]);
     globalThis.document.getElementById('status-line').textContent = '';
-    // after: 1 — on a linked device the import runs only after the resume's
-    // sync succeeded (final review C2), and that sync writes items first. So
-    // its write is let through and the import's, the next one, is refused.
-    const quota = refuseItemsWrites({ after: 1 });
+    // By content: only a write holding the new deadline (the import's) is
+    // refused. On a linked device the resume's sync writes items too, before
+    // the import may run (final review C2); its write must land, whatever the
+    // order of writes.
+    const quota = refuseItemsWrites({ holding: 'bs-bsD-i4b' });
     try {
       await refreshWith(changed);
       await drainUntil(() => quota.refused() > 0);
@@ -9954,7 +10026,8 @@ test('bsD: a sync in flight across a hide does not release the next visit\'s def
   const { getLink } = await import('../js/auth.js');
   let net = null;
   try {
-    // Device B, unlinked, imports Y.
+    // Device B imports Y (linked by refreshWith; re-linked to a fresh
+    // account below).
     saveFeeds([bsFeed()]);
     await refreshWith(bsIcs([{ uid: 'bsD-r1', summary: 'HW R1 - Due', date: far(2) }]));
     await drainUntil(() => loadItems().some((it) => it.id === 'bs-bsD-r1'));

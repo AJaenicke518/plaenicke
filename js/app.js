@@ -251,7 +251,14 @@ function ideaItems() { return sortIdeasNewestFirst(liveItems().filter(isIdea)); 
 // Declared before initSettings so nothing it calls can meet the TDZ. The
 // same hooks object goes to Settings and is exported for the tests.
 let deadlineStatus = { note: null, held: [] };
-export const deadlines = { status: () => deadlineStatus, removeHeld: removeHeldDeadlines };
+// What the last import that actually ran (past the wait for sync) judged:
+// how many have run, and each feed's cache fetchedAt it read. Read by the
+// tests to know an import has judged a given fetch — a deferred import never
+// counts. Settings ignores it.
+let lastImport = { runs: 0, fetchedAt: {} };
+export const deadlines = {
+  status: () => deadlineStatus, removeHeld: removeHeldDeadlines, lastImport: () => lastImport,
+};
 // THE IMPORT WAITS FOR SYNC ON A LINKED DEVICE (final review C2). A device that
 // has not pulled the account's latest items would patch a stale copy, stamped
 // later than Alex's tick on the other device, and whole-record last-write-wins
@@ -652,6 +659,10 @@ function applyDeadlinePlan({ create, update, remove }) {
 function importDeadlines() {
   if (importWaitsForSync()) { deadlineImportDeferred = true; return; }
   deadlineImportDeferred = false;
+  lastImport = {
+    runs: lastImport.runs + 1,
+    fetchedAt: Object.fromEntries(Object.entries(feedCache).map(([id, e]) => [id, e && e.fetchedAt])),
+  };
   try {
     const baseline = loadDeadlineBaseline();
     const plan = planDeadlineImport({
@@ -1577,7 +1588,12 @@ function backgroundSyncFeeds(feedList) {
     feedCache = loadFeedCache();
     render();
     if (results === null) for (const f of feedList) failedFeedIds.add(f.id);
-    else for (const [id, r] of Object.entries(results)) { if (r.ok) failedFeedIds.delete(id); else failedFeedIds.add(id); }
+    // A signed-out result made no request: not a failed fetch, so it neither
+    // sets nor clears this calendar's failure memory.
+    else for (const [id, r] of Object.entries(results)) {
+      if (r.ok) failedFeedIds.delete(id);
+      else if (r.error !== 'signed_out') failedFeedIds.add(id);
+    }
     importDeadlines();
     stampFromFeeds();
     if (feedQueue.size > 0) {
@@ -1858,6 +1874,12 @@ function stampUpdated() {
 function stampFromFeeds() {
   const visible = visibleFeeds();
   if (visible.length === 0) return; // keep the render-time stamp
+  // Signed out (spec D21, § 6.8): nothing refreshes, and that is not a
+  // failure to report — the cached events still render.
+  if (getLink() === null) {
+    els.updatedStamp.textContent = 'Sign in to refresh calendars.';
+    return;
+  }
   if (visible.some((f) => failedFeedIds.has(f.id))) {
     els.updatedStamp.textContent = "Couldn't refresh calendars";
     return;
