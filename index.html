@@ -50,6 +50,11 @@
        there is a problem. -->
   <p id="sync-indicator" class="sync-indicator" role="status" hidden></p>
 
+  <!-- "Save your recovery link" (accounts spec D8): shown on every device while
+       the account's recovery link is unconfirmed. js/accountui.js paints it
+       from GET /account at load, and after sign-in and the recovery screen. -->
+  <div id="account-banner" class="account-banner" role="status" hidden></div>
+
   <!-- The status line (capture date row, 2026-10-27): every message that is
        not about the capture box. Empty, it takes no space (styles.css
        :empty); it is never hidden, so it stays a live region that is read out

@@ -27,7 +27,24 @@ function findButtonByText(el, text) {
   return null;
 }
 
-function openPanel(feeds, seed = () => {}, deadlineStatus = { note: null, held: [] }) {
+// js/account.js stand-in: every call is recorded, and one the test did not
+// supply rejects, so the panel can never reach a server from this file.
+const ACCOUNT_API_NAMES = ['signUp', 'logIn', 'recover', 'changePassword', 'newRecoveryLink', 'upgrade',
+  'getAccount', 'listDevices', 'signOutOthers', 'confirmRecovery', 'logOut'];
+function trapAccountApi(impl = {}) {
+  const calls = [];
+  const api = {};
+  for (const name of ACCOUNT_API_NAMES) {
+    api[name] = async (args) => {
+      calls.push({ name, args });
+      if (!impl[name]) throw new Error(`unexpected account api.${name}`);
+      return impl[name](args);
+    };
+  }
+  return { api, calls };
+}
+
+function openPanel(feeds, seed = () => {}, deadlineStatus = { note: null, held: [] }, { accountImpl = {}, open = true } = {}) {
   globalThis.window = makeFakeWindow();
   globalThis.document = makeFakeDocument();
   installFakeLocalStorage();
@@ -42,7 +59,8 @@ function openPanel(feeds, seed = () => {}, deadlineStatus = { note: null, held: 
   const notified = [];
   const fetched = [];
   const removed = [];
-  initSettings({
+  const account = trapAccountApi(accountImpl);
+  const settings = initSettings({
     button,
     host,
     onFeedsChanged: () => notified.push('view'),
@@ -54,9 +72,10 @@ function openPanel(feeds, seed = () => {}, deadlineStatus = { note: null, held: 
     // mount without one. app.js always passes applySyncedState here.
     applyState: (s) => s,
     deadlines: { status: () => deadlineStatus, removeHeld: () => removed.push('held') },
+    accountApi: account.api,
   });
-  button.click(); // host.childElementCount === 0 -> open()
-  return { host, notified, button, fetched, removed };
+  if (open) button.click(); // host.childElementCount === 0 -> open()
+  return { host, notified, button, fetched, removed, settings, accountCalls: account.calls };
 }
 
 // A linked device: calendars refresh only with a session (accounts spec D21).
@@ -1218,4 +1237,77 @@ test('settings: linked, the Calendars list has no sign-in note, and Sync sends t
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+// --- Account (accounts Task 13) ----------------------------------------------
+
+function byIdIn(root, id) {
+  if (root.id === id) return root;
+  for (const c of root.children) {
+    const f = byIdIn(c, id);
+    if (f) return f;
+  }
+  return null;
+}
+
+function sectionTitled(host, title) {
+  return host.querySelectorAll('div').find((d) => d._classes.has('settings-section')
+    && d.children[0] && d.children[0].tagName === 'H3' && d.children[0].textContent === title);
+}
+
+test('settings: the Account section sits above Sync, as #account-section with heading Account, and opening makes no request', () => {
+  const { host, accountCalls } = openPanel([]);
+  const sections = host.querySelectorAll('div').filter((d) => d._classes.has('settings-section'));
+  const titles = sections.map((d) => d.children[0].textContent);
+  assert.ok(titles.indexOf('Account') >= 0, 'an Account section');
+  assert.equal(titles.indexOf('Account') + 1, titles.indexOf('Sync'), 'directly above Sync');
+  assert.equal(sectionTitled(host, 'Account').id, 'account-section');
+  assert.ok(byIdIn(host, 'acct-login'), 'an unlinked device can log in');
+  assert.equal(accountCalls.length, 0);
+});
+
+test('settings: initSettings returns open(intent); open({kind:recover, code}) renders the reset form pre-filled, with no request', () => {
+  const { host, settings, accountCalls } = openPanel([], () => {}, undefined, { open: false });
+  assert.equal(host.childElementCount, 0, 'fixture check: closed');
+  settings.open({ kind: 'recover', code: 'X' });
+  assert.ok(host.childElementCount > 0, 'the panel is open');
+  assert.equal(byIdIn(host, 'acct-recovery-code').value, 'X');
+  assert.equal(byIdIn(host, 'acct-password').autocomplete, 'new-password');
+  assert.equal(accountCalls.length, 0, 'a boot link makes no request (link-scanner rule)');
+});
+
+test('settings: open({kind:invite, code}) renders the sign-up form pre-filled; open() while open re-opens it', () => {
+  const { host, settings, accountCalls } = openPanel([]);
+  settings.open({ kind: 'invite', code: 'INV' });
+  assert.equal(byIdIn(host, 'acct-invite-code').value, 'INV');
+  assert.equal(host.childElementCount, 1, 'one panel, not two');
+  assert.equal(accountCalls.length, 0);
+});
+
+test('settings: on an account device, linkui\'s Sign out revokes through account.logOut, keeps localOwner, and the Account section follows', async () => {
+  const { saveLocalOwner, loadLocalOwner, loadAuth } = await import('../js/storage.js');
+  const { host, accountCalls } = openPanel([], () => { session(); saveLocalOwner(5); }, undefined, {
+    accountImpl: { logOut: async () => ({ revoked: true }) },
+  });
+  const sync = sectionTitled(host, 'Sync');
+  const linkSignOut = sync.querySelectorAll('button').find((b) => b.textContent === 'Sign out');
+  assert.ok(linkSignOut, 'fixture check: linkui offers Sign out on an account device');
+  linkSignOut.click();
+  await waitFor(() => loadAuth() === null, 'the sign-out');
+  assert.deepEqual(accountCalls.map((c) => c.name), ['logOut']);
+  assert.equal(loadLocalOwner(), 5);
+  await waitFor(() => byIdIn(host, 'acct-login') !== null, 'the Account section to show Log in');
+});
+
+test('settings: Sign out in the Account section re-renders the Sync section as signed out', async () => {
+  const { saveLocalOwner, loadAuth } = await import('../js/storage.js');
+  const { host, accountCalls } = openPanel([], () => { session(); saveLocalOwner(5); }, undefined, {
+    accountImpl: { logOut: async () => ({ revoked: true }) },
+  });
+  assert.ok(sectionTitled(host, 'Sync').querySelectorAll('button').some((b) => b.textContent === 'Sign out'), 'fixture check');
+  byIdIn(host, 'acct-signout').click();
+  await waitFor(() => loadAuth() === null, 'the sign-out');
+  await waitFor(() => allText(sectionTitled(host, 'Sync')).includes('This device is signed out. Sign in to sync it again.'), 'the Sync section to follow');
+  assert.deepEqual(accountCalls.map((c) => c.name), ['logOut']);
+  assert.match(allText(host), /Sign in to refresh calendars\./, 'and the calendars say so');
 });

@@ -314,7 +314,7 @@ test('parseViaWorker: 429 daily_limit → Error(limit) carrying resetsAt', async
 });
 
 test('parseViaWorker: a 429 that is not daily_limit (or has no resetsAt) → server, never limit', async () => {
-  for (const body of [{ error: 'other' }, { error: 'daily_limit' }, null]) {
+  for (const body of [{ error: 'other' }, { error: 'daily_limit' }, { error: 'daily_limit', resetsAt: 'not a time' }, null]) {
     const net = stubFetch(async () => response(429, { json: async () => body }));
     try {
       await assert.rejects(parseViaWorker('x', AUTH), { message: 'server' }, JSON.stringify(body));

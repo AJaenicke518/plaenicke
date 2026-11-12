@@ -34,6 +34,8 @@ import { syncOnce, recordSyncFailure, localState } from './sync.js';
 import { isLinked, isAdoptionPending, getLink } from './auth.js';
 import { merge } from './merge.js';
 import { renderSyncStatus, syncWriteStarted, syncWriteSettled } from './linkui.js';
+import { initAccountBanner, refreshAccount } from './accountui.js';
+import { readBootIntent } from './fragment.js';
 import { WORKER_URL } from './config.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
 import { installPress } from './press.js';
@@ -270,7 +272,7 @@ let visit = 1;
 let deadlineImportDeferred = false;
 const importWaitsForSync = () => isLinked() && (isAdoptionPending() || !syncedSinceVisible);
 
-initSettings({
+const settings = initSettings({
   button: els.settingsBtn,
   host: els.settingsHost,
   // The stamp is repainted too (sweep F, O5): adding, removing or hiding a
@@ -1919,6 +1921,28 @@ window.addEventListener('online', runSync);
 // tests/apply.test.js).
 renderSyncStatus();
 runSync();
+
+// --- accounts (Task 13) -----------------------------------------------------
+//
+// The "Save your recovery link" banner (spec D8) opens Settings on Make a new
+// recovery link.
+initAccountBanner({ onOpen: () => settings.open({ kind: 'new-recovery' }) });
+
+// A boot link (#invite= / #recover=, D24): read and stripped from the URL at
+// once (js/fragment.js), then Settings opens on the matching form. NO request
+// is made for it — a link scanner opening the URL must not spend the invite.
+const bootIntent = readBootIntent({ location: window.location, history: window.history });
+if (bootIntent) settings.open(bootIntent);
+
+// GET /account on EVERY linked device, legacy included (§ 6.7 step 4): paints
+// the banner from the answer and records localOwner on a legacy device whose
+// account now has a login. If it fails (offline, or any error) the banner
+// keeps its last painted state and the next successful answer repaints it.
+// The failure is deliberately NOT written to plaenicke.syncState: that state
+// and its shell indicator belong to sync, and an account check failing says
+// nothing about whether sync works. Only a storage throw (saveLocalOwner)
+// rejects; it is logged by name.
+refreshAccount().catch((e) => { console.error('plaenicke: account check failed', e && e.name); });
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => { navigator.serviceWorker.register('service-worker.js'); });

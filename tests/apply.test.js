@@ -292,7 +292,18 @@ test('app.js paints the shell sync indicator at load, so a stuck adoption is vis
   const shell = globalThis.document.getElementById(SHELL_SYNC_STATUS_ID);
   shell.hidden = true;
   shell.textContent = '';
-  await import('../js/app.js');
+  // Accounts (Task 13): the load also reads a boot fragment and asks the
+  // account for its recovery state. Recorded here, asserted below: this is the
+  // only test that sees app.js's module-scope code run.
+  globalThis.window.location.hash = '#recover=RECOVERYCODE1234567890';
+  const loadRequests = [];
+  const offline = globalThis.fetch;
+  globalThis.fetch = (url, opts) => { loadRequests.push(String(url)); return offline(url, opts); };
+  try {
+    await import('../js/app.js');
+  } finally {
+    globalThis.fetch = offline;
+  }
   assert.equal(shell.hidden, false,
     'a device sitting at adoptionPending syncs nothing at all — the app shell must say so without opening Settings');
   assert.match(shell.textContent, /\S/);
@@ -305,6 +316,21 @@ test('app.js paints the shell sync indicator at load, so a stuck adoption is vis
   // Phase 0 baseline: a cold load is an open, and it is logged. Asserted here
   // because this is the only test that sees app.js's module-scope code run.
   assert.equal(loadLaunches().length, 1, 'loading the app must record one launch');
+  // The boot fragment: stripped at once, and Settings opened on it. This device
+  // is linked, so the reset form is refused (D17) instead of shown.
+  assert.deepEqual(globalThis.window.history.calls, [[null, '', '/plaenicke/']], 'the fragment is stripped');
+  const settingsHost = globalThis.document.getElementById('settings-host');
+  assert.ok(settingsHost.childElementCount > 0, 'Settings opened for the boot link');
+  assert.match(allText(settingsHost), /This device is already signed in\. Sign out first\./);
+  // The load-time GET /account (an offline one, here): asked, and on failure
+  // the banner keeps its last painted state — hidden.
+  assert.ok(loadRequests.some((u) => u.endsWith('/account')), 'the load asks the account for its recovery state');
+  assert.ok(!loadRequests.some((u) => u.includes('/auth/')), 'and never anything that changes the account');
+  assert.equal(globalThis.document.getElementById('account-banner').hidden, true);
+  // Close the panel: every later test opens Settings from closed.
+  for (const fn of globalThis.document._listeners.keydown || []) fn({ key: 'Escape' });
+  assert.equal(settingsHost.childElementCount, 0, 'fixture check: Settings closed');
+  globalThis.window.location.hash = '';
 });
 
 // applySyncedState must re-merge against live storage. Between the merge that

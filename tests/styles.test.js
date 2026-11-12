@@ -487,7 +487,7 @@ test('spacing and radii are theme-independent: dark mode never redefines them', 
 // panels, list rows, the day grid) keep their own radius.
 const CONTROL_RULES = [
   'button', '.icon-btn', '.cap-field', '.cap-field input',
-  '.feed-add input', '.link-ui input', '.preview-row input', '.preview-row select',
+  '.feed-add input', '.link-ui input', '.preview-row input', '.preview-row select', '.account-field input',
   '.idea-add textarea', '.sheet input', '.sheet select', '.sheet textarea',
 ];
 for (const sel of CONTROL_RULES) {
@@ -509,7 +509,7 @@ test('the item sheet uses the sheet radius on its top corners', () => {
 // (The item sheet's three are pinned by the edit-items tests above.)
 const INPUT_RULES = [
   '.cap-field input', '.idea-add textarea',
-  '.feed-add input', '.link-ui input', '.preview-row input', '.preview-row select',
+  '.feed-add input', '.link-ui input', '.preview-row input', '.preview-row select', '.account-field input',
   '.capture-text',
 ];
 for (const sel of INPUT_RULES) {
@@ -1418,4 +1418,23 @@ test('the status line collapses when empty without leaving the accessibility tre
 test('the capture date row restates [hidden] and its fields are 44px targets', () => {
   assert.equal(declOf('.cap-when-wrap[hidden]', 'display'), 'none');
   assert.equal(declOf('.cap-field', 'min-height'), '44px');
+});
+
+// --- accounts (Task 13): the Account section and the recovery banner -------
+test('account: every account rule colours with tokens only, so dark mode follows', () => {
+  const rules = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)]
+    .filter(([, sel]) => /\.account-/.test(sel));
+  assert.ok(rules.length >= 8, `fixture check: found ${rules.length} rules`);
+  for (const [, sel, body] of rules) {
+    assert.doesNotMatch(body, /#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(/, sel.trim());
+  }
+  assert.equal(declOf('.account-error', 'color'), 'var(--danger)');
+});
+
+test('account: the banner hides when [hidden], and its buttons and checkboxes are 44px targets', () => {
+  assert.equal(declOf('.account-banner[hidden]', 'display'), 'none');
+  assert.ok(px(declOf('.account-ui button', 'min-height')) >= 44);
+  assert.ok(px(declOf('.account-link-button', 'min-height')) >= 44);
+  assert.ok(px(declOf('.account-check', 'min-height')) >= 44);
+  assert.ok(px(declOf('.account-banner button', 'min-height')) >= 44);
 });

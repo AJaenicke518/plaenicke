@@ -58,7 +58,7 @@ export async function parseViaWorker(text, { authToken } = {}) {
     // is a server fault, never a guessed limit.
     let body = null;
     try { body = await res.json(); } catch { /* reported as server below */ }
-    if (body && body.error === 'daily_limit' && typeof body.resetsAt === 'string') {
+    if (body && body.error === 'daily_limit' && typeof body.resetsAt === 'string' && !Number.isNaN(Date.parse(body.resetsAt))) {
       const err = new Error('limit');
       err.resetsAt = body.resetsAt;
       throw err;
