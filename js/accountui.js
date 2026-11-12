@@ -358,9 +358,10 @@ export function initAccountUI({
   }
 
   // linkAndAdopt, and what to do with each outcome. Resolves 'linked',
-  // 'adopt_failed' (linked, but the step after the link threw), or null (not
-  // linked: the error is already shown, with `notLinkedNote` after it).
-  async function adopt(code, accountId, notLinkedNote = '') {
+  // 'adopt_failed' (linked, but the step after the link threw), or
+  // { notLinked: copy } — not linked, the fresh session revoked, and `copy`
+  // the line to show (the caller decides where; nothing is shown here).
+  async function adopt(code, accountId) {
     let outcome;
     try {
       outcome = await linkui().linkAndAdopt(code, { accountId });
@@ -373,9 +374,7 @@ export function initAccountUI({
     }
     if (outcome === 'linked') return 'linked';
     await revokeFresh(code);
-    const copy = outcome === 'blocked' ? errorCopy(adoptionBlocker(accountId) || 'blocked') : errorCopy(outcome);
-    showError(notLinkedNote ? `${copy} ${notLinkedNote}` : copy);
-    return null;
+    return { notLinked: outcome === 'blocked' ? errorCopy(adoptionBlocker(accountId) || 'blocked') : errorCopy(outcome) };
   }
 
   // After a recovery screen is up: the link landed but its next step threw.
@@ -383,10 +382,15 @@ export function initAccountUI({
     if (result === 'adopt_failed') showError(errorCopy('adopt_failed'));
   }
 
-  function showRecovery(code, email) {
-    recovery = { code, email };
+  // `linked: false` (sweep W3-I1c): sign-up or a reset minted this code and
+  // then could not link this device. The account HAS this code now — after
+  // a reset it is the only one — so it is shown all the same, without Done
+  // (there is no session here to confirm it with), and with `error` saying
+  // what happened.
+  function showRecovery(code, email, { linked = true, error: why = '' } = {}) {
+    recovery = { code, email, linked };
     view = 'recovery';
-    error = '';
+    error = why;
     notice = '';
     render();
   }
@@ -400,9 +404,14 @@ export function initAccountUI({
       const res = await api.signUp({ invite: v.invite, email: v.email, password: v.newPassword, deviceName: deviceName() });
       // Link FIRST (§ 6.1 step 6), so the credential is stored before the
       // recovery screen sends the user off to Mail and the app is evicted.
-      const linked = await adopt(res.code, res.accountId,
-        'Your account was created — sign in on another device, then make a new recovery link.');
-      if (!linked) return;
+      const linked = await adopt(res.code, res.accountId);
+      if (linked.notLinked) {
+        showRecovery(res.recoveryCode, v.email, {
+          linked: false,
+          error: `${linked.notLinked} Your account was created — save this recovery link, then sign in on another device.`,
+        });
+        return;
+      }
       remember(getLink(), { accountId: res.accountId, email: v.email, recoveryConfirmed: false });
       showRecovery(res.recoveryCode, v.email);
       sayIfAdoptFailed(linked);
@@ -418,7 +427,7 @@ export function initAccountUI({
         return;
       }
       const linked = await adopt(res.code, res.accountId);
-      if (!linked) return;
+      if (linked.notLinked) { showError(linked.notLinked); return; }
       remember(getLink(), { accountId: res.accountId, email: v.email, recoveryConfirmed: res.recoveryConfirmed });
       view = 'home';
       render();
@@ -446,9 +455,14 @@ export function initAccountUI({
       }
       // recover/finish already replaced the old recovery code: the new one
       // is shown whenever this device is linked, even if a later step threw.
-      const linked = await adopt(res.code, res.accountId,
-        'Your password was reset — sign in with it, then make a new recovery link.');
-      if (!linked) return;
+      const linked = await adopt(res.code, res.accountId);
+      if (linked.notLinked) {
+        showRecovery(res.recoveryCode, v.email, {
+          linked: false,
+          error: `${linked.notLinked} Your password was reset — save this new recovery link, then sign in with the new password.`,
+        });
+        return;
+      }
       remember(getLink(), { accountId: res.accountId, email: v.email, recoveryConfirmed: false });
       showRecovery(res.recoveryCode, v.email);
       sayIfAdoptFailed(linked);
@@ -711,6 +725,11 @@ export function initAccountUI({
       className: 'note',
       text: 'If you forget your password, this link is the only way back into your planner. Save it where only you can reach it.',
     }));
+    if (recovery.linked) {
+      // Mail can evict the Home Screen app (sweep W3-I1a); D8's banner
+      // catches that, but the code on screen is lost with it.
+      screen.appendChild(el('p', { className: 'note', text: 'Tick the box and tap Done right after sending — Mail may close this app.' }));
+    }
     screen.appendChild(el('p', { id: 'acct-recovery-value', className: 'account-recovery-value', text: code }));
     const mail = el('a', { id: 'acct-recovery-email', className: 'account-link-button', text: 'Email it to me', href: mailtoHref(email, code) });
     const copy = button('acct-recovery-copy', 'Copy', action(async () => {
@@ -728,13 +747,30 @@ export function initAccountUI({
       a.href = url;
       a.download = 'plaenicke-recovery-link.txt';
       a.click();
-      // Revoked a moment later, not at once: some browsers start the save
-      // after the click returns.
-      setTimeoutImpl(() => URL.revokeObjectURL(url), 1000);
+      // Revoked later, not at once: some browsers start the save after the
+      // click returns, and iOS can take a while over its save sheet (W3 #26).
+      setTimeoutImpl(() => URL.revokeObjectURL(url), 60000);
+      showNotice("If the file didn't save, use Copy or Email it to me.");
     });
     const actionsRow = el('div', { className: 'account-recovery-actions' });
     actionsRow.append(mail, copy, download);
     screen.appendChild(actionsRow);
+    // The one deliberate way off this screen besides Done (W3-I1b): Escape
+    // and a backdrop tap no longer close the panel here.
+    const later = button('acct-recovery-later', recovery.linked ? 'Not now' : 'Close', () => {
+      if (busy) return;
+      recovery = null;
+      view = 'home';
+      error = '';
+      notice = '';
+      render();
+    });
+    if (!recovery.linked) {
+      screen.appendChild(later);
+      wrap.appendChild(screen);
+      messages(wrap);
+      return;
+    }
     const savedLabel = el('label', { className: 'account-check' });
     const saved = el('input', { type: 'checkbox', id: 'acct-recovery-saved' });
     savedLabel.append(saved, el('span', { text: 'I saved my recovery link' }));
@@ -773,7 +809,7 @@ export function initAccountUI({
         if (view === 'recovery') done.disabled = saved.checked !== true;
       }
     });
-    screen.appendChild(done);
+    screen.append(done, later);
     wrap.appendChild(screen);
     messages(wrap);
   }
@@ -894,5 +930,10 @@ export function initAccountUI({
   if (intent) open(intent);
   else render();
 
-  return { open, signOut, signIn };
+  // settings.js asks before Escape or a backdrop tap closes the panel (sweep
+  // W3-I1b): not while a recovery code is on screen, nor while a submit is
+  // out (its answer would land in a panel no longer there).
+  const holdsPanel = () => view === 'recovery' || busy;
+
+  return { open, signOut, signIn, holdsPanel };
 }

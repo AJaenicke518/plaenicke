@@ -1310,3 +1310,30 @@ test('settings: Sign out in the Account section re-renders the Sync section as s
   assert.deepEqual(accountCalls.map((c) => c.name), ['logOut']);
   assert.match(allText(host), /Sign in to refresh calendars\./, 'and the calendars say so');
 });
+
+// Sweep W3-I1b: a recovery code on screen, or a submit still out, is not
+// thrown away by Escape, a backdrop tap or the Settings button.
+test('W3-I1b: Escape, a backdrop tap and the Settings button leave the panel open while the Account section holds it', async () => {
+  let release;
+  const { host, button, settings } = openPanel([], () => {}, undefined, {
+    accountImpl: { signUp: () => new Promise((_, reject) => { release = () => reject(new Error('no')); }) },
+  });
+  settings.open({ kind: 'invite', code: 'INV' });
+  const fill = (id, v) => { const el = byIdIn(host, id); el.value = v; (el._listeners.input || []).forEach((fn) => fn({ target: el })); };
+  fill('acct-email', 'a@x.de');
+  fill('acct-password', 'correct-horse-7!');
+  fill('acct-password2', 'correct-horse-7!');
+  const form = byIdIn(host, 'acct-form');
+  const settled = Promise.all(form._listeners.submit.map((fn) => fn({ target: form, preventDefault() {} })));
+  await waitFor(() => typeof release === 'function', 'signUp to be called');
+  document._listeners.keydown.slice().forEach((fn) => fn({ key: 'Escape' }));
+  assert.equal(host.childElementCount, 1, 'Escape');
+  host.children[0].click();
+  assert.equal(host.childElementCount, 1, 'backdrop tap');
+  button.click();
+  assert.equal(host.childElementCount, 1, 'Settings button');
+  release();
+  await settled;
+  document._listeners.keydown.slice().forEach((fn) => fn({ key: 'Escape' }));
+  assert.equal(host.childElementCount, 0, 'once the submit settled, Escape closes as before');
+});

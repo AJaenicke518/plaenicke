@@ -593,10 +593,11 @@ test('accountui: other_account_data from linkAndAdopt shows its copy, leaves not
   input(host, 'acct-password2', GOOD_PW);
   submit(host);
   assert.ok(await until(() => errorText(host) !== ''));
-  assert.equal(errorText(host), `${ACCOUNT_COPY.other_account_data} Your account was created — sign in on another device, then make a new recovery link.`);
+  assert.equal(errorText(host), `${ACCOUNT_COPY.other_account_data} Your account was created — save this recovery link, then sign in on another device.`);
   assert.equal(loadAuth(), null, 'not linked');
   assert.equal(loadLocalOwner(), 5, 'the owner is untouched');
-  assert.equal(byId(host, 'acct-recovery-screen'), null);
+  assert.ok(byId(host, 'acct-recovery-screen'), 'sweep W3-I1c: the new account\'s recovery code is still shown');
+  assert.equal(byId(host, 'acct-recovery-done'), null);
   const out = calls.find((c) => c.name === 'logOut');
   assert.ok(out, 'the new device row is not orphaned');
   assert.equal(out.args.link.authToken, parseLinkCode(code).authToken);
@@ -1049,7 +1050,7 @@ test('accountui: the recovery screen\'s Download saves a .txt holding the link a
     assert.ok(text.includes('If you forget your password, open this link to reset it.'));
     assert.deepEqual(anchors, [{ href: 'blob:fake', download: 'plaenicke-recovery-link.txt' }]);
     const revoke = downloadTimers.pop();
-    assert.equal(revoke.ms, 1000, 'the blob URL is revoked a moment later, by an injected timer');
+    assert.equal(revoke.ms, 60000, 'the blob URL is revoked later (60 s, sweep W3 #26), by an injected timer');
   } finally {
     URL.createObjectURL = realCreate;
     URL.revokeObjectURL = realRevoke;
@@ -1104,7 +1105,7 @@ test('accountui: a reset blocked after recover/finish says the password was rese
   input(host, 'acct-password2', GOOD_PW);
   submit(host);
   assert.ok(await until(() => errorText(host) !== ''));
-  assert.equal(errorText(host), `${W3_MAPPED.link_failed} Your password was reset — sign in with it, then make a new recovery link.`);
+  assert.equal(errorText(host), `${W3_MAPPED.link_failed} Your password was reset — save this new recovery link, then sign in with the new password.`);
 });
 
 test('accountui: a new recovery link before any account check still shows the code, and leaves the banner to the next check', async () => {
@@ -1325,4 +1326,115 @@ test('W3 #18: it is "Sign in" everywhere, never "Log in"', () => {
 test('SEC #11: the recovery note says the link itself is the secret', async () => {
   const { RECOVERY_NOTE } = await import('../js/account.js');
   assert.match(RECOVERY_NOTE, /Anyone with this link can reset your password and read your planner\. Keep it private\.$/);
+});
+
+// --- sweep W3-I1: recovery-code loss paths -----------------------------------
+
+async function toRecoveryScreen(host, api, linkui) {
+  mount(host, { api, linkui });
+  click(byId(host, 'acct-invite'));
+  input(host, 'acct-invite-code', 'INVITE123');
+  input(host, 'acct-email', 'tester@example.com');
+  input(host, 'acct-password', GOOD_PW);
+  input(host, 'acct-password2', GOOD_PW);
+  await submit(host);
+}
+
+test('W3-I1a: the recovery screen says to tick and tap Done right after sending', async () => {
+  const { host } = setup();
+  const { api } = fakeApi({ signUp: async () => ({ code: newCode(), accountId: 7, recoveryCode: 'RECOVERYCODE1234567890' }) });
+  await toRecoveryScreen(host, api);
+  assert.ok(byId(host, 'acct-recovery-screen'));
+  assert.match(allText(host), /Tick the box and tap Done right after sending — Mail may close this app\./);
+});
+
+test('W3-I1b: the handle holds the panel open while the recovery screen is up or a submit is busy', async () => {
+  const { host } = setup();
+  let release;
+  const { api } = fakeApi({
+    signUp: () => new Promise((r) => { release = () => r({ code: newCode(), accountId: 7, recoveryCode: 'RECOVERYCODE1234567890' }); }),
+  });
+  const handle = mount(host, { api });
+  assert.equal(handle.holdsPanel(), false, 'home');
+  click(byId(host, 'acct-invite'));
+  input(host, 'acct-invite-code', 'INVITE123');
+  input(host, 'acct-email', 'tester@example.com');
+  input(host, 'acct-password', GOOD_PW);
+  input(host, 'acct-password2', GOOD_PW);
+  assert.equal(handle.holdsPanel(), false, 'a form being filled');
+  const settled = submit(host);
+  assert.ok(await until(() => release));
+  assert.equal(handle.holdsPanel(), true, 'busy');
+  release();
+  await settled;
+  assert.ok(byId(host, 'acct-recovery-screen'));
+  assert.equal(handle.holdsPanel(), true, 'the recovery screen');
+});
+
+test('W3-I1b: "Not now" leaves a linked recovery screen on purpose; the banner stays', async () => {
+  const { host, banner } = setup();
+  const { api } = fakeApi({ signUp: async () => ({ code: newCode(), accountId: 7, recoveryCode: 'RECOVERYCODE1234567890' }) });
+  await toRecoveryScreen(host, api);
+  const later = byId(host, 'acct-recovery-later');
+  assert.equal(later.textContent, 'Not now');
+  click(later);
+  assert.equal(byId(host, 'acct-recovery-screen'), null);
+  assert.equal(banner.hidden, false, 'still unconfirmed');
+});
+
+for (const outcome of ['blocked', 'link_failed', 'joined_other']) {
+  test(`W3-I1c: sign-up that could not link (${outcome}) still shows the new recovery code, with no Done`, async () => {
+    const { host } = setup();
+    const code = newCode();
+    const { api, calls } = fakeApi({
+      signUp: async () => ({ code, accountId: 7, recoveryCode: 'RECOVERYCODE1234567890' }),
+      logOut: async () => ({ revoked: true }),
+    });
+    await toRecoveryScreen(host, api, { linkAndAdopt: async () => outcome });
+    assert.ok(byId(host, 'acct-recovery-screen'), 'the code the account now has is not thrown away');
+    assert.equal(byId(host, 'acct-recovery-value').textContent, 'RECOVERYCODE1234567890');
+    assert.equal(byId(host, 'acct-recovery-done'), null, 'nothing to confirm with: this device is not signed in');
+    assert.equal(byId(host, 'acct-recovery-later').textContent, 'Close');
+    assert.ok(errorText(host).endsWith('Your account was created — save this recovery link, then sign in on another device.'), errorText(host));
+    assert.equal(loadAuth(), null);
+    assert.ok(calls.some((c) => c.name === 'logOut'), 'the fresh session is still revoked');
+    click(byId(host, 'acct-recovery-later'));
+    assert.ok(byId(host, 'acct-login'), 'Close goes back to the signed-out home');
+  });
+
+  test(`W3-I1c: a reset that could not link (${outcome}) still shows the new recovery code`, async () => {
+    const { host } = setup();
+    const { api } = fakeApi({
+      recover: async () => ({ code: newCode(), accountId: 6, recoveryCode: 'NEWRECOVERYCODE1234567' }),
+      logOut: async () => ({ revoked: true }),
+    });
+    mount(host, { api, linkui: { linkAndAdopt: async () => outcome }, intent: { kind: 'recover', code: 'RECOVERYFROMLINK123456' } });
+    input(host, 'acct-email', 'b@x.de');
+    input(host, 'acct-password', GOOD_PW);
+    input(host, 'acct-password2', GOOD_PW);
+    await submit(host);
+    assert.equal(byId(host, 'acct-recovery-value').textContent, 'NEWRECOVERYCODE1234567');
+    assert.equal(byId(host, 'acct-recovery-done'), null);
+    assert.ok(errorText(host).endsWith('Your password was reset — save this new recovery link, then sign in with the new password.'), errorText(host));
+  });
+}
+
+test('W3 #26: Download keeps its file URL for 60 s and points at Copy if nothing saved', async () => {
+  const { host } = setup();
+  const { api } = fakeApi({ signUp: async () => ({ code: newCode(), accountId: 7, recoveryCode: 'RECOVERYCODE1234567890' }) });
+  await toRecoveryScreen(host, api);
+  const before = downloadTimers.length;
+  const origCreate = URL.createObjectURL;
+  const origRevoke = URL.revokeObjectURL;
+  URL.createObjectURL = () => 'blob:x';
+  URL.revokeObjectURL = () => {};
+  try {
+    click(byId(host, 'acct-recovery-download'));
+  } finally {
+    URL.createObjectURL = origCreate;
+    URL.revokeObjectURL = origRevoke;
+  }
+  assert.equal(downloadTimers.length, before + 1);
+  assert.equal(downloadTimers[downloadTimers.length - 1].ms, 60000);
+  assert.equal(byId(host, 'acct-notice').textContent, "If the file didn't save, use Copy or Email it to me.");
 });

@@ -154,7 +154,7 @@ export function initSettings({
   // it is open (a Remove question, the sync section, a disabled Add), so the
   // list is read from the panel at each Tab press.
   function onKey(e) {
-    if (e.key === 'Escape') { close(); return; }
+    if (e.key === 'Escape') { if (!accountHolds()) close(); return; }
     if (e.key !== 'Tab') return;
     const focusables = tabStops(host);
     if (focusables.length === 0) return;
@@ -172,6 +172,12 @@ export function initSettings({
   // Stops fitting the backdrop to the visual viewport (the iOS keyboard,
   // punchlist L139: js/viewport.js fillVisualViewport), or null while closed.
   let stopViewport = null;
+  // The open panel's Account handle, or null while closed. While it holds the
+  // panel — a recovery code on screen, a submit still out (sweep W3-I1b) —
+  // Escape, a backdrop tap and the Settings button do not close it: a code
+  // lost that way is gone, and Mail can evict the app moments later.
+  let accountHandle = null;
+  const accountHolds = () => Boolean(accountHandle && accountHandle.holdsPanel());
 
   // Focus goes back to the Settings button on every close path (the button,
   // Escape, a backdrop tap), as the item sheet returns it to its opener (app.js's
@@ -179,6 +185,7 @@ export function initSettings({
   // scrolling, for the same reason.
   function close() {
     repaintRows = null;
+    accountHandle = null;
     host.innerHTML = '';
     if (releaseScroll) { releaseScroll(); releaseScroll = null; }
     if (stopViewport) { stopViewport(); stopViewport = null; }
@@ -194,7 +201,7 @@ export function initSettings({
     backdrop.setAttribute('role', 'dialog');
     backdrop.setAttribute('aria-modal', 'true');
     backdrop.setAttribute('aria-label', 'Settings');
-    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop && !accountHolds()) close(); });
 
     const panel = document.createElement('div');
     panel.className = 'settings-panel';
@@ -826,6 +833,7 @@ export function initSettings({
       linkui: () => linkHandle,
       onSignedOut: () => { mountLink(); refreshCalendars(); },
     });
+    accountHandle = acct;
     if (!releaseScroll) releaseScroll = lock(); // no scrolling behind the modal (iOS)
     // The backdrop is the panel's scroll container. Fixed at inset: 0 it is
     // the layout viewport's height, and the iOS keyboard shrinks only the
@@ -838,7 +846,10 @@ export function initSettings({
     if (intent) acct.open(intent);
   }
 
-  button.addEventListener('click', () => { host.childElementCount ? close() : open(); });
+  button.addEventListener('click', () => {
+    if (!host.childElementCount) open();
+    else if (!accountHolds()) close();
+  });
 
   // The inline pre-paint script already applied a theme from its own copy of this
   // logic; re-apply through resolveTheme() so js/theme.js is the source of truth.
