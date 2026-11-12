@@ -194,7 +194,7 @@ test('mailtoHref round-trips and recoveryLink uses APP_URL', () => {
   assert.equal(u.searchParams.get('subject'), 'Your plaenicke recovery link');
   const body = u.searchParams.get('body');
   assert.ok(body.includes(`#recover=${code}`));
-  assert.ok(body.includes('Keep this email. If you forget your password, open this link to reset it. Anyone with access to this email can reset your password.'));
+  assert.ok(body.includes('Keep this email. If you forget your password, open this link to reset it. Anyone with this link can reset your password and read your planner. Keep it private.'));
 });
 
 test('a login response without a token throws AccountError(server)', async () => {

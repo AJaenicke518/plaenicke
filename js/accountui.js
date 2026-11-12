@@ -47,13 +47,20 @@ export const REVOKE_FAILED_TEXT = "This device's session could not be revoked �
 // own (ruling R2), never restated here.
 const KEYS_BROKEN = "Something is wrong with this account's keys. Nothing was changed. Tell Alex.";
 const SERVER_BROKEN = "The server isn't set up right. Tell Alex.";
+const UNSAFE_SETTINGS = 'The server asked for unsafe settings. Nothing was sent.';
 const CHANGED_ELSEWHERE = 'Your account changed on another device. Try again.';
+// email_taken on Create your login: the address belongs to someone else's
+// account, so "sign in instead" would be wrong advice (W3-I8).
+const UPGRADE_EMAIL_TAKEN = 'That email is used by another account.';
+// The Worker's own email rule (worker/src/input.js EMAIL_RE), checked here
+// first so a typo is said at once instead of after a key derivation.
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 // Done on a recovery screen whose code was replaced meanwhile (W3-I2).
 const REPLACED_ELSEWHERE = 'This recovery link was replaced on another device — make a new one.';
 const ERROR_COPY = {
   bad_credentials: 'Email or password is wrong.',
   invalid_invite: "That invite code doesn't work. Ask Alex for a new one.",
-  email_taken: "There's already an account with that email. Log in instead.",
+  email_taken: "There's already an account with that email. Sign in instead.",
   no_account: 'No account with that email.',
   disabled: 'This account is turned off. Ask Alex.',
   bad_recovery: "That recovery link doesn't match this email.",
@@ -61,7 +68,22 @@ const ERROR_COPY = {
   already_linked: ACCOUNT_COPY.already_linked,
   dek_check_failed: KEYS_BROKEN,
   wrong_key_on_device: KEYS_BROKEN,
-  kdf_iters_too_low: 'The server asked for unsafe settings. Nothing was sent.',
+  kdf_iters_too_low: UNSAFE_SETTINGS,
+  kdf_iters_out_of_range: UNSAFE_SETTINGS,
+  unwrap_failed: KEYS_BROKEN,
+  bad_salt: SERVER_BROKEN,
+  bad_config: SERVER_BROKEN,
+  bad_seal: SERVER_BROKEN,
+  bad_request: "The app sent something the server didn't accept. Tell Alex.",
+  bad_recovery_code: "That isn't a recovery code — paste the whole link or the 22-character code.",
+  invalid_email: "That doesn't look like an email address.",
+  already_upgraded: 'This account already has a login — it was made on another device.',
+  // linkAndAdopt's outcomes when it did not link (sweep W3-I8). linkui's own
+  // section already says why in its words, so this line points there rather
+  // than saying it twice.
+  link_failed: 'This device could not be linked — the Sync section below says why.',
+  blocked: "This device can't be linked to that account — the Sync section below says why.",
+  joined_other: 'Another sign-in was already under way on this device. Wait for it to finish, then try again.',
   unreachable: "Can't reach the server. Check your connection.",
   not_configured: SERVER_BROKEN,
   at_rest_key_mismatch: SERVER_BROKEN,
@@ -237,6 +259,17 @@ function el(tag, props = {}) {
   return node;
 }
 
+// What a code field holds: the code itself, or a whole link carrying it
+// (W3-C1). Testers paste the link they were sent, so the text after
+// '#<kind>=' is the code; anything else is taken as typed. Trimmed either
+// way; a malformed code is the server's (or keys.js's) to refuse.
+export function codeFrom(raw, kind) {
+  const text = String(raw || '').trim();
+  const marker = `#${kind}=`;
+  const at = text.lastIndexOf(marker);
+  return (at === -1 ? text : text.slice(at + marker.length)).trim();
+}
+
 function deviceName() {
   const ua = (globalThis.navigator && globalThis.navigator.userAgent) || '';
   if (/iPhone/.test(ua)) return 'iPhone';
@@ -252,7 +285,7 @@ function deviceName() {
 // its labels. The LOGIN form never shows or gates on the policy: an existing
 // password that a later blocklist update would refuse must still log in.
 const FORMS = {
-  login: { title: 'Log in', fields: ['email', 'password'], policy: false, submit: 'Log in' },
+  login: { title: 'Sign in', fields: ['email', 'password'], policy: false, submit: 'Sign in' },
   signup: { title: 'Create your account', fields: ['invite', 'email', 'newPassword', 'password2'], policy: true, submit: 'Create account' },
   forgot: { title: 'Reset your password', fields: ['recovery', 'email', 'newPassword', 'password2'], policy: true, submit: 'Reset password' },
   change: { title: 'Change password', fields: ['email', 'current', 'newPassword', 'password2', 'signOutOthers'], policy: true, submit: 'Change password' },
@@ -368,7 +401,7 @@ export function initAccountUI({
       // Link FIRST (§ 6.1 step 6), so the credential is stored before the
       // recovery screen sends the user off to Mail and the app is evicted.
       const linked = await adopt(res.code, res.accountId,
-        'Your account was created — log in on another device, then make a new recovery link.');
+        'Your account was created — sign in on another device, then make a new recovery link.');
       if (!linked) return;
       remember(getLink(), { accountId: res.accountId, email: v.email, recoveryConfirmed: false });
       showRecovery(res.recoveryCode, v.email);
@@ -414,7 +447,7 @@ export function initAccountUI({
       // recover/finish already replaced the old recovery code: the new one
       // is shown whenever this device is linked, even if a later step threw.
       const linked = await adopt(res.code, res.accountId,
-        'Your password was reset — log in with it, then make a new recovery link.');
+        'Your password was reset — sign in with it, then make a new recovery link.');
       if (!linked) return;
       remember(getLink(), { accountId: res.accountId, email: v.email, recoveryConfirmed: false });
       showRecovery(res.recoveryCode, v.email);
@@ -442,7 +475,13 @@ export function initAccountUI({
     },
     async upgrade(v) {
       const link = requireLink();
-      const res = await api.upgrade({ link, email: v.email, password: v.newPassword, upgradeCode: v.upgradeCode });
+      let res;
+      try {
+        res = await api.upgrade({ link, email: v.email, password: v.newPassword, upgradeCode: v.upgradeCode });
+      } catch (err) {
+        if (err instanceof AccountError && err.code === 'email_taken') { showError(UPGRADE_EMAIL_TAKEN); return; }
+        throw err;
+      }
       // Plan review I6: the data here now belongs to an account with a login
       // — no longer a legacy one (sweep W2-C1).
       saveLocalOwner(res.accountId);
@@ -456,6 +495,7 @@ export function initAccountUI({
 
   function messages(wrap) {
     noticeEl = el('p', { className: 'note account-notice', id: 'acct-notice', text: notice });
+    noticeEl.setAttribute('aria-live', 'polite');
     errorEl = el('p', { className: 'note account-error', id: 'acct-error', text: error });
     errorEl.setAttribute('role', 'alert');
     wrap.append(noticeEl, errorEl);
@@ -473,7 +513,7 @@ export function initAccountUI({
     if (mode === 'unlinked') {
       wrap.appendChild(el('p', { className: 'note', text: 'Sign in to sync your planner and use smart add and calendars.' }));
       wrap.append(
-        button('acct-login', 'Log in', () => open({ kind: 'login' }), 'primary'),
+        button('acct-login', 'Sign in', () => open({ kind: 'login' }), 'primary'),
         button('acct-invite', 'I have an invite', () => open({ kind: 'invite' })),
         button('acct-forgot', 'Forgot password', () => open({ kind: 'recover' })),
       );
@@ -545,11 +585,19 @@ export function initAccountUI({
       return input;
     };
     const plain = { autocapitalize: 'off', spellcheck: false };
-    if (kind === 'invite') refs.invite = make('acct-invite-code', 'Invite code', { type: 'text', autocomplete: 'off', value: prefill.invite, ...plain });
-    else if (kind === 'recovery') refs.recovery = make('acct-recovery-code', 'Recovery code', { type: 'text', autocomplete: 'off', value: prefill.recovery, ...plain });
+    // A pasted code is not a word: no autocorrect, autocomplete or
+    // capitalisation (W3 #13). autocorrect has no DOM property, so these are
+    // attributes.
+    const codeField = (id, label, value) => {
+      const node = make(id, label, { type: 'text', value, spellcheck: false });
+      for (const a of ['autocorrect', 'autocomplete', 'autocapitalize']) node.setAttribute(a, 'off');
+      return node;
+    };
+    if (kind === 'invite') refs.invite = codeField('acct-invite-code', 'Invite link or code', prefill.invite);
+    else if (kind === 'recovery') refs.recovery = codeField('acct-recovery-code', 'Recovery link or code', prefill.recovery);
     // Sweep W1-C1 / W3-I3: the server upgrades only with a one-time code Alex
     // mints with curl (docs/admin.md).
-    else if (kind === 'upgradeCode') refs.upgradeCode = make('acct-upgrade-code', 'Upgrade code from Alex', { type: 'text', autocomplete: 'off', ...plain });
+    else if (kind === 'upgradeCode') refs.upgradeCode = codeField('acct-upgrade-code', 'Upgrade code from Alex', '');
     else if (kind === 'email') refs.email = make('acct-email', 'Email', { type: 'email', autocomplete: 'username', value: emailKnown(), ...plain });
     else if (kind === 'password') refs.password = make('acct-password', 'Password', { type: 'password', autocomplete: 'current-password' });
     else if (kind === 'current') refs.current = make('acct-current-password', 'Current password', { type: 'password', autocomplete: 'current-password' });
@@ -572,11 +620,16 @@ export function initAccountUI({
     const refs = {};
     for (const kind of spec.fields) field(form, kind, refs);
     let policy = null;
+    let mismatch = null;
     if (spec.policy) {
       policy = el('ul', { id: 'acct-policy', className: 'account-policy' });
-      form.appendChild(policy);
+      policy.setAttribute('aria-live', 'polite');
+      mismatch = el('p', { className: 'note account-error', id: 'acct-mismatch' });
+      mismatch.setAttribute('aria-live', 'polite');
+      form.append(policy, mismatch);
     }
     const status = el('p', { className: 'note', id: 'acct-status' });
+    status.setAttribute('aria-live', 'polite');
     const submitBtn = el('button', { type: 'submit', id: 'acct-submit', className: 'primary', text: spec.submit });
     const cancel = button('acct-cancel', 'Cancel', () => { view = 'home'; error = ''; render(); });
     form.append(status, submitBtn, cancel);
@@ -584,8 +637,8 @@ export function initAccountUI({
     messages(wrap);
 
     const values = () => ({
-      invite: refs.invite ? refs.invite.value.trim() : undefined,
-      recovery: refs.recovery ? refs.recovery.value.trim() : undefined,
+      invite: refs.invite ? codeFrom(refs.invite.value, 'invite') : undefined,
+      recovery: refs.recovery ? codeFrom(refs.recovery.value, 'recover') : undefined,
       upgradeCode: refs.upgradeCode ? refs.upgradeCode.value.trim() : undefined,
       email: refs.email ? refs.email.value.trim() : undefined,
       password: refs.password ? refs.password.value : undefined,
@@ -594,7 +647,12 @@ export function initAccountUI({
       signOutOthers: refs.signOutOthers ? refs.signOutOthers.checked === true : undefined,
     });
 
+    // Every text field on a form is required (W3-I9): Submit stays off
+    // until each holds something. Only the policy forms add the D10 gate.
+    const required = [refs.invite, refs.recovery, refs.upgradeCode, refs.email, refs.password, refs.current,
+      refs.newPassword, refs.password2].filter(Boolean);
     function gateOk() {
+      if (required.some((node) => node.value.trim() === '')) return false;
       if (!spec.policy) return true;
       const pw = refs.newPassword.value;
       return checkPassword(pw, refs.email.value.trim()).ok && pw === refs.password2.value;
@@ -606,12 +664,17 @@ export function initAccountUI({
         for (const p of checkPassword(refs.newPassword.value, refs.email.value.trim()).problems) {
           policy.appendChild(el('li', { text: p }));
         }
+        const differs = refs.password2.value !== '' && refs.password2.value !== refs.newPassword.value;
+        mismatch.textContent = differs ? "Passwords don't match" : '';
       }
       submitBtn.disabled = busy || !gateOk();
     }
 
-    for (const input of [refs.email, refs.newPassword, refs.password2, refs.password, refs.current, refs.invite, refs.recovery]) {
-      if (input) input.addEventListener('input', refreshGate);
+    // `change` too (W3 #11): iOS autofill and Keychain fill a field without
+    // an input event.
+    for (const node of required) {
+      node.addEventListener('input', refreshGate);
+      node.addEventListener('change', refreshGate);
     }
     refreshGate();
 
@@ -619,6 +682,10 @@ export function initAccountUI({
       e.preventDefault();
       // Enter in a field submits even while the button is disabled.
       if (busy || !gateOk()) return;
+      if (refs.email && !EMAIL_RE.test(refs.email.value.trim())) {
+        showError(errorCopy('invalid_email'));
+        return;
+      }
       busy = true;
       refreshGate();
       showError('');

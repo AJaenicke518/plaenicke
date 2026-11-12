@@ -138,11 +138,11 @@ function assertNoMinKdfIters(calls) {
 
 // --- 1. what each device sees ----------------------------------------------
 
-test('accountui: an unlinked device shows Log in, I have an invite, Forgot password', () => {
+test('accountui: an unlinked device shows Sign in, I have an invite, Forgot password', () => {
   const { host } = setup();
   const { api, calls } = fakeApi();
   mount(host, { api });
-  assert.equal(byId(host, 'acct-login').textContent, 'Log in');
+  assert.equal(byId(host, 'acct-login').textContent, 'Sign in');
   assert.equal(byId(host, 'acct-invite').textContent, 'I have an invite');
   assert.equal(byId(host, 'acct-forgot').textContent, 'Forgot password');
   assert.equal(byId(host, 'acct-signout'), null);
@@ -501,7 +501,7 @@ test('accountui: an answer for a session that changed meanwhile is dropped', asy
 const MAPPED = {
   bad_credentials: 'Email or password is wrong.',
   invalid_invite: "That invite code doesn't work. Ask Alex for a new one.",
-  email_taken: "There's already an account with that email. Log in instead.",
+  email_taken: "There's already an account with that email. Sign in instead.",
   no_account: 'No account with that email.',
   disabled: 'This account is turned off. Ask Alex.',
   bad_recovery: "That recovery link doesn't match this email.",
@@ -593,7 +593,7 @@ test('accountui: other_account_data from linkAndAdopt shows its copy, leaves not
   input(host, 'acct-password2', GOOD_PW);
   submit(host);
   assert.ok(await until(() => errorText(host) !== ''));
-  assert.equal(errorText(host), `${ACCOUNT_COPY.other_account_data} Your account was created — log in on another device, then make a new recovery link.`);
+  assert.equal(errorText(host), `${ACCOUNT_COPY.other_account_data} Your account was created — sign in on another device, then make a new recovery link.`);
   assert.equal(loadAuth(), null, 'not linked');
   assert.equal(loadLocalOwner(), 5, 'the owner is untouched');
   assert.equal(byId(host, 'acct-recovery-screen'), null);
@@ -617,7 +617,7 @@ test('accountui: a linkAndAdopt that rejects (a post-link throw) shows a specifi
   assert.deepEqual(calls.map((c) => c.name), ['logIn'], 'the device is linked: its session stays');
 });
 
-test('accountui: link_failed and joined_other from linkAndAdopt show their codes', async () => {
+test('accountui: link_failed and joined_other from linkAndAdopt show their own copy (sweep W3-I8; was the bare code)', async () => {
   for (const outcome of ['link_failed', 'joined_other']) {
     const { host } = setup();
     const code = newCode();
@@ -631,7 +631,7 @@ test('accountui: link_failed and joined_other from linkAndAdopt show their codes
     input(host, 'acct-password', 'whatever');
     submit(host);
     assert.ok(await until(() => errorText(host) !== ''), outcome);
-    assert.equal(errorText(host), `Unexpected error: ${outcome}`);
+    assert.equal(errorText(host), W3_MAPPED[outcome]);
     const out = calls.find((c) => c.name === 'logOut');
     assert.ok(out, `${outcome}: not linked, so the fresh session is revoked`);
     assert.equal(out.args.link.authToken, parseLinkCode(code).authToken);
@@ -1104,7 +1104,7 @@ test('accountui: a reset blocked after recover/finish says the password was rese
   input(host, 'acct-password2', GOOD_PW);
   submit(host);
   assert.ok(await until(() => errorText(host) !== ''));
-  assert.equal(errorText(host), 'Unexpected error: link_failed Your password was reset — log in with it, then make a new recovery link.');
+  assert.equal(errorText(host), `${W3_MAPPED.link_failed} Your password was reset — sign in with it, then make a new recovery link.`);
 });
 
 test('accountui: a new recovery link before any account check still shows the code, and leaves the banner to the next check', async () => {
@@ -1144,4 +1144,185 @@ test('W2-rr: an owner-mismatch answer records nothing about the link', async () 
 test('W3-I3: upgrade-code refusals have their own copy', () => {
   assert.equal(errorCopy('invalid_upgrade_code'), "That upgrade code doesn't work — it may be used or expired. Mint a new one (docs/admin.md).");
   assert.equal(errorCopy('missing_upgrade_code'), 'Paste the upgrade code first.');
+});
+
+// --- sweep W3: forms ---------------------------------------------------------
+
+const RESET_LINK = 'https://ajaenicke518.github.io/plaenicke/#recover=AAAAAAAAAAAAAAAAAAAAAA';
+
+function labelOf(host, id) {
+  return byId(host, id).parentNode.children[0].textContent;
+}
+
+test('W3-C1: a whole recovery link pasted into Reset sends just its code', async () => {
+  const { host } = setup();
+  const { api, calls } = fakeApi({ recover: async () => { throw new AccountError('bad_recovery'); } });
+  mount(host, { api });
+  openForm(host, 'acct-forgot');
+  assert.equal(labelOf(host, 'acct-recovery-code'), 'Recovery link or code');
+  input(host, 'acct-recovery-code', `  ${RESET_LINK}\n`);
+  input(host, 'acct-email', 'a@x.de');
+  input(host, 'acct-password', GOOD_PW);
+  input(host, 'acct-password2', GOOD_PW);
+  await submit(host);
+  assert.equal(calls[0].args.recoveryCode, 'AAAAAAAAAAAAAAAAAAAAAA');
+});
+
+test('W3-C1: a whole invite link pasted into sign-up sends just its code', async () => {
+  const { host } = setup();
+  const { api, calls } = fakeApi({ signUp: async () => { throw new AccountError('invalid_invite'); } });
+  mount(host, { api });
+  openForm(host, 'acct-invite');
+  assert.equal(labelOf(host, 'acct-invite-code'), 'Invite link or code');
+  input(host, 'acct-invite-code', 'https://ajaenicke518.github.io/plaenicke/#invite=INVITECODE_x-1 ');
+  input(host, 'acct-email', 'a@x.de');
+  input(host, 'acct-password', GOOD_PW);
+  input(host, 'acct-password2', GOOD_PW);
+  await submit(host);
+  assert.equal(calls[0].args.invite, 'INVITECODE_x-1');
+});
+
+test('W3-C1: bad_recovery_code says what to paste', () => {
+  assert.equal(errorCopy('bad_recovery_code'), "That isn't a recovery code — paste the whole link or the 22-character code.");
+});
+
+test('W3-I8: an email that is not an email is refused on the device, nothing sent', async () => {
+  const { host } = setup();
+  const { api, calls } = fakeApi();
+  mount(host, { api });
+  openForm(host, 'acct-login');
+  input(host, 'acct-email', 'alex at example');
+  input(host, 'acct-password', 'whatever');
+  await submit(host);
+  assert.equal(errorText(host), "That doesn't look like an email address.");
+  assert.equal(calls.length, 0);
+});
+
+const W3_MAPPED = {
+  already_upgraded: 'This account already has a login — it was made on another device.',
+  unwrap_failed: "Something is wrong with this account's keys. Nothing was changed. Tell Alex.",
+  bad_salt: "The server isn't set up right. Tell Alex.",
+  kdf_iters_out_of_range: 'The server asked for unsafe settings. Nothing was sent.',
+  bad_config: "The server isn't set up right. Tell Alex.",
+  bad_seal: "The server isn't set up right. Tell Alex.",
+  bad_request: "The app sent something the server didn't accept. Tell Alex.",
+  joined_other: 'Another sign-in was already under way on this device. Wait for it to finish, then try again.',
+  link_failed: 'This device could not be linked — the Sync section below says why.',
+  blocked: "This device can't be linked to that account — the Sync section below says why.",
+};
+
+test('W3-I8: every code the client can meet has its own copy', () => {
+  for (const [code, copy] of Object.entries(W3_MAPPED)) assert.equal(errorCopy(code), copy, code);
+});
+
+test('W3-I8: email_taken on Create your login names the other account, not "sign in instead"', async () => {
+  const { host } = setup();
+  saveAuth(newCode());
+  const { api } = fakeApi({
+    getAccount: async () => ({ accountId: 1, email: null, recoveryConfirmed: false }),
+    upgrade: async () => { throw new AccountError('email_taken', {}, 409); },
+  });
+  await refreshAccount({ api });
+  mount(host, { api });
+  click(byId(host, 'acct-upgrade'));
+  input(host, 'acct-upgrade-code', 'UPGRADECODE12345678901');
+  input(host, 'acct-email', 'alex@example.com');
+  input(host, 'acct-password', GOOD_PW);
+  input(host, 'acct-password2', GOOD_PW);
+  await submit(host);
+  assert.equal(errorText(host), 'That email is used by another account.');
+});
+
+test('W3-I9: a confirm that differs says "Passwords don\'t match" (and only then)', () => {
+  const { host } = setup();
+  const { api } = fakeApi();
+  mount(host, { api });
+  openForm(host, 'acct-invite');
+  const mismatch = () => byId(host, 'acct-mismatch').textContent;
+  input(host, 'acct-password', GOOD_PW);
+  assert.equal(mismatch(), '', 'an empty confirm is not a mismatch yet');
+  input(host, 'acct-password2', 'correct-horse');
+  assert.equal(mismatch(), "Passwords don't match");
+  input(host, 'acct-password2', GOOD_PW);
+  assert.equal(mismatch(), '');
+});
+
+test('W3-I9: every form keeps Submit disabled until its required fields are filled (login: no policy gate)', () => {
+  const cases = [
+    ['acct-login', () => {}, [['acct-email', 'a@x.de'], ['acct-password', 'x']]],
+    ['acct-invite', () => {}, [['acct-invite-code', 'INV'], ['acct-email', 'a@x.de'], ['acct-password', GOOD_PW], ['acct-password2', GOOD_PW]]],
+    ['acct-forgot', () => {}, [['acct-recovery-code', 'R'], ['acct-email', 'a@x.de'], ['acct-password', GOOD_PW], ['acct-password2', GOOD_PW]]],
+    ['acct-new-recovery', () => linkedAccount(5), [['acct-email', 'a@x.de'], ['acct-current-password', 'old']]],
+    ['acct-change-password', () => linkedAccount(5), [['acct-email', 'a@x.de'], ['acct-current-password', 'old'], ['acct-password', GOOD_PW], ['acct-password2', GOOD_PW]]],
+  ];
+  for (const [opener, prepare, fields] of cases) {
+    const { host } = setup();
+    prepare();
+    mount(host, { api: fakeApi().api });
+    openForm(host, opener);
+    for (const [id] of fields) input(host, id, '');
+    assert.equal(byId(host, 'acct-submit').disabled, true, `${opener}: empty`);
+    for (const [id, v] of fields.slice(0, -1)) input(host, id, v);
+    assert.equal(byId(host, 'acct-submit').disabled, true, `${opener}: last field empty`);
+    const [lastId, lastV] = fields[fields.length - 1];
+    input(host, lastId, lastV);
+    assert.equal(byId(host, 'acct-submit').disabled, false, `${opener}: all filled`);
+  }
+});
+
+test('W3 #11: the gate also follows change events (autofill fires change, not input)', () => {
+  const { host } = setup();
+  mount(host, { api: fakeApi().api });
+  openForm(host, 'acct-login');
+  const email = byId(host, 'acct-email');
+  const pw = byId(host, 'acct-password');
+  email.value = 'a@x.de';
+  pw.value = 'from-keychain';
+  for (const fn of pw._listeners.change || []) fn({ target: pw });
+  assert.equal(byId(host, 'acct-submit').disabled, false);
+});
+
+test('W3 #13: invite, recovery and upgrade-code fields switch off autocorrect and autocomplete (attributes)', async () => {
+  for (const [opener, id, prepare] of [['acct-invite', 'acct-invite-code'], ['acct-forgot', 'acct-recovery-code']]) {
+    const { host } = setup();
+    mount(host, { api: fakeApi().api });
+    openForm(host, opener);
+    assert.equal(byId(host, id).getAttribute('autocorrect'), 'off', id);
+    assert.equal(byId(host, id).getAttribute('autocomplete'), 'off', id);
+    assert.equal(byId(host, id).getAttribute('autocapitalize'), 'off', id);
+    void prepare;
+  }
+  const { host } = setup();
+  saveAuth(newCode());
+  const { api } = fakeApi({ getAccount: async () => ({ accountId: 1, email: null, recoveryConfirmed: false }) });
+  await refreshAccount({ api });
+  mount(host, { api });
+  click(byId(host, 'acct-upgrade'));
+  assert.equal(byId(host, 'acct-upgrade-code').getAttribute('autocorrect'), 'off');
+  assert.equal(byId(host, 'acct-upgrade-code').getAttribute('autocomplete'), 'off');
+});
+
+test('W3 #16: status, notice and policy are polite live regions; the error stays an alert', () => {
+  const { host } = setup();
+  mount(host, { api: fakeApi().api });
+  openForm(host, 'acct-invite');
+  for (const id of ['acct-status', 'acct-notice', 'acct-policy', 'acct-mismatch']) {
+    assert.equal(byId(host, id).getAttribute('aria-live'), 'polite', id);
+  }
+  assert.equal(byId(host, 'acct-error').getAttribute('role'), 'alert');
+});
+
+test('W3 #18: it is "Sign in" everywhere, never "Log in"', () => {
+  const { host } = setup();
+  mount(host, { api: fakeApi().api });
+  assert.equal(byId(host, 'acct-login').textContent, 'Sign in');
+  openForm(host, 'acct-login');
+  assert.equal(byId(host, 'acct-submit').textContent, 'Sign in');
+  assert.doesNotMatch(allText(host), /Log in/i);
+  assert.equal(errorCopy('email_taken'), "There's already an account with that email. Sign in instead.");
+});
+
+test('SEC #11: the recovery note says the link itself is the secret', async () => {
+  const { RECOVERY_NOTE } = await import('../js/account.js');
+  assert.match(RECOVERY_NOTE, /Anyone with this link can reset your password and read your planner\. Keep it private\.$/);
 });

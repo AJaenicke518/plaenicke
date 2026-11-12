@@ -247,7 +247,7 @@ export function recoveryLink(code) {
 
 // The one sentence that travels with a recovery link: the mailto body here and
 // accountui's Download file both use it, so the two cannot drift.
-export const RECOVERY_NOTE = 'Keep this email. If you forget your password, open this link to reset it. Anyone with access to this email can reset your password.';
+export const RECOVERY_NOTE = 'Keep this email. If you forget your password, open this link to reset it. Anyone with this link can reset your password and read your planner. Keep it private.';
 
 export function mailtoHref(email, code) {
   const subject = 'Your plaenicke recovery link';
