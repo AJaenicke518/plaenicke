@@ -31,7 +31,7 @@ CLAUDE.md's "Single user" line and V5's non-goals ("multi-user accounts; public 
 | D2 | Key model | Random 32-byte **DEK** encrypts the blob exactly as today; server stores it **wrapped twice** — by a password-derived key and a recovery-code-derived key | Bitwarden / Standard Notes shape. Password change and recovery never re-encrypt data. Alex's `encKey` **becomes** his DEK: his blob stays byte-identical. |
 | D3 | Password KDF | PBKDF2-HMAC-SHA-256 (WebCrypto), **600,000 iterations**, 16-byte random salt, stored per account. **Client refuses any `kdfIters` < 600,000** | OWASP's current figure; Bitwarden's minimum. Native, no dependency. The floor stops a compromised server from downgrading the KDF to brute-force `authKey`. |
 | D4 | Login proof | `authKey = HKDF(masterKey, 'plaenicke/v1/auth')`; server stores `HMAC(macKey, authKey)` | 256-bit secret ⇒ one keyed hash suffices (NIST 800-63B § 3.1.2.2 stretching applies below 112 bits). SRP/OPAQUE rejected: no WebCrypto primitives, no gain against a dump that also holds the wrapped key. |
-| D5 | At-rest key | Worker secret `AT_REST_KEY`; HKDF subkeys `macKey` ('plaenicke/v1/at-rest/mac') and `sealKey` ('…/seal'). Sealed values carry a key-id prefix `k1:`. A `config` row stores `HMAC(macKey, 'key-check')`; on mismatch every auth route returns 500 `at_rest_key_mismatch` | A D1 dump alone yields neither a guess oracle nor a crackable wrap. Losing or changing the secret produces a loud, specific error — never "wrong password" for everyone. Alex keeps two copies (laptop + password manager, punchlist L49). |
+| D5 | At-rest key | Worker secret `AT_REST_KEY`; HKDF subkeys `macKey` ('plaenicke/v1/at-rest/mac') and `sealKey` ('…/seal'). Sealed values carry a key-id prefix `k1:`. A `config` row stores `HMAC(macKey, 'plaenicke/v1/key-check')`; on mismatch every auth route returns 500 `at_rest_key_mismatch` | A D1 dump alone yields neither a guess oracle nor a crackable wrap. Losing or changing the secret produces a loud, specific error — never "wrong password" for everyone. Alex keeps two copies (laptop + password manager, punchlist L49). |
 | D6 | Recovery code | 16 random bytes (128 bits), base64url (22 chars), unstretched | NIST: ≥ 64 bits for saved recovery codes; 128 bits clears the no-stretch threshold. |
 | D7 | Recovery delivery | **Device-delivered**: *Email it to me* (`mailto:` to own address), *Copy*, *Download* (`.txt`). Server never sees the code | Server-sent email needs Workers Paid (Cloudflare Email Service pricing, updated 2026-06-09) or a domain + third-party sender storing content 7–45 days, and would hand the Worker the code. Alex's trade-off (inbox control = reset) preserved. |
 | D8 | Recovery confirmed server-side | `accounts.recovery_confirmed_at`; set only by `POST /account/recovery/confirm`; returned by login and `GET /account`; every device shows a persistent "Save your recovery link" banner while it is null | A `mailto:` switch to Mail can evict the standalone PWA; a client-only flag would be lost. |
@@ -104,6 +104,7 @@ CREATE TABLE accounts (
   wrapped_dek_pw_sealed  TEXT,
   wrapped_dek_rec_sealed TEXT,
   dek_check              TEXT,
+  invite_hash            TEXT UNIQUE,                  -- NULL for legacy account 1
   recovery_confirmed_at  TEXT,
   created_at             TEXT NOT NULL,
   disabled_at            TEXT,
@@ -159,15 +160,13 @@ CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL);   -- 'key-check
 2. Email + password + confirm; D10 policy shown live. Forms carry `autocomplete="username"` / `"new-password"` so iCloud Keychain offers to save.
 3. Device: `kdfSalt`, derive (§ 4.1), `DEK = generateEncKey()`, `R = random16`, wrap twice, `dekCheck`.
 4. `POST /auth/signup {invite, email, kdfSalt, kdfIters, authKey, recAuthKey, wrappedDekPw, wrappedDekRec, dekCheck, deviceName}`.
-5. Worker, **one `batch()`** keyed on a per-request random `nonce`:
+5. Worker picks a **random account id** first (`id = 2 + random 52-bit integer` from `crypto.getRandomValues`; collision ⇒ the batch fails on the primary key and the handler retries once with a new id), seals both wraps with that id in the AAD, then runs **one `batch()`** keyed on a per-request `nonce` (`<ISO time>|<uuid>`):
    1. `UPDATE invites SET used_at = ?nonce WHERE hash = ? AND used_at IS NULL AND revoked_at IS NULL`
-   2. `INSERT INTO accounts (…, invite_hash) SELECT …, hash FROM invites WHERE hash = ? AND used_at = ?nonce` — inserts nothing unless step 1 claimed the invite **in this request**; a duplicate email raises `UNIQUE` and rolls the batch back.
-   3. `INSERT INTO data (id, version, blob, updated_at) SELECT id, 0, '', ? FROM accounts WHERE email = ? AND invite_hash = ?`
-   4. `INSERT INTO devices (…) SELECT ?, id, ?, ?, NULL FROM accounts WHERE email = ? AND invite_hash = ?`
+   2. `INSERT INTO accounts (id, email, …, wrapped_dek_pw_sealed, wrapped_dek_rec_sealed, invite_hash, created_at) SELECT ?id, ?, …, hash, ? FROM invites WHERE hash = ? AND used_at = ?nonce` — inserts nothing unless step 1 claimed the invite **in this request**.
+   3. `INSERT INTO data (id, version, blob, updated_at) SELECT a.id, 0, '', ? FROM accounts a JOIN invites i ON i.hash = a.invite_hash WHERE i.hash = ? AND i.used_at = ?nonce`
+   4. `INSERT INTO devices (token_hash, account_id, name, created_at) SELECT ?, a.id, ?, ? FROM accounts a JOIN invites i ON i.hash = a.invite_hash WHERE i.hash = ? AND i.used_at = ?nonce`
 
-   Then, outside the batch, the sealed wraps are written with `UPDATE accounts SET wrapped_dek_pw_sealed=?, wrapped_dek_rec_sealed=? WHERE id=? AND wrapped_dek_pw_sealed IS NULL`, because the seal AAD needs the account id the batch just assigned. If that tail fails, the account exists without wraps. Login then returns 500 `account_incomplete` (never a fallback), a re-sign-up returns `email_taken`, and the admin list shows the account. Alex deletes it and re-sends an invite.
-
-   Steps 3–4 use `INSERT … SELECT`, **never** `VALUES ((SELECT id …))`: a NULL subquery into `INTEGER PRIMARY KEY` auto-assigns a fresh id and would create an orphan row. The handler reads step 2's `changes`: 0 ⇒ 403 `invalid_invite`. `UNIQUE(email)` ⇒ 409 `email_taken`. Else `{token, accountId}`. (`invites.used_at` holds the nonce, so the column doubles as "which request claimed it"; the admin list shows `used_at IS NOT NULL` as used. Store `nonce` as `<ISO time>|<random>` so it still reads as a time.)
+   Steps 3–4 are keyed on the nonce, never on the email, so a replayed used invite can never attach a device to someone else's account. They use `INSERT … SELECT`, never `VALUES ((SELECT …))` (a NULL into `INTEGER PRIMARY KEY` auto-assigns an id). The handler reads step 2's `changes`: 0 ⇒ 403 `invalid_invite`. Only a `UNIQUE` violation on `accounts.email` ⇒ 409 `email_taken`; any other constraint error ⇒ 500. Else `{token, accountId}`. The whole sign-up is atomic.
 6. Device: `linkAndAdopt(composeLinkCode(token, DEK), {accountId})` — **link first**, so the credential is persisted before anything can evict the app.
 7. Recovery screen: the code, *Email it to me*, *Copy*, *Download*; *Done* is enabled after ticking "I saved my recovery link" and calls `POST /account/recovery/confirm`. If the app is evicted or the tester leaves, D8's banner reappears on every device until confirmed. If the code itself was lost before confirmation, the banner offers *Make a new recovery link* (§ 6.5).
 

@@ -8,9 +8,13 @@
 
 **Tech Stack:** Vanilla ES modules, WebCrypto, `node --test`, Cloudflare Workers + D1 (tests: real `node:sqlite` via `worker/tests/fake-d1.js`).
 
-**Spec:** `docs/superpowers/specs/2026-11-11-plaenicke-accounts-design.md` (commit `3f0f5e4` + § 6.1 step 5 fix). Every task's implementer reads the spec sections named in the task.
+**Spec:** `docs/superpowers/specs/2026-11-11-plaenicke-accounts-design.md` (as revised after the plan review: atomic sign-up with a server-chosen random account id, `accounts.invite_hash`). Every task's implementer reads the spec sections named in the task.
 
 **Deviation from the writing-plans template, stated out loud:** worker and crypto tasks carry full test code and the load-bearing implementation (SQL, crypto). UI tasks carry exact DOM ids, copy strings and tests, not full DOM-building code. Reason: CLAUDE.md records nine defects in V5 that lived in a plan's *prescribed code*. Precise contracts with executable tests transfer better than long prescribed UI code. Implementers follow the surrounding file's idiom.
+
+**Second stated deviation (spec D15):** the spec says "one exported entry `linkAndAdopt`". The plan makes it a method on the handle `initLinkUI` returns, because `runAdoption`/`doLink` are closures of a mount. The cross-mount exclusion lives in module scope (`activeAdoption`), so a handle from a closed panel still serialises correctly. `settings.js` passes the live handle to accountui on every open.
+
+**Plan revised after its own devil's-advocate review** (3 Critical, 15 Important, all applied). Each task's text below is the revised version.
 
 ## Global Constraints
 
@@ -77,9 +81,10 @@
 - Test: `worker/tests/migration.test.js` (new)
 
 **Interfaces:**
-- Produces: `makeD1({ upTo } = {})`. It loads migrations `0001…upTo` in filename order (default: all), with `PRAGMA foreign_keys = ON`. Returns `{ prepare, batch, exec }`:
+- Produces: `makeD1({ upTo } = {})`. It loads migrations `0001…upTo` in filename order (default: all), with `PRAGMA foreign_keys = ON`. An `upTo` that matches no file **throws** (no silent load-all). Returns `{ prepare, batch, applyMigration }`:
   - `batch(stmts)` runs the bound statements inside `BEGIN`/`COMMIT`, rolls back on any throw, rethrows, and returns an array of `run()`-shaped results.
-  - `exec(sql)` is for tests only, for seeding.
+  - `applyMigration(prefix)` is for tests only: applies one migration on top of `upTo`.
+  - `prepare(sql).bind(...args)` returns a **new** bound statement each call, as D1 does, so `DB.batch([s.bind(1), s.bind(2)])` runs with two different argument lists.
   - `prepare().bind().first()/run()/all()`. `all()` is added for the admin list and returns `{ results: [...] }`.
 
 - [ ] **Step 1: Write the failing tests** in `worker/tests/migration.test.js`:
@@ -114,8 +119,22 @@ test('0002 applies on a populated 0001 database and preserves data and devices b
     { token_hash: 'h1', account_id: 1, name: 'laptop', created_at: '2026-08-28T00:00:00.000Z', last_seen_at: '2026-11-10T00:00:00.000Z' },
     { token_hash: 'h2', account_id: 1, name: 'iphone', created_at: '2026-08-28T00:00:01.000Z', last_seen_at: null },
   ]);
-  const acct = await db.prepare('SELECT id, email, failed_logins FROM accounts').first();
-  assert.deepEqual(acct, { id: 1, email: null, failed_logins: 0 });
+  const acct = await db.prepare('SELECT id, email, failed_logins, invite_hash FROM accounts').first();
+  assert.deepEqual(acct, { id: 1, email: null, failed_logins: 0, invite_hash: null });
+  const cols = (await db.prepare('PRAGMA table_info(accounts)').all()).results.map((c) => c.name);
+  for (const c of ['invite_hash', 'dek_check', 'recovery_confirmed_at', 'wrapped_dek_pw_sealed']) assert.ok(cols.includes(c), c);
+});
+
+test('one prepared statement bound twice inside a batch runs with both argument lists', async () => {
+  const db = makeD1();
+  const s = db.prepare('INSERT INTO invites (hash, created_at) VALUES (?, ?)');
+  await db.batch([s.bind('a', 't'), s.bind('b', 't')]);
+  const rows = (await db.prepare('SELECT hash FROM invites ORDER BY hash').all()).results;
+  assert.deepEqual(rows, [{ hash: 'a' }, { hash: 'b' }]);
+});
+
+test('an upTo that matches no migration throws', () => {
+  assert.throws(() => makeD1({ upTo: '001' }));
 });
 
 test('old data.js queries still work after 0002 (phased release, spec § 10)', async () => {
@@ -160,11 +179,10 @@ test('usage upsert with WHERE … RETURNING returns no row once the cap is reach
 });
 ```
 
-  Add `applyMigration(name)` to the fake as a test-only helper. It applies a single named migration on top of `upTo`.
 
 - [ ] **Step 2: Run them and confirm they fail.** `npm test`. Expected: failures (`makeD1` ignores `upTo`, no `batch`, no `0002`).
 
-- [ ] **Step 3: Implement.** Write `0002_accounts.sql` verbatim from spec § 5, including the `devices_v2` and `data_v2` rebuilds that keep `data.id`. Rewrite `fake-d1.js`:
+- [ ] **Step 3: Implement.** Write `0002_accounts.sql` verbatim from spec § 5 (including `accounts.invite_hash TEXT UNIQUE` and the `devices_v2`/`data_v2` rebuilds that keep `data.id`). Rewrite `fake-d1.js` along these lines. The shape below is the contract; make `bind` return a fresh statement object (`makeStatement(sql, args)`), not `this`:
 
 ```js
 import { DatabaseSync } from 'node:sqlite';
@@ -178,20 +196,25 @@ const MIGRATIONS = readdirSync(DIR).filter((f) => f.endsWith('.sql')).sort();
 export function makeD1({ upTo } = {}) {
   const db = new DatabaseSync(':memory:');
   db.exec('PRAGMA foreign_keys = ON');
-  const load = (name) => db.exec(readFileSync(join(DIR, MIGRATIONS.find((f) => f.startsWith(name))), 'utf8'));
+  const load = (prefix) => {
+    const f = MIGRATIONS.find((m) => m.startsWith(prefix));
+    if (!f) throw new Error(`no migration ${prefix}`);
+    db.exec(readFileSync(join(DIR, f), 'utf8'));
+  };
+  if (upTo && !MIGRATIONS.some((m) => m.startsWith(upTo))) throw new Error(`no migration ${upTo}`);
   for (const f of MIGRATIONS) {
     load(f.slice(0, 4));
     if (upTo && f.startsWith(upTo)) break;
   }
-  function prepare(sql) {
-    let args = [];
+  function prepare(sql) { return makeStatement(sql, []); }
+  function makeStatement(sql, args) {
     const api = {
-      bind(...a) { args = a; return api; },
+      bind(...a) { return makeStatement(sql, a); },
       async first() { const row = db.prepare(sql).get(...args); return row === undefined ? null : { ...row }; },
       async run() { const r = db.prepare(sql).run(...args); return { success: true, meta: { changes: Number(r.changes) }, results: [] }; },
       async all() { return { success: true, results: db.prepare(sql).all(...args).map((r) => ({ ...r })) }; },
       _exec() {
-        if (/\bRETURNING\b/i.test(sql)) {
+        if (/\bRETURNING\b/i.test(sql) || /^\s*SELECT/i.test(sql)) {
           const rows = db.prepare(sql).all(...args).map((r) => ({ ...r }));
           return { success: true, meta: { changes: rows.length }, results: rows };
         }
@@ -216,11 +239,11 @@ export function makeD1({ upTo } = {}) {
 }
 ```
 
-  Keep the existing header comment's rule ("Mirrors exactly the subset of the D1 binding the Worker uses"). Update it to name `batch` and `all`.
+  Keep the existing header comment's rule ("Mirrors exactly the subset of the D1 binding the Worker uses"). Update it to name `batch` and `all`. In `worker/tests/fake-d1.test.js`, rename "the single-row CHECK rejects a second data row" to say what now rejects it (the FK to `accounts`), or rewrite it to insert a second account and assert the second data row is **accepted**. The CHECK is gone by design.
 
 - [ ] **Step 4: Run `npm test`.** Expected: new tests pass. **Existing worker tests that touch `data` or `devices` now fail**, because `devices` requires `account_id`. That is expected, and Task 3 fixes it. To keep this commit green, Step 3 also updates `worker/src/auth.js`'s `mintDevice` INSERT to bind `account_id = 1` **temporarily**, with a `// TEMP(Task 3)` comment. Task 3's reviewer checks that it is gone.
 
-- [ ] **Step 5: Mutation check.** Remove `PRAGMA foreign_keys = ON` and confirm `foreign keys are enforced` fails. Remove `ROLLBACK` and confirm `batch is atomic` fails. Restore both.
+- [ ] **Step 5: Mutation check.** Replace the pragma with `db.exec('PRAGMA foreign_keys = OFF')` (removing the line proves nothing: `node:sqlite` enables FKs by default since Node 22.10) and confirm `foreign keys are enforced` fails. Remove `ROLLBACK` and confirm `batch is atomic` fails. Restore both.
 
 - [ ] **Step 6: Commit** — `git commit -m "worker: migration 0002 (accounts) and a transactional, FK-enforcing fake D1"`
 
@@ -284,11 +307,13 @@ test('checkKey writes on first use and detects a changed key', async () => {
   await assert.rejects(checkKey(other), (err) => err.code === 'at_rest_key_mismatch');
 });
 
-test('mac and seal subkeys are separated (mac of x ≠ any seal output prefix)', async () => {
-  const a = await atRest(env());
-  const m = await a.mac('plaenicke/v1/key-check');
-  const s = await a.seal('c', 1, 'plaenicke/v1/key-check');
-  assert.ok(!s.includes(m));
+test('checkKey reads first and writes only on a miss (no D1 write per request)', async () => {
+  const e = env();
+  let writes = 0;
+  const realPrepare = e.DB.prepare;
+  e.DB.prepare = (sql) => { if (/^\s*INSERT/i.test(sql)) writes += 1; return realPrepare(sql); };
+  await checkKey(e); await checkKey(e); await checkKey(e);
+  assert.equal(writes, 1);
 });
 ```
 
@@ -299,7 +324,7 @@ test('mac and seal subkeys are separated (mac of x ≠ any seal output prefix)',
   - `sealKey` is the same with `info 'plaenicke/v1/at-rest/seal'` and `{name:'AES-GCM',length:256}`.
   - `seal`: random 12-byte IV, `additionalData: utf8(`${column}|${accountId}`)`, output `'k1:' + base64(iv‖ct)`.
   - `unseal` rejects a value without `k1:`.
-  - `checkKey` stores `mac('plaenicke/v1/key-check')` under `config.key = 'key-check'` with `INSERT … ON CONFLICT(key) DO NOTHING`, then reads it back and compares.
+  - `checkKey` first `SELECT value FROM config WHERE key = 'key-check'`. On a miss it `INSERT … ON CONFLICT(key) DO NOTHING` `mac('plaenicke/v1/key-check')` and re-reads. It compares, and caches a positive result per isolate in a module-level `Map` keyed by the key's mac, so a warm isolate makes no D1 call. (Tests construct fresh envs; the cache key includes the DB object, via a `WeakMap<DB, mac>`.)
 - [ ] **Step 4: `npm test` passes.**
 - [ ] **Step 5: Commit** — `worker: at-rest seal and MAC with key check (spec D5)`
 
@@ -317,6 +342,7 @@ test('mac and seal subkeys are separated (mac of x ≠ any seal output prefix)',
   - `mintDevice(env, accountId, name, now)` returns the token. It throws `TypeError('accountId required')` if `accountId` is not a positive integer.
   - `handleGetData(env, accountId)` and `handlePutData(request, env, now, accountId)`.
   - `POST /admin/device` body `{name, accountId}`, where `accountId` is required.
+  - `export function timingSafeEqual(a, b)` (now exported; it returns `false`, never throws, when either side is not a string) and `export function newToken()` (32 random bytes, base64url) from `auth.js`, for Tasks 4–6.
 
 - [ ] **Step 1: Failing tests:**
   - (a) A token for account 2 GETs account 2's row, never account 1's.
@@ -418,53 +444,78 @@ const post = (env, path, json, token) => worker.fetch(new Request(`https://w${pa
   14. `GET /account/devices` lists both devices with `current` true only for the caller. `signout-others` leaves only the caller.
   15. `POST /account/recovery/confirm` sets `recovery_confirmed_at`; the next login returns `recoveryConfirmed:true`.
   16. A missing `AT_REST_KEY` returns 500 `not_configured` on signup and login. A changed key returns 500 `at_rest_key_mismatch` (sign up with key A, log in with key B).
-  17. Response bodies and `console.log` never contain the email or keys: stub `console.log`/`console.error` during tests 1 and 9 and assert no captured string includes `tester@example.com` or `authKey`.
+  17. Response bodies and `console.log` never contain the email or keys: stub `console.log`/`console.error` during tests 1 and 9 and assert no captured string includes `tester@example.com` or the **value** of `body().authKey`.
+  18. **A replayed used invite cannot attach a device to the existing account:** after test 1's sign-up, a second sign-up with the same invite **and the same email** returns 403 `invalid_invite` (not 409). The first account still has exactly one device.
+  19. Validation: `kdfIters: 599999`, `email: ''`, `email: 'no-at-sign'`, and `deviceName` of 101 chars each return 400 `bad_request`, and no invite is consumed.
+  20. Under concurrency, every 429 carries a non-null `retryAt` (assert across test 11's responses).
 
 - [ ] **Step 2: Run and confirm failures.**
-- [ ] **Step 3: Implement `accounts.js`.** The load-bearing SQL is below. Use these statements, not paraphrases.
+- [ ] **Step 3: Implement `accounts.js`.** The load-bearing SQL is below. Use these statements, not paraphrases. Validate first (spec D3/D10/§ 6): base64 lengths, `kdfIters` integer ≥ 600000, email matches `/^[^@\s]+@[^@\s]+\.[^@\s]+$/` after trim+lowercase, `deviceName` 1–100 chars; anything else → 400 `bad_request` before any D1 write.
 
-  Sign-up batch (spec § 6.1 step 5). `nonce = `${now}|${crypto.randomUUID()}``:
+  Sign-up (spec § 6.1 step 5) — **one atomic batch**, account id chosen first so the wraps can be sealed before the batch:
 
 ```js
-const inviteHash = await sha256Hex(b.invite);
 const email = b.email.trim().toLowerCase();
-const tokenRaw = /* 32 random bytes base64url, as auth.js does */;
-const tokenHash = await sha256Hex(tokenRaw);
-const results = await env.DB.batch([
-  env.DB.prepare('UPDATE invites SET used_at = ? WHERE hash = ? AND used_at IS NULL AND revoked_at IS NULL').bind(nonce, inviteHash),
-  env.DB.prepare(`INSERT INTO accounts (email, kdf_salt, kdf_iters, auth_mac, rec_auth_mac, dek_check, invite_hash, created_at)
-                  SELECT ?, ?, ?, ?, ?, ?, hash, ? FROM invites WHERE hash = ? AND used_at = ?`)
-    .bind(email, b.kdfSalt, b.kdfIters, await A.mac(b.authKey), await A.mac(b.recAuthKey), b.dekCheck, now, inviteHash, nonce),
-  env.DB.prepare(`INSERT INTO data (id, version, blob, updated_at) SELECT id, 0, '', ? FROM accounts WHERE email = ? AND invite_hash = ?`)
-    .bind(now, email, inviteHash),
-  env.DB.prepare(`INSERT INTO devices (token_hash, account_id, name, created_at) SELECT ?, id, ?, ? FROM accounts WHERE email = ? AND invite_hash = ?`)
-    .bind(tokenHash, deviceName, now, email, inviteHash),
-]);
-if (results[1].meta.changes !== 1) return json({ error: 'invalid_invite' }, 403);
+const inviteHash = await sha256Hex(b.invite);
+const nonce = `${now}|${crypto.randomUUID()}`;
+const token = newToken();
+const tokenHash = await sha256Hex(token);
+for (let attempt = 0; attempt < 2; attempt += 1) {
+  const id = randomAccountId(); // 2 + (random 52-bit integer); Number.isSafeInteger holds
+  const pw = await A.seal('wrapped_dek_pw_sealed', id, b.wrappedDekPw);
+  const rec = await A.seal('wrapped_dek_rec_sealed', id, b.wrappedDekRec);
+  let results;
+  try {
+    results = await env.DB.batch([
+      env.DB.prepare('UPDATE invites SET used_at = ? WHERE hash = ? AND used_at IS NULL AND revoked_at IS NULL').bind(nonce, inviteHash),
+      env.DB.prepare(`INSERT INTO accounts (id, email, kdf_salt, kdf_iters, auth_mac, rec_auth_mac, wrapped_dek_pw_sealed, wrapped_dek_rec_sealed, dek_check, invite_hash, created_at)
+                      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, hash, ? FROM invites WHERE hash = ? AND used_at = ?`)
+        .bind(id, email, b.kdfSalt, b.kdfIters, await A.mac(b.authKey), await A.mac(b.recAuthKey), pw, rec, b.dekCheck, now, inviteHash, nonce),
+      env.DB.prepare(`INSERT INTO data (id, version, blob, updated_at)
+                      SELECT a.id, 0, '', ? FROM accounts a JOIN invites i ON i.hash = a.invite_hash WHERE i.hash = ? AND i.used_at = ?`)
+        .bind(now, inviteHash, nonce),
+      env.DB.prepare(`INSERT INTO devices (token_hash, account_id, name, created_at)
+                      SELECT ?, a.id, ?, ? FROM accounts a JOIN invites i ON i.hash = a.invite_hash WHERE i.hash = ? AND i.used_at = ?`)
+        .bind(tokenHash, b.deviceName, now, inviteHash, nonce),
+    ]);
+  } catch (err) {
+    const msg = String(err && err.message);
+    if (/UNIQUE constraint failed: accounts\.email/.test(msg)) return json({ error: 'email_taken' }, 409);
+    if (/UNIQUE constraint failed: accounts\.id/.test(msg) && attempt === 0) continue; // id collision: retry once
+    throw err; // → index.js's 500 internal_error
+  }
+  if (results[1].meta.changes !== 1) return json({ error: 'invalid_invite' }, 403);
+  return json({ token, accountId: id });
+}
+throw new Error('account id collision twice');
 ```
 
-  - The unique-email violation surfaces as a thrown error whose message contains `UNIQUE`. Map it to 409 `email_taken`; rethrow anything else.
-  - The wrapped DEKs need the account id for their AAD. After the batch, `SELECT id`, then `UPDATE accounts SET wrapped_dek_pw_sealed = ?, wrapped_dek_rec_sealed = ? WHERE id = ? AND wrapped_dek_pw_sealed IS NULL`.
-  - **This second step is a deliberate non-atomic tail.** If it fails, the account exists with null wraps. Login on such an account returns 500 `account_incomplete`, never a fallback, and the admin list shows it. Add test 18: force the tail to fail, then assert login returns 500 `account_incomplete` and a re-sign-up returns 409.
-  - Add a `// WHY` comment naming the trade-off: an AAD on account id requires the id first. The alternative, a pre-chosen id via `SELECT max(id)+1`, races.
+  - **Why statements 3–4 join on the nonce:** keyed on email, a replay of a used invite with the victim's email would find the victim's account (plan review C2). Test 18 pins it.
+  - Real D1's constraint message format may differ from `node:sqlite`'s. Match on `accounts.email` in the message, and add a Phase-1 manual check to `docs/admin.md`: sign up twice with one email and confirm 409.
 
-  Login attempt reservation (spec § 6.2 step 3):
+  Login attempt reservation (spec § 6.2 step 3) — one UPDATE that also restarts an expired lock window:
 
 ```js
 const lockUntil = addMinutes(now, 60);
-const reserved = await env.DB.prepare(`UPDATE accounts SET failed_logins = failed_logins + 1,
-    locked_until = CASE WHEN failed_logins + 1 >= 50 THEN ? ELSE locked_until END
-  WHERE id = ? AND (locked_until IS NULL OR locked_until <= ?) RETURNING failed_logins`).bind(lockUntil, row.id, now).first();
-if (!reserved) return json({ error: 'locked', retryAt: row.locked_until }, 429);
+const reserved = await env.DB.prepare(`UPDATE accounts SET
+    failed_logins = CASE WHEN locked_until IS NOT NULL AND locked_until <= ?1 THEN 1 ELSE failed_logins + 1 END,
+    locked_until  = CASE WHEN locked_until IS NOT NULL AND locked_until <= ?1 THEN NULL
+                         WHEN failed_logins + 1 >= 50 THEN ?2 ELSE locked_until END
+  WHERE id = ?3 AND (locked_until IS NULL OR locked_until <= ?1) RETURNING failed_logins`).bind(now, lockUntil, row.id).first();
+if (!reserved) {
+  const cur = await env.DB.prepare('SELECT locked_until FROM accounts WHERE id = ?').bind(row.id).first();
+  return json({ error: 'locked', retryAt: cur && cur.locked_until }, 429);
+}
 ```
 
-  Lock semantics, pinned by test 10. The CASE leaves `failed_logins` at 50 when it sets the lock, so an expired lock must restart the count. **Before** the reservation, run `UPDATE accounts SET failed_logins = 0, locked_until = NULL WHERE id = ? AND locked_until IS NOT NULL AND locked_until <= ?` (bind `now`). Then compare `timingSafeEqual(await A.mac(b.authKey), row.auth_mac)`. On success, batch `UPDATE accounts SET failed_logins = 0, locked_until = NULL WHERE id = ?` with the device insert.
+  Factor this as `reservePasswordAttempt(env, accountId, now)` → `boolean`, plus `clearPasswordFailures(env, accountId)` (`UPDATE accounts SET failed_logins = 0, locked_until = NULL WHERE id = ?`), and use both from Task 5. Note the CASE subtlety: the 50th failure sets `locked_until` while the count reads 50; the 51st request (inside the hour) gets no row → 429. Then compare `timingSafeEqual(await A.mac(b.authKey), row.auth_mac)`. A legacy row with `auth_mac IS NULL` → 404 `no_account` at prelogin and login (it has no password yet). On success, batch `clearPasswordFailures` with the device insert.
 
   Every route starts with `const A = await atRest(env); await checkKey(env);` inside a `try` that maps `AtRestError` to 500 `{error: e.code}`.
 
 - [ ] **Step 4: `npm test` passes.**
 - [ ] **Step 5: Mutation checks.**
   - Remove the `AND used_at IS NULL` guard and confirm test 2 fails.
+  - Key statements 3–4 on `email` instead of the nonce and confirm test 18 fails.
   - Remove the reservation (compare first, count after) and confirm test 11 fails.
   - Remove the lowercase normalisation and confirm test 7 fails (prelogin with `tester@example.com`).
 - [ ] **Step 6: Commit** — `worker: sign-up, login with atomic lockout, sessions, recovery confirm`
@@ -491,7 +542,9 @@ if (!reserved) return json({ error: 'locked', retryAt: row.locked_until }, 429);
   3. **Concurrent finish:** two `recover/finish` calls with the same old `recAuthKey` and different new material via `Promise.all` give exactly one 200 and one 409 `recovery_changed`. Devices are deleted once and exactly one new device exists.
   4. `recover/finish` works while the account is locked (exempt), and clears `failed_logins`/`locked_until`.
   5. Password change with the right current key: the new key logs in; other devices stay unless `signOutOthers:true`, which leaves only the caller.
-  6. Password change with a wrong current key returns 401 and increments `failed_logins`. At 50 it returns 429 (D11 reworded: password checks lock; sync does not). `/data` with the same token still returns 200 while locked.
+  6. Password change with a wrong current key returns 401 and increments `failed_logins`. The 50th wrong attempt is still 401 and sets the lock; the **51st** returns 429 (D11: password checks lock; sync does not). `/data` with the same token still returns 200 while locked. A **successful** password change resets `failed_logins` to 0.
+  10. `recover/start` and `recover/finish` for an unknown email return 401 `bad_recovery` (never a 500 from binding `undefined`). For a disabled account they return 403 `disabled`, and no credential changes.
+  11. Password change or new recovery link on legacy account 1 (no `auth_mac`) returns 409 `no_password`.
   7. New recovery link: replaces `rec_auth_mac` and the wrapped rec, and clears `recovery_confirmed_at`.
   8. Upgrade on legacy account 1 with an account-1 token sets the email and credentials. A second upgrade returns 409 `already_upgraded`. A token of a non-legacy account returns 409 `already_upgraded`. An email already used by another account returns 409 `email_taken`.
   9. After upgrade, account 1's `data` row is byte-identical and both account-1 device tokens still work.
@@ -513,7 +566,8 @@ if (res[0].meta.changes !== 1) return json({ error: 'recovery_changed' }, 409);
 ```
 
   - **Hazard named for the implementer:** if two finishes produce the *same* `recAuthKey2` (impossible with random codes, but a test could do it), the second batch's DELETE would fire. Test 3 must use different new material.
-  - Password change and new recovery link: verify the current key through the same reservation as login (factor `reservePasswordAttempt(env, row, now)` out of Task 4's code; it returns `null | {}`). Then run `UPDATE … WHERE id = ? AND auth_mac = ?old` and check `changes`.
+  - recover/start and recover/finish: look the row up by email first (`SELECT id, rec_auth_mac, disabled_at, … FROM accounts WHERE email = ?`). Missing row or MAC mismatch → 401 `bad_recovery`; `disabled_at` set → 403 `disabled`. `id` comes from that row.
+  - Password change and new recovery link: `auth_mac IS NULL` → 409 `no_password`. Otherwise verify the current key through Task 4's `reservePasswordAttempt` (no row → 429 with a re-read `retryAt`). Then run `UPDATE … WHERE id = ? AND auth_mac = ?old`, check `changes` (0 → 409 `password_changed`), and on success `clearPasswordFailures`.
   - Upgrade: `UPDATE accounts SET email=?, … WHERE id = ? AND email IS NULL`, with the caller's `accountId`. `changes === 0` gives 409 `already_upgraded`. A unique violation gives 409 `email_taken`.
 - [ ] **Step 4: `npm test` passes.**
 - [ ] **Step 5: Mutation checks.**
@@ -572,13 +626,17 @@ if (res[0].meta.changes !== 1) return json({ error: 'recovery_changed' }, 409);
   11. A disabled account's token returns 401 on smart add and feed (`authenticateDevice` returns null).
 - [ ] **Step 2: Confirm the tests fail.**
 - [ ] **Step 3: Implement.**
-  - `handleFeed(request, deps)` gains `deps.authenticate`, an async function returning an account or `null`, plus `deps.requireSession`. `index.js` passes `(req) => authenticateDevice(req, env, nowISO())`. That keeps `feed.js` free of D1 imports.
+  - `handleFeed(request, deps)` gains optional `deps.authenticate` (async, returns an account or `null`) and `deps.requireSession` (default `false`). When `authenticate` is absent it is never called, so the ~36 existing `handleFeed` test calls keep working unchanged. `index.js` passes `(req) => authenticateDevice(req, env, nowISO(env))`. That keeps `feed.js` free of D1 imports.
+  - **Order inside `handleFeed`** (matching `feed.js:169-172` and the pinned `index.test.js:115-132`): Origin → OPTIONS → method → **token** → `cache.match`. Correct test 10's wording to this order.
+  - `/feed` is dispatched **before** `index.js`'s try/catch (`index.js:151-162`, on purpose). So `handleFeed` wraps its `deps.authenticate` call in its own `try`, and a throw returns feed.js's `errorResponse('internal_error', 500)` with CORS. Add test 12: an `authenticate` that throws gives 500 `internal_error` with `Access-Control-Allow-Origin` set.
   - Smart add:
 
+Order inside `handleSmartAdd`: method → JSON parse → `empty_text` validation → authenticate → slot. A client bug must not burn the cap.
+
 ```js
-const device = await authenticateDevice(request, env, nowISO());
+const device = await authenticateDevice(request, env, nowISO(env));
 if (!device && requireSession(env)) return json({ error: 'unauthorized' }, 401);
-const day = utcDay(nowISO());
+const day = utcDay(nowISO(env));
 if (device) {
   const slot = await takeSmartAddSlot(env, device.accountId, day);
   if (!slot.ok) return json({ error: 'daily_limit', resetsAt: nextUtcMidnight(day) }, 429);
@@ -587,6 +645,8 @@ if (device) {
 if (device && data.usage) await recordTokens(env, device.accountId, day, data.usage.input_tokens | 0, data.usage.output_tokens | 0);
 ```
 
+  - Record tokens on **every** path where Claude returned a body with `usage`, including the `refusal` and `max_tokens` early returns.
+  - `nowISO(env)` returns `env.NOW ? env.NOW() : new Date().toISOString()` (one helper, shared with accounts.js), so tests 4 and 5 can inject a clock.
   - The log line gains token counts only: `smart-add claude_ms=… status=… in=… out=…`.
   - `scripts/smoke-worker.mjs` reads a token from `PLAENICKE_SMOKE_TOKEN` and sends it. With the variable unset it **exits non-zero with a message**, never silently tokenless. `tests/smoke-worker.test.js` gets a case for the missing variable.
 - [ ] **Step 4: `npm test` passes.**
@@ -616,7 +676,7 @@ if (device && data.usage) await recordTokens(env, device.accountId, day, data.us
   - `export const KDF_ITERS = 600000`.
 
 - [ ] **Step 1: Failing tests:**
-  1. A known-answer PBKDF2-HMAC-SHA-256 vector through the same WebCrypto path. Check the module derives `masterKey` with the documented parameters by exposing `_masterKeyForTest(password, salt, iters)`. Use the widely published vector: P="password", S="salt", c=1, dkLen=32 gives `120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b` (verify against RFC 7914 §11's PBKDF2-SHA256 vector or the Python `hashlib.pbkdf2_hmac` output in the test comment; the implementer must recompute and paste the source). This test bypasses the floor via the `_ForTest` hook.
+  1. A known-answer PBKDF2-HMAC-SHA-256 vector through the same WebCrypto path. Check the module derives `masterKey` with the documented parameters by exposing `_masterKeyForTest(password, salt, iters)`. Use the widely published vector: P="password", S="salt", c=1, dkLen=32 gives `120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b` (this is the widely published vector, not RFC 7914 §11's, which uses "passwd"/64 bytes. Recompute it with `python3 -c "import hashlib;print(hashlib.pbkdf2_hmac('sha256',b'password',b'salt',1,32).hex())"` and paste that command into the test comment as the source). `_masterKeyForTest` skips the 16-byte salt check, because "salt" is 4 bytes. This test bypasses the floor via the `_ForTest` hook.
   2. An HKDF-SHA-256 RFC 5869 Test Case 1 vector through WebCrypto (`deriveBits`), checked against the RFC's OKM truncated to 32 bytes. This proves the platform HKDF is the one the spec assumes.
   3. `derivePasswordKeys('pw', salt, 599999)` rejects with `kdf_iters_too_low`.
   4. Determinism: the same password, salt and iters give the same `authKey`. A different password or salt gives a different one.
@@ -626,7 +686,7 @@ if (device && data.usage) await recordTokens(env, device.accountId, day, data.us
   8. `dekCheck` is stable for one DEK and different across DEKs.
   9. NFKC: `'ﬁ'` (U+FB01) and `'fi'` derive the same `authKey`.
 - [ ] **Step 2: Confirm the tests fail.**
-- [ ] **Step 3: Implement** exactly per spec § 4.1. Use `bytesToBase64url`/`base64urlToBytes` from `js/crypto.js`; do not add another copy.
+- [ ] **Step 3: Implement** exactly per spec § 4.1. Use `bytesToBase64url`/`base64urlToBytes` from `js/crypto.js`; do not add another copy. `derivePasswordKeys(password, salt, iters, { minKdfIters = MIN_KDF_ITERS } = {})`: the named option exists for tests only, and no UI path passes it (Task 13's test asserts accountui never passes it). Add `js/keys.js` to `service-worker.js` `ASSETS` in this commit, or `tests/serviceworker.test.js:21-24` fails.
 - [ ] **Step 4: `npm test` passes.** Note the test run time: 600k iterations in Node. If any single test exceeds 5 s, use the `_ForTest` hook with low iterations everywhere except test 3 and one real-count smoke test.
 - [ ] **Step 5: Commit** — `client: key derivation, DEK wrapping, recovery codes (js/keys.js)`
 
@@ -655,7 +715,7 @@ if (device && data.usage) await recordTokens(env, device.accountId, day, data.us
   - `'correct horse 7'` is ok (the space counts as a symbol).
   - A 64-character password is ok.
   - An empty string lists all its problems.
-- [ ] **Step 3: Implement.** Compare `COMMON.has(password.toLowerCase())`.
+- [ ] **Step 3: Implement.** Compare `COMMON.has(password.toLowerCase())`. Add both new modules to `service-worker.js` `ASSETS` in this commit.
 - [ ] **Step 4: `npm test` passes.**
 - [ ] **Step 5: Commit** — `client: password policy with common-password blocklist`
 
@@ -670,12 +730,13 @@ if (device && data.usage) await recordTokens(env, device.accountId, day, data.us
 **Interfaces:** Every function takes `{fetchImpl, apiBase}` last, with the defaults `fetch` and `WORKER_URL`. Each returns a value or throws `AccountError(code)`, where `code` is the Worker's `error` string, or `'unreachable'` / `'server'`. `export class AccountError extends Error { constructor(code, extra) {…} }`.
 - `signUp({invite, email, password, deviceName})` → `{code /*86-char link code*/, accountId, recoveryCode}`. It generates the DEK with `generateEncKey`, `R` and the salt, derives and wraps, then POSTs.
 - `logIn({email, password, deviceName})` → `{code, accountId, recoveryConfirmed}`. It refuses low iterations (`kdf_iters_too_low` propagates as an `AccountError`). After unwrapping it verifies `dekCheck`, and a mismatch throws `AccountError('dek_check_failed')`.
-- `recover({email, recoveryCode, newPassword, deviceName})` → `{code, accountId, recoveryCode /*new*/}`.
+- `recover({email, recoveryCode, newPassword, deviceName, onAccountKnown})` → `{code, accountId, recoveryCode /*new*/}`. After `recover/start` it verifies `dekCheck`, then calls `await onAccountKnown?.(accountId)`; a throw from the hook aborts **before** `recover/finish` and propagates.
 - `changePassword({link, email, currentPassword, newPassword, signOutOthers})`. `link` comes from `getLink()`. It runs the D18 decrypt-check first: `GET /data` with the bearer, then `decryptBlob(link.encKey, blob)` unless `blob === ''`. On failure it throws `AccountError('wrong_key_on_device')`.
 - `newRecoveryLink({link, email, currentPassword})` → `{recoveryCode}`, with the D18 check.
 - `upgrade({link, email, password})` → `{recoveryCode, accountId}`, with the D18 check and `link.encKey` as the DEK.
 - `getAccount({link})`, `listDevices({link})`, `signOutOthers({link})`, `confirmRecovery({link})`.
-- `logOut({link})` → `{revoked: boolean}`. It never throws on network failure: it returns `{revoked:false}`.
+- `logOut({link})` → `{revoked: boolean}`. It never throws on network failure: it returns `{revoked:false}`. A **401** means the session is already gone (recovery or sign-out-others revoked it) and returns `{revoked:true}`.
+- Every function accepts `{minKdfIters}` and forwards it to `js/keys.js`. Tests use it; production callers never pass it.
 - `recoveryLink(code)` returns `` `${APP_URL}#recover=${code}` ``, where `APP_URL` is added to `js/config.js` as `'https://ajaenicke518.github.io/plaenicke/'`.
 - `mailtoHref(email, code)` returns a `mailto:` URL with an encoded subject "Your plaenicke recovery link" and a body that holds the link plus one sentence: "Keep this email. If you forget your password, open this link to reset it. Anyone with access to this email can reset your password."
 
@@ -688,8 +749,12 @@ if (device && data.usage) await recordTokens(env, device.accountId, day, data.us
   6. `upgrade` from a device whose `encKey` cannot decrypt the account blob gives `wrong_key_on_device`, and **no upgrade request is sent**. Seed account 1's blob with `encryptBlob(keyA, {...})` and call with `keyB`.
   7. `logOut` while offline (`fetchImpl` rejects) returns `{revoked:false}` and does not throw.
   8. `mailtoHref` round-trips through `new URL()`, and the body contains `#recover=<code>`.
+  9. `recover` with a tampered `dekCheck` in the `recover/start` response gives `dek_check_failed`, and **no `recover/finish` request is sent**.
+  10. `logOut` receiving 401 returns `{revoked:true}`.
+
+  Iterations in tests: pass `{minKdfIters: 1000}` and sign up with `kdfIters: 1000` via an `iters` option on `signUp`. Test 4 keeps the default floor and proves a server-sent 1000 is refused.
 - [ ] **Step 2: Confirm the tests fail.**
-- [ ] **Step 3: Implement.** `account.js` never imports `storage.js`.
+- [ ] **Step 3: Implement.** `account.js` never imports `storage.js`. Add `js/account.js` to `service-worker.js` `ASSETS` in this commit.
 - [ ] **Step 4: `npm test` passes.**
 - [ ] **Step 5: Commit** — `client: account API (sign-up, login, recovery, password, upgrade)`
 
@@ -715,7 +780,7 @@ if (device && data.usage) await recordTokens(env, device.accountId, day, data.us
   - `#invite=` with an empty code returns `null` but still strips the hash.
   - The `tests/sync.test.js` writer-scan still passes, with `localOwner` not listed as a synced key.
 - [ ] **Step 2: Confirm the tests fail.**
-- [ ] **Step 3: Implement.**
+- [ ] **Step 3: Implement.** Add `js/fragment.js` to `service-worker.js` `ASSETS` in this commit.
 - [ ] **Step 4: `npm test` passes.**
 - [ ] **Step 5: Commit** — `client: device-local account owner and boot-time invite/recover fragments`
 
@@ -727,33 +792,48 @@ if (device && data.usage) await recordTokens(env, device.accountId, day, data.us
 
 **Files:** Modify `js/linkui.js`. Test `tests/linkui.test.js` additions. **Read CLAUDE.md "Before you touch sync" and the ledger first.** This task changes the adoption entry point.
 
-**Interfaces:**
-- `initLinkUI(options)` returns `{ settled, linkAndAdopt(code, {accountId}) }`. `linkAndAdopt`:
-  1. If `getLink()` is non-null, throws `Error('already_linked')` (D17).
-  2. If `loadLocalOwner()` is non-null and `!== accountId`, **and** local items or feeds are non-empty (`localState()` from `sync.js`: items or feeds length > 0, tombstones ignored), throws `Error('other_account_data')`. Nothing is written.
-  3. Otherwise runs `runAdoption((g) => doLink(code, g))`. After `linkWithCode` succeeds and before the preview, calls `saveLocalOwner(accountId)`. It returns the adoption's settled promise.
-- `options.accountMode` is a function returning `'legacy' | 'account' | 'unlinked'`, computed by the caller from `loadLocalOwner()` and `getLink()`. When it is `'account'`:
-  - `failureText('unauthorized')` and the 401 copy read: `"This device was signed out. Sign in again."`
-  - The paste field and *Link another device* are hidden.
-  - *Unlink* is labelled *Sign out* and calls `options.onSignOut()`. `onSignOut` is supplied by accountui and implements D27. linkui does not call `account.logOut` itself.
-- With `options.accountMode` absent, linkui behaves exactly as today. Legacy devices keep their UI.
+**Interfaces (module-level exports, so every paint site and accountui can reach them):**
+- `adoptionBlocker(targetAccountId /* number | null */)` → `null | 'already_linked' | 'other_account_data'`. **Pure, no network.**
+  - `'already_linked'` if `getLink()` is non-null (D17).
+  - `'other_account_data'` if `loadLocalOwner()` is non-null, differs from `targetAccountId` (a `null` target, as at sign-up or for a pasted code, always differs), **and** `localState()` (from `sync.js`) has `items.length + feeds.length > 0` (tombstones ignored).
+  - Otherwise `null`.
+  - accountui calls it before any request that changes server state. Sign-up uses `null`; login and recovery call it once the account id is known and before anything irreversible (exact order in Task 13).
+- `accountModeFromStorage()` → `'account' | 'legacy' | 'unlinked'`: `'unlinked'` if `getLink()` is null; `'account'` if `loadLocalOwner()` is non-null; else `'legacy'`. linkui derives its mode from storage at every render and in the module-level `failureText`/`describeSyncStatus`/`renderSyncStatus` paint paths. No closure option, because `app.js` calls `renderSyncStatus()` with no arguments (`app.js:310`).
+- `doLink(raw, generation, { accountId = null } = {})` (closure, extended):
+  1. `const blocker = adoptionBlocker(accountId)`. If non-null, set `notice` to the Task 13 copy for that code, `render()`, return `'blocked'`. **Every** link path passes here: the paste field, Re-link and `linkAndAdopt`. So D16 cannot be bypassed by pasting a code (plan review I5).
+  2. `await linkWithCode(raw)`. On failure, the existing notice path; return `'link_failed'`.
+  3. If `accountId !== null`, `saveLocalOwner(accountId)` **before** `doPreview`. WHY: an unrecorded owner reopens the D16 cross-account merge if the preview crashes.
+  4. `await doPreview(1, generation)`; return `'linked'`.
+- The returned handle: `initLinkUI(options)` → `{ settled, linkAndAdopt(code, {accountId}) }`.
+  - `linkAndAdopt` resolves to `'linked' | 'link_failed' | 'blocked' | 'joined_other'`.
+  - It runs `runAdoption((g) => doLink(code, g, { accountId }))` and captures `doLink`'s return value in a local. If `runAdoption` joined an already-active episode instead of running `doLink`, the local stays unset and it resolves `'joined_other'`.
+- `signOutLocal()` (module-level export) → `'signed_out' | 'refused_write_in_flight'`. It applies the same refusal as `unlinkButton` (`activeAdoption && writeInFlight` → refuse, `linkui.js:1001-1003`), else `unlink()` (keeps local data and `localOwner`, D27) and repaints the shell indicator. Both linkui's own *Sign out* button and accountui's `#acct-signout` call it. accountui calls `account.logOut` **first**, then `signOutLocal()`.
+- Account mode rendering (`accountModeFromStorage() === 'account'`):
+  - `ERROR_LABELS.unauthorized` / `failureText('unauthorized')` / the status line read **"This device was signed out. Sign in again."**
+  - The paste field, *Link another device*, and every "Paste a fresh 86-character link code" string are not rendered.
+  - *Unlink* is labelled *Sign out* and calls `options.onSignOut` (accountui supplies it: logOut, then `signOutLocal`).
+  - On `lastError === 'unauthorized'` a **Sign in** button `#link-signin` calls `options.onSignIn` (accountui: `signOutLocal()`, then show the login form). The device is unlinked first, so `adoptionBlocker` allows a login back into the **same** account and blocks a different one.
+- **While `loadLocalOwner()` is non-null and the device is unlinked, the paste field is not rendered.** A pasted code carries no account id, so `adoptionBlocker(null)` would block it anyway; hiding it avoids a dead control.
+- Legacy mode (`'legacy'`): linkui behaves exactly as today.
 
 - [ ] **Step 1: Failing tests:**
-  1. `linkAndAdopt` on an empty device: links, raises adoption, completes bootstrap against an empty remote, and `loadLocalOwner()` equals the accountId.
-  2. **Owner guard blocks a different account:** with `localOwner = 5` and one local item, `linkAndAdopt(code, {accountId: 6})` rejects with `other_account_data`; `loadAuth()` stays null; items are unchanged.
-  3. With `localOwner = 5` and no local items or feeds, `linkAndAdopt(code, {accountId: 6})` succeeds.
-  4. Same owner (5 → 5) with local data: proceeds to the existing Merge dialog (assert the Merge button is present). It does not auto-merge.
-  5. `already_linked` when already linked.
-  6. **Account device 401 copy:** with `accountMode: () => 'account'` and `syncState.lastError = 'unauthorized'`, the rendered text contains "This device was signed out. Sign in again." and does **not** contain "86-character".
-  7. In account mode the paste input and the "Link another device" control are absent, and the *Sign out* button calls `onSignOut`.
-  8. Legacy mode (no `accountMode`): every pre-existing `linkui.test.js` test still passes unchanged.
-  9. Concurrency: two `linkAndAdopt` calls in the same tick run one adoption (the second joins the first via `runAdoption`); `linkWithCode` is called once.
+  1. `linkAndAdopt` on an empty device resolves `'linked'`, raises adoption, completes bootstrap against an empty remote, and `loadLocalOwner()` equals the accountId.
+  2. **Owner guard blocks a different account:** with `localOwner = 5` and one local item, `linkAndAdopt(code, {accountId: 6})` resolves `'blocked'`; `loadAuth()` stays null; items unchanged; the notice shows the `other_account_data` copy.
+  3. **Paste path is guarded too:** with `localOwner = 5`, local data, and unlinked, the paste field is absent. Calling the internal paste handler directly via the test seam (`runAdoption((g) => doLink(code86, g))`) resolves `'blocked'` and `loadAuth()` stays null.
+  4. With `localOwner = 5` and no local items or feeds, `linkAndAdopt(code, {accountId: 6})` resolves `'linked'`.
+  5. Same owner (5 → 5) with local data reaches the existing Merge dialog (the Merge button is present). It does not auto-merge.
+  6. `adoptionBlocker` table: linked → `already_linked`; owner 5, data, target null → `other_account_data`; owner null → `null`; owner 5, target 5 → `null`.
+  7. **Account device 401 copy:** `localOwner = 5`, linked, `syncState.lastError = 'unauthorized'`. Both `#sync-status` and the shell indicator `#sync-indicator` (via the no-argument `renderSyncStatus()`) contain "This device was signed out. Sign in again." and neither contains "86-character".
+  8. Clicking `#link-signin` calls `onSignIn`.
+  9. In account mode the paste input and "Link another device" are absent, and *Sign out* calls `onSignOut`.
+  10. `signOutLocal()` while an adoption write is in flight returns `'refused_write_in_flight'` and `loadAuth()` is unchanged; otherwise `'signed_out'`, with `localOwner` and items kept.
+  11. A preview that throws after a successful link still leaves `loadLocalOwner()` set.
+  12. Two `linkAndAdopt` calls in the same tick: `linkWithCode` is called once; the second resolves `'joined_other'`.
+  13. Legacy mode: every pre-existing `linkui.test.js` test passes unchanged.
 - [ ] **Step 2: Confirm the tests fail.**
-- [ ] **Step 3: Implement.** Keep `doLink` unchanged. The owner write sits in `linkAndAdopt`'s wrapper, after `linkWithCode` resolves. `saveLocalOwner` must happen **before** `doPreview` so that a crash mid-adoption leaves the owner recorded. Explain in a `// WHY` comment: an unrecorded owner reopens the D16 cross-account merge.
-- [ ] **Step 4: `npm test` passes.** Run it **five times**, since linkui tests poll WebCrypto (CLAUDE.md release flow).
-- [ ] **Step 5: Mutation checks.**
-  - Remove the owner guard and confirm test 2 fails.
-  - Write the owner after the preview and confirm a test that throws from `doPreview` (add it) shows `localOwner` unset.
+- [ ] **Step 3: Implement** per the interface above.
+- [ ] **Step 4: `npm test` passes**, run **five times** (linkui tests poll WebCrypto).
+- [ ] **Step 5: Mutation checks.** Remove the `adoptionBlocker` call from `doLink` and confirm tests 2 and 3 fail. Move `saveLocalOwner` after `doPreview` and confirm test 11 fails. Drop the `writeInFlight` refusal from `signOutLocal` and confirm test 10 fails.
 - [ ] **Step 6: Commit** — `linkui: linkAndAdopt with account-owner guard; account-mode copy and sign-out`
 
 ---
@@ -764,8 +844,9 @@ if (device && data.usage) await recordTokens(env, device.accountId, day, data.us
 
 **Files:**
 - Create: `js/accountui.js`.
-- Modify: `js/settings.js` (mount Account above Sync; pass `linkAndAdopt` and `accountMode`), `js/app.js` (boot intent opens Settings at the Account section; banner host), `js/smartadd.js`, `js/feeds.js`, `index.html` (banner element `#account-banner`), `styles.css` (forms reuse existing tokens only; no new hard-coded colours; `tests/styles.test.js` enforces this).
-- Test: `tests/accountui.test.js`; additions to `tests/smartadd.test.js`, `tests/feeds.test.js`, `tests/settings.test.js`.
+- Modify: `js/settings.js` (mount Account above Sync; **keep** `initLinkUI`'s return value, which `settings.js:759` discards today, and pass its handle plus `onSignOut`/`onSignIn` to accountui, mounted after it; `initSettings` returns `{ open(intent) }`, where `intent` is `{kind:'invite'|'recover'|'login'|'new-recovery', code?}` and `open` renders the panel and then the matching Account form), `js/app.js` (boot intent via `readBootIntent({location, history})` → `settings.open(intent)`; banner host; `getAccount` at load), `js/smartadd.js`, `js/feeds.js`, `js/app.js` call sites of both, `index.html` (banner element `#account-banner`), `styles.css` (forms reuse existing tokens only; no new hard-coded colours; `tests/styles.test.js` enforces this), `service-worker.js` (`ASSETS` += `js/accountui.js`).
+- Modify test tooling: `tests/fake-dom.js` gains `location` (`{hash:'', pathname:'/plaenicke/', search:''}`) and `history` (`{replaceState(){}}` recording calls); `tests/apply.test.js` keeps importing app.js cleanly with them.
+- Test: `tests/accountui.test.js`; additions to `tests/smartadd.test.js`, `tests/feeds.test.js`, `tests/settings.test.js`, `tests/apply.test.js`.
 
 **Contract (ids and copy are exact):**
 - Section heading `Account`, container `#account-section`.
@@ -803,13 +884,20 @@ if (device && data.usage) await recordTokens(env, device.accountId, day, data.us
 - Linked account device: email shown; `#acct-change-password`, `#acct-new-recovery`, a devices list `#acct-devices`, `#acct-signout-others` "Sign out other devices", `#acct-signout` "Sign out".
 - Legacy device (`getAccount` returns `email:null`): `#acct-upgrade` "Create your login".
 - Banner `#account-banner`, shown while `recoveryConfirmed === false`: "Save your recovery link — without it, a forgotten password means losing your planner." with a button that opens *Make a new recovery link*. App load runs `getAccount` on linked account devices and paints the banner from the answer. If `getAccount` fails (offline or any error), the banner keeps its last painted state and the next successful `getAccount` repaints it. The failure is not written to `syncState` (that indicator belongs to sync). State this in a comment at the call site.
-- Sign-out (D27): `logOut`, then `unlink()`. **`localOwner` is kept**, because the local data still belongs to that account and D16 needs the tag. If `revoked:false`, show "This device's session could not be revoked — use Sign out other devices from another device." Never block.
-- Error copy for `account_incomplete` → "Your account setup didn't finish. Tell Alex."
-- `smartadd.js`: send `authorization` when `getLink()` is non-null. Map 429 `daily_limit` to `Error('limit')` and 401 to `Error('unauthorized')`. `app.js` copy:
+- **Order of guard and network (plan review I4):**
+  - Sign-up: `adoptionBlocker(null)` **before** `api.signUp`; a blocker shows its copy and nothing is sent.
+  - Recover: `already_linked` refused before `recover/start`; after `recover/start` (read-only) returns `accountId`, `adoptionBlocker(accountId)` runs **before** `recover/finish`. To make that possible, `account.recover` takes an `onAccountKnown(accountId)` hook that may throw to abort before finish.
+  - Login: `adoptionBlocker(null)` rejects only `already_linked` up front; after `api.logIn` returns, `adoptionBlocker(accountId)`; if blocked, call `api.logOut` with the fresh token (the device row must not be orphaned), then show the copy.
+- After a successful `upgrade`, `saveLocalOwner(accountId)` (plan review I6).
+- At app load, on **every** linked device (legacy included), `getAccount`. If it returns a non-null `email` while `loadLocalOwner()` is null, `saveLocalOwner(accountId)` (Alex's second phone after the upgrade). The banner shows only when `email !== null && recoveryConfirmed === false`.
+- accountui never passes `minKdfIters` (a test asserts it by spying on `api`).
+- Sign-out (D27): `api.logOut`, then `signOutLocal()` from linkui (never `unlink()` directly; plan review I8). **`localOwner` is kept**, because the local data still belongs to that account and D16 needs the tag. If `revoked:false`, show "This device's session could not be revoked — use Sign out other devices from another device." Never block.
+- Error copy for `no_password` → "This account has no password yet. Use Create your login." and `password_changed` / `recovery_changed` → "Your account changed on another device. Try again."
+- `smartadd.js`: `parseViaWorker(text, { authToken })` takes the token as a parameter (no `getLink` import, keeping smartadd's tests storage-free); `authToken` is a **required** key: `undefined` throws `TypeError('authToken required')`, `null` means signed out and makes no request (`Error('signed_out')`). Send `authorization` when non-null. Map 429 `daily_limit` to an `Error('limit')` carrying `resetsAt` (parse the 429 JSON body, then drain), and 401 to `Error('unauthorized')`. `app.js` copy:
   - `limit` → "You've used today's smart adds. They reset at <local time of resetsAt>. You can still add it by picking a date."
   - `unauthorized` → "Signed out — sign in again to use smart add."
   - Signed out with no call made → "Sign in to use smart add."
-- `feeds.js`: `syncFeed` gets `authToken` in its options and sends `authorization` when present. Signed out (no token) it returns `{ok:false, error:'signed_out'}` **without fetching**, and the Calendars list shows "Sign in to refresh calendars." The cache keeps rendering.
+- `feeds.js`: `syncFeed(feed, { fetchImpl, now, manual, authToken })` and `syncStale(…, { authToken })`. `authToken` is a **required** key: `undefined` throws `TypeError('authToken required')` (a forgotten call site fails loudly, never a silent "signed out"; plan review I10); `null` returns `{ok:false, error:'signed_out'}` **without fetching**, and the Calendars list shows "Sign in to refresh calendars." The cache keeps rendering. Every caller in `app.js` and `settings.js` passes `getLink()?.authToken ?? null`.
 
 - [ ] **Step 1: Failing tests** (fake DOM; `account.js` functions injected as `options.api`, so UI tests do not run PBKDF2):
   1. Unlinked device: the three buttons render. Linked account device: change/new recovery/devices/sign-out render. Legacy device: "Create your login" renders.
@@ -819,10 +907,15 @@ if (device && data.usage) await recordTokens(env, device.accountId, day, data.us
   5. Every mapped error code renders its exact copy. An unmapped code renders "Unexpected error: weird_code".
   6. `other_account_data` from `linkAndAdopt` renders its copy, and the account is **not** left half-linked (`loadAuth()` null).
   7. Sign-out offline: `unlink` was called, the warning copy is shown, and `localOwner` is preserved.
-  8. The policy list updates on input. Submit is disabled while `checkPassword().ok` is false or the passwords differ.
+  8. The policy list updates on input. On **sign-up, reset and change-password** forms, Submit is disabled while `checkPassword().ok` is false or the passwords differ. The **login** form shows no policy and never gates on it (a future blocklist update must not lock existing users out).
   9. Boot intent `invite` opens Settings with the invite form pre-filled; `recover` opens the reset form pre-filled. **No `api` call happens on open** (link-scanner rule).
   10. `smartadd.test.js`: sends the bearer when linked; 429 gives `limit`; 401 gives `unauthorized`.
-  11. `feeds.test.js`: sends the bearer; signed out gives `signed_out` and `fetchImpl` is never called.
+  11. `feeds.test.js`: sends the bearer; `authToken: null` gives `signed_out` and `fetchImpl` is never called; `authToken` omitted throws `authToken required`; `syncStale` forwards the token to every `syncFeed`.
+  12. `apply.test.js`: app.js's background refresh passes the linked device's token (spy on the fetch the refresh makes and assert its `authorization` header).
+  13. Login blocked after the response: `api.logIn` resolves with accountId 6 while `localOwner = 5` with data, so `api.logOut` is called with the new token and the `other_account_data` copy shows.
+  14. Recover blocked before finish: the `onAccountKnown` hook aborts, and the `api` spy shows `recover/finish` was never reached.
+  15. Load on a legacy-mode device whose `getAccount` returns `{email:'a@x.de', accountId:1}` writes `localOwner = 1`; `{email:null}` writes nothing and shows no banner.
+  16. `settings.open({kind:'recover', code:'X'})` renders the reset form with the code pre-filled and makes no `api` call.
 - [ ] **Step 2: Confirm the tests fail.**
 - [ ] **Step 3: Implement.** Follow `settings.js`'s per-open mount pattern. accountui mounts against a fresh element each open, like linkui.
 - [ ] **Step 4: `npm test` passes** five times.
@@ -836,7 +929,7 @@ if (device && data.usage) await recordTokens(env, device.accountId, day, data.us
 
 **Files:** Test `tests/accounts-e2e.test.js` (new). No production code unless a defect is found. A defect gets its own failing test in the owning module's test file and a fix commit.
 
-- [ ] **Step 1: Write the tests.** Two simulated devices run in one process, each with its own fake `localStorage` instance (swap `globalThis.localStorage` between device turns using the existing `installFakeLocalStorage` helper, or the established pattern in `tests/sync.test.js`, whichever the file uses). Both talk to one `env` through `fetchImpl = (u, o) => worker.fetch(new Request(u, o), env)` and use the **real** `syncOnce`.
+- [ ] **Step 1: Write the tests.** Use a **test `applyState`** that writes items/feeds through `storage.js` (not app.js's `applySyncedState`: app.js's module-scope snapshot would be shared by both "devices", and it arms real timers). Swap `globalThis.localStorage` between devices **only after** every pending linkui/sync promise has settled (`await handle.settled()` and a poll on the sync queue), because their continuations read storage at call time. Two simulated devices run in one process, each with its own fake `localStorage` instance (swap `globalThis.localStorage` between device turns using the existing `installFakeLocalStorage` helper, or the established pattern in `tests/sync.test.js`, whichever the file uses). Both talk to one `env` through `fetchImpl = (u, o) => worker.fetch(new Request(u, o), env)` and use the **real** `syncOnce`.
   1. Device A: `signUp` → `linkAndAdopt` → add an item → `syncOnce`. Device B: `logIn` → `linkAndAdopt` → `syncOnce`, then B shows A's item. B edits it; A syncs and shows the edit.
   2. Legacy upgrade: seed account 1 by linking A and B the old way (admin-minted token + `composeForNewDevice`), both synced with items. A runs `upgrade`. B keeps syncing **without any action**, and both converge after an edit on each. The account-1 blob decrypts with the original `encKey` throughout.
   3. Recovery signs B out: A runs `recover`. B's next `syncOnce` returns `unauthorized`, and B's rendered status (linkui in account mode) shows "This device was signed out. Sign in again." B logs in with the new password and converges with A, with **no data lost** on either side (item sets equal and include B's last unsynced local edit after the merge).
@@ -851,8 +944,9 @@ if (device && data.usage) await recordTokens(env, device.accountId, day, data.us
 
 **Files:** Modify `service-worker.js`, `tests/serviceworker.test.js` (the `CACHE_ON_MAIN` pin stays main's live value), `CLAUDE.md`, `worker/README.md`. Create `docs/admin.md`.
 
-- [ ] **Step 1:** Add `js/keys.js`, `js/password-policy.js`, `js/common-passwords.js`, `js/account.js`, `js/accountui.js` and `js/fragment.js` to `ASSETS`. Pick the new `CACHE` name after `git branch -a` plus `git grep -n "plaenicke-v6-" $(git for-each-ref --format='%(refname:short)' refs/heads)`. Use the next number unused on any branch, and record the choice in the commit body. Run the existing serviceworker test that asserts every imported module is precached.
-- [ ] **Step 2:** Write `docs/admin.md`: curl recipes for every admin route, with `ADMIN=$(cat ~/.plaenicke-admin-secret)`; minting an invite and the message to send a tester; the § 10 release checklist verbatim; the tester instructions verbatim; the rollback rule.
+- [ ] **Step 1:** Confirm every new module is already in `ASSETS` (Tasks 8–13 added them). Pick the new `CACHE` name after `git branch -a` plus `git grep -n "plaenicke-v6-" $(git for-each-ref --format='%(refname:short)' refs/heads)`. Use the next number unused on any branch, and record the choice in the commit body. Run the existing serviceworker test that asserts every imported module is precached.
+- [ ] **Step 2a: Settle D1 migration atomicity (spec § 5, plan review I12).** Search Cloudflare's D1 docs (`developers.cloudflare.com/d1/reference/migrations/` and the `wrangler d1 migrations apply` reference) for whether a migration file is applied as one transaction. Record the finding and the URL and date in `docs/admin.md`. If the docs do not say so explicitly, write that, and keep "close the app on both devices" plus the Time Travel bookmark as a **required** pre-step, with the restore command (`wrangler d1 time-travel restore plaenicke --bookmark=<id>`).
+- [ ] **Step 2:** Write `docs/admin.md`: curl recipes for every admin route, with `ADMIN=$(cat ~/.plaenicke-admin-secret)`; minting an invite and the message to send a tester; the § 10 release checklist verbatim; the tester instructions verbatim; the rollback rule; **two release-window rules**: (1) between `migrations apply` and the Phase-1 deploy, do not mint devices (the old Worker's `mintDevice` fails NOT NULL on `account_id`); (2) `npm run smoke:worker` needs `PLAENICKE_SMOKE_TOKEN` (a device minted on Alex's account) and spends 6 of that account's 50 daily smart adds per run; and the Phase-1 manual check "sign up twice with one email → 409" (Task 4).
 - [ ] **Step 3:** In `CLAUDE.md`:
   - Replace "Single user" with "Invite-only multi-user (V7 accounts, spec 2026-11-11)".
   - Add a short "Accounts" section with: the `AT_REST_KEY` secret and its backup rule; `REQUIRE_SESSION`; "login enters through `linkAndAdopt`, never `linkWithCode` directly"; "`plaenicke.localOwner` guards cross-account merges; never clear it on sign-out".
