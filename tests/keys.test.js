@@ -121,3 +121,56 @@ test('real 600k iteration smoke test', async () => {
   const r = await derivePasswordKeys('pw', salt(), KDF_ITERS);
   assert.equal(base64urlToBytes(r.authKey).length, 32);
 });
+
+// Golden vectors computed independently of js/keys.js. Source (python3, hashlib/hmac only):
+// import hashlib, hmac, base64
+// def hkdf(ikm, info, salt=b'\x00'*32, n=32):
+//     prk = hmac.new(salt, ikm, hashlib.sha256).digest()
+//     out=b'';t=b'';i=1
+//     while len(out)<n:
+//         t=hmac.new(prk,t+info+bytes([i]),hashlib.sha256).digest();out+=t;i+=1
+//     return out[:n]
+// b64u=lambda b: base64.urlsafe_b64encode(b).rstrip(b'=').decode()
+// salt=bytes(range(1,17))
+// m=hashlib.pbkdf2_hmac('sha256','correct horse 7'.encode(),salt,1000,32)
+// print('salt',b64u(salt))
+// print('auth',b64u(hkdf(m,b'plaenicke/v1/auth')))
+// print('wrap',hkdf(m,b'plaenicke/v1/wrap').hex())
+// rc=bytes(range(0xa0,0xb0))
+// print('rc',b64u(rc))
+// print('recauth',b64u(hkdf(rc,b'plaenicke/v1/rec-auth')))
+// print('recwrap',hkdf(rc,b'plaenicke/v1/rec-wrap').hex())
+//
+const GOLD_SALT = 'AQIDBAUGBwgJCgsMDQ4PEA';
+const GOLD_AUTH = '9noINOUGm3xAW5A1nDS83dkRjTkHn1M11IyRbJUMWXI';
+const GOLD_WRAP = 'be987b0a9f8c883358261f16a8f295350c9368b32c891e813a96232c4ef611b9';
+const GOLD_CODE = 'oKGio6SlpqeoqaqrrK2urw';
+const GOLD_RECAUTH = 'pHNP1LuBJWp_1oYgqkBa4NAgVDYyGJPuKznSTXjrkas';
+const GOLD_RECWRAP = 'e4d3c91538e408fff690b5a763eb3236fe67128614d066d593b490ec4913fac7';
+
+async function independentWrap(rawHex, dek, aad) {
+  const key = await crypto.subtle.importKey('raw', fromHex(rawHex), 'AES-GCM', false, ['encrypt']);
+  const iv = new Uint8Array(12).fill(7);
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(aad) }, key, dek));
+  const out = new Uint8Array(12 + ct.length);
+  out.set(iv); out.set(ct, 12);
+  return btoa(String.fromCharCode(...out));
+}
+
+test('golden: password authKey and wrapKey match independent derivation', async () => {
+  const { authKey, wrapKey } = await derivePasswordKeys('correct horse 7', GOLD_SALT, 1000, { minKdfIters: 1000 });
+  assert.equal(authKey, GOLD_AUTH);
+  const dek = new Uint8Array(32).fill(9);
+  const wrapped = await independentWrap(GOLD_WRAP, dek, 'plaenicke/v1/dek-pw');
+  assert.deepEqual(await unwrapDek(wrapKey, wrapped, 'pw'), dek);
+});
+
+test('golden: recovery recAuthKey and wrapKey match independent derivation', async () => {
+  assert.equal(bytesToBase64url(Uint8Array.from({ length: 16 }, (_, i) => 0xa0 + i)), GOLD_CODE);
+  const { recAuthKey, wrapKey } = await deriveRecoveryKeys(GOLD_CODE);
+  assert.equal(recAuthKey, GOLD_RECAUTH);
+  const dek = new Uint8Array(32).fill(9);
+  const wrapped = await independentWrap(GOLD_RECWRAP, dek, 'plaenicke/v1/dek-rec');
+  assert.deepEqual(await unwrapDek(wrapKey, wrapped, 'rec'), dek);
+  await assert.rejects(unwrapDek(wrapKey, wrapped, 'pw'), { message: 'unwrap_failed' });
+});

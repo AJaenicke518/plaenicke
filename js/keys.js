@@ -2,13 +2,12 @@
 // Pure and async: no storage, no DOM. The password never leaves the device;
 // only authKey / recAuthKey (HKDF outputs) are sent to the Worker.
 
-import { bytesToBase64url, base64urlToBytes, KEY_BYTES } from './crypto.js';
+import { bytesToBase64url, base64urlToBytes, KEY_BYTES, IV_BYTES } from './crypto.js';
 
 export const MIN_KDF_ITERS = 600000;
 export const KDF_ITERS = 600000;
 const SALT_BYTES = 16;
 const RECOVERY_BYTES = 16;
-const IV_BYTES = 12;
 
 const enc = new TextEncoder();
 const subtle = () => crypto.subtle;
