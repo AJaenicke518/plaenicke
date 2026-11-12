@@ -103,8 +103,8 @@ function nowISO() { return new Date().toISOString(); }
 async function handleData(request, env) {
   const device = await authenticateDevice(request, env, nowISO());
   if (!device) return json({ error: 'unauthorized' }, 401);
-  if (request.method === 'GET') return handleGetData(env);
-  if (request.method === 'PUT') return handlePutData(request, env, nowISO());
+  if (request.method === 'GET') return handleGetData(env, device.accountId);
+  if (request.method === 'PUT') return handlePutData(request, env, nowISO(), device.accountId);
   return json({ error: 'method_not_allowed' }, 405);
 }
 
@@ -129,9 +129,10 @@ async function handleAdminDevice(request, env) {
 
   if (request.method === 'POST') {
     const name = payload && typeof payload.name === 'string' ? payload.name.trim() : '';
-    if (!name) return json({ error: 'bad_request' }, 400);
+    const accountId = payload ? payload.accountId : undefined;
+    if (!name || !Number.isInteger(accountId) || accountId <= 0) return json({ error: 'bad_request' }, 400);
     // The token is returned here and never again — only its hash is stored.
-    const token = await mintDevice(env, name, nowISO());
+    const token = await mintDevice(env, accountId, name, nowISO());
     return json({ token, name });
   }
 

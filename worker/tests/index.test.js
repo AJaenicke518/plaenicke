@@ -144,7 +144,7 @@ test('/data requires a device token', async () => {
 
 test('/data with a valid token returns the seeded state', async () => {
   const env = { ...ENV, DB: makeD1() };
-  const token = await mintDevice(env, 'laptop', '2026-08-01T00:00:00.000Z');
+  const token = await mintDevice(env, 1, 'laptop', '2026-08-01T00:00:00.000Z');
   const res = await worker.fetch(new Request('https://worker.example/data', {
     headers: { authorization: `Bearer ${token}` },
   }), env);
@@ -154,7 +154,7 @@ test('/data with a valid token returns the seeded state', async () => {
 
 test('/data rejects an unsupported method', async () => {
   const env = { ...ENV, DB: makeD1() };
-  const token = await mintDevice(env, 'laptop', '2026-08-01T00:00:00.000Z');
+  const token = await mintDevice(env, 1, 'laptop', '2026-08-01T00:00:00.000Z');
   const res = await worker.fetch(new Request('https://worker.example/data', {
     method: 'DELETE', headers: { authorization: `Bearer ${token}` },
   }), env);
@@ -163,19 +163,19 @@ test('/data rejects an unsupported method', async () => {
 
 test('/admin/device requires the admin secret, not a device token', async () => {
   const env = { ...ENV, DB: makeD1(), ADMIN_SECRET: 'adm1n' };
-  const deviceToken = await mintDevice(env, 'laptop', '2026-08-01T00:00:00.000Z');
+  const deviceToken = await mintDevice(env, 1, 'laptop', '2026-08-01T00:00:00.000Z');
 
   const asDevice = await worker.fetch(new Request('https://worker.example/admin/device', {
     method: 'POST',
     headers: { authorization: `Bearer ${deviceToken}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ name: 'phone' }),
+    body: JSON.stringify({ name: 'phone', accountId: 1 }),
   }), env);
   assert.equal(asDevice.status, 401);
 
   const asAdmin = await worker.fetch(new Request('https://worker.example/admin/device', {
     method: 'POST',
     headers: { authorization: 'Bearer adm1n', 'content-type': 'application/json' },
-    body: JSON.stringify({ name: 'phone' }),
+    body: JSON.stringify({ name: 'phone', accountId: 1 }),
   }), env);
   assert.equal(asAdmin.status, 200);
   const body = await asAdmin.json();
@@ -188,7 +188,7 @@ test('a minted token immediately works against /data', async () => {
   const minted = await (await worker.fetch(new Request('https://worker.example/admin/device', {
     method: 'POST',
     headers: { authorization: 'Bearer adm1n', 'content-type': 'application/json' },
-    body: JSON.stringify({ name: 'phone' }),
+    body: JSON.stringify({ name: 'phone', accountId: 1 }),
   }), env)).json();
 
   const res = await worker.fetch(new Request('https://worker.example/data', {
@@ -208,7 +208,7 @@ test('DELETE /admin/device revokes a minted token, and the token then fails on /
   const minted = await (await worker.fetch(new Request('https://worker.example/admin/device', {
     method: 'POST',
     headers: { authorization: 'Bearer adm1n', 'content-type': 'application/json' },
-    body: JSON.stringify({ name: 'phone' }),
+    body: JSON.stringify({ name: 'phone', accountId: 1 }),
   }), env)).json();
   const row = await env.DB.prepare('SELECT token_hash FROM devices WHERE name = ?')
     .bind('phone').first();
@@ -298,7 +298,7 @@ test('the admin secret does not authenticate against /data', async () => {
 // their own unit tests using a fixed NOW).
 test('PUT /data stamps updated_at with the router\'s real clock, not the seeded epoch', async () => {
   const env = { ...ENV, DB: makeD1() };
-  const token = await mintDevice(env, 'laptop', '2026-08-01T00:00:00.000Z');
+  const token = await mintDevice(env, 1, 'laptop', '2026-08-01T00:00:00.000Z');
   const before = Date.now();
 
   const res = await worker.fetch(new Request('https://worker.example/data', {
@@ -320,7 +320,7 @@ test('POST /admin/device with a blank name returns 400 bad_request', async () =>
   const res = await worker.fetch(new Request('https://worker.example/admin/device', {
     method: 'POST',
     headers: { authorization: 'Bearer adm1n', 'content-type': 'application/json' },
-    body: JSON.stringify({ name: '  ' }),
+    body: JSON.stringify({ name: '  ', accountId: 1 }),
   }), env);
   assert.equal(res.status, 400);
   assert.equal((await res.json()).error, 'bad_request');
@@ -337,7 +337,7 @@ test('two devices share one blob: A writes through the router, B reads it back',
     new Request('https://worker.example/admin/device', {
       method: 'POST',
       headers: { authorization: 'Bearer adm1n', 'content-type': 'application/json' },
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, accountId: 1 }),
     }), env)).json()).token;
 
   const laptop = await mint('laptop');
@@ -369,7 +369,7 @@ test('two devices share one blob: A writes through the router, B reads it back',
 // failure lands inside the route rather than at authentication setup.
 async function envWithBrokenDB() {
   const env = { ...ENV, DB: makeD1() };
-  const token = await mintDevice(env, 'laptop', '2026-08-01T00:00:00.000Z');
+  const token = await mintDevice(env, 1, 'laptop', '2026-08-01T00:00:00.000Z');
   env.DB = { prepare() { throw new Error('D1_ERROR: network failure'); } };
   return { env, token };
 }
@@ -461,7 +461,7 @@ test('an unhandled failure on POST / is caught too, and stays public', async () 
 
 test('authenticateDevice via /data stamps last_seen_at with the router\'s real clock', async () => {
   const env = { ...ENV, DB: makeD1() };
-  const token = await mintDevice(env, 'laptop', '2026-08-01T00:00:00.000Z');
+  const token = await mintDevice(env, 1, 'laptop', '2026-08-01T00:00:00.000Z');
   const before = Date.now();
 
   const res = await worker.fetch(new Request('https://worker.example/data', {
@@ -473,4 +473,53 @@ test('authenticateDevice via /data stamps last_seen_at with the router\'s real c
   assert.match(row.last_seen_at, ISO_INSTANT);
   assert.ok(Math.abs(Date.parse(row.last_seen_at) - before) < 5000,
     `last_seen_at not close to now: ${row.last_seen_at}`);
+});
+
+// --- Task 3: per-account routing ---------------------------------------
+
+test('a token reads only its own account row', async () => {
+  const DB = makeD1();
+  await DB.prepare("INSERT INTO accounts (id, email, created_at) VALUES (2, 'b@x.de', 't')").run();
+  await DB.prepare("INSERT INTO data (id, version, blob, updated_at) VALUES (2, 3, 'B', 't')").run();
+  const env = { ...ENV, DB };
+  const token = await mintDevice(env, 2, 'phone', 't');
+  const res = await worker.fetch(new Request('https://w/data', { headers: { authorization: `Bearer ${token}` } }), env);
+  assert.deepEqual(await res.json(), { version: 3, blob: 'B' });
+});
+
+test('a PUT through the router moves only the token\'s account version', async () => {
+  const DB = makeD1();
+  await DB.prepare("INSERT INTO accounts (id, email, created_at) VALUES (2, 'b@x.de', 't')").run();
+  await DB.prepare("INSERT INTO data (id, version, blob, updated_at) VALUES (2, 3, 'B', 't')").run();
+  const env = { ...ENV, DB };
+  const token = await mintDevice(env, 2, 'phone', 't');
+  const res = await worker.fetch(new Request('https://w/data', {
+    method: 'PUT',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ version: 3, blob: 'B2' }),
+  }), env);
+  assert.deepEqual(await res.json(), { version: 4 });
+  assert.equal((await DB.prepare('SELECT version FROM data WHERE id = 1').first()).version, 0);
+});
+
+test('/data with a disabled account\'s token is 401', async () => {
+  const DB = makeD1();
+  await DB.prepare("INSERT INTO accounts (id, email, created_at, disabled_at) VALUES (2, 'b@x.de', 't', 't')").run();
+  const env = { ...ENV, DB };
+  const token = await mintDevice(env, 2, 'phone', 't');
+  const res = await worker.fetch(new Request('https://w/data', { headers: { authorization: `Bearer ${token}` } }), env);
+  assert.equal(res.status, 401);
+});
+
+test('POST /admin/device without accountId returns 400 bad_request', async () => {
+  const env = { ...ENV, DB: makeD1(), ADMIN_SECRET: 'adm1n' };
+  for (const body of [{ name: 'phone' }, { name: 'phone', accountId: '1' }, { name: 'phone', accountId: 0 }]) {
+    const res = await worker.fetch(new Request('https://worker.example/admin/device', {
+      method: 'POST',
+      headers: { authorization: 'Bearer adm1n', 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }), env);
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).error, 'bad_request');
+  }
 });
