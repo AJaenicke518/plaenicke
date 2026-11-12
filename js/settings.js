@@ -20,6 +20,7 @@ import { uid } from './uid.js';
 import { nowISO, toISO } from './dateparse.js';
 import { userWriteStamp, STAMP_EXHAUSTED_ERROR } from './edit.js';
 import { lock } from './scrolllock.js';
+import { fillVisualViewport } from './viewport.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
 import { FEED_PALETTE } from './palette.js';
 import {
@@ -158,6 +159,9 @@ export function initSettings({
   // The page scroll lock is shared with the item sheet (js/scrolllock.js,
   // sweep F O2); this panel's own hold, or null while it is closed.
   let releaseScroll = null;
+  // Stops fitting the backdrop to the visual viewport (the iOS keyboard,
+  // punchlist L139: js/viewport.js fillVisualViewport), or null while closed.
+  let stopViewport = null;
 
   // Focus goes back to the Settings button on every close path (the button,
   // Escape, a backdrop tap), as the item sheet returns it to its opener (app.js's
@@ -167,6 +171,7 @@ export function initSettings({
     repaintRows = null;
     host.innerHTML = '';
     if (releaseScroll) { releaseScroll(); releaseScroll = null; }
+    if (stopViewport) { stopViewport(); stopViewport = null; }
     document.removeEventListener('keydown', onKey);
     button.focus({ preventScroll: true });
   }
@@ -765,6 +770,11 @@ export function initSettings({
       onUnlinked: refreshCalendars,
     });
     if (!releaseScroll) releaseScroll = lock(); // no scrolling behind the modal (iOS)
+    // The backdrop is the panel's scroll container. Fixed at inset: 0 it is
+    // the layout viewport's height, and the iOS keyboard shrinks only the
+    // visual viewport, so its scroll range ended behind the keyboard. Fitted
+    // to the visible area, its end is reachable above the keyboard.
+    if (!stopViewport) stopViewport = fillVisualViewport(backdrop);
     document.addEventListener('keydown', onKey);
     h.focus();
   }
