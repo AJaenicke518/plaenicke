@@ -14,10 +14,9 @@ import { VERSION } from './version.js';
 import { cors, json } from './cors.js';
 import { handleGetData, handlePutData } from './data.js';
 import { handleAccountRoute } from './accounts.js';
+import { handleAdminRoute } from './admin.js';
 import { nowISO } from './clock.js';
-import {
-  authenticateDevice, isAdmin, mintDevice, revokeDevice,
-} from './auth.js';
+import { authenticateDevice } from './auth.js';
 
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -109,40 +108,6 @@ async function handleData(request, env) {
   return json({ error: 'method_not_allowed' }, 405);
 }
 
-async function handleAdminDevice(request, env) {
-  // Auth before method: an unauthenticated caller must not be able to probe
-  // which methods this route supports.
-  if (!isAdmin(request, env)) return json({ error: 'unauthorized' }, 401);
-
-  // Method before body: reject unsupported methods without ever touching the
-  // request body, so e.g. a bodiless GET gets a real 405 instead of a
-  // misleading bad_json.
-  if (request.method !== 'POST' && request.method !== 'DELETE') {
-    return json({ error: 'method_not_allowed' }, 405);
-  }
-
-  let payload;
-  try {
-    payload = await request.json();
-  } catch {
-    return json({ error: 'bad_json' }, 400);
-  }
-
-  if (request.method === 'POST') {
-    const name = payload && typeof payload.name === 'string' ? payload.name.trim() : '';
-    const accountId = payload ? payload.accountId : undefined;
-    if (!name || !Number.isInteger(accountId) || accountId <= 0) return json({ error: 'bad_request' }, 400);
-    // The token is returned here and never again — only its hash is stored.
-    const token = await mintDevice(env, accountId, name, nowISO(env));
-    return json({ token, name });
-  }
-
-  // DELETE
-  const hash = payload && typeof payload.token_hash === 'string' ? payload.token_hash : '';
-  if (!hash) return json({ error: 'bad_request' }, 400);
-  return json({ revoked: await revokeDevice(env, hash) });
-}
-
 export default {
   async fetch(request, env) {
     const { pathname } = new URL(request.url);
@@ -172,7 +137,8 @@ export default {
       }
       if (pathname === '/') return await handleSmartAdd(request, env);
       if (pathname === '/data') return await handleData(request, env);
-      if (pathname === '/admin/device') return await handleAdminDevice(request, env);
+      const adminRes = await handleAdminRoute(pathname, request, env);
+      if (adminRes) return adminRes;
 
       const accountRes = await handleAccountRoute(pathname, request, env);
       if (accountRes) return accountRes;
