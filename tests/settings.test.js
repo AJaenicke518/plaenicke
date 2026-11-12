@@ -59,6 +59,7 @@ function openPanel(feeds, seed = () => {}, deadlineStatus = { note: null, held: 
   const notified = [];
   const fetched = [];
   const removed = [];
+  const signedIn = [];
   const account = trapAccountApi(accountImpl);
   const settings = initSettings({
     button,
@@ -67,6 +68,7 @@ function openPanel(feeds, seed = () => {}, deadlineStatus = { note: null, held: 
     onSyncedDataChanged: () => notified.push('synced'),
     // Every fetch's result, in order: [feedId, ok].
     onFeedFetched: (id, ok) => fetched.push([id, ok]),
+    onSignedIn: () => signedIn.push('in'),
     // Not exercised by any test that uses this helper — they drive the theme
     // and calendar controls — but open() mounts initLinkUI, which refuses to
     // mount without one. app.js always passes applySyncedState here.
@@ -75,7 +77,7 @@ function openPanel(feeds, seed = () => {}, deadlineStatus = { note: null, held: 
     accountApi: account.api,
   });
   if (open) button.click(); // host.childElementCount === 0 -> open()
-  return { host, notified, button, fetched, removed, settings, accountCalls: account.calls };
+  return { host, notified, button, fetched, removed, settings, signedIn, accountCalls: account.calls };
 }
 
 // A linked device: calendars refresh only with a session (accounts spec D21).
@@ -481,6 +483,7 @@ test('settings: the panel refuses to open its sync section without an applyState
     onFeedsChanged: () => {},
     onSyncedDataChanged: () => {},
     onFeedFetched: () => {},
+    onSignedIn: () => {},
     deadlines: { status: () => ({ note: null, held: [] }), removeHeld() {} },
   });
   assert.throws(() => button.click(), /applyState/,
@@ -533,6 +536,7 @@ test('settings: the calendar list refreshes when an adoption lands while the pan
       onFeedsChanged: () => {},
       onSyncedDataChanged: () => {},
       onFeedFetched: () => {},
+      onSignedIn: () => {},
       deadlines: { status: () => ({ note: null, held: [] }), removeHeld() {} },
       // Stands in for app.js's applySyncedState: the feed owner assigns a
       // real colour before saving (merge.js hands a first-seen feed
@@ -1336,4 +1340,47 @@ test('W3-I1b: Escape, a backdrop tap and the Settings button leave the panel ope
   await settled;
   document._listeners.keydown.slice().forEach((fn) => fn({ key: 'Escape' }));
   assert.equal(host.childElementCount, 0, 'once the submit settled, Escape closes as before');
+});
+
+// Sweep W3 #20: a sign-in from the Account section must refetch calendars
+// with the new session; without the wire nothing would until the next launch.
+test('W3 #20: initSettings refuses to mount without an onSignedIn callback', () => {
+  globalThis.window = makeFakeWindow();
+  globalThis.document = makeFakeDocument();
+  installFakeLocalStorage();
+  assert.throws(() => initSettings({
+    button: document.createElement('button'), host: document.createElement('div'),
+    onFeedsChanged() {}, onSyncedDataChanged() {}, onFeedFetched() {}, applyState: (s) => s,
+    deadlines: { status: () => ({ note: null, held: [] }), removeHeld() {} },
+  }), /onSignedIn/);
+});
+
+test('W3 #15: the Account heading is a script-only focus target (tabindex -1)', () => {
+  const { host } = openPanel([]);
+  const heading = sectionTitled(host, 'Account').children[0];
+  assert.equal(heading.getAttribute('tabindex'), '-1');
+});
+
+test('W3-I5: Create your login re-mounts the Sync section as an account device (Sign out, no Unlink)', async () => {
+  const { refreshAccount } = await import('../js/accountui.js');
+  const legacyAnswer = async () => ({ accountId: 1, email: null, recoveryConfirmed: false });
+  const { host, settings } = openPanel([], () => { session(); }, undefined, {
+    open: false,
+    accountImpl: { upgrade: async () => ({ recoveryCode: 'UPGRADERECOVERY1234567', accountId: 1 }) },
+  });
+  assert.equal(await refreshAccount({ api: { getAccount: legacyAnswer } }), 'ok');
+  settings.open();
+  const syncButtons = () => sectionTitled(host, 'Sync').querySelectorAll('button').map((b) => b.textContent);
+  assert.ok(syncButtons().includes('Unlink this device'), 'fixture check: legacy Sync section');
+  byIdIn(host, 'acct-upgrade').click();
+  const fill = (id, v) => { const el = byIdIn(host, id); el.value = v; (el._listeners.input || []).forEach((fn) => fn({ target: el })); };
+  fill('acct-upgrade-code', 'UPGRADECODE12345678901');
+  fill('acct-email', 'alex@example.com');
+  fill('acct-password', 'correct-horse-7!');
+  fill('acct-password2', 'correct-horse-7!');
+  const form = byIdIn(host, 'acct-form');
+  await Promise.all(form._listeners.submit.map((fn) => fn({ target: form, preventDefault() {} })));
+  assert.ok(byIdIn(host, 'acct-recovery-screen'), 'fixture check: upgraded');
+  assert.ok(syncButtons().includes('Sign out'), 'the Sync section follows the new mode');
+  assert.ok(!syncButtons().includes('Unlink this device'));
 });

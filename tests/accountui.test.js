@@ -679,17 +679,20 @@ test('accountui: the handle\'s signOut returns signOutLocal\'s result (linkui sh
   assert.equal(loadAuth(), null);
 });
 
-test('accountui: signIn (linkui\'s Sign in on a revoked device) signs out locally and opens the login form', async () => {
+// Sweep W3-I12: linkui's Sign in is also offered on 'undecryptable', where the
+// session may still be live; it is revoked best effort before signing out.
+test('accountui: signIn (linkui\'s Sign in) revokes the held session best effort, signs out locally and opens the login form', async () => {
   const { host } = setup();
-  linkedAccount(5);
-  const { api, calls } = fakeApi();
+  const token = linkedAccount(5);
+  const { api, calls } = fakeApi({ logOut: async () => ({ revoked: false }) });
   const handle = mount(host, { api });
-  assert.equal(handle.signIn(), 'signed_out');
+  assert.equal(await handle.signIn(), 'signed_out');
   assert.equal(loadAuth(), null);
   assert.equal(loadLocalOwner(), 5);
   assert.ok(byId(host, 'acct-form'));
   assert.equal(byId(host, 'acct-password').autocomplete, 'current-password');
-  assert.equal(calls.length, 0, 'the session is already gone: nothing to revoke');
+  assert.deepEqual(calls.map((c) => c.name), ['logOut'], 'revoked first, and an offline revoke does not stop the sign-in');
+  assert.equal(calls[0].args.link.authToken, token);
 });
 
 // --- 8. the password policy ------------------------------------------------
@@ -1015,6 +1018,7 @@ test('accountui: Sign out other devices calls signOutOthers and says so', async 
   const { api, calls } = fakeApi({ signOutOthers: async () => ({ signedOut: 2 }) });
   mount(host, { api });
   click(byId(host, 'acct-signout-others'));
+  click(byId(host, 'acct-signout-others-confirm')); // sweep W3 #23: it asks first
   assert.ok(await until(() => allText(host).includes('Other devices were signed out.')));
   assert.deepEqual(calls.map((c) => c.name), ['signOutOthers']);
 });
@@ -1437,4 +1441,215 @@ test('W3 #26: Download keeps its file URL for 60 s and points at Copy if nothing
   assert.equal(downloadTimers.length, before + 1);
   assert.equal(downloadTimers[downloadTimers.length - 1].ms, 60000);
   assert.equal(byId(host, 'acct-notice').textContent, "If the file didn't save, use Copy or Email it to me.");
+});
+
+// --- sweep W3: the Account home ----------------------------------------------
+
+function mountWith(host, { linkui, ...opts }) {
+  const handle = linkui || fakeLinkui();
+  return initAccountUI({ host, setTimeoutImpl: () => {}, ...opts, linkui: () => handle });
+}
+
+test('W3-I4: an account device whose last sync was refused (unauthorized) shows signed out with Sign in, not "Signed in."', async () => {
+  const { host } = setup();
+  linkedAccount(5);
+  const { saveSyncState } = await import('../js/storage.js');
+  saveSyncState({ lastError: 'unauthorized' });
+  const { api, calls } = fakeApi({ logOut: async () => ({ revoked: true }) });
+  mount(host, { api });
+  assert.doesNotMatch(allText(host), /Signed in/);
+  assert.match(allText(host), new RegExp(ACCOUNT_COPY.signed_out));
+  assert.equal(byId(host, 'acct-signout'), null, 'no account controls on a dead session');
+  click(byId(host, 'acct-signin'));
+  assert.ok(await until(() => byId(host, 'acct-form')), 'then the sign-in form');
+  assert.equal(loadAuth(), null, 'Sign in signs out locally first');
+  assert.equal(loadLocalOwner(), 5);
+  assert.deepEqual(calls.map((c) => c.name), ['logOut'], 'a 401 revoke is harmless and covers a live session');
+});
+
+test('W3-I4: a GET /account answered 401 shows the same signed-out home', async () => {
+  const { host } = setup();
+  linkedAccount(5);
+  const { api } = fakeApi({ getAccount: async () => { throw new AccountError('unauthorized', {}, 401); } });
+  mount(host, { api });
+  assert.equal(await refreshAccount({ api }), 'failed');
+  assert.ok(byId(host, 'acct-signin'), 'the mounted section follows the answer (W3-I11)');
+  assert.match(allText(host), new RegExp(ACCOUNT_COPY.signed_out));
+});
+
+test('W3-I11: the mounted Account home re-renders when the load-time GET /account answers', async () => {
+  const { host } = setup();
+  linkedAccount(5);
+  const { api } = fakeApi({ getAccount: async () => ({ accountId: 5, email: 'late@x.de', recoveryConfirmed: true }) });
+  mount(host, { api });
+  assert.match(allText(host), /Signed in\./);
+  assert.equal(await refreshAccount({ api }), 'ok');
+  assert.match(allText(host), /Signed in as late@x\.de/);
+});
+
+test('W3-I11: an answer does not wipe a form being filled', async () => {
+  const { host } = setup();
+  linkedAccount(5);
+  const { api } = fakeApi({ getAccount: async () => ({ accountId: 5, email: 'late@x.de', recoveryConfirmed: true }) });
+  mount(host, { api });
+  click(byId(host, 'acct-change-password'));
+  input(host, 'acct-current-password', 'typed');
+  await refreshAccount({ api });
+  assert.equal(byId(host, 'acct-current-password').value, 'typed');
+});
+
+test('W3-I5: Create your login tells Settings the mode changed (linkui re-mounts as an account device)', async () => {
+  const { host } = setup();
+  saveAuth(newCode());
+  const { api } = fakeApi({
+    getAccount: async () => ({ accountId: 1, email: null, recoveryConfirmed: false }),
+    upgrade: async () => ({ recoveryCode: 'UPGRADERECOVERY1234567', accountId: 1 }),
+  });
+  await refreshAccount({ api });
+  let changed = 0;
+  mountWith(host, { api, onAccountChanged: () => { changed += 1; } });
+  click(byId(host, 'acct-upgrade'));
+  input(host, 'acct-upgrade-code', 'UPGRADECODE12345678901');
+  input(host, 'acct-email', 'alex@example.com');
+  input(host, 'acct-password', GOOD_PW);
+  input(host, 'acct-password2', GOOD_PW);
+  await submit(host);
+  assert.equal(changed, 1);
+  assert.equal(accountModeFromStorage(), 'account');
+});
+
+test('W3-I5: an email answer that ends legacy mode (upgraded elsewhere) tells Settings too; a same-mode answer does not', async () => {
+  const { host } = setup();
+  saveAuth(newCode());
+  let email = null;
+  const { api } = fakeApi({ getAccount: async () => ({ accountId: 1, email, recoveryConfirmed: false }) });
+  await refreshAccount({ api });
+  let changed = 0;
+  mountWith(host, { api, onAccountChanged: () => { changed += 1; } });
+  await refreshAccount({ api });
+  assert.equal(changed, 0, 'still legacy');
+  email = 'alex@example.com';
+  await refreshAccount({ api });
+  assert.equal(changed, 1, 'legacy -> account');
+});
+
+test('W3 #20: a sign-in that linked tells Settings (calendars refetch with the new session)', async () => {
+  const { host } = setup();
+  let signedIn = 0;
+  const { api } = fakeApi({ logIn: async () => ({ code: newCode(), accountId: 7, recoveryConfirmed: true }) });
+  mountWith(host, { api, onSignedIn: () => { signedIn += 1; } });
+  click(byId(host, 'acct-login'));
+  input(host, 'acct-email', 'a@x.de');
+  input(host, 'acct-password', 'whatever');
+  await submit(host);
+  assert.equal(signedIn, 1);
+});
+
+test('W3 #20: sign-up and reset that linked tell Settings too; one that did not link does not', async () => {
+  for (const [opener, impl, fills, linkOutcome, expected] of [
+    ['acct-invite', { signUp: async () => ({ code: newCode(), accountId: 7, recoveryCode: 'RECOVERYCODE1234567890' }) },
+      [['acct-invite-code', 'I']], 'linked', 1],
+    ['acct-forgot', { recover: async () => ({ code: newCode(), accountId: 7, recoveryCode: 'RECOVERYCODE1234567890' }) },
+      [['acct-recovery-code', 'R']], 'linked', 1],
+    ['acct-invite', { signUp: async () => ({ code: newCode(), accountId: 7, recoveryCode: 'RECOVERYCODE1234567890' }), logOut: async () => ({ revoked: true }) },
+      [['acct-invite-code', 'I']], 'link_failed', 0],
+  ]) {
+    const { host } = setup();
+    let signedIn = 0;
+    const linkui = linkOutcome === 'linked' ? fakeLinkui() : { linkAndAdopt: async () => linkOutcome };
+    mountWith(host, { api: fakeApi(impl).api, linkui, onSignedIn: () => { signedIn += 1; } });
+    click(byId(host, opener));
+    for (const [id, v] of fills) input(host, id, v);
+    input(host, 'acct-email', 'a@x.de');
+    input(host, 'acct-password', GOOD_PW);
+    input(host, 'acct-password2', GOOD_PW);
+    await submit(host);
+    assert.equal(signedIn, expected, `${opener} ${linkOutcome}`);
+  }
+});
+
+test('W3 #15: when a re-render removes the focused control, focus goes to the section heading', async () => {
+  const { host } = setup();
+  linkedAccount(5);
+  const heading = document.createElement('h3');
+  const { api } = fakeApi({ logOut: async () => ({ revoked: true }) });
+  mountWith(host, { api, focusTarget: heading });
+  const btn = byId(host, 'acct-signout');
+  btn.focus();
+  click(btn);
+  assert.ok(await until(() => loadAuth() === null && byId(host, 'acct-login')));
+  assert.equal(document.activeElement, heading);
+  assert.deepEqual(document.lastFocusOptions, { preventScroll: true });
+});
+
+test('W3 #15: a re-render while focus is elsewhere leaves focus alone', async () => {
+  const { host } = setup();
+  linkedAccount(5);
+  const heading = document.createElement('h3');
+  const elsewhere = document.createElement('input');
+  const { api } = fakeApi({ getAccount: async () => ({ accountId: 5, email: 'a@x.de', recoveryConfirmed: true }) });
+  mountWith(host, { api, focusTarget: heading });
+  elsewhere.focus();
+  await refreshAccount({ api });
+  assert.equal(document.activeElement, elsewhere);
+});
+
+test('W3 #14: a form opened by an intent scrolls the Account section into view', () => {
+  const { host } = setup();
+  const scrolled = [];
+  host.scrollIntoView = (o) => scrolled.push(o);
+  const handle = mountWith(host, { api: fakeApi().api, intent: { kind: 'invite', code: 'INV' } });
+  assert.deepEqual(scrolled, [{ block: 'start' }]);
+  handle.open({ kind: 'login' });
+  assert.equal(scrolled.length, 2, 'the handle\'s open (the banner, a later fragment) too');
+});
+
+test('W3 #22: sign-up and reset in a Safari tab (not the Home Screen app) warn where the code belongs', () => {
+  for (const kind of ['invite', 'recover']) {
+    const { host } = setup();
+    mountWith(host, { api: fakeApi().api, intent: { kind, code: 'X' }, isSafariTab: () => true });
+    assert.equal(byId(host, 'acct-safari-warning').textContent,
+      "You're in Safari, not the plaenicke app — open the app from your Home Screen and paste the code there.");
+  }
+  const { host } = setup();
+  mountWith(host, { api: fakeApi().api, intent: { kind: 'invite', code: 'X' }, isSafariTab: () => false });
+  assert.equal(byId(host, 'acct-safari-warning'), null, 'the installed app: no warning');
+  const { host: h2 } = setup();
+  mountWith(h2, { api: fakeApi().api, isSafariTab: () => true });
+  click(byId(h2, 'acct-login'));
+  assert.equal(byId(h2, 'acct-safari-warning'), null, 'sign-in moves no code: no warning');
+});
+
+test('W3 #22: the default Safari check is navigator.standalone === false exactly', async () => {
+  const { isSafariTab } = await import('../js/accountui.js');
+  assert.equal(isSafariTab({ standalone: false }), true);
+  assert.equal(isSafariTab({ standalone: true }), false);
+  assert.equal(isSafariTab({}), false, 'not iOS: no claim');
+  assert.equal(isSafariTab(undefined), false);
+});
+
+test('W3 #23: Sign out other devices asks first', async () => {
+  const { host } = setup();
+  linkedAccount(5);
+  const { api, calls } = fakeApi({ signOutOthers: async () => ({ ok: true }) });
+  mount(host, { api });
+  click(byId(host, 'acct-signout-others'));
+  assert.equal(calls.length, 0, 'the first tap only asks');
+  assert.match(allText(host), /Sign out every other device\?/);
+  click(byId(host, 'acct-signout-others-cancel'));
+  assert.equal(byId(host, 'acct-signout-others-confirm'), null);
+  click(byId(host, 'acct-signout-others'));
+  click(byId(host, 'acct-signout-others-confirm'));
+  assert.ok(await until(() => calls.length === 1));
+  assert.equal(calls[0].name, 'signOutOthers');
+  assert.ok(await until(() => allText(host).includes('Other devices were signed out.')));
+});
+
+test('W3 #25: an account device with a pending Merge points to the Sync section', async () => {
+  const { host } = setup();
+  linkedAccount(5);
+  const { saveSyncState } = await import('../js/storage.js');
+  saveSyncState({ adoptionPending: true, linkOwner: 5 });
+  mount(host, { api: fakeApi().api });
+  assert.match(allText(host), /This device isn't syncing yet — choose how to combine it in Sync below\./);
 });

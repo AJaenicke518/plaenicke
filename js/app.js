@@ -316,6 +316,9 @@ const settings = initSettings({
   applyState: applySyncedState,
   // Brightspace deadlines: the Settings row's note and its "Remove them".
   deadlines,
+  // A sign-in from Settings → Account: refetch calendars with the new
+  // session (sweep W3 #20); signed out they only rendered from the cache.
+  onSignedIn: () => backgroundSyncFeeds(feeds),
 });
 
 // The status line: Ideas, ticks, deletes, edits and notices. Never an add's.

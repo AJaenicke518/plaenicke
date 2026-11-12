@@ -28,7 +28,7 @@ import { AccountError, recoveryLink, mailtoHref, RECOVERY_NOTE } from './account
 import {
   ACCOUNT_COPY, adoptionBlocker, accountModeFromStorage, signOutLocal, signOutBlocked,
 } from './linkui.js';
-import { getLink } from './auth.js';
+import { getLink, isAdoptionPending } from './auth.js';
 import {
   loadLocalOwner, saveLocalOwner, loadLegacyOwner, saveLegacyOwner, clearLegacyOwner, loadSyncState, saveSyncState,
 } from './storage.js';
@@ -131,6 +131,14 @@ class Blocked extends Error {
 // email or banner never shows under another. Module scope, so a Settings
 // mount and the app shell share it. Not persisted: app load asks again.
 let known = null; // { token, info: { accountId, email, recoveryConfirmed } }
+// The session GET /account last answered 401 for (sweep W3-I4): this device
+// still holds it, but the server has deleted it.
+let rejectedToken = null;
+// The latest Account section mount, so an answer that arrives after it
+// rendered can repaint it (W3-I11) and tell Settings the mode changed
+// (W3-I5). settings.js mounts one per open; an older one renders into a
+// detached element, which is harmless.
+let live = null;
 
 function currentInfo() {
   const link = getLink();
@@ -167,10 +175,16 @@ async function fetchAccount(api) {
     paintBanner();
     return { status: 'unlinked' };
   }
+  const modeBefore = accountModeFromStorage();
   let body;
   try {
     body = await api.getAccount({ link });
   } catch (err) {
+    const still = getLink();
+    if (err instanceof AccountError && err.status === 401 && still && still.authToken === link.authToken) {
+      rejectedToken = link.authToken;
+      if (live) live.refresh();
+    }
     return { status: 'failed', err };
   }
   // Signed out (or into another session) while the request was out: the
@@ -205,7 +219,12 @@ async function fetchAccount(api) {
   // This answer was for this session: its link is now shown to be the
   // owner's (W2 re-review), so a pending adoption may be previewed.
   if (loadSyncState().linkOwner !== info.accountId) saveSyncState({ linkOwner: info.accountId });
+  if (rejectedToken === link.authToken) rejectedToken = null;
   remember(link, info);
+  if (live) {
+    if (accountModeFromStorage() !== modeBefore) live.modeChanged();
+    live.refresh();
+  }
   return { status: 'ok' };
 }
 
@@ -270,6 +289,25 @@ export function codeFrom(raw, kind) {
   return (at === -1 ? text : text.slice(at + marker.length)).trim();
 }
 
+// True only where iOS says this is a Safari tab rather than the Home Screen
+// app (sweep W3 #22): navigator.standalone is iOS-only and false in a tab.
+// Anywhere else it is undefined, and nothing is claimed.
+export function isSafariTab(nav = globalThis.navigator) {
+  return Boolean(nav) && nav.standalone === false;
+}
+
+// The session this device holds was refused by the server (§ 6.10): a sync
+// answered 401, or GET /account did.
+function sessionRefused() {
+  const link = getLink();
+  return Boolean(link) && (rejectedToken === link.authToken || loadSyncState().lastError === 'unauthorized');
+}
+
+function within(root, node) {
+  for (let n = node; n; n = n.parentNode) if (n === root) return true;
+  return false;
+}
+
 function deviceName() {
   const ua = (globalThis.navigator && globalThis.navigator.userAgent) || '';
   if (/iPhone/.test(ua)) return 'iPhone';
@@ -295,6 +333,13 @@ const FORMS = {
 
 export function initAccountUI({
   host, api = accountApi, linkui, intent = null, onSignedOut = () => {},
+  // Settings re-mounts linkui when the UI mode changes under it (legacy ->
+  // account, W3-I5), and refetches calendars once a sign-in linked (#20).
+  onAccountChanged = () => {}, onSignedIn = () => {},
+  // The Account heading: focus returns there when a re-render removes the
+  // focused control (#15).
+  focusTarget = null,
+  isSafariTab: inSafariTab = () => isSafariTab(),
   // Injected so tests leave no timer behind (the Download handler's revoke).
   setTimeoutImpl = (fn, ms) => setTimeout(fn, ms),
 } = {}) {
@@ -311,6 +356,7 @@ export function initAccountUI({
   let busy = false;
   let errorEl = null;
   let noticeEl = null;
+  let askSignOutOthers = false; // #23: the first tap only asks
 
   function showError(text) {
     error = text;
@@ -413,6 +459,7 @@ export function initAccountUI({
         return;
       }
       remember(getLink(), { accountId: res.accountId, email: v.email, recoveryConfirmed: false });
+      onSignedIn();
       showRecovery(res.recoveryCode, v.email);
       sayIfAdoptFailed(linked);
     },
@@ -429,6 +476,7 @@ export function initAccountUI({
       const linked = await adopt(res.code, res.accountId);
       if (linked.notLinked) { showError(linked.notLinked); return; }
       remember(getLink(), { accountId: res.accountId, email: v.email, recoveryConfirmed: res.recoveryConfirmed });
+      onSignedIn();
       view = 'home';
       render();
       sayIfAdoptFailed(linked);
@@ -464,6 +512,7 @@ export function initAccountUI({
         return;
       }
       remember(getLink(), { accountId: res.accountId, email: v.email, recoveryConfirmed: false });
+      onSignedIn();
       showRecovery(res.recoveryCode, v.email);
       sayIfAdoptFailed(linked);
     },
@@ -501,6 +550,9 @@ export function initAccountUI({
       saveLocalOwner(res.accountId);
       if (loadLegacyOwner() === res.accountId) clearLegacyOwner();
       remember(link, { accountId: res.accountId, email: v.email, recoveryConfirmed: false });
+      // Legacy -> account: linkui's section still shows Unlink and the
+      // code tools until Settings re-mounts it (W3-I5).
+      onAccountChanged();
       showRecovery(res.recoveryCode, v.email);
     },
   };
@@ -531,7 +583,16 @@ export function initAccountUI({
         button('acct-invite', 'I have an invite', () => open({ kind: 'invite' })),
         button('acct-forgot', 'Forgot password', () => open({ kind: 'recover' })),
       );
+    } else if (mode === 'account' && sessionRefused()) {
+      // § 6.10 / W3-I4: the server deleted this session. Nothing here works
+      // until the device signs in again.
+      wrap.appendChild(el('p', { className: 'note', text: ACCOUNT_COPY.signed_out }));
+      wrap.appendChild(button('acct-signin', 'Sign in', action(async () => { await signIn(); }), 'primary'));
     } else if (mode === 'account') {
+      if (isAdoptionPending()) {
+        // #25: the Merge choice lives in linkui's section.
+        wrap.appendChild(el('p', { className: 'note', text: "This device isn't syncing yet — choose how to combine it in Sync below." }));
+      }
       const email = emailKnown();
       wrap.appendChild(el('p', { className: 'account-email', text: email ? `Signed in as ${email}` : 'Signed in.' }));
       wrap.append(
@@ -556,12 +617,7 @@ export function initAccountUI({
           devices = listed;
           render();
         })),
-        button('acct-signout-others', 'Sign out other devices', action(async () => {
-          await api.signOutOthers({ link: requireLink() });
-          devices = null;
-          notice = 'Other devices were signed out.';
-          render();
-        })),
+        ...signOutOthersControls(),
         button('acct-signout', 'Sign out', action(async () => {
           if ((await signOut()) === 'signed_out') onSignedOut();
         }), 'remove'),
@@ -587,6 +643,26 @@ export function initAccountUI({
       }
     }
     messages(wrap);
+  }
+
+  // #23: signing every other device out is not undoable from here, so the
+  // first tap asks.
+  function signOutOthersControls() {
+    if (!askSignOutOthers) {
+      return [button('acct-signout-others', 'Sign out other devices', () => { askSignOutOthers = true; error = ''; render(); })];
+    }
+    const ask = el('p', { className: 'note', text: 'Sign out every other device? Each will need to sign in again.' });
+    return [
+      ask,
+      button('acct-signout-others-confirm', 'Sign them out', action(async () => {
+        await api.signOutOthers({ link: requireLink() });
+        askSignOutOthers = false;
+        devices = null;
+        notice = 'Other devices were signed out.';
+        render();
+      }), 'remove'),
+      button('acct-signout-others-cancel', 'Cancel', () => { askSignOutOthers = false; render(); }),
+    ];
   }
 
   function field(form, kind, refs) {
@@ -629,6 +705,15 @@ export function initAccountUI({
     const spec = FORMS[view];
     const which = view;
     wrap.appendChild(el('h4', { text: spec.title }));
+    if ((which === 'signup' || which === 'forgot') && inSafariTab()) {
+      // #22: a Safari tab's storage is not the Home Screen app's (D24), so
+      // an account made here is not in the app.
+      wrap.appendChild(el('p', {
+        id: 'acct-safari-warning',
+        className: 'note account-error',
+        text: "You're in Safari, not the plaenicke app — open the app from your Home Screen and paste the code there.",
+      }));
+    }
     const form = el('form', { id: 'acct-form', className: 'account-form' });
     form.setAttribute('novalidate', '');
     const refs = {};
@@ -815,12 +900,22 @@ export function initAccountUI({
   }
 
   function render() {
+    const hadFocus = within(host, document.activeElement);
     host.innerHTML = '';
     const wrap = el('div', { className: 'account-ui' });
     if (view === 'recovery') renderRecovery(wrap);
     else if (FORMS[view]) renderForm(wrap);
     else renderHome(wrap);
     host.appendChild(wrap);
+    // #15: the focused control went with the old tree; without this, focus
+    // falls to the top of the document.
+    if (hadFocus && focusTarget && !within(host, document.activeElement)) focusTarget.focus({ preventScroll: true });
+  }
+
+  // #14: a form opened from outside (a boot link, the banner) can be far
+  // below the top of the panel.
+  function reveal() {
+    if (typeof host.scrollIntoView === 'function') host.scrollIntoView({ block: 'start' });
   }
 
   function focusFirstEmpty() {
@@ -912,9 +1007,22 @@ export function initAccountUI({
     return result;
   }
 
-  // linkui's Sign in, on an account device whose session was deleted
-  // (§ 6.10): sign out locally (nothing to revoke), then the login form.
-  function signIn() {
+  // Sign in on an account device whose session was deleted (§ 6.10), or
+  // whose saved key cannot read the account (linkui's undecryptable): the
+  // session may still be live in that second case, so it is revoked best
+  // effort first (sweep W3-I12; logOut never throws, and a 401 is the goal
+  // already met). Then sign out locally, then the sign-in form. Asked first,
+  // as signOut does: revoking and then being refused would strand the device
+  // on a dead session.
+  async function signIn() {
+    if (signOutBlocked()) {
+      view = 'home';
+      error = ACCOUNT_COPY.sign_out_refused;
+      render();
+      return 'refused_write_in_flight';
+    }
+    const link = getLink();
+    if (link) await api.logOut({ link });
     const result = signOutLocal();
     if (result !== 'signed_out') {
       view = 'home';
@@ -927,13 +1035,22 @@ export function initAccountUI({
     return result;
   }
 
-  if (intent) open(intent);
-  else render();
+  live = {
+    refresh: () => { if (view === 'home') render(); },
+    modeChanged: () => onAccountChanged(),
+  };
+
+  if (intent) { open(intent); reveal(); } else render();
 
   // settings.js asks before Escape or a backdrop tap closes the panel (sweep
   // W3-I1b): not while a recovery code is on screen, nor while a submit is
   // out (its answer would land in a panel no longer there).
   const holdsPanel = () => view === 'recovery' || busy;
 
-  return { open, signOut, signIn, holdsPanel };
+  function openFromOutside(next) {
+    open(next);
+    if (next) reveal();
+  }
+
+  return { open: openFromOutside, signOut, signIn, holdsPanel };
 }

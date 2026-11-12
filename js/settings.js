@@ -85,7 +85,7 @@ function tabStops(root) {
 // `accountApi` is js/account.js, injected so tests never run PBKDF2 or reach
 // a server.
 export function initSettings({
-  button, host, onFeedsChanged, onSyncedDataChanged, onFeedFetched, applyState, deadlines,
+  button, host, onFeedsChanged, onSyncedDataChanged, onFeedFetched, applyState, deadlines, onSignedIn,
   accountApi = accountModule,
 }) {
   // A missing wire here is silent data loss, not a degraded feature: without
@@ -105,6 +105,12 @@ export function initSettings({
   // apply a held removal. Missing wiring would hide a held removal silently.
   if (!deadlines || typeof deadlines.status !== 'function' || typeof deadlines.removeHeld !== 'function') {
     throw new Error('initSettings requires deadlines: { status, removeHeld }');
+  }
+  // A sign-in from the Account section refetches calendars with the new
+  // session (sweep W3 #20). Without the wire nothing would until the next
+  // launch, and the stamp would keep saying "Sign in to refresh calendars."
+  if (typeof onSignedIn !== 'function') {
+    throw new Error('initSettings requires an onSignedIn callback');
   }
 
   // Follow the phone while in auto.
@@ -788,6 +794,9 @@ export function initSettings({
     accountSection.id = 'account-section';
     const acH = document.createElement('h3');
     acH.textContent = 'Account';
+    // Where focus goes when the Account section re-renders away the focused
+    // control (sweep W3 #15): script-only, never a Tab stop.
+    acH.setAttribute('tabindex', '-1');
     const accountHost = document.createElement('div');
     accountSection.append(acH, accountHost);
 
@@ -832,6 +841,11 @@ export function initSettings({
       api: accountApi,
       linkui: () => linkHandle,
       onSignedOut: () => { mountLink(); refreshCalendars(); },
+      // Legacy -> account (an upgrade, here or on another device): linkui's
+      // section still shows Unlink and the code tools until re-mounted.
+      onAccountChanged: () => { mountLink(); },
+      onSignedIn: () => { refreshCalendars(); onSignedIn(); },
+      focusTarget: acH,
     });
     accountHandle = acct;
     if (!releaseScroll) releaseScroll = lock(); // no scrolling behind the modal (iOS)
