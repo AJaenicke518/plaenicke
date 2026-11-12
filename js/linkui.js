@@ -94,14 +94,18 @@ const ACCOUNT_SIGNED_OUT_TEXT = ACCOUNT_COPY.signed_out;
 //                           one person's planner — feed capability URLs
 //                           included — into someone else's account.
 //
-// TOMBSTONES ARE NOT COUNTED. They are not a planner; a device holding only
-// deletions has nothing of the previous owner's to leak.
+// TOMBSTONES ARE COUNTED (sweep W2-I1). They are not a planner, but they are
+// the previous owner's DELETIONS: adopted into another account, a tombstone
+// deletes that account's record with the same id on every device — a
+// Brightspace deadline's bs-<UID> id is the same for every student of the
+// course (reproduced: scen/s2.mjs). Blocking is the whole fix: clearing them
+// would add a tombstone writer outside app.js/feeds.js (js/storage.js).
 export function adoptionBlocker(targetAccountId) {
   if (getLink() !== null) return 'already_linked';
   const owner = loadLocalOwner();
   if (owner !== null && owner !== targetAccountId) {
     const local = localState();
-    if (local.items.length + local.feeds.length > 0) return 'other_account_data';
+    if (local.items.length + local.feeds.length + local.tombstones.length > 0) return 'other_account_data';
   }
   return null;
 }

@@ -2537,12 +2537,12 @@ test('acct 3: the paste path is guarded too — the field is hidden, and the han
   assert.equal(findInput(empty.host, 'Link code'), null);
 });
 
-test('acct 4: an owned device with no items or feeds may join a different account', async () => {
+// Sweep W2-I1: deletions now count as the previous owner's data (acct 6's
+// table), so "nothing local" means no items, feeds OR tombstones.
+test('acct 4: an owned device with no items, feeds or deletions may join a different account', async () => {
   installFakeLocalStorage();
   const doc = installDom();
   saveLocalOwner(5);
-  // Tombstones are ignored by the guard: they are not a planner.
-  saveTombstones([{ id: 'gone', kind: 'item', deletedAt: '2026-08-04T00:00:00.000Z' }]);
   const server = emptyAccountServer();
   const { ui } = mountPanel(doc, { fetchImpl: server.fetchImpl, readFetchImpl: server.fetchImpl });
   await ui.settled();
@@ -2604,8 +2604,18 @@ test('acct 6: adoptionBlocker table', () => {
   installFakeLocalStorage();
   saveLocalOwner(5);
   saveTombstones([{ id: 'gone', kind: 'item', deletedAt: '2026-08-04T00:00:00.000Z' }]);
-  assert.equal(adoptionBlocker(6), null, 'tombstones alone are not a planner');
-  assert.equal(adoptionBlocker(null), null);
+  // Sweep W2-I1 (was: "tombstones alone are not a planner"). They are not,
+  // but they ARE the previous owner's deletions: adopted into another account
+  // they delete its records with the same ids (a bs-<UID> deadline both
+  // accounts import) on every device (scen/s2.mjs). Blocked, not cleared —
+  // clearing would add a tombstone writer outside app.js/feeds.js.
+  assert.equal(adoptionBlocker(6), 'other_account_data', 'another owner\'s deletions block too');
+  assert.equal(adoptionBlocker(null), 'other_account_data');
+  assert.equal(adoptionBlocker(5), null, 'the same account takes its own deletions back');
+
+  installFakeLocalStorage();
+  saveTombstones([{ id: 'gone', kind: 'item', deletedAt: '2026-08-04T00:00:00.000Z' }]);
+  assert.equal(adoptionBlocker(6), null, 'no owner, no guard');
 });
 
 test('accountModeFromStorage: unlinked, account, legacy — read at call time', async () => {

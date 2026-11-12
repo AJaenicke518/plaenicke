@@ -811,3 +811,47 @@ test('e2e 9: re-signing in to the same account keeps two same-title, same-date r
   assert.deepEqual(server.tombstones, [], 'no tombstone was pushed');
   assert.deepEqual(ids(loadItems()), ids([q1, q2]), 'and both are still on the device');
 });
+
+// Sweep W2-I1 (scen/s2.mjs): D was signed in to X, deleted a Brightspace
+// deadline (a tombstone), and signed out with no items or feeds left. Signing
+// in to Y used to adopt X's tombstone into Y — deleting Y's record with the
+// same bs- id on every device. Now blocked like any other owner's data.
+test('e2e 10: a device holding only another account\'s deletions cannot be signed in to a different account', async () => {
+  const w = world();
+  const D = device('D');
+  const E = device('E');
+  await invite(w.env, 'INVITE-X');
+  await invite(w.env, 'INVITE-Y');
+  const prevWindow = globalThis.window;
+  globalThis.window = makeFakeWindow();
+  try {
+    await use(D);
+    mountLinkUI(D, w);
+    const upX = await account.signUp({ invite: 'INVITE-X', email: EMAIL, password: PW, deviceName: 'D', ...w.api });
+    assert.equal(await linkAndAdopt(D, upX.code, upX.accountId), 'linked');
+    saveTombstones([{ id: 'bs-ASSIGN-42', kind: 'item', deletedAt: '2026-11-11T11:00:00.000Z' }]);
+    assert.deepEqual(await account.logOut({ link: getLink(), ...w.api }), { revoked: true });
+    assert.equal(signOutLocal(), 'signed_out');
+    assert.equal(loadItems().length + loadFeeds().length, 0, 'fixture check: no planner left on D');
+
+    await use(E);
+    mountLinkUI(E, w);
+    const shared = makeItem({ title: 'Essay', date: '2026-11-20', type: 'task' },
+      { id: 'bs-ASSIGN-42', createdAt: T0, updatedAt: T0 });
+    addLocal(shared);
+    const upY = await account.signUp({ invite: 'INVITE-Y', email: OTHER_EMAIL, password: OTHER_PW, deviceName: 'E', ...w.api });
+    assert.equal(await linkAndAdopt(E, upY.code, upY.accountId), 'linked');
+    const rowBefore = await w.row(upY.accountId);
+
+    await use(D);
+    const host = await loginViaForm(D, w, OTHER_EMAIL, OTHER_PW);
+    await pollUntil(() => (elById(host, 'acct-error') || {}).textContent, 'the login error');
+    assert.equal(elById(host, 'acct-error').textContent, ACCOUNT_COPY.other_account_data);
+    assert.equal(getLink(), null, 'D was not linked');
+    const rowAfter = await w.row(upY.accountId);
+    assert.equal(rowAfter.version, rowBefore.version, 'Y\'s account is unchanged');
+    assert.equal(rowAfter.blob, rowBefore.blob);
+  } finally {
+    globalThis.window = prevWindow;
+  }
+});
