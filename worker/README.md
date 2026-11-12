@@ -142,7 +142,7 @@ would leave later migrations with no record of what production has already
 applied. Check state with:
 
 ```bash
-npx wrangler d1 migrations list plaenicke --remote   # unapplied migrations only
+(cd worker && npx wrangler d1 migrations list plaenicke --remote)   # unapplied migrations only
 ```
 
 Verified against wrangler 4.118.0: `migrations list` picks up
@@ -177,7 +177,12 @@ curl -X POST https://<worker-host>/admin/device \
 ```
 
 `accountId` is required (400 `bad_request` without it, 404 `no_account` for an
-unknown id). All admin recipes are in `docs/admin.md`.
+unknown id, 409 `disabled` for a disabled account). All admin recipes are in
+`docs/admin.md`. On account 1, mint only after its upgrade (`docs/admin.md`,
+release-window rule 2). A raw 43-character token is right only for an account's very first device:
+`linkWithCode` treats it as a bootstrap and mints a fresh, empty encryption
+key, so never paste one (a smoke token included) into a device of an existing
+account (CLAUDE.md, Device linking).
 
 Response: `{"token": "...", "name": "laptop"}`.
 
@@ -212,8 +217,8 @@ There is no HTTP route that lists devices or looks up a token's hash
   `name`, `created_at`, and `last_seen_at` alongside `token_hash`
   (`migrations/0002_accounts.sql`):
   ```bash
-  npx wrangler d1 execute plaenicke --remote \
-    --command "SELECT account_id, name, token_hash, last_seen_at FROM devices"
+  (cd worker && npx wrangler d1 execute plaenicke --remote \
+    --command "SELECT account_id, name, token_hash, last_seen_at FROM devices")
   ```
 
 **Known gap:** if you never captured the token *and* can't identify the row

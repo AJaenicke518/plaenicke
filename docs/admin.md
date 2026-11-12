@@ -180,7 +180,7 @@ The order is fixed: **Worker (tolerant), then client, then account 1's upgrade, 
    git branch --show-current    # expect main
    git status --short           # expect no output
    git pull --ff-only origin main
-   git merge --no-ff accounts
+   git merge --no-ff accounts -m "Merge V7 accounts"
    npm test                     # expect # fail 0 and # cancelled 0
    git push origin main
    ```
@@ -191,11 +191,15 @@ The order is fixed: **Worker (tolerant), then client, then account 1's upgrade, 
    ```
 3. On each device: force-quit and reopen plaenicke, then open Settings. The new client is running when Settings shows an **Account** section above Sync (`js/settings.js`, "Account (accounts Task 13), above Sync"). If it does not, wait a few minutes and force-quit and reopen again: the service worker fetches network-first (`service-worker.js`), but the browser may still hold an HTTP-cached copy of the old files.
 4. From now on a device with no session makes no smart-add or calendar request at all (`js/smartadd.js` throws `signed_out` before the fetch; `js/feeds.js` returns `signed_out`). Alex's two linked devices have a session and keep working.
-5. **Prove every device sends its session (required before Phase 3).** Do one smart add on each device, then:
+5. **Prove every device sends its session (required before Phase 3).** Read the count first and write it into the result log:
+   ```
+   curl -s "$WORKER_URL/admin/accounts" -H "authorization: Bearer $ADMIN" | jq '.[] | select(.id == 1) | .smartAddToday'
+   ```
+   Then do one smart add on each device, and read again:
    ```
    curl -s "$WORKER_URL/admin/accounts" -H "authorization: Bearer $ADMIN" | jq '.[] | select(.id == 1)'
    ```
-   Expect `smartAddToday` to have risen by one per device and `lastSeenAt` to be a minute ago. In tolerant mode a tokenless smart add is still served but is not counted (`worker/src/index.js` takes a slot only for an authenticated device), so a count that did not rise means a device is not sending its token: stop. This also exercises the smart-add counter's `RETURNING` upsert on real D1.
+   Expect `smartAddToday` to have risen by exactly one per device since the first read (the count is per UTC day: do both reads and the smart adds on the same UTC day) and `lastSeenAt` to be a minute ago. In tolerant mode a tokenless smart add is still served but is not counted (`worker/src/index.js` takes a slot only for an authenticated device), so a count that did not rise means a device is not sending its token: stop. This also exercises the smart-add counter's `RETURNING` upsert on real D1.
 
 ### Phase 2b: upgrade account 1 (before minting any other account-1 token)
 
@@ -295,7 +299,12 @@ Cloudflare's configuration reference, section "Source of truth" (https://develop
 ### Rollback
 
 - **Commands.** List versions with `(cd worker && npx wrangler versions list)` and roll back with `(cd worker && npx wrangler rollback <VERSION_ID> --message "<why>")` (Cloudflare, `wrangler rollback` reference, fetched 2026-11-12). A rollback creates a new deployment of that version; it does not change connected resources such as D1 (Cloudflare, Rollbacks page). Whether a rollback restores that version's `[vars]` is **unverified** (the pages do not say). To turn the flag off, roll forward instead: a commit that deletes the `[vars]` block, a version bump, `npx wrangler deploy`, and the `/feed?url=x` probe expecting 400.
-- **Worker back to the pre-V7 version:** safe only before the first invite is used. The old `authenticateDevice` serves `data WHERE id = 1` to any token. After that, roll forward.
+- **Worker back to the pre-V7 version:** safe only while no account other than 1 has device rows. The pre-V7 `authenticateDevice` accepts any token in `devices` and the pre-V7 `data.js` always serves `data WHERE id = 1` (`git show dcc17ac:worker/src/auth.js`, `…:worker/src/data.js`), so any other account's device would read and write Alex's planner. The Phase-1 check account is deleted in its cleanup (step 4), so the rollback stays safe after the checks. Check before rolling back:
+  ```
+  (cd worker && npx wrangler d1 execute plaenicke --remote \
+    --command "SELECT COUNT(*) AS n FROM devices WHERE account_id != 1")
+  ```
+  `n` must be 0. Otherwise disable or delete those accounts first (both delete their device rows), or roll forward.
 - **After Phase 2, a Worker rollback needs the client reverted too.** The V7 client sends `authorization` on every `/feed` request (`js/feeds.js`), and the pre-V7 Worker's feed preflight allows only `content-type, cache-control` (`git show dcc17ac:worker/src/feed.js`, the pre-V7 `main`), so calendars stop refreshing. Revert the merge on `main` (`git revert -m 1 <merge commit>`, push), then roll the Worker back.
 - **After Phase 3, a client rollback needs the flag off first.** The pre-V7 client sends no bearer on smart add or `/feed`, so with the flag on both answer 401. Roll the flag forward to off (above), then revert the client.
 - **D1 restore order: roll the Worker back first, then restore D1.** The V7 Worker cannot run against the pre-migration schema (no `accounts` table); the pre-V7 Worker can run against the migrated one (spec § 9 tests the old `data.js` queries on it). Then: `(cd worker && npx wrangler d1 time-travel restore plaenicke --bookmark=<bookmark from Phase 1 step 3>)`. A restore discards every write after the bookmark, syncs included.
@@ -368,7 +377,7 @@ Things the tests cannot reach: WebKit, iOS Mail, Keychain, the keyboard and real
 
 | # | Check | How | Expect | Result (date, pass/fail, note) |
 |---|---|---|---|---|
-| 1 | Safari-tab warning | Open the invite link in a Safari tab (not the Home Screen app) | Sign-up says "You're in Safari, not the plaenicke app — open the app from your Home Screen and paste the code there." | |
+| 1 | Safari-tab warning | Open `https://ajaenicke518.github.io/plaenicke/#invite=<code>` in a Safari tab, not the Home Screen app (`js/config.js` `APP_URL` plus the `#invite=` fragment `js/fragment.js` reads) | Sign-up says "You're in Safari, not the plaenicke app — open the app from your Home Screen and paste the code there." | |
 | 2 | Code fields | Type into the invite, recovery and upgrade-code fields | No autocorrect, no capitalisation, no suggestions | |
 | 3 | Keychain autofill | Sign in with a Keychain-saved password via the QuickType bar | Submit becomes enabled without typing a character | |
 | 4 | Form in view | Open a form from a link while the keyboard is up | The form scrolls into view inside the keyboard-fitted Settings panel | |

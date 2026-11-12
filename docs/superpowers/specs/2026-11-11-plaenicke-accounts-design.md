@@ -263,14 +263,14 @@ Typed `{error}` per failure, each mapped to a specific client message; unwrap or
 
 ## 10. Release (Alex-run; none of it done by the autonomous run)
 
-`docs/admin.md` § Release checklist is the runnable version (exact commands, expected output, stop conditions); this section states the order and why. Revised 2026-11-12 after the end-of-branch review sweep (W1–W4).
+`docs/admin.md` § Release checklist is the runnable version and **its order is authoritative** (exact commands, expected output, stop conditions); this section summarises that order and why. Where the two ever differ, follow `docs/admin.md`. Revised 2026-11-12 after the end-of-branch review sweep (W1–W4).
 
 **Phase 0 — prepare:** branch `accounts` clean, `npm test` green (`# fail 0`, `# cancelled 0`), `worker/src/version.js` = `worker-2026-11-12.1`, `worker/wrangler.toml` has no `[vars]`.
 
 **Phase 1 — tolerant Worker** (`REQUIRE_SESSION` unset):
 1. Close plaenicke on both devices.
-2. D1 export to `~/plaenicke-backups/` and a Time Travel bookmark, immediately before the migration.
-3. `AT_REST_KEY` via `wrangler secret put` (piped), second copy in the password manager.
+2. `AT_REST_KEY` via `wrangler secret put` (piped), second copy in the password manager.
+3. D1 export to `~/plaenicke-backups/` and a Time Travel bookmark, immediately before the migration.
 4. `d1 migrations list` (expect only `0002_accounts.sql`), then `d1 migrations apply --remote`.
 5. `wrangler deploy` from `worker/`; `GET /version` must answer `worker-2026-11-12.1`.
 6. Free probes: tokenless `/feed?url=x` with the app's Origin → 400 `bad_url` (tolerant); `POST /auth/prelogin` unknown email → 404 (key set and of record).
@@ -280,10 +280,10 @@ Typed `{error}` per failure, each mapped to a specific client message; unwrap or
 
 **Phase 2b — upgrade account 1:** audit account 1's device rows; `POST /admin/upgrade-code {accountId:1}` (single use, 24 h); *Create your login* on one device with that code (§ 6.7); save the recovery link; the other device still syncs. Only after this may any other account-1 token be minted (sweep W1-C1: before the code requirement, any account-1 bearer could set account 1's login).
 
-**Phase 3 — require sessions:** a commit on `main` adds `[vars] REQUIRE_SESSION = "true"` to `worker/wrangler.toml` and bumps `version.js`; deploy; `/feed?url=x` → 401; mint the smoke token, `npm run smoke:worker`, revoke the token. The flag is never set in the dashboard or with `--var`: `wrangler deploy` overwrites dashboard variables unless `keep_vars = true` (Cloudflare configuration reference, "Source of truth", fetched 2026-11-12). Then the iPhone device checks (`docs/admin.md`), then invites. Tester instructions: install to the home screen first, paste the invite in the app, save the recovery link; lost password **and** recovery link = data gone; don't sign in on shared computers.
+**Phase 3 — require sessions:** mint the smoke token (first step, now that account 1 is upgraded); a commit on `main` adds `[vars] REQUIRE_SESSION = "true"` to `worker/wrangler.toml` and bumps `version.js`; deploy; `/feed?url=x` → 401; `npm run smoke:worker`; revoke the token. The flag is never set in the dashboard or with `--var`: `wrangler deploy` overwrites dashboard variables unless `keep_vars = true` (Cloudflare configuration reference, "Source of truth", fetched 2026-11-12). Then the iPhone device checks (`docs/admin.md`), then invites. Tester instructions: install to the home screen first, paste the invite in the app, save the recovery link; lost password **and** recovery link = data gone; don't sign in on shared computers.
 
 **Rollback:**
-- The Worker may go back to the pre-V7 version only **before the first invite is used** (the old `authenticateDevice` serves `data WHERE id = 1` to any token). After that, roll forward.
+- The Worker may go back to the pre-V7 version only **while no account other than 1 has device rows** (the old `authenticateDevice` accepts any token in `devices` and the old `data.js` serves `data WHERE id = 1`). The Phase-1 check account is deleted in its cleanup, so the checks do not end that window; the first tester's sign-up does. `docs/admin.md` gives the `SELECT COUNT(*) … WHERE account_id != 1` check. Otherwise roll forward.
 - After Phase 2, a Worker rollback needs the client reverted first: the V7 client sends `authorization` on `/feed` and the pre-V7 feed preflight does not allow it.
 - After Phase 3, a client rollback needs the flag off first (a commit removing `[vars]`, deployed): the pre-V7 client sends no bearer.
 - D1 restore: roll the Worker back first, then Time Travel restore (the V7 Worker cannot run on the pre-migration schema; the old `data.js` queries run on the migrated one, § 9).
