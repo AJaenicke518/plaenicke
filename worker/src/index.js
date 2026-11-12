@@ -162,12 +162,13 @@ export default {
     // and enforces its own origin allowlist, so the shared preflight below
     // must not intercept it — dispatch here first, unconditionally.
     if (pathname === '/feed') {
-      const required = requireSession(env);
-      if (required === null) return badConfig();
+      // requireSession's null (a malformed flag) is passed through, not
+      // answered here: feed.js answers OPTIONS, a foreign Origin and a wrong
+      // method first, and only the real GET is 500 bad_config.
       return handleFeed(request, {
         fetchImpl: fetch,
         cache: caches.default,
-        requireSession: required,
+        requireSession: requireSession(env),
         authenticate: (req) => authenticateDevice(req, env, nowISO(env)),
       });
     }

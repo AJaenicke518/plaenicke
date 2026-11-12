@@ -178,6 +178,12 @@ export async function handleFeed(request, {
   if (request.method === 'OPTIONS') return new Response(null, { headers: cors() });
   if (request.method !== 'GET') return errorResponse('method_not_allowed', 405);
 
+  // A REQUIRE_SESSION that is neither true nor false (index.js passes null):
+  // zero fallback — the real request is refused, before the session check,
+  // the cache and any upstream fetch. After the checks above, so a preflight
+  // and the Origin allowlist answer as they always do.
+  if (requireSession === null) return errorResponse('bad_config', 500);
+
   // After Origin/OPTIONS/method, BEFORE cache.match: an unauthenticated caller
   // must not be able to read cached feeds or trigger fetches. /feed is
   // dispatched outside index.js's try/catch, so a throw is handled here.

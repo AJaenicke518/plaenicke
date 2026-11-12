@@ -752,3 +752,33 @@ test('REQUIRE_SESSION: any other value is 500 bad_config on smart add and /feed 
     assert.deepEqual(await usageRows(env), []);
   }
 });
+
+// Sweep W2 (carried from W1's re-review): the bad_config check ran in the
+// router before feed.js's own checks, so a misconfigured flag answered 500 to
+// a preflight and to a foreign Origin. OPTIONS, the Origin allowlist and the
+// method check answer exactly as they do with a valid flag; only the real GET
+// is 500 bad_config — still before the cache and before any upstream fetch.
+test('REQUIRE_SESSION garbage: /feed OPTIONS, Origin and method checks are unaffected; only the GET is 500 bad_config', async () => {
+  const url = 'https://worker.example/feed?url=' + encodeURIComponent('https://cal.example/a.ics');
+  for (const flag of ['1', 'TRUE', '']) {
+    const { env, token } = await smartEnv({ REQUIRE_SESSION: flag });
+    await withCache(async (spy) => {
+      const pre = await worker.fetch(new Request(url, { method: 'OPTIONS', headers: { origin: ALLOWED_ORIGIN } }), env);
+      assert.equal(pre.status, 200, `OPTIONS ${JSON.stringify(flag)}`);
+      assert.equal(pre.headers.get('Access-Control-Allow-Methods'), 'GET, OPTIONS');
+      const foreign = await worker.fetch(new Request(url, { headers: { origin: 'https://evil.example' } }), env);
+      assert.equal(foreign.status, 403);
+      assert.equal((await foreign.json()).error, 'forbidden');
+      const post = await worker.fetch(new Request(url, { method: 'POST', headers: { origin: ALLOWED_ORIGIN } }), env);
+      assert.equal(post.status, 405);
+      assert.equal((await post.json()).error, 'method_not_allowed');
+      for (const t of [null, token]) {
+        const res = await worker.fetch(feedReq(t), env);
+        assert.equal(res.status, 500);
+        assert.equal((await res.json()).error, 'bad_config');
+        assert.equal(res.headers.get('Access-Control-Allow-Origin'), ALLOWED_ORIGIN);
+      }
+      assert.equal(spy.matches, 0, 'never reaches the cache');
+    });
+  }
+});
