@@ -35,7 +35,9 @@ import { envWith, invite } from '../worker/tests/account-helpers.js';
 import { FakeLocalStorage } from './fake-localstorage.js';
 import { makeFakeDocument, makeFakeWindow, allText, findAll, fire } from './fake-dom.js';
 import * as account from '../js/account.js';
-import { initLinkUI, renderSyncStatus, signOutLocal, adoptionBlocker, ACCOUNT_COPY, SYNC_STATUS_ID } from '../js/linkui.js';
+import {
+  initLinkUI, renderSyncStatus, signOutLocal, adoptionBlocker, accountModeFromStorage, ACCOUNT_COPY, SYNC_STATUS_ID,
+} from '../js/linkui.js';
 import { initAccountUI, refreshAccount } from '../js/accountui.js';
 import { syncOnce, localState } from '../js/sync.js';
 import { getLink, unlink } from '../js/auth.js';
@@ -633,4 +635,146 @@ test('e2e 6: a sync in flight across a sign-out and a sign-in to another account
   const xAfter = await w.row(upX.accountId);
   assert.equal(xAfter.version, xRow.version, 'nothing was pushed to X with the old credential');
   assert.equal(loadLocalOwner(), upY.accountId);
+});
+
+// The real login form on `dev`, submitted with these credentials. Resolves
+// with the form's host once its error line or the home view has settled.
+function elById(root, id) {
+  if (root.id === id) return root;
+  for (const c of root.children) { const f = elById(c, id); if (f) return f; }
+  return null;
+}
+async function loginViaForm(dev, w, email, password) {
+  const host = dev.doc.createElement('div');
+  dev.doc.body.appendChild(host);
+  initAccountUI({ host, api: boundApi(w), linkui: () => dev.ui, setTimeoutImpl: () => {} });
+  fire(elById(host, 'acct-login'), 'click');
+  for (const [id, v] of [['acct-email', email], ['acct-password', password]]) {
+    const el = elById(host, id);
+    el.value = v;
+    fire(el, 'input');
+  }
+  const form = elById(host, 'acct-form');
+  await track(Promise.all((form._listeners.submit || []).map((fn) => fn({ target: form, preventDefault() {} }))));
+  return host;
+}
+
+// Sweep W2-C1 (reproduced first by the data-integrity review, scen/s1b.mjs):
+// a legacy account-1 device, linked from the paste field and never
+// upgraded, recorded no owner. Unlinked, it then let the next account to
+// sign in adopt Alex's planner — the feed capability URL included.
+test('e2e 7: an unlinked legacy account-1 device holding data cannot be signed in to another account', async () => {
+  const w = world();
+  const L = device('L');
+  const T = device('T');
+  const prevWindow = globalThis.window;
+  globalThis.window = makeFakeWindow();
+  try {
+    const feedUrl = 'https://p01-calendars.icloud.com/SECRET';
+    const tokL = await mintDevice(w.env, 1, 'L', T0);
+    await use(L);
+    mountLinkUI(L, w);
+    addLocal(newItem('Alex private appointment'));
+    saveFeeds([{ id: 'f1', url: feedUrl, name: 'Alex', color: 'var(--feed-palette-1)', hidden: false, updatedAt: T0 }]);
+    await pasteLink(L, tokL);
+    assert.equal(loadSyncState().adoptionPending, false, 'fixture check: L bootstrapped account 1');
+    // App load on a linked device asks GET /account.
+    assert.equal(await refreshAccount({ api: boundApi(w) }), 'ok');
+    assert.equal(loadLocalOwner(), 1, 'the planner here is recorded as account 1\'s');
+    assert.equal(accountModeFromStorage(), 'legacy', 'and the device keeps the legacy UI');
+    unlink(); // linkui's legacy Unlink (doUnlink) is unlink() plus a render
+
+    await invite(w.env, 'INVITE-T');
+    await use(T);
+    mountLinkUI(T, w);
+    const upT = await account.signUp({ invite: 'INVITE-T', email: OTHER_EMAIL, password: OTHER_PW, deviceName: 'T', ...w.api });
+    assert.equal(await linkAndAdopt(T, upT.code, upT.accountId), 'linked');
+    const rowBefore = await w.row(upT.accountId);
+    const devicesBefore = await w.deviceCount(upT.accountId);
+
+    await use(L);
+    const itemsL = loadItems();
+    const host = await loginViaForm(L, w, OTHER_EMAIL, OTHER_PW);
+    await pollUntil(() => (elById(host, 'acct-error') || {}).textContent, 'the login error');
+    assert.equal(elById(host, 'acct-error').textContent, ACCOUNT_COPY.other_account_data);
+    assert.equal(getLink(), null, 'L was not linked');
+    assert.equal(loadLocalOwner(), 1);
+    assert.deepEqual(loadItems(), itemsL);
+    const rowAfter = await w.row(upT.accountId);
+    assert.equal(rowAfter.version, rowBefore.version, 'the tester\'s account is unchanged');
+    assert.equal(rowAfter.blob, rowBefore.blob);
+    assert.equal(await w.deviceCount(upT.accountId), devicesBefore, 'the session the login minted was revoked');
+  } finally {
+    globalThis.window = prevWindow;
+  }
+});
+
+// The other half of W2-C1: recording owner 1 on a legacy device must not
+// take away its legacy re-link (spec § 6.11: legacy devices keep today's UI
+// until upgraded). Unlinked, it still offers the paste field; a code for
+// account 1 links — checked against GET /account before anything is
+// previewed or adopted — and a code for any other account is refused.
+test('e2e 8: an unlinked legacy-owned device re-links with an account-1 code, and refuses another account\'s code', async () => {
+  const w = world();
+  const A = device('A');
+  const L = device('L');
+  const T = device('T');
+
+  // A: account 1's first device (bootstrap), with an item on the server.
+  const tokA = await mintDevice(w.env, 1, 'A', T0);
+  await use(A);
+  mountLinkUI(A, w);
+  const a1 = newItem('pay rent');
+  addLocal(a1);
+  await pasteLink(A, tokA);
+  const encKey1 = getLink().encKey;
+
+  // T: a tester account with data, and a code for it.
+  await invite(w.env, 'INVITE-T');
+  await use(T);
+  mountLinkUI(T, w);
+  const upT = await account.signUp({ invite: 'INVITE-T', email: OTHER_EMAIL, password: OTHER_PW, deviceName: 'T', ...w.api });
+  assert.equal(await linkAndAdopt(T, upT.code, upT.accountId), 'linked');
+  addLocal(newItem('tess thing'));
+  assert.equal((await sync(T, w)).status, 'ok');
+  const codeForT = composeForNewDevice(await mintDevice(w.env, upT.accountId, 'L', T0), getLink());
+  const tRow = await w.row(upT.accountId);
+
+  // L: a legacy account-1 device, checked (owner 1), then unlinked.
+  await use(A);
+  const codeL1 = composeForNewDevice(await mintDevice(w.env, 1, 'L', T0), getLink());
+  const codeL2 = composeForNewDevice(await mintDevice(w.env, 1, 'L2', T0), getLink());
+  await use(L);
+  mountLinkUI(L, w);
+  const l1 = newItem('water plants');
+  addLocal(l1);
+  await pasteLink(L, codeL1);
+  await clickMerge(L);
+  assert.equal(await refreshAccount({ api: boundApi(w) }), 'ok');
+  assert.equal(loadLocalOwner(), 1);
+  unlink();
+  L.doc = makeFakeDocument();
+  globalThis.document = L.doc;
+  mountLinkUI(L, w);
+  assert.ok(findAll(L.host, 'INPUT').some((i) => i.getAttribute('aria-label') === 'Link code'),
+    'the legacy paste field is still offered');
+
+  // Another account's code: refused, nothing linked, that account untouched.
+  await pasteLink(L, codeForT);
+  assert.equal(getLink(), null, 'not linked to the tester\'s account');
+  assert.ok(allText(L.host).includes(ACCOUNT_COPY.other_account_data), allText(L.host));
+  assert.equal(loadLocalOwner(), 1);
+  assert.deepEqual(ids(loadItems()), ids([a1, l1]));
+  const tAfter = await w.row(upT.accountId);
+  assert.equal(tAfter.version, tRow.version);
+  assert.equal(tAfter.blob, tRow.blob);
+
+  // An account-1 code: links and adopts as today.
+  await pasteLink(L, codeL2);
+  assert.ok(getLink(), 'linked');
+  assert.deepEqual(getLink().encKey, encKey1);
+  if (findButton(L.host, 'Merge')) await clickMerge(L);
+  await pollUntil(() => loadSyncState().adoptionPending === false, 'L to adopt');
+  assert.equal(accountModeFromStorage(), 'legacy');
+  assert.deepEqual(ids((await serverState(w, 1, encKey1)).items), ids([a1, l1]));
 });

@@ -637,3 +637,27 @@ test('saveLocalOwner throws TypeError for anything but a positive safe integer a
   }
   assert.equal(localStorage.getItem(LOCAL_OWNER_KEY), null);
 });
+
+// --- plaenicke.legacyOwner (sweep W2-C1) ---
+import * as storageNs from '../js/storage.js';
+
+test('W2-C1: legacyOwner round trips, clears, and reads a malformed value as null', () => {
+  installFakeLocalStorage();
+  assert.equal(storageNs.LEGACY_OWNER_KEY, 'plaenicke.legacyOwner');
+  assert.equal(storageNs.loadLegacyOwner(), null);
+  storageNs.saveLegacyOwner(1);
+  assert.equal(storageNs.loadLegacyOwner(), 1);
+  storageNs.clearLegacyOwner();
+  assert.equal(storageNs.loadLegacyOwner(), null);
+  for (const bad of ['abc', '0', '-3', '1.5', '', 'null']) {
+    localStorage.setItem(storageNs.LEGACY_OWNER_KEY, bad);
+    assert.equal(storageNs.loadLegacyOwner(), null, `stored ${JSON.stringify(bad)}`);
+  }
+  assert.throws(() => storageNs.saveLegacyOwner(0), TypeError);
+});
+
+test('W2-C1: a quota failure on legacyOwner is a QuotaError', () => {
+  installFakeLocalStorage();
+  localStorage.setItem = () => { const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; };
+  assert.throws(() => storageNs.saveLegacyOwner(1), QuotaError);
+});

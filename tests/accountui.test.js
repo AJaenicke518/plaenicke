@@ -14,11 +14,11 @@ import {
   BANNER_ID, BANNER_TEXT, REVOKE_FAILED_TEXT,
 } from '../js/accountui.js';
 import { AccountError, recoveryLink, mailtoHref } from '../js/account.js';
-import { ACCOUNT_COPY, initLinkUI } from '../js/linkui.js';
+import { ACCOUNT_COPY, initLinkUI, accountModeFromStorage } from '../js/linkui.js';
 import { checkPassword } from '../js/password-policy.js';
 import { bytesToBase64url, generateEncKey, composeLinkCode, parseLinkCode } from '../js/crypto.js';
 import {
-  saveAuth, loadAuth, saveItems, saveLocalOwner, loadLocalOwner,
+  saveAuth, loadAuth, saveItems, saveLocalOwner, loadLocalOwner, loadLegacyOwner, saveLegacyOwner,
 } from '../js/storage.js';
 
 // --- harness ---------------------------------------------------------------
@@ -375,14 +375,79 @@ test('accountui: on a legacy device, getAccount with an email records localOwner
   assert.equal(banner.hidden, true);
 });
 
-test('accountui: on a legacy device, getAccount with email null writes nothing and shows no banner', async () => {
-  const { banner } = setup();
+// Sweep W2-C1 (was: "email null writes nothing"). An unlinked legacy device
+// with no owner tag let its account-1 planner — feed URLs included — be
+// adopted into the next account to sign in on it (scen/s1b.mjs). Every
+// validated answer now records the owner; the legacy-vs-account mode comes
+// from plaenicke.legacyOwner, not from the owner tag's presence.
+test('accountui: on a legacy device, getAccount with email null records owner 1 and keeps the legacy UI, with no banner', async () => {
+  const { host, banner } = setup();
   saveAuth(newCode());
   initAccountBanner({ onOpen: () => {} });
   const { api } = fakeApi({ getAccount: async () => ({ email: null, accountId: 1, recoveryConfirmed: false }) });
-  await refreshAccount({ api });
-  assert.equal(loadLocalOwner(), null);
+  assert.equal(await refreshAccount({ api }), 'ok');
+  assert.equal(loadLocalOwner(), 1, 'the planner here is account 1\'s');
+  assert.equal(loadLegacyOwner(), 1, 'and account 1 has no login yet');
+  assert.equal(accountModeFromStorage(), 'legacy');
   assert.equal(banner.hidden, true, 'a legacy account has no recovery link to save yet');
+  mount(host, { api });
+  assert.equal(byId(host, 'acct-upgrade').textContent, 'Create your login');
+  assert.equal(byId(host, 'acct-signout'), null, 'still linkui\'s Unlink, not Sign out');
+});
+
+test('W2-C1: an email answer for the legacy owner clears the legacy marker (another device upgraded it)', async () => {
+  setup();
+  saveAuth(newCode());
+  saveLocalOwner(1);
+  saveLegacyOwner(1);
+  const { api } = fakeApi({ getAccount: async () => ({ email: 'a@x.de', accountId: 1, recoveryConfirmed: true }) });
+  assert.equal(await refreshAccount({ api }), 'ok');
+  assert.equal(loadLegacyOwner(), null);
+  assert.equal(accountModeFromStorage(), 'account');
+});
+
+// Sweep W2 observation (TEST C7): the owner tag is never overwritten by an
+// answer naming a different account — that would hand this device's planner
+// to it. The mismatch is a failed check, said, not a silent write.
+test('W2-C1: an existing owner and an answer naming a different account — nothing overwritten, reported failed', async () => {
+  const { banner } = setup();
+  saveAuth(newCode());
+  saveLocalOwner(5);
+  initAccountBanner({ onOpen: () => {} });
+  const { api } = fakeApi({ getAccount: async () => ({ email: null, accountId: 1, recoveryConfirmed: false }) });
+  const errors = [];
+  const origErr = console.error;
+  console.error = (...a) => errors.push(a.join(' '));
+  try {
+    assert.equal(await refreshAccount({ api }), 'failed');
+  } finally {
+    console.error = origErr;
+  }
+  assert.equal(loadLocalOwner(), 5, 'not overwritten');
+  assert.equal(loadLegacyOwner(), null, 'nothing recorded about the other account');
+  assert.equal(banner.hidden, true);
+  assert.ok(errors.some((e) => e.includes('owner_mismatch')), 'logged by name');
+});
+
+test('W2-C1: Create your login turns a legacy device into an account device', async () => {
+  const { host } = setup();
+  saveAuth(newCode());
+  const { api } = fakeApi({
+    getAccount: async () => ({ accountId: 1, email: null, recoveryConfirmed: false }),
+    upgrade: async () => ({ recoveryCode: 'UPGRADERECOVERY1234567', accountId: 1 }),
+  });
+  await refreshAccount({ api });
+  assert.equal(accountModeFromStorage(), 'legacy', 'fixture check');
+  mount(host, { api });
+  click(byId(host, 'acct-upgrade'));
+  input(host, 'acct-email', 'alex@example.com');
+  input(host, 'acct-password', GOOD_PW);
+  input(host, 'acct-password2', GOOD_PW);
+  submit(host);
+  assert.ok(await until(() => byId(host, 'acct-recovery-screen')));
+  assert.equal(loadLocalOwner(), 1);
+  assert.equal(loadLegacyOwner(), null);
+  assert.equal(accountModeFromStorage(), 'account');
 });
 
 test('accountui: an answer for a session that changed meanwhile is dropped', async () => {

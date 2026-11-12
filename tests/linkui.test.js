@@ -24,6 +24,7 @@ import { fetchWithTimeout, FETCH_TIMEOUT_MS } from '../js/fetchtimeout.js';
 // missing export fails the tests that use it rather than the whole file.
 import * as linkuiNs from '../js/linkui.js';
 import { saveLocalOwner, loadLocalOwner, clearLocalOwner, loadAuth, AUTH_KEY } from '../js/storage.js';
+import * as storageNs from '../js/storage.js';
 
 // --- fake DOM: tests/fake-dom.js ---------------------------------------------
 //
@@ -3095,4 +3096,109 @@ test('W2-C2: signOutBlocked() is true while an ordinary sync holds the turn, and
   assert.equal(linkuiNs.signOutBlocked(), false);
   assert.equal(linkuiNs.signOutLocal(), 'signed_out');
   assert.equal(loadAuth(), null);
+});
+
+// --- sweep W2-C1 / W2-I3: owner tags and the legacy mode --------------------
+
+const pasteInto = (host, code, buttonText = 'Link this device') => {
+  const input = findAll(host, 'INPUT').find((i) => i.getAttribute('aria-label') === 'Link code');
+  assert.ok(input, 'the paste field is rendered');
+  input.value = code;
+  findButton(host, buttonText).click();
+};
+
+test('W2-C1: a legacy-owned unlinked device keeps the paste field; an account-owned one does not', () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  const calls = [];
+  saveLocalOwner(1);
+  storageNs.saveLegacyOwner(1);
+  const legacy = mountPanel(doc, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls) });
+  assert.ok(findAll(legacy.host, 'INPUT').some((i) => i.getAttribute('aria-label') === 'Link code'));
+  storageNs.clearLegacyOwner();
+  const owned = mountPanel(installDom(), { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls) });
+  assert.equal(findAll(owned.host, 'INPUT').some((i) => i.getAttribute('aria-label') === 'Link code'), false);
+  assert.deepEqual(calls, []);
+});
+
+test('W2-C1: a corrupt stored code on a legacy-owned device keeps the legacy copy and the re-link field', () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  saveLocalOwner(1);
+  storageNs.saveLegacyOwner(1);
+  saveAuth('not-a-valid-code');
+  const calls = [];
+  const { host } = mountPanel(doc, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls) });
+  const status = findAll(host, 'DIV').find((d) => d.id === SYNC_STATUS_ID);
+  assert.ok(status.textContent.includes('Re-link with the 86-character code'), `status line: ${status.textContent}`);
+  assert.ok(findButton(host, 'Re-link this device'));
+});
+
+test('W2-C1: a pasted code on a legacy-owned device is unlinked again when the account check cannot answer', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  saveLocalOwner(1);
+  storageNs.saveLegacyOwner(1);
+  saveItems([{ id: 'mine', title: 'mine', date: '2026-08-05', time: null, updatedAt: '2026-08-01T00:00:00.000Z' }]);
+  const calls = [];
+  const readFetchImpl = async (url, opts) => {
+    calls.push({ url: String(url), method: (opts && opts.method) || 'GET' });
+    throw new TypeError('Failed to fetch');
+  };
+  const { host, ui } = mountPanel(doc, { fetchImpl: noNetwork([]), readFetchImpl });
+  pasteInto(host, freshLinkCode().code);
+  await ui.settled();
+  assert.equal(loadAuth(), null, 'not linked: the code\'s account is unknown');
+  assert.deepEqual(calls.map((c) => c.url), ['https://w.example/account'], 'only the account check — no preview');
+  assert.equal(loadLocalOwner(), 1);
+  assert.ok(allText(host).includes('Could not check which account that code belongs to'), allText(host));
+});
+
+test('W2-C1: a pasted code on a legacy-owned device whose account check names another account is refused', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  saveLocalOwner(1);
+  storageNs.saveLegacyOwner(1);
+  const calls = [];
+  const readFetchImpl = async (url, opts) => {
+    calls.push({ url: String(url), method: (opts && opts.method) || 'GET' });
+    return { ok: true, status: 200, json: async () => ({ accountId: 77, email: 'x@y.de', recoveryConfirmed: true }) };
+  };
+  const { host, ui } = mountPanel(doc, { fetchImpl: noNetwork([]), readFetchImpl });
+  pasteInto(host, freshLinkCode().code);
+  await ui.settled();
+  assert.equal(loadAuth(), null);
+  assert.deepEqual(calls.map((c) => c.url), ['https://w.example/account']);
+  assert.equal(loadLocalOwner(), 1, 'the owner is not handed to the other account');
+  assert.ok(allText(host).includes(linkuiNs.ACCOUNT_COPY.other_account_data));
+});
+
+test('W2-C1: a sign-in clears the legacy marker for the account it links (that account has a login)', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  saveLocalOwner(1);
+  storageNs.saveLegacyOwner(1);
+  const server = emptyAccountServer();
+  const { ui } = mountPanel(doc, { fetchImpl: server.fetchImpl, readFetchImpl: server.fetchImpl });
+  assert.equal(await ui.linkAndAdopt(freshLinkCode().code, { accountId: 1 }), 'linked');
+  assert.equal(storageNs.loadLegacyOwner(), null);
+  assert.equal(linkuiNs.accountModeFromStorage(), 'account');
+});
+
+// W2-I3: the owner used to be written AFTER linkWithCode. A storage failure
+// on that write left a LINKED device with no owner — D16 reopened.
+test('W2-I3: a sign-in whose owner write fails leaves the device unlinked, never linked without an owner', async () => {
+  const ls = installFakeLocalStorage();
+  const doc = installDom();
+  const real = ls.setItem.bind(ls);
+  ls.setItem = (k, v) => {
+    if (k === storageNs.LOCAL_OWNER_KEY) { const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; }
+    return real(k, v);
+  };
+  const calls = [];
+  const { ui } = mountPanel(doc, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls) });
+  await assert.rejects(ui.linkAndAdopt(freshLinkCode().code, { accountId: 7 }), (e) => e.name === 'QuotaError');
+  assert.equal(loadAuth(), null, 'not linked');
+  assert.equal(isLinked(), false);
+  assert.deepEqual(calls, [], 'nothing reached the network');
 });

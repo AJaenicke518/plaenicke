@@ -474,3 +474,39 @@ export function saveLocalOwner(id) {
 }
 
 export function clearLocalOwner() { localStorage.removeItem(LOCAL_OWNER_KEY); }
+
+// --- legacy owner (sweep W2-C1) ---
+// plaenicke.legacyOwner — DEVICE-LOCAL, NEVER SYNCED. The account id that the
+// last validated GET /account said has NO LOGIN yet (email null: Alex's
+// account 1 before its upgrade). It carries the UI mode only; plaenicke.
+// localOwner carries the D16 guard. They used to be one key: a legacy device
+// recorded no owner so it would keep the legacy UI, and an unlinked legacy
+// device then let the next account to sign in adopt its planner (sweep
+// W2-C1). Now every validated GET /account records the owner, and the
+// device is a LEGACY device while localOwner is unset or equals this key —
+// an account device otherwise. Written by accountui.js from GET /account;
+// cleared there when the account is seen with a login (an email answer, a
+// completed upgrade) and by linkui.js when a sign-in links the device (only
+// an account with a login can be signed in to). A stored value that is not a
+// positive safe integer reads as null; the writer throws instead of storing
+// one.
+export const LEGACY_OWNER_KEY = 'plaenicke.legacyOwner';
+
+export function loadLegacyOwner() {
+  const v = localStorage.getItem(LEGACY_OWNER_KEY);
+  if (typeof v !== 'string' || !/^[1-9][0-9]*$/.test(v)) return null;
+  const n = Number(v);
+  return isOwnerId(n) ? n : null;
+}
+
+export function saveLegacyOwner(id) {
+  if (!isOwnerId(id)) throw new TypeError('legacyOwner must be a positive safe integer');
+  try {
+    localStorage.setItem(LEGACY_OWNER_KEY, String(id));
+  } catch (err) {
+    if (err && err.name === 'QuotaExceededError') throw new QuotaError('Legacy owner exceeded storage quota');
+    throw err;
+  }
+}
+
+export function clearLegacyOwner() { localStorage.removeItem(LEGACY_OWNER_KEY); }

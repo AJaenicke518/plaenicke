@@ -7,8 +7,10 @@
 // run PBKDF2 or reach a server; the default is the real module. Every link goes
 // through linkui's linkAndAdopt (D15) — this file never calls linkWithCode or
 // unlink() itself — and every sign-out ends in linkui's signOutLocal() (D27,
-// plan review I8). localOwner is written only after an upgrade and from a
-// validated GET /account; it is NEVER cleared here (D16).
+// plan review I8). localOwner is written after an upgrade and from every
+// validated GET /account (sweep W2-C1: a legacy answer included); it is
+// NEVER cleared here (D16). plaenicke.legacyOwner — whether that owner has a
+// login yet — is what tells the legacy UI from the account UI.
 //
 // MOUNTED PER OPEN, like linkui: settings.js rebuilds its panel on every open
 // and empties it on close, so initAccountUI runs against a fresh element each
@@ -27,7 +29,9 @@ import {
   ACCOUNT_COPY, adoptionBlocker, accountModeFromStorage, signOutLocal, signOutBlocked,
 } from './linkui.js';
 import { getLink } from './auth.js';
-import { loadLocalOwner, saveLocalOwner } from './storage.js';
+import {
+  loadLocalOwner, saveLocalOwner, loadLegacyOwner, saveLegacyOwner, clearLegacyOwner,
+} from './storage.js';
 import { checkPassword } from './password-policy.js';
 import { parseLinkCode } from './crypto.js';
 
@@ -149,10 +153,29 @@ async function fetchAccount(api) {
   if (!now || now.authToken !== link.authToken) return { status: 'failed', err: new AccountError('unauthorized') };
   const info = validAccount(body);
   if (!info) return { status: 'failed', err: new AccountError('server') };
-  // Alex's second phone after the upgrade (§ 6.7 step 4): linked with no
-  // owner, and the account now has a login. A legacy account (email null)
-  // records nothing — there is no login to be the owner of yet.
-  if (info.email !== null && loadLocalOwner() === null) saveLocalOwner(info.accountId);
+  // THE OWNER IS RECORDED FROM EVERY VALIDATED ANSWER (sweep W2-C1) — a
+  // legacy account (email null) included. A legacy device used to record
+  // nothing here, so once unlinked it held account 1's planner under no
+  // owner, and the next account to sign in on it adopted that planner, feed
+  // URLs included (reproduced: scen/s1b.mjs).
+  //
+  // An owner already recorded is NEVER overwritten by an answer naming a
+  // different account: that would hand this device's planner to it. Linking
+  // records the owner first (linkui's doLink), so a mismatch means something
+  // upstream went wrong — reported by name, nothing written, nothing shown.
+  const owner = loadLocalOwner();
+  if (owner !== null && owner !== info.accountId) {
+    console.error('plaenicke: account check failed', 'owner_mismatch');
+    return { status: 'failed', err: new AccountError('owner_mismatch') };
+  }
+  // The legacy marker first: if the owner write then fails, a marker with no
+  // owner reads as a legacy device, which is what this one is. The other
+  // order could leave an account-1 owner with no marker — the account UI on
+  // an account with no login.
+  if (info.email === null) saveLegacyOwner(info.accountId);
+  else if (loadLegacyOwner() === info.accountId) clearLegacyOwner();
+  // Alex's second phone after the upgrade (§ 6.7 step 4) lands here too.
+  if (owner === null) saveLocalOwner(info.accountId);
   remember(link, info);
   return { status: 'ok' };
 }
@@ -413,8 +436,10 @@ export function initAccountUI({
     async upgrade(v) {
       const link = requireLink();
       const res = await api.upgrade({ link, email: v.email, password: v.newPassword });
-      // Plan review I6: the data here now belongs to an account with a login.
+      // Plan review I6: the data here now belongs to an account with a login
+      // — no longer a legacy one (sweep W2-C1).
       saveLocalOwner(res.accountId);
+      if (loadLegacyOwner() === res.accountId) clearLegacyOwner();
       remember(link, { accountId: res.accountId, email: v.email, recoveryConfirmed: false });
       showRecovery(res.recoveryCode, v.email);
     },

@@ -23,7 +23,10 @@ import { getLink, linkWithCode, unlink, isAdoptionPending } from './auth.js';
 import { composeForNewDevice, base64urlToBytes, TOKEN_BYTES, KEY_BYTES } from './crypto.js';
 import { previewRemote, syncOnce, localState, syncHoldsTurn } from './sync.js';
 import { applyTombstones } from './merge.js';
-import { loadAuth, loadSyncState, loadLocalOwner, saveLocalOwner } from './storage.js';
+import {
+  loadAuth, loadSyncState, loadLocalOwner, saveLocalOwner, loadLegacyOwner, clearLegacyOwner,
+} from './storage.js';
+import { getAccount } from './account.js';
 import { WORKER_URL } from './config.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
 
@@ -103,16 +106,27 @@ export function adoptionBlocker(targetAccountId) {
   return null;
 }
 
+// Does this device's recorded owner have a login? (sweep W2-C1.) The owner
+// tag alone used to decide the UI mode, so a legacy device could not record
+// one without losing today's UI — and an unlinked legacy device then leaked
+// its planner into the next account to sign in. The owner tag now guards
+// (D16) and plaenicke.legacyOwner, set from GET /account's email-null answer,
+// says that owner has no login yet.
+function ownerHasLogin() {
+  const owner = loadLocalOwner();
+  return owner !== null && loadLegacyOwner() !== owner;
+}
+
 // Derived from storage at CALL time, never held in a closure: app.js calls
 // renderSyncStatus() with no arguments, and a panel mounted before a sign-in or
 // sign-out must render the mode storage holds now.
 //   'unlinked' — no readable link (a corrupt stored code included);
-//   'account'  — linked, and the device records an account owner;
-//   'legacy'   — linked with no owner: today's UI, unchanged.
+//   'account'  — linked, and the device's owner is an account with a login;
+//   'legacy'   — linked with no owner, or owned by an account with no login
+//                yet (Alex's account 1 before its upgrade): today's UI.
 export function accountModeFromStorage() {
   if (getLink() === null) return 'unlinked';
-  if (loadLocalOwner() !== null) return 'account';
-  return 'legacy';
+  return ownerHasLogin() ? 'account' : 'legacy';
 }
 
 const ERROR_LABELS = {
@@ -341,7 +355,7 @@ function statusText(now) {
   const facts = readSyncFacts();
   const kind = classifySyncState(facts);
   if (kind === SYNC_NOT_LINKED) return NOT_LINKED_TEXT;
-  if (kind === SYNC_CORRUPT) return loadLocalOwner() !== null ? ACCOUNT_COPY.corrupt : CORRUPT_TEXT;
+  if (kind === SYNC_CORRUPT) return ownerHasLogin() ? ACCOUNT_COPY.corrupt : CORRUPT_TEXT;
   return describeSyncStatus(facts.syncState, now, accountModeFromStorage());
 }
 
@@ -850,7 +864,12 @@ export function initLinkUI(options = {}) {
     // refused 'already_linked'.
     const legacyRelink = blocker === 'already_linked' && accountId === null
       && accountModeFromStorage() === 'legacy';
-    if (blocker !== null && !legacyRelink) {
+    // A pasted code on a LEGACY-owned device (sweep W2-C1, below): which
+    // account it belongs to is unknown until GET /account answers, so D16's
+    // other_account_data is decided by that check instead of here.
+    const legacyOwnedPaste = blocker === 'other_account_data' && accountId === null
+      && loadLocalOwner() !== null && !ownerHasLogin();
+    if (blocker !== null && !legacyRelink && !legacyOwnedPaste) {
       notice = ACCOUNT_COPY[blocker];
       stage = null;
       render();
@@ -863,11 +882,33 @@ export function initLinkUI(options = {}) {
     // later sign-in to the old account passes adoptionBlocker(old) and merges
     // them into it. Covers a pasted 86-character code, a 43-character
     // bootstrap token, and a corrupt-code re-link alike.
-    if (accountId === null && loadLocalOwner() !== null) {
-      notice = ACCOUNT_COPY.owned_device;
-      stage = null;
-      render();
-      return 'blocked';
+    //
+    // ONE EXCEPTION (sweep W2-C1): a device owned by a LEGACY account (no
+    // login yet — Alex's account 1 before its upgrade) has no sign-in to fall
+    // back on; its paste field is today's UI (spec § 6.11). It may link a
+    // pasted code, but the code's account is checked against the owner by
+    // GET /account right after the link and BEFORE any preview or adoption;
+    // any other account, or no answer, unlinks again.
+    const owner = loadLocalOwner();
+    let mustBeOwner = null;
+    if (accountId === null && owner !== null) {
+      if (ownerHasLogin()) {
+        notice = ACCOUNT_COPY.owned_device;
+        stage = null;
+        render();
+        return 'blocked';
+      }
+      mustBeOwner = owner;
+    }
+    // THE OWNER IS WRITTEN BEFORE THE LINK (sweep W2-I3). Written after it, a
+    // storage failure on this write left a linked device with no owner — the
+    // D16 cross-account merge reopened. An owner with no credential reads as
+    // an unlinked, owned device, which is safe. A sign-in links only an
+    // account that has a login, so that account is no longer a legacy one
+    // here.
+    if (accountId !== null) {
+      saveLocalOwner(accountId);
+      if (loadLegacyOwner() === accountId) clearLegacyOwner();
     }
     try {
       await linkWithCode(raw);
@@ -879,13 +920,36 @@ export function initLinkUI(options = {}) {
       render();
       return 'link_failed';
     }
-    // BEFORE anything else can throw — onLinked, and above all the preview.
-    // A linked device with no recorded owner reopens the D16 cross-account
-    // merge: a later sign-in to a different account would adopt this data.
-    if (accountId !== null) saveLocalOwner(accountId);
+    if (mustBeOwner !== null) {
+      const verdict = await linkedAccountIs(mustBeOwner);
+      if (verdict !== 'same') {
+        unlink();
+        notice = verdict === 'other'
+          ? ACCOUNT_COPY.other_account_data
+          : 'Could not check which account that code belongs to, so this device was not linked. Try again when you are online.';
+        stage = null;
+        render();
+        return verdict === 'other' ? 'blocked' : 'link_failed';
+      }
+    }
     if (onLinked) onLinked();
     await doPreview(1, generation);
     return 'linked';
+  }
+
+  // 'same' when GET /account says the link now stored belongs to `owner`,
+  // 'other' when it names another account, 'unknown' when there is no
+  // validated answer (offline, an error, a malformed body). Never throws.
+  async function linkedAccountIs(owner) {
+    try {
+      const body = await getAccount({ link: getLink(), fetchImpl: readFetchImpl, apiBase });
+      const id = body && body.accountId;
+      if (!(Number.isSafeInteger(id) && id > 0)) return 'unknown';
+      return id === owner ? 'same' : 'other';
+    } catch (err) {
+      console.error('plaenicke: account check after link failed', err && (err.code || err.name));
+      return 'unknown';
+    }
   }
 
   // Runs doLink as an adoption episode and reports what happened. runAdoption
@@ -1160,12 +1224,13 @@ export function initLinkUI(options = {}) {
     wrap.append(input, warning, button);
   }
 
-  // An unlinked device that records an account owner gets NO paste field: a
-  // pasted code carries no account id, so adoptionBlocker(null) refuses it
-  // whenever the device holds data, and the field would be a dead control.
-  // It signs in through accountui instead.
+  // An unlinked device whose owner is an account WITH A LOGIN gets NO paste
+  // field: doLink refuses a pasted code there (it carries no account id), so
+  // the field would be a dead control. It signs in through accountui
+  // instead. A legacy-owned device keeps the field (sweep W2-C1; doLink
+  // checks the code's account against the owner).
   function renderCorrupt(wrap) {
-    if (loadLocalOwner() !== null) {
+    if (ownerHasLogin()) {
       wrap.appendChild(el('p', { className: 'note', text: ACCOUNT_COPY.corrupt }));
       if (onSignIn) wrap.appendChild(signInButton());
       return;
@@ -1175,7 +1240,7 @@ export function initLinkUI(options = {}) {
   }
 
   function renderUnlinked(wrap) {
-    if (loadLocalOwner() !== null) {
+    if (ownerHasLogin()) {
       wrap.appendChild(el('p', { className: 'note', text: ACCOUNT_COPY.signed_out_unlinked }));
       return;
     }
