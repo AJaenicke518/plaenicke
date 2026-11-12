@@ -573,22 +573,8 @@ test('smart-add cap: 50 calls are 200, the 51st is 429 daily_limit with resetsAt
   });
 });
 
-// Real D1 is a network hop per statement; the in-process fake resolves within
-// one tick, which hides read-then-write races. Yield a macrotask per statement.
-function slowDb(db) {
-  const wrap = (st) => ({
-    bind: (...a) => wrap(st.bind(...a)),
-    first: async () => { await new Promise((r) => setImmediate(r)); return st.first(); },
-    run: async () => { await new Promise((r) => setImmediate(r)); return st.run(); },
-    all: async () => { await new Promise((r) => setImmediate(r)); return st.all(); },
-  });
-  return { prepare: (sql) => wrap(db.prepare(sql)), batch: db.batch };
-}
-
 test('55 parallel smart-adds: exactly 50 x 200 and 5 x 429', async () => {
-  const base = await smartEnv();
-  const { token } = base;
-  const env = { ...base.env, DB: slowDb(base.env.DB) };
+  const { env, token } = await smartEnv({ DB: makeD1({ yieldPerStatement: true }) });
   await withAnthropic(() => claudeOk(), async (stub) => {
     const res = await Promise.all(Array.from({ length: 55 }, () => smart(env, token)));
     const codes = res.map((r) => r.status);

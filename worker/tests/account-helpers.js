@@ -7,7 +7,8 @@ export const KEY = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
 export const KEY_B = 'HB0eHyAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5Ojs';
 export const b64u = (n, fill) => Buffer.alloc(n, fill).toString('base64url');
 export const b64 = (n, fill) => Buffer.alloc(n, fill).toString('base64');
-export function envWith() { return { DB: makeD1(), AT_REST_KEY: KEY, ADMIN_SECRET: 'adm' }; }
+// envWith({ yieldPerStatement: true }) for every concurrency test (see fake-d1.js).
+export function envWith(d1 = {}) { return { DB: makeD1(d1), AT_REST_KEY: KEY, ADMIN_SECRET: 'adm' }; }
 export async function invite(env, code = 'INVITE-1') {
   await env.DB.prepare('INSERT INTO invites (hash, created_at) VALUES (?, ?)').bind(await sha256Hex(code), 't').run();
   return code;

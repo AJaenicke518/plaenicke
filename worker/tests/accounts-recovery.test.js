@@ -59,7 +59,7 @@ test('2b. exactly one new device after finish', async () => {
 });
 
 test('3. concurrent finish: one 200, one 409 recovery_changed, one device', async () => {
-  const { env, accountId } = await signedUp();
+  const { env, accountId } = await signedUp(envWith({ yieldPerStatement: true }));
   await login(env); await login(env);
   const rs = await Promise.all([
     post(env, '/auth/recover/finish', fin({ authKey: b64u(32, 31), recAuthKey2: b64u(32, 32), deviceName: 'A' })),

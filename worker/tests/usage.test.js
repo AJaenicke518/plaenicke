@@ -42,14 +42,7 @@ test('recordTokens adds to the (account, day) row and tolerates repeats', async 
 });
 
 test('55 parallel slot takers (each statement yields a macrotask) get exactly 50 slots', async () => {
-  const db = makeD1();
-  const yieldTick = () => new Promise((r) => setImmediate(r));
-  const wrap = (st) => ({
-    bind: (...a) => wrap(st.bind(...a)),
-    first: async () => { await yieldTick(); return st.first(); },
-    run: async () => { await yieldTick(); return st.run(); },
-  });
-  const env = { DB: { prepare: (sql) => wrap(db.prepare(sql)) } };
+  const env = { DB: makeD1({ yieldPerStatement: true }) };
   const res = await Promise.all(Array.from({ length: 55 }, () => takeSmartAddSlot(env, 1, '2026-11-11')));
   assert.equal(res.filter((r) => r.ok).length, 50);
   assert.equal(res.filter((r) => !r.ok).length, 5);

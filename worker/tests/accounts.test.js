@@ -137,14 +137,14 @@ test('10b. after an expired lock a WRONG key restarts the window at 1', async ()
 });
 
 test('11 + 20. 60 concurrent wrong logins: exactly 50 x 401, 10 x 429, all with retryAt', async () => {
-  const { env } = await signedUp();
+  const { env } = await signedUp(envWith({ yieldPerStatement: true }));
   env.NOW = () => T0;
   const rs = await Promise.all(Array.from({ length: 60 }, () => login(env, { authKey: b64u(32, 9) })));
   const statuses = rs.map((r) => r.status);
   assert.equal(statuses.filter((s) => s === 401).length, 50);
   assert.equal(statuses.filter((s) => s === 429).length, 10);
   for (const r of rs.filter((x) => x.status === 429)) assert.ok((await r.json()).retryAt);
-  assert.ok((await one(env, 'SELECT failed_logins FROM accounts WHERE email IS NOT NULL')).failed_logins <= 50);
+  assert.equal((await one(env, 'SELECT failed_logins FROM accounts WHERE email IS NOT NULL')).failed_logins, 50);
 });
 
 test('12. a disabled account is 403 disabled on login', async () => {
