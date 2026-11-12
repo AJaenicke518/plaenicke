@@ -30,7 +30,7 @@ import {
 } from './linkui.js';
 import { getLink } from './auth.js';
 import {
-  loadLocalOwner, saveLocalOwner, loadLegacyOwner, saveLegacyOwner, clearLegacyOwner,
+  loadLocalOwner, saveLocalOwner, loadLegacyOwner, saveLegacyOwner, clearLegacyOwner, loadSyncState, saveSyncState,
 } from './storage.js';
 import { checkPassword } from './password-policy.js';
 import { parseLinkCode } from './crypto.js';
@@ -176,6 +176,9 @@ async function fetchAccount(api) {
   else if (loadLegacyOwner() === info.accountId) clearLegacyOwner();
   // Alex's second phone after the upgrade (§ 6.7 step 4) lands here too.
   if (owner === null) saveLocalOwner(info.accountId);
+  // This answer was for this session: its link is now shown to be the
+  // owner's (W2 re-review), so a pending adoption may be previewed.
+  if (loadSyncState().linkOwner !== info.accountId) saveSyncState({ linkOwner: info.accountId });
   remember(link, info);
   return { status: 'ok' };
 }

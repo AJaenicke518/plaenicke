@@ -18,7 +18,7 @@ import { ACCOUNT_COPY, initLinkUI, accountModeFromStorage } from '../js/linkui.j
 import { checkPassword } from '../js/password-policy.js';
 import { bytesToBase64url, generateEncKey, composeLinkCode, parseLinkCode } from '../js/crypto.js';
 import {
-  saveAuth, loadAuth, saveItems, saveLocalOwner, loadLocalOwner, loadLegacyOwner, saveLegacyOwner,
+  saveAuth, loadAuth, saveItems, saveLocalOwner, loadLocalOwner, loadLegacyOwner, saveLegacyOwner, loadSyncState,
 } from '../js/storage.js';
 
 // --- harness ---------------------------------------------------------------
@@ -1087,4 +1087,25 @@ test('accountui: a new recovery link before any account check still shows the co
   submit(host);
   assert.ok(await until(() => byId(host, 'acct-recovery-screen')));
   assert.equal(banner.hidden, true, 'no account id was confirmed for this session, so nothing is remembered');
+});
+
+// W2 re-review: an answer for this session shows the stored link is the
+// owner's, so linkui may preview a pending adoption on the now-owned device.
+test('W2-rr: a validated getAccount records that this link belongs to the owner', async () => {
+  setup();
+  saveAuth(newCode());
+  const { api } = fakeApi({ getAccount: async () => ({ email: null, accountId: 1, recoveryConfirmed: false }) });
+  assert.equal(await refreshAccount({ api }), 'ok');
+  assert.equal(loadSyncState().linkOwner, 1);
+});
+
+test('W2-rr: an owner-mismatch answer records nothing about the link', async () => {
+  setup();
+  saveAuth(newCode());
+  saveLocalOwner(5);
+  const { api } = fakeApi({ getAccount: async () => ({ email: null, accountId: 1, recoveryConfirmed: false }) });
+  const origErr = console.error;
+  console.error = () => {};
+  try { assert.equal(await refreshAccount({ api }), 'failed'); } finally { console.error = origErr; }
+  assert.equal(loadSyncState().linkOwner, null);
 });

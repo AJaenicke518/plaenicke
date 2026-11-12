@@ -764,7 +764,7 @@ test('e2e 8: an unlinked legacy-owned device re-links with an account-1 code, an
   // Another account's code: refused, nothing linked, that account untouched.
   await pasteLink(L, codeForT);
   assert.equal(getLink(), null, 'not linked to the tester\'s account');
-  assert.ok(allText(L.host).includes(ACCOUNT_COPY.other_account_data), allText(L.host));
+  assert.ok(allText(L.host).includes(ACCOUNT_COPY.owned_device), allText(L.host));
   assert.equal(loadLocalOwner(), 1);
   assert.deepEqual(ids(loadItems()), ids([a1, l1]));
   const tAfter = await w.row(upT.accountId);

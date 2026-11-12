@@ -293,8 +293,15 @@ export function clearAuth() { localStorage.removeItem(AUTH_KEY); }
 // this device's data. The adoption's Merge then unions WITHOUT dedupe —
 // dedupe is for a device joining an account for the first time. Fails toward
 // today's behaviour: anything but an explicit true reads false.
+//
+// linkOwner (sweep W2 re-review): the account id this LINK has been shown to
+// belong to — by the sign-in that made it, by the account check before a
+// legacy paste, or by a GET /account answer for this session. An owned
+// device's pending adoption is previewed and adopted only while it equals
+// plaenicke.localOwner. Anything but a positive safe integer reads null.
 export const ZERO_SYNC_STATE = {
   version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false, plainAdoption: false,
+  linkOwner: null,
 };
 
 export function loadSyncState() {
@@ -319,6 +326,7 @@ export function loadSyncState() {
     // fail-open this guard exists to prevent.
     adoptionPending: parsed.adoptionPending !== false,
     plainAdoption: parsed.plainAdoption === true,
+    linkOwner: isOwnerId(parsed.linkOwner) ? parsed.linkOwner : null,
   };
 }
 

@@ -329,12 +329,12 @@ test('auth round-trips and clears', () => {
 test('loadSyncState returns a zeroed state when nothing is stored', () => {
   installFakeLocalStorage();
   assert.deepEqual(loadSyncState(),
-    { version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false, plainAdoption: false });
+    { version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false, plainAdoption: false, linkOwner: null });
 });
 
 test('syncState round-trips including adoptionPending', () => {
   installFakeLocalStorage();
-  const s = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-08-02T00:00:00.000Z', lastError: null, adoptionPending: true, plainAdoption: true };
+  const s = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-08-02T00:00:00.000Z', lastError: null, adoptionPending: true, plainAdoption: true, linkOwner: 3 };
   saveSyncState(s);
   assert.deepEqual(loadSyncState(), s);
 });
@@ -429,7 +429,7 @@ test('saveSyncState preserves adoptionPending on a partial update instead of res
 // were a plain setter.
 test('saveSyncState merges a one-field patch over every existing field', () => {
   installFakeLocalStorage();
-  const full = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-10-01T00:00:00.000Z', lastError: 'offline', adoptionPending: true, plainAdoption: true };
+  const full = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-10-01T00:00:00.000Z', lastError: 'offline', adoptionPending: true, plainAdoption: true, linkOwner: 3 };
   saveSyncState(full);
   saveSyncState({ lastError: null });
   assert.deepEqual(loadSyncState(), { ...full, lastError: null });
@@ -439,10 +439,10 @@ test('saveSyncState merges a one-field patch over every existing field', () => {
 // a caller supplying every field still gets exactly that object back.
 test('saveSyncState with a complete object overwrites every field, including lifting adoptionPending', () => {
   installFakeLocalStorage();
-  saveSyncState({ version: 1, tokenHash: 'h', lastSyncedAt: null, lastError: null, adoptionPending: true, plainAdoption: true });
-  saveSyncState({ version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false, plainAdoption: false });
+  saveSyncState({ version: 1, tokenHash: 'h', lastSyncedAt: null, lastError: null, adoptionPending: true, plainAdoption: true, linkOwner: 3 });
+  saveSyncState({ version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false, plainAdoption: false, linkOwner: null });
   assert.deepEqual(loadSyncState(),
-    { version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false, plainAdoption: false });
+    { version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false, plainAdoption: false, linkOwner: null });
 });
 
 // --- launch log (Phase 0 baseline) ------------------------------------------
@@ -672,4 +672,14 @@ test('W2-C3: plainAdoption reads true ONLY from an explicit true (a cursor store
   }
   localStorage.setItem('plaenicke.syncState', JSON.stringify({ adoptionPending: true, plainAdoption: true }));
   assert.equal(loadSyncState().plainAdoption, true);
+});
+
+test('W2-rr: linkOwner reads only a positive safe integer; anything else is null', () => {
+  installFakeLocalStorage();
+  for (const v of ['1', 0, -1, 1.5, true, null, {}]) {
+    localStorage.setItem('plaenicke.syncState', JSON.stringify({ adoptionPending: true, linkOwner: v }));
+    assert.equal(loadSyncState().linkOwner, null, JSON.stringify(v));
+  }
+  localStorage.setItem('plaenicke.syncState', JSON.stringify({ adoptionPending: true, linkOwner: 7 }));
+  assert.equal(loadSyncState().linkOwner, 7);
 });

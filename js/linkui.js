@@ -20,7 +20,7 @@
 // failure that string IS a real link code, so no error path may echo it.
 
 import { getLink, linkWithCode, unlink, isAdoptionPending } from './auth.js';
-import { composeForNewDevice, base64urlToBytes, TOKEN_BYTES, KEY_BYTES } from './crypto.js';
+import { composeForNewDevice, base64urlToBytes, parseLinkCode, TOKEN_BYTES, KEY_BYTES } from './crypto.js';
 import { previewRemote, syncOnce, localState, syncHoldsTurn } from './sync.js';
 import { applyTombstones } from './merge.js';
 import {
@@ -119,6 +119,14 @@ export function adoptionBlocker(targetAccountId) {
 function ownerHasLogin() {
   const owner = loadLocalOwner();
   return owner !== null && loadLegacyOwner() !== owner;
+}
+
+// True when this device is linked, records an owner, and the stored link was
+// never shown to belong to that owner (W2 re-review). Its pending adoption is
+// neither previewed nor adopted.
+function linkNotShownOwners() {
+  const owner = loadLocalOwner();
+  return getLink() !== null && owner !== null && loadSyncState().linkOwner !== owner;
 }
 
 // Derived from storage at CALL time, never held in a closure: app.js calls
@@ -897,9 +905,12 @@ export function initLinkUI(options = {}) {
     // ONE EXCEPTION (sweep W2-C1): a device owned by a LEGACY account (no
     // login yet — Alex's account 1 before its upgrade) has no sign-in to fall
     // back on; its paste field is today's UI (spec § 6.11). It may link a
-    // pasted code, but the code's account is checked against the owner by
-    // GET /account right after the link and BEFORE any preview or adoption;
-    // any other account, or no answer, unlinks again.
+    // pasted code once GET /account, asked with the code's own token BEFORE
+    // anything is stored, names the owner. No answer, an error or another
+    // account stores nothing. (The first version linked first and checked
+    // after: an app killed while the check was out left a foreign credential
+    // linked with adoption pending, and the next mount adopted it — W2
+    // re-review.)
     const owner = loadLocalOwner();
     // RE-SIGN-IN (sweep W2-C3): the data here already belongs to the account
     // being signed in to, so its adoption merges without dedupe. Decided from
@@ -914,6 +925,22 @@ export function initLinkUI(options = {}) {
         return 'blocked';
       }
       mustBeOwner = owner;
+      let token;
+      try {
+        token = pastedToken(raw);
+      } catch (err) {
+        // Never the input itself — see the header note on secrets.
+        notice = `Could not link this device: ${(err && err.message) || 'unknown error'}`;
+        stage = null;
+        render();
+        return 'link_failed';
+      }
+      if (!(await tokenBelongsTo(token, owner))) {
+        notice = ACCOUNT_COPY.owned_device;
+        stage = null;
+        render();
+        return 'blocked';
+      }
     }
     // THE OWNER IS WRITTEN BEFORE THE LINK (sweep W2-I3). Written after it, a
     // storage failure on this write left a linked device with no owner — the
@@ -926,7 +953,7 @@ export function initLinkUI(options = {}) {
       if (loadLegacyOwner() === accountId) clearLegacyOwner();
     }
     try {
-      await linkWithCode(raw, { plainAdoption });
+      await linkWithCode(raw, { plainAdoption, linkOwner: accountId !== null ? accountId : mustBeOwner });
     } catch (err) {
       // `raw` is NEVER interpolated: on a transient failure it is a real
       // link code. crypto.js/auth.js messages never echo their input.
@@ -935,35 +962,29 @@ export function initLinkUI(options = {}) {
       render();
       return 'link_failed';
     }
-    if (mustBeOwner !== null) {
-      const verdict = await linkedAccountIs(mustBeOwner);
-      if (verdict !== 'same') {
-        unlink();
-        notice = verdict === 'other'
-          ? ACCOUNT_COPY.other_account_data
-          : 'Could not check which account that code belongs to, so this device was not linked. Try again when you are online.';
-        stage = null;
-        render();
-        return verdict === 'other' ? 'blocked' : 'link_failed';
-      }
-    }
     if (onLinked) onLinked();
     await doPreview(1, generation);
     return 'linked';
   }
 
-  // 'same' when GET /account says the link now stored belongs to `owner`,
-  // 'other' when it names another account, 'unknown' when there is no
-  // validated answer (offline, an error, a malformed body). Never throws.
-  async function linkedAccountIs(owner) {
+  // The session token a pasted input carries: a 43-character token is
+  // itself; an 86-character code carries it in its first half. Throws on
+  // anything else, exactly as linkWithCode would.
+  function pastedToken(raw) {
+    const trimmed = String(raw || '').trim();
+    if (base64urlToBytes(trimmed).length === TOKEN_BYTES) return trimmed;
+    return parseLinkCode(trimmed).authToken;
+  }
+
+  // True only when GET /account, asked with `token`, names `owner`. No
+  // answer, an error or a malformed body is false. Never throws.
+  async function tokenBelongsTo(token, owner) {
     try {
-      const body = await getAccount({ link: getLink(), fetchImpl: readFetchImpl, apiBase });
-      const id = body && body.accountId;
-      if (!(Number.isSafeInteger(id) && id > 0)) return 'unknown';
-      return id === owner ? 'same' : 'other';
+      const body = await getAccount({ link: { authToken: token }, fetchImpl: readFetchImpl, apiBase });
+      return Boolean(body) && body.accountId === owner;
     } catch (err) {
-      console.error('plaenicke: account check after link failed', err && (err.code || err.name));
-      return 'unknown';
+      console.error('plaenicke: account check before link failed', err && (err.code || err.name));
+      return false;
     }
   }
 
@@ -1005,6 +1026,15 @@ export function initLinkUI(options = {}) {
   // clicking a button starts a fresh episode at 1 — the loop being bounded
   // here is the automatic one, which nothing else gates.
   async function doPreview(attempt, generation) {
+    // Defence in depth (W2 re-review): never preview — and so never adopt —
+    // a link on an owned device that was not shown to be the owner's.
+    if (linkNotShownOwners()) {
+      stage = null;
+      stageData = {};
+      notice = ACCOUNT_COPY.owned_device;
+      render();
+      return;
+    }
     stage = 'busy';
     stageData = { text: 'Checking the account…' };
     render();
@@ -1166,6 +1196,7 @@ export function initLinkUI(options = {}) {
     // From here until syncOnceImpl settles there is an unabandonable write in
     // flight. No mount may take over from it — see `writeInFlight`.
     let res;
+    const writingFor = getLink();
     writeInFlight = true;
     writeStartedAt = now().getTime();
     // Repaint this mount's "Combining…" view once the write crosses the slow
@@ -1205,6 +1236,16 @@ export function initLinkUI(options = {}) {
       stage = null;
       render();
       if (onLinked) onLinked();
+      return;
+    }
+    // Skipped because the link changed while the write was out (W2-C2):
+    // another tab signed in elsewhere. The device IS linked — to that one.
+    const nowLink = getLink();
+    if (res.status === 'skipped' && nowLink && writingFor && nowLink.authToken !== writingFor.authToken) {
+      stage = null;
+      stageData = {};
+      notice = 'This device was signed in to a different account while combining, so nothing was combined. Open Sync again to continue.';
+      render();
       return;
     }
     stage = 'failed';
@@ -1449,6 +1490,11 @@ export function initLinkUI(options = {}) {
   }
 
   function renderAdoptionEntry(wrap) {
+    if (linkNotShownOwners()) {
+      wrap.appendChild(el('p', { className: 'note', text: ACCOUNT_COPY.owned_device }));
+      appendStopControl(wrap, accountModeFromStorage());
+      return;
+    }
     wrap.appendChild(el('p', {
       className: 'note',
       text: 'This device is linked but has not been combined with the account yet. Nothing syncs until you choose.',
@@ -1627,6 +1673,8 @@ export function initLinkUI(options = {}) {
   // and empties the host on close (its close()), so this runs once per panel open
   // against a fresh sub-element — never accumulating listeners, and never
   // firing a request just because the user opened Settings.
+  // doPreview refuses a link on an owned device that was not shown to be
+  // the owner's (W2 re-review), so this mount-time preview cannot adopt one.
   if (getLink() && isAdoptionPending()) runAdoption((g) => doPreview(1, g));
 
   return {

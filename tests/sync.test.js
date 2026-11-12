@@ -975,7 +975,7 @@ test('an encrypt failure before the PUT reports error, not offline', async () =>
 // is given; every other sync-state field, the adoption gate included, stays.
 test('recordSyncFailure records lastError and leaves every other sync-state field alone', () => {
   installFakeLocalStorage();
-  const full = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-10-01T00:00:00.000Z', lastError: null, adoptionPending: true, plainAdoption: true };
+  const full = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-10-01T00:00:00.000Z', lastError: null, adoptionPending: true, plainAdoption: true, linkOwner: 3 };
   saveSyncState(full);
   recordSyncFailure({ name: 'TypeError' });
   assert.deepEqual(loadSyncState(), { ...full, lastError: 'TypeError' });
