@@ -55,15 +55,26 @@ const CORRUPT_TEXT = "This device's saved code is unreadable, so it will never s
 //
 // EXPORTED, and the ONE copy: accountui (Task 13) imports these rather than
 // restating them, so the two surfaces cannot drift (controller ruling R2).
+//
+// AN ACCOUNT DEVICE HAS NO CODE TO PASTE. Every screen an owned device can
+// reach sends it to Sign in, never to "the 86-character code" the legacy copy
+// names — that advice beside no paste field is a dead end.
 export const ACCOUNT_COPY = {
   other_account_data: "This device holds another account's planner. Signing in here would copy it into that account.",
   already_linked: 'This device is already signed in. Sign out first.',
+  // A pasted code / bootstrap token, or a link with no account id, on a device
+  // that records an owner (D16, ruling R11).
+  owned_device: 'This device belongs to an account. Sign in to sync it.',
+  // The session was deleted (recovery, sign-out-others, disable) — § 6.10.
+  signed_out: 'This device was signed out. Sign in again.',
+  undecryptable: "This device can't read your planner with its saved key. Sign in again.",
+  corrupt: "This device's saved sign-in is damaged. Sign in again.",
+  sign_out_note: 'Signing out stops syncing on this device. Your items and calendars stay on this device.',
+  signed_out_unlinked: 'This device is signed out. Sign in to sync it again.',
+  signed_out_notice: 'Signed out. Everything on this device was kept — items, calendars and all.',
+  sign_out_refused: 'A sync is finishing — try signing out again in a moment.',
 };
-
-// What an ACCOUNT device whose session was deleted reads, everywhere the
-// legacy copy would say "rejected" or "paste a fresh 86-character code" — an
-// account device has no code to paste; it signs in again (spec § 6.10).
-const ACCOUNT_SIGNED_OUT_TEXT = 'This device was signed out. Sign in again.';
+const ACCOUNT_SIGNED_OUT_TEXT = ACCOUNT_COPY.signed_out;
 
 // adoptionBlocker — may this device be linked into `targetAccountId`?
 // PURE: reads local storage, never the network. Every link path runs it first
@@ -330,7 +341,7 @@ function statusText(now) {
   const facts = readSyncFacts();
   const kind = classifySyncState(facts);
   if (kind === SYNC_NOT_LINKED) return NOT_LINKED_TEXT;
-  if (kind === SYNC_CORRUPT) return CORRUPT_TEXT;
+  if (kind === SYNC_CORRUPT) return loadLocalOwner() !== null ? ACCOUNT_COPY.corrupt : CORRUPT_TEXT;
   return describeSyncStatus(facts.syncState, now, accountModeFromStorage());
 }
 
@@ -444,6 +455,7 @@ const APPLIED_FAILURE_TEXT = {
 // has no 86-character code to paste; it signs in again).
 export function failureText(status, applied, mode = accountModeFromStorage()) {
   if (mode === 'account' && status === 'unauthorized') return ACCOUNT_SIGNED_OUT_TEXT;
+  if (mode === 'account' && status === 'undecryptable') return ACCOUNT_COPY.undecryptable;
   if (applied && APPLIED_FAILURE_TEXT[status]) return APPLIED_FAILURE_TEXT[status];
   return FAILURE_TEXT[status] || `Something went wrong (${status}).`;
 }
@@ -619,7 +631,7 @@ export function syncWriteSettled() {
 const UNLINK_NOTE = "Unlinking stops syncing and deletes this device's link code, which cannot be shown again. "
   + 'Your items and calendars stay on this device.';
 // The account-device counterpart, rendered beside Sign out (D27).
-const SIGN_OUT_NOTE = 'Signing out stops syncing on this device. Your items and calendars stay on this device.';
+const SIGN_OUT_NOTE = ACCOUNT_COPY.sign_out_note;
 
 function el(tag, props = {}) {
   const node = document.createElement(tag);
@@ -652,7 +664,8 @@ export function initLinkUI(options = {}) {
     host, onLinked, onUnlinked, applyState,
     // Account devices only (§ 6.11). accountui supplies both: onSignOut is
     // account.logOut then signOutLocal(); onSignIn is signOutLocal() then the
-    // login form. Absent, the control is not rendered — never a dead button.
+    // login form. Each RETURNS signOutLocal()'s result, so a refusal can be
+    // shown. Absent, the control is not rendered — never a dead button.
     onSignOut = null, onSignIn = null,
     // Effects, injected the way js/feeds.js and js/sync.js already do it. The
     // defaults are the production wiring; tests supply their own.
@@ -827,6 +840,19 @@ export function initLinkUI(options = {}) {
       render();
       return 'blocked';
     }
+    // D16, ruling R11: an OWNED device is never linked without an account id,
+    // even with no local data. adoptionBlocker lets that through (an empty
+    // device has no planner to leak), but the link would leave localOwner
+    // naming the OLD account while holding the new one's records — and a
+    // later sign-in to the old account passes adoptionBlocker(old) and merges
+    // them into it. Covers a pasted 86-character code, a 43-character
+    // bootstrap token, and a corrupt-code re-link alike.
+    if (accountId === null && loadLocalOwner() !== null) {
+      notice = ACCOUNT_COPY.owned_device;
+      stage = null;
+      render();
+      return 'blocked';
+    }
     try {
       await linkWithCode(raw);
     } catch (err) {
@@ -871,9 +897,11 @@ export function initLinkUI(options = {}) {
 
   // Validated BEFORE anything is linked: saveLocalOwner throws on a bad id,
   // and a throw after linkWithCode would leave a linked device with no owner.
+  // An account sign-in always knows its account id, so null is refused too
+  // (ruling R11): a link with no id cannot record an owner.
   function linkAndAdopt(code, { accountId = null } = {}) {
-    if (accountId !== null && !(Number.isSafeInteger(accountId) && accountId > 0)) {
-      return Promise.reject(new TypeError('linkAndAdopt: accountId must be a positive safe integer or null'));
+    if (!(Number.isSafeInteger(accountId) && accountId > 0)) {
+      return Promise.reject(new TypeError('linkAndAdopt: accountId must be a positive safe integer'));
     }
     return linkEpisode(code, accountId);
   }
@@ -1121,14 +1149,18 @@ export function initLinkUI(options = {}) {
   // whenever the device holds data, and the field would be a dead control.
   // It signs in through accountui instead.
   function renderCorrupt(wrap) {
+    if (loadLocalOwner() !== null) {
+      wrap.appendChild(el('p', { className: 'note', text: ACCOUNT_COPY.corrupt }));
+      if (onSignIn) wrap.appendChild(signInButton());
+      return;
+    }
     wrap.appendChild(el('p', { className: 'note', text: CORRUPT_TEXT }));
-    if (loadLocalOwner() !== null) return;
     pasteField(wrap, 'Re-link this device');
   }
 
   function renderUnlinked(wrap) {
     if (loadLocalOwner() !== null) {
-      wrap.appendChild(el('p', { className: 'note', text: 'This device is signed out. Sign in to sync it again.' }));
+      wrap.appendChild(el('p', { className: 'note', text: ACCOUNT_COPY.signed_out_unlinked }));
       return;
     }
     pasteField(wrap, 'Link this device',
@@ -1177,8 +1209,7 @@ export function initLinkUI(options = {}) {
     btn.addEventListener('click', () => {
       if (activeAdoption && writeInFlight) return joinActive();
       return run(async () => {
-        await onSignOut();
-        afterSignOut();
+        afterSignOut(await onSignOut());
       });
     });
     return btn;
@@ -1193,19 +1224,26 @@ export function initLinkUI(options = {}) {
     btn.addEventListener('click', () => {
       if (activeAdoption && writeInFlight) return joinActive();
       return run(async () => {
-        await onSignIn();
-        afterSignOut();
+        afterSignOut(await onSignIn());
       });
     });
     return btn;
   }
 
-  function afterSignOut() {
+  // `result` is what onSignOut / onSignIn returned: accountui returns
+  // signOutLocal()'s answer. A refusal is SAID, never silent — a write can
+  // begin while logOut is still on the network, after the pre-check passed.
+  function afterSignOut(result) {
+    if (result === 'refused_write_in_flight') {
+      notice = ACCOUNT_COPY.sign_out_refused;
+      render();
+      return;
+    }
     if (getLink() === null) {
       stage = null;
       stageData = {};
       mintedCode = '';
-      notice = 'Signed out. Everything on this device was kept — items, calendars and all.';
+      notice = ACCOUNT_COPY.signed_out_notice;
     }
     render();
     if (getLink() === null && onUnlinked) onUnlinked();
@@ -1340,8 +1378,9 @@ export function initLinkUI(options = {}) {
       retry.addEventListener('click', () => runAdoption((g) => doPreview(1, g)));
       wrap.appendChild(retry);
     } else if (mode === 'account') {
-      // No paste field on an account device (§ 6.11): it signs in again.
-      if (status === 'unauthorized' && onSignIn) wrap.appendChild(signInButton());
+      // 'unauthorized' and 'undecryptable'. No paste field on an account
+      // device (§ 6.11): it signs in again.
+      if (onSignIn) wrap.appendChild(signInButton());
     } else {
       // 'unauthorized' and 'undecryptable'. Re-linking is the right first
       // answer, but it cannot be the only one — see below.

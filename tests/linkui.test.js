@@ -2675,19 +2675,21 @@ test('acct 8: clicking #link-signin calls onSignIn', async () => {
   btn.click();
   await ui.settled();
   assert.equal(signIns.length, 1);
+});
 
-  // Without an onSignIn there is no dead button.
-  installDom();
-  const doc2 = globalThis.document;
-  mountPanel(doc2, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls) });
-  assert.equal(doc2.getElementById('link-signin'), null);
+test('acct 8: without an onSignIn there is no dead Sign in button', async () => {
+  const doc = await signedOutAccountDevice();
+  const calls = [];
+  mountPanel(doc, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls) });
+  assert.equal(doc.getElementById('link-signin'), null);
+});
 
-  // A legacy device in the same state keeps today's UI: no Sign in.
+test('acct 8: a legacy device rejected with 401 keeps today\'s UI — no Sign in', async () => {
+  const doc = await signedOutAccountDevice();
   clearLocalOwner();
-  installDom();
-  const doc3 = globalThis.document;
-  mountPanel(doc3, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls), onSignIn: () => {} });
-  assert.equal(doc3.getElementById('link-signin'), null);
+  const calls = [];
+  mountPanel(doc, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls), onSignIn: () => {} });
+  assert.equal(doc.getElementById('link-signin'), null);
 });
 
 test('acct 8b: an account device whose preview is rejected offers Sign in, not a paste field', async () => {
@@ -2867,4 +2869,157 @@ test("acct: D17 'already_linked' still refuses linkAndAdopt on a linked device a
   assert.equal(await account.ui._linkForTest(freshLinkCode().code), 'blocked');
   assert.equal(loadAuth(), existing);
   assert.deepEqual(calls, []);
+});
+
+// =========================================================================
+// Task 12 review fixes
+// =========================================================================
+
+// Review I1(a): an ACCOUNT device whose preview cannot be decrypted has no
+// code to paste; it signs in again.
+test('fix I1a: an account device that cannot decrypt the account is sent to Sign in, never to an 86-character code', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  await linkWithCode(freshLinkCode().code); // gate raised: mount previews
+  saveLocalOwner(5);
+  const blob = await encryptBlob(generateEncKey(), st({ items: [it('r')] })); // a key this device lacks
+  const read = async () => ({ ok: true, status: 200, json: async () => ({ version: 2, blob }) });
+  const signIns = [];
+  const { host, ui } = mountPanel(doc, { fetchImpl: read, readFetchImpl: read, onSignIn: () => { signIns.push(true); } });
+  await ui.settled();
+  assert.ok(allText(host).includes(linkuiNs.ACCOUNT_COPY.undecryptable), allText(host));
+  assert.ok(!allText(host).includes('86-character'));
+  assert.ok(!doc.getElementById(SYNC_STATUS_ID).textContent.includes('86-character'));
+  assert.equal(findInput(host, 'Link code'), null);
+  doc.getElementById('link-signin').click();
+  await ui.settled();
+  assert.equal(signIns.length, 1);
+  // Legacy copy unchanged.
+  assert.match(linkuiNs.failureText('undecryptable', false, 'legacy'), /86-character/);
+});
+
+// Review I1(b): a corrupt stored code on an OWNED device.
+test('fix I1b: a corrupt stored code on an owned device says to sign in, on the panel and #sync-status', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  saveAuth('!!! not a link code !!!');
+  saveLocalOwner(5);
+  const line = doc.createElement('div');
+  line.id = SYNC_STATUS_ID;
+  doc.body.appendChild(line);
+  renderSyncStatus();
+  assert.equal(line.textContent, linkuiNs.ACCOUNT_COPY.corrupt);
+  line.id = '';
+
+  const calls = [];
+  const signIns = [];
+  const { host, ui } = mountPanel(doc, {
+    fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls), onSignIn: () => { signIns.push(true); },
+  });
+  assert.ok(allText(host).includes(linkuiNs.ACCOUNT_COPY.corrupt));
+  assert.ok(!allText(host).includes('86-character'));
+  assert.equal(findInput(host, 'Link code'), null);
+  doc.getElementById('link-signin').click();
+  await ui.settled();
+  assert.equal(signIns.length, 1);
+
+  installDom();
+  const bare = mountPanel(globalThis.document, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls) });
+  assert.equal(globalThis.document.getElementById('link-signin'), null, 'no dead button without onSignIn');
+  assert.ok(!allText(bare.host).includes('86-character'));
+});
+
+test('fix I1b: a corrupt stored code on a legacy device keeps the legacy copy', () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  saveAuth('!!! not a link code !!!');
+  const line = doc.createElement('div');
+  line.id = SYNC_STATUS_ID;
+  doc.body.appendChild(line);
+  renderSyncStatus();
+  assert.match(line.textContent, /86-character/);
+});
+
+// Review I2 (ruling R11, spec D16): an owned device must never be linked
+// without an account id — even with no local data — or localOwner goes stale
+// and a later sign-in to the old owner merges another account's planner.
+test('fix I2: an owned device with no data refuses a link with no account id, on every path', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  saveLocalOwner(5);
+  const calls = [];
+  const { host, ui } = mountPanel(doc, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls) });
+  await ui.settled();
+
+  assert.equal(await ui._linkForTest(freshLinkCode().code), 'blocked', '86-character code');
+  assert.equal(loadAuth(), null);
+  assert.equal(loadLocalOwner(), 5);
+  assert.ok(allText(host).includes(linkuiNs.ACCOUNT_COPY.owned_device));
+  assert.equal(await ui._linkForTest(bytesToBase64url(generateEncKey())), 'blocked', '43-character bootstrap token');
+  assert.equal(loadAuth(), null);
+
+  await assert.rejects(ui.linkAndAdopt(freshLinkCode().code, { accountId: null }), TypeError);
+  await assert.rejects(ui.linkAndAdopt(freshLinkCode().code), TypeError);
+  assert.equal(loadAuth(), null);
+  assert.equal(loadLocalOwner(), 5);
+  assert.deepEqual(calls, []);
+});
+
+test('fix I2: a corrupt stored code on an owned, empty device cannot be re-linked by a pasted code', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  saveAuth('!!! not a link code !!!');
+  saveLocalOwner(5);
+  const calls = [];
+  const { ui } = mountPanel(doc, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls) });
+  assert.equal(await ui._linkForTest(freshLinkCode().code), 'blocked');
+  assert.equal(loadAuth(), '!!! not a link code !!!');
+  assert.equal(loadLocalOwner(), 5);
+});
+
+test('fix minor: a sign-out or sign-in refused because a sync is finishing says so', async () => {
+  for (const control of ['Sign out', 'Sign in']) {
+    installFakeLocalStorage();
+    const doc = installDom();
+    await linkWithCode(freshLinkCode().code);
+    saveSyncState({ adoptionPending: false, lastError: 'unauthorized' });
+    saveLocalOwner(5);
+    const calls = [];
+    const refused = async () => 'refused_write_in_flight';
+    const { host, ui } = mountPanel(doc, {
+      fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls), onSignOut: refused, onSignIn: refused,
+    });
+    const btn = control === 'Sign in' ? doc.getElementById('link-signin') : findButton(host, 'Sign out');
+    assert.ok(btn, `fixture check: ${control} is offered`);
+    btn.click();
+    await ui.settled();
+    assert.ok(allText(host).includes(linkuiNs.ACCOUNT_COPY.sign_out_refused), `${control}: ${allText(host)}`);
+    assert.ok(loadAuth(), 'still linked');
+  }
+});
+
+test('fix minor: the account copy linkui renders comes from ACCOUNT_COPY', async () => {
+  const keys = ['other_account_data', 'already_linked', 'signed_out', 'undecryptable', 'corrupt', 'owned_device',
+    'sign_out_note', 'signed_out_unlinked', 'signed_out_notice', 'sign_out_refused'];
+  for (const k of keys) assert.equal(typeof linkuiNs.ACCOUNT_COPY[k], 'string', k);
+  assert.equal(linkuiNs.ACCOUNT_COPY.signed_out, SIGNED_OUT_COPY);
+
+  installFakeLocalStorage();
+  let doc = installDom();
+  saveLocalOwner(5);
+  const calls = [];
+  let m = mountPanel(doc, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls) });
+  assert.ok(allText(m.host).includes(linkuiNs.ACCOUNT_COPY.signed_out_unlinked));
+
+  installFakeLocalStorage();
+  doc = installDom();
+  await linkWithCode(freshLinkCode().code);
+  clearAdoptionPending();
+  saveLocalOwner(5);
+  m = mountPanel(doc, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls), onSignOut: async () => linkuiNs.signOutLocal() });
+  assert.ok(allText(m.host).includes(linkuiNs.ACCOUNT_COPY.sign_out_note));
+  findButton(m.host, 'Sign out').click();
+  await m.ui.settled();
+  assert.equal(loadAuth(), null);
+  assert.ok(allText(m.host).includes(linkuiNs.ACCOUNT_COPY.signed_out_notice));
 });
