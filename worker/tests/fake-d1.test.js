@@ -24,8 +24,15 @@ test('first() returns null when nothing matches', async () => {
   assert.equal(await db.prepare('SELECT * FROM devices WHERE token_hash = ?').bind('x').first(), null);
 });
 
-test('the single-row CHECK rejects a second data row', async () => {
+test('the FK to accounts rejects a data row for a missing account', async () => {
   const db = makeD1();
   await assert.rejects(() =>
     db.prepare('INSERT INTO data (id, version, blob, updated_at) VALUES (2, 0, \'\', \'x\')').run());
+});
+
+test('the single-row CHECK is gone: a second account may own a second data row', async () => {
+  const db = makeD1();
+  await db.prepare("INSERT INTO accounts (id, created_at) VALUES (2, 't')").run();
+  const res = await db.prepare('INSERT INTO data (id, version, blob, updated_at) VALUES (2, 0, \'\', \'x\')').run();
+  assert.equal(res.meta.changes, 1);
 });

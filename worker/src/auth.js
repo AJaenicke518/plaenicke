@@ -56,7 +56,8 @@ export async function authenticateDevice(request, env, now) {
 
 export async function mintDevice(env, name, now) {
   const token = base64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES)));
-  await env.DB.prepare('INSERT INTO devices (token_hash, name, created_at) VALUES (?, ?, ?)')
+  // TEMP(Task 3): bind the legacy account until accounts are real.
+  await env.DB.prepare('INSERT INTO devices (token_hash, account_id, name, created_at) VALUES (?, 1, ?, ?)')
     .bind(await sha256Hex(token), name, now).run();
   return token;
 }
