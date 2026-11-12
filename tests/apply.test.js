@@ -13,7 +13,7 @@ process.env.TZ = 'America/Los_Angeles';
 // below — app.js included — is evaluated (tests/offline-fetch.js): every fetch
 // a test has not stubbed rejects the way an offline device does.
 import './offline-fetch.js';
-import { test, afterEach } from 'node:test';
+import { test, afterEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
@@ -76,8 +76,37 @@ function recordAlign(fn, ms) {
 }
 const unmockedSetTimeout = globalThis.setTimeout;
 const unmockedClearTimeout = globalThis.clearTimeout;
-globalThis.setTimeout = (fn, ms, ...args) => (isTodayAlign(fn) ? recordAlign(fn, ms) : unmockedSetTimeout(fn, ms, ...args));
-globalThis.clearTimeout = (h) => { if (isAlignHandle(h)) alignTimeouts.delete(h); else unmockedClearTimeout(h); };
+// A DOWNLOAD DEADLINE LEFT ARMED IS A LEAKED REQUEST (sweep W2-I5). Every
+// fetchWithTimeout arms one FETCH_TIMEOUT_MS timer and disarms it when the
+// request settles, so a timer of exactly that length still armed after the
+// last test is a request some test held open and never released — and it
+// kept this file's process alive for the full 60 s (measured: `npm test` took
+// 60.7 s instead of ~6 s). Tracked here, through the same wrapper, and checked
+// by the after() below.
+const armedDeadlines = new Set();
+function armDeadline(fn, ms, args) {
+  const handle = unmockedSetTimeout((...a) => { armedDeadlines.delete(handle); fn(...a); }, ms, ...args);
+  armedDeadlines.add(handle);
+  return handle;
+}
+globalThis.setTimeout = (fn, ms, ...args) => {
+  if (isTodayAlign(fn)) return recordAlign(fn, ms);
+  if (ms === FETCH_TIMEOUT_MS) return armDeadline(fn, ms, args);
+  return unmockedSetTimeout(fn, ms, ...args);
+};
+globalThis.clearTimeout = (h) => {
+  if (isAlignHandle(h)) { alignTimeouts.delete(h); return; }
+  armedDeadlines.delete(h);
+  unmockedClearTimeout(h);
+};
+after(() => {
+  const leaked = armedDeadlines.size;
+  // Cleared either way, so a failure here is reported at once rather than
+  // after the leaked deadline finally fires.
+  for (const h of armedDeadlines) unmockedClearTimeout(h);
+  armedDeadlines.clear();
+  assert.equal(leaked, 0, 'a fetchWithTimeout deadline is still armed: some test held a request open and never released it');
+});
 const liveAligns = () => [...alignTimeouts.values()];
 // Runs the one pending first timeout, as the clock reaching the minute would.
 function fireTodayAlign() {
@@ -5217,9 +5246,18 @@ test('stamp: a calendar added in Settings whose first fetch fails says "Couldn\'
   withSession(); // calendars refresh only with a session (D21)
   seed([]);
   seedFeedsWithCache([sdFeed('sP-have')], { 'sP-have': cacheAt(localAt(9, 50)) });
-  let answer;
+  // Answered BY URL (sweep W2-I5). Opening Settings on this linked device
+  // with the adoption gate up also previews the account (GET /data); a stub
+  // that held every request caught that read, never released it, and left its
+  // 60 s download deadline armed past the last test. The account read fails
+  // at once, as offline; only the new calendar's fetch is held, and every
+  // held request is settled in finally.
+  const held = [];
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = () => new Promise((resolve) => { answer = resolve; });
+  globalThis.fetch = (url) => {
+    if (String(url).includes('/data')) return Promise.reject(new TypeError('offline in this test'));
+    return new Promise((resolve) => { held.push({ url: String(url), resolve }); });
+  };
   t.mock.timers.enable({ apis: ['Date'], now: localAt(10, 0).getTime() });
   const panel = { close() {} };
   try {
@@ -5229,11 +5267,15 @@ test('stamp: a calendar added in Settings whose first fetch fails says "Couldn\'
     click(panel.host.querySelectorAll('button').find((b) => b.textContent === 'Add calendar'));
     await settle();
     assert.equal(stampEl().textContent, 'Updated 9:50 AM', 'while its first fetch runs, the new calendar is not a failure');
-    answer(failingFeed());
+    const feedFetch = held.filter((h) => h.url.includes('/feed?url='));
+    assert.equal(feedFetch.length, 1, 'fixture check: the new calendar\'s first fetch is the one held');
+    feedFetch[0].resolve(failingFeed());
     for (let i = 0; i < 6; i += 1) await settle();
     assert.equal(stampEl().textContent, "Couldn't refresh calendars", 'its first fetch failed, and the stamp says so');
   } finally {
     panel.close();
+    for (const h of held) h.resolve(failingFeed());
+    for (let i = 0; i < 6; i += 1) await settle();
     t.mock.timers.reset();
     globalThis.fetch = originalFetch;
   }
