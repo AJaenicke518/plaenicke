@@ -1,5 +1,6 @@
 // accounts.js — sign-up, prelogin, login (with atomic lockout), logout, devices,
-// account info and recovery confirm (spec § 6.1, 6.2, 6.6).
+// account info, recovery confirm, recovery, password change, new recovery link
+// and legacy upgrade (spec § 6.1 - 6.7).
 //
 // Never log emails, keys, tokens or bodies from this file.
 import { atRest, checkKey, AtRestError } from './seal.js';
@@ -148,10 +149,160 @@ async function handleLogin(request, env, A) {
   });
 }
 
-async function handleBearer(path, request, env, now) {
+const validKdf = (b) => isB64u(b.kdfSalt, 16) && Number.isInteger(b.kdfIters) && b.kdfIters >= MIN_ITERS;
+
+// Shared by recover/start and recover/finish: the row is found by email, then
+// the recovery key is checked. Recovery is exempt from the D11 lockout, so a
+// wrong key is never counted. Returns {row} or {res}.
+async function recoveryRow(env, A, email, recAuthKey) {
+  const row = await env.DB.prepare(
+    'SELECT id, rec_auth_mac, wrapped_dek_rec_sealed, dek_check, disabled_at FROM accounts WHERE email = ?',
+  ).bind(email).first();
+  if (!row || row.rec_auth_mac === null) return { res: json({ error: 'bad_recovery' }, 401) };
+  if (row.disabled_at) return { res: json({ error: 'disabled' }, 403) };
+  if (!timingSafeEqual(await A.mac(recAuthKey), row.rec_auth_mac)) return { res: json({ error: 'bad_recovery' }, 401) };
+  return { row };
+}
+
+async function handleRecoverStart(request, env, A) {
+  const b = await readBody(request);
+  const email = normEmail(b && b.email);
+  if (!b || !EMAIL_RE.test(email) || !isB64u(b.recAuthKey, 32)) return json({ error: 'bad_request' }, 400);
+  const { row, res } = await recoveryRow(env, A, email, b.recAuthKey);
+  if (res) return res;
+  return json({
+    accountId: row.id,
+    wrappedDekRec: await A.unseal('wrapped_dek_rec_sealed', row.id, row.wrapped_dek_rec_sealed),
+    dekCheck: row.dek_check,
+  });
+}
+
+async function handleRecoverFinish(request, env, A) {
+  const b = await readBody(request);
+  const email = normEmail(b && b.email);
+  if (!b || !EMAIL_RE.test(email) || !isB64u(b.recAuthKey, 32) || !validKdf(b)
+    || !isB64u(b.authKey, 32) || !isB64u(b.recAuthKey2, 32)
+    || !isB64(b.wrappedDekPw, 60) || !isB64(b.wrappedDekRec2, 60) || !validName(b.deviceName)) {
+    return json({ error: 'bad_request' }, 400);
+  }
+  const { row, res } = await recoveryRow(env, A, email, b.recAuthKey);
+  if (res) return res;
+  const id = row.id;
+  const now = nowISO(env);
+  const token = newToken();
+  const tokenHash = await sha256Hex(token);
+  const oldMac = await A.mac(b.recAuthKey);
+  const newMac = await A.mac(b.recAuthKey2);
+  const pw = await A.seal('wrapped_dek_pw_sealed', id, b.wrappedDekPw);
+  const recW = await A.seal('wrapped_dek_rec_sealed', id, b.wrappedDekRec2);
+  const authMac = await A.mac(b.authKey);
+  // One batch. The DELETE and INSERT are conditioned on the NEW rec_auth_mac,
+  // so they run only if this call's UPDATE landed (spec § 6.3 step 4).
+  const results = await env.DB.batch([
+    env.DB.prepare(`UPDATE accounts SET kdf_salt=?, kdf_iters=?, auth_mac=?, rec_auth_mac=?, wrapped_dek_pw_sealed=?, wrapped_dek_rec_sealed=?,
+        recovery_confirmed_at=NULL, failed_logins=0, locked_until=NULL WHERE id=? AND rec_auth_mac=?`)
+      .bind(b.kdfSalt, b.kdfIters, authMac, newMac, pw, recW, id, oldMac),
+    env.DB.prepare('DELETE FROM devices WHERE account_id = ? AND EXISTS (SELECT 1 FROM accounts WHERE id = ? AND rec_auth_mac = ?)')
+      .bind(id, id, newMac),
+    env.DB.prepare('INSERT INTO devices (token_hash, account_id, name, created_at) SELECT ?, id, ?, ? FROM accounts WHERE id = ? AND rec_auth_mac = ?')
+      .bind(tokenHash, b.deviceName, now, id, newMac),
+  ]);
+  if (results[0].meta.changes !== 1) return json({ error: 'recovery_changed' }, 409);
+  return json({ token, accountId: id });
+}
+
+// Password-gated account changes (change password, new recovery link): the
+// current key goes through the same atomic attempt reservation as login.
+// Returns {row} to proceed, or {res}.
+async function verifyCurrentPassword(env, A, accountId, currentAuthKey, now) {
+  const row = await env.DB.prepare('SELECT auth_mac FROM accounts WHERE id = ?').bind(accountId).first();
+  if (!row || row.auth_mac === null) return { res: json({ error: 'no_password' }, 409) };
+  if (!await reservePasswordAttempt(env, accountId, now)) {
+    const cur = await env.DB.prepare('SELECT locked_until FROM accounts WHERE id = ?').bind(accountId).first();
+    return { res: json({ error: 'locked', retryAt: cur && cur.locked_until }, 429) };
+  }
+  if (!timingSafeEqual(await A.mac(currentAuthKey), row.auth_mac)) return { res: json({ error: 'bad_credentials' }, 401) };
+  return { row };
+}
+
+async function handlePasswordChange(request, env, A, device, now) {
+  const b = await readBody(request);
+  if (!b || !isB64u(b.currentAuthKey, 32) || !validKdf(b) || !isB64u(b.authKey, 32)
+    || !isB64(b.wrappedDekPw, 60) || typeof b.signOutOthers !== 'boolean') {
+    return json({ error: 'bad_request' }, 400);
+  }
+  const { accountId, tokenHash } = device;
+  const { row, res } = await verifyCurrentPassword(env, A, accountId, b.currentAuthKey, now);
+  if (res) return res;
+  const newMac = await A.mac(b.authKey);
+  const pw = await A.seal('wrapped_dek_pw_sealed', accountId, b.wrappedDekPw);
+  const stmts = [
+    env.DB.prepare(`UPDATE accounts SET kdf_salt=?, kdf_iters=?, auth_mac=?, wrapped_dek_pw_sealed=?,
+        failed_logins=0, locked_until=NULL WHERE id=? AND auth_mac=?`)
+      .bind(b.kdfSalt, b.kdfIters, newMac, pw, accountId, row.auth_mac),
+  ];
+  if (b.signOutOthers) {
+    stmts.push(env.DB.prepare(
+      'DELETE FROM devices WHERE account_id = ? AND token_hash != ? AND EXISTS (SELECT 1 FROM accounts WHERE id = ? AND auth_mac = ?)',
+    ).bind(accountId, tokenHash, accountId, newMac));
+  }
+  const results = await env.DB.batch(stmts);
+  if (results[0].meta.changes !== 1) return json({ error: 'password_changed' }, 409);
+  return json({ ok: true });
+}
+
+async function handleNewRecovery(request, env, A, device, now) {
+  const b = await readBody(request);
+  if (!b || !isB64u(b.currentAuthKey, 32) || !isB64u(b.recAuthKey, 32) || !isB64(b.wrappedDekRec, 60)) {
+    return json({ error: 'bad_request' }, 400);
+  }
+  const { accountId } = device;
+  const { row, res } = await verifyCurrentPassword(env, A, accountId, b.currentAuthKey, now);
+  if (res) return res;
+  const recMac = await A.mac(b.recAuthKey);
+  const recW = await A.seal('wrapped_dek_rec_sealed', accountId, b.wrappedDekRec);
+  const results = await env.DB.batch([
+    env.DB.prepare(`UPDATE accounts SET rec_auth_mac=?, wrapped_dek_rec_sealed=?, recovery_confirmed_at=NULL,
+        failed_logins=0, locked_until=NULL WHERE id=? AND auth_mac=?`)
+      .bind(recMac, recW, accountId, row.auth_mac),
+  ]);
+  if (results[0].meta.changes !== 1) return json({ error: 'password_changed' }, 409);
+  return json({ ok: true });
+}
+
+async function handleUpgrade(request, env, A, device) {
+  const b = await readBody(request);
+  const email = normEmail(b && b.email);
+  if (!b || !EMAIL_RE.test(email) || email.length > 254 || !validKdf(b)
+    || !isB64u(b.authKey, 32) || !isB64u(b.recAuthKey, 32)
+    || !isB64(b.wrappedDekPw, 60) || !isB64(b.wrappedDekRec, 60)
+    || typeof b.dekCheck !== 'string' || !/^[0-9a-f]{64}$/.test(b.dekCheck)) {
+    return json({ error: 'bad_request' }, 400);
+  }
+  const { accountId } = device;
+  const pw = await A.seal('wrapped_dek_pw_sealed', accountId, b.wrappedDekPw);
+  const recW = await A.seal('wrapped_dek_rec_sealed', accountId, b.wrappedDekRec);
+  let res;
+  try {
+    res = await env.DB.prepare(`UPDATE accounts SET email=?, kdf_salt=?, kdf_iters=?, auth_mac=?, rec_auth_mac=?,
+        wrapped_dek_pw_sealed=?, wrapped_dek_rec_sealed=?, dek_check=?, recovery_confirmed_at=NULL
+        WHERE id=? AND email IS NULL`)
+      .bind(email, b.kdfSalt, b.kdfIters, await A.mac(b.authKey), await A.mac(b.recAuthKey), pw, recW, b.dekCheck, accountId).run();
+  } catch (err) {
+    if (/UNIQUE constraint failed: accounts\.email/.test(String(err && err.message))) return json({ error: 'email_taken' }, 409);
+    throw err;
+  }
+  if (res.meta.changes !== 1) return json({ error: 'already_upgraded' }, 409);
+  return json({ ok: true, accountId });
+}
+
+async function handleBearer(path, request, env, A, now) {
   const device = await authenticateDevice(request, env, now);
   if (!device) return json({ error: 'unauthorized' }, 401);
   const { accountId, tokenHash } = device;
+  if (path === '/account/password') return handlePasswordChange(request, env, A, device, now);
+  if (path === '/account/recovery') return handleNewRecovery(request, env, A, device, now);
+  if (path === '/account/upgrade') return handleUpgrade(request, env, A, device);
   if (path === '/auth/logout') {
     await env.DB.prepare('DELETE FROM devices WHERE token_hash = ?').bind(tokenHash).run();
     return json({ ok: true });
@@ -181,6 +332,11 @@ async function handleBearer(path, request, env, now) {
 }
 
 const ROUTES = {
+  '/auth/recover/start': ['POST', 'recover-start'],
+  '/auth/recover/finish': ['POST', 'recover-finish'],
+  '/account/password': ['POST', 'bearer'],
+  '/account/recovery': ['POST', 'bearer'],
+  '/account/upgrade': ['POST', 'bearer'],
   '/auth/signup': ['POST', 'signup'],
   '/auth/prelogin': ['POST', 'prelogin'],
   '/auth/login': ['POST', 'login'],
@@ -203,7 +359,9 @@ export async function handleAccountRoute(pathname, request, env) {
     if (route[1] === 'signup') return await handleSignup(request, env, A);
     if (route[1] === 'prelogin') return await handlePrelogin(request, env);
     if (route[1] === 'login') return await handleLogin(request, env, A);
-    return await handleBearer(pathname, request, env, nowISO(env));
+    if (route[1] === 'recover-start') return await handleRecoverStart(request, env, A);
+    if (route[1] === 'recover-finish') return await handleRecoverFinish(request, env, A);
+    return await handleBearer(pathname, request, env, A, nowISO(env));
   } catch (e) {
     if (e instanceof AtRestError) return json({ error: e.code }, 500);
     throw e;

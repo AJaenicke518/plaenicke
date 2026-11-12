@@ -1,38 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import worker from '../src/index.js';
-import { makeD1 } from './fake-d1.js';
 import { sha256Hex } from '../src/auth.js';
-
-const KEY = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
-const KEY_B = 'HB0eHyAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5Ojs';
-const b64u = (n, fill) => Buffer.alloc(n, fill).toString('base64url');
-const b64 = (n, fill) => Buffer.alloc(n, fill).toString('base64');
-function envWith() { return { DB: makeD1(), AT_REST_KEY: KEY, ADMIN_SECRET: 'adm' }; }
-async function invite(env, code = 'INVITE-1') {
-  await env.DB.prepare('INSERT INTO invites (hash, created_at) VALUES (?, ?)').bind(await sha256Hex(code), 't').run();
-  return code;
-}
-function body(over = {}) {
-  return { invite: 'INVITE-1', email: 'Tester@Example.com', kdfSalt: b64u(16, 1), kdfIters: 600000,
-    authKey: b64u(32, 2), recAuthKey: b64u(32, 3), wrappedDekPw: b64(60, 4), wrappedDekRec: b64(60, 5),
-    dekCheck: 'a'.repeat(64), deviceName: 'iPhone', ...over };
-}
-const post = (env, path, json, token) => worker.fetch(new Request(`https://w${path}`, {
-  method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
-  body: JSON.stringify(json) }), env);
-const get = (env, path, token) => worker.fetch(new Request(`https://w${path}`, {
-  headers: token ? { authorization: `Bearer ${token}` } : {} }), env);
-const one = (env, sql, ...args) => env.DB.prepare(sql).bind(...args).first();
-const count = async (env, table) => (await one(env, `SELECT COUNT(*) AS n FROM ${table}`)).n;
-const login = (env, over = {}) => post(env, '/auth/login', { email: 'tester@example.com', authKey: b64u(32, 2), deviceName: 'Mac', ...over });
-async function signedUp(env = envWith()) {
-  await invite(env);
-  const res = await post(env, '/auth/signup', body());
-  assert.equal(res.status, 200);
-  return { env, ...(await res.json()) };
-}
-const T0 = '2026-11-11T12:00:00.000Z';
+import {
+  KEY, KEY_B, b64u, b64, envWith, invite, body, post, get, one, count, login, signedUp, T0,
+} from './account-helpers.js';
 
 test('1. sign-up with a valid invite creates account, data row, device; consumes invite', async () => {
   const env = envWith();
