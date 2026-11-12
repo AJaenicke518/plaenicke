@@ -49,3 +49,29 @@ test('empty string lists all its problems', () => {
 test('missing email does not throw', () => {
   assert.equal(checkPassword('correct horse 7').ok, true);
 });
+
+// --- sweep W2 observations (TEST M10/M11, Task 9 deferred NFKC) -----------
+
+test('W2: exactly 8 characters is accepted; 7 is not', () => {
+  assert.deepEqual(checkPassword('qz7!kwrm', 'a@x.de'), { ok: true, problems: [] });
+  assert.deepEqual(checkPassword('qz7!kwr', 'a@x.de').problems, [LEN]);
+});
+
+test('W2: length counts characters, not UTF-16 units (an astral character is one)', () => {
+  const seven = '😀😀😀😀😀1!';            // 7 characters, 12 UTF-16 units
+  assert.equal(seven.length, 12);
+  assert.deepEqual(checkPassword(seven, 'a@x.de').problems, [LEN]);
+  assert.equal(checkPassword(`${seven}x`, 'a@x.de').ok, true);
+});
+
+// keys.js derives from password.normalize('NFKC'), so the policy must judge
+// the same string: a fullwidth 'Ｐassword1！' IS 'Password1!' to the KDF.
+test('W2: the blocklist and the email check see the NFKC form (fullwidth characters)', () => {
+  assert.deepEqual(checkPassword('Ｐassword1！', 'a@x.de').problems, [COM]);
+  assert.deepEqual(checkPassword('ａｌｅｘ.j2026!', 'alex.j@x.de').problems, [EML]);
+  assert.deepEqual(checkPassword('alex.j2026!', 'ａｌｅｘ.j@x.de').problems, [EML], 'the email is normalized too');
+});
+
+test('W2: the blocklist is not accidentally emptied (size floor)', () => {
+  assert.ok(COMMON.size >= 3600, `COMMON has ${COMMON.size} entries`);
+});

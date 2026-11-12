@@ -2,7 +2,13 @@
 // anything that is neither, so a space counts.
 import { COMMON } from './common-passwords.js';
 
-export function checkPassword(password, email) {
+//
+// Judged on the NFKC form (sweep W2), because that is what js/keys.js derives
+// from: a fullwidth 'Ｐassword1！' is 'Password1!' to the KDF, so it is to the
+// blocklist and the email check too. Length counts code points.
+export function checkPassword(rawPassword, rawEmail) {
+  const password = String(rawPassword).normalize('NFKC');
+  const email = typeof rawEmail === 'string' ? rawEmail.normalize('NFKC') : rawEmail;
   const problems = [];
   if ([...password].length < 8) problems.push('At least 8 characters');
   if (!/\p{N}/u.test(password)) problems.push('At least one number');
