@@ -1438,3 +1438,8 @@ test('account: the banner hides when [hidden], and its buttons and checkboxes ar
   assert.ok(px(declOf('.account-check', 'min-height')) >= 44);
   assert.ok(px(declOf('.account-banner button', 'min-height')) >= 44);
 });
+
+// Sweep W3 #27: the recovery banner's corner was a literal 8px.
+test('account: the recovery banner uses the control radius token, not a literal', () => {
+  assert.equal(declOf('.account-banner', 'border-radius'), 'var(--radius-control)');
+});

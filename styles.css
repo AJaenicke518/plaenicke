@@ -884,7 +884,7 @@ button[data-press].pressed { opacity: 1; }
   font-size: 0.8rem;
   margin: 0 0 12px;
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   border: 1px solid var(--accent);
   color: var(--ink);
   background: var(--card);

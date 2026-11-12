@@ -411,7 +411,10 @@ function paintShellIndicator(el, now = new Date()) {
   // disable) says so in the shell too — "Sync problem" names no action.
   const signedOut = kind === SYNC_ERROR && readSyncFacts().syncState.lastError === 'unauthorized'
     && accountModeFromStorage() === 'account';
-  el.textContent = !attention ? '' : signedOut ? ACCOUNT_SIGNED_OUT_TEXT : SHELL_TEXT[kind];
+  // A damaged code on an account device is fixed by signing in, not by the
+  // legacy re-link (Task 12 deferred, sweep W3).
+  const accountCorrupt = kind === SYNC_CORRUPT && ownerHasLogin();
+  el.textContent = !attention ? '' : signedOut ? ACCOUNT_SIGNED_OUT_TEXT : accountCorrupt ? ACCOUNT_COPY.corrupt : SHELL_TEXT[kind];
   el.className = attention ? 'sync-indicator sync-indicator-problem' : 'sync-indicator';
 }
 

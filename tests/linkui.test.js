@@ -3752,3 +3752,21 @@ test('W3 carried: an unshown link on a legacy-owned device gets legacy copy (Che
   assert.ok(text.includes(linkuiNs.ACCOUNT_COPY.legacy_link_unchecked), text);
   assert.ok(!text.includes(linkuiNs.ACCOUNT_COPY.owned_device));
 });
+
+// Task 12 deferred (sweep W3): on an account device a corrupt stored code is
+// fixed by signing in, not by the legacy re-link the generic badge implies.
+test('W3: the shell indicator on an account device with a damaged sign-in says to sign in again', () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  const shell = doc.createElement('div');
+  shell.id = SHELL_SYNC_STATUS_ID;
+  doc.body.appendChild(shell);
+  saveAuth('!!! not a link code !!!');
+  saveLocalOwner(5);
+  renderSyncStatus();
+  assert.equal(shell.hidden, false);
+  assert.equal(shell.textContent, linkuiNs.ACCOUNT_COPY.corrupt);
+  storageNs.saveLegacyOwner(5); // a legacy owner keeps the generic badge
+  renderSyncStatus();
+  assert.equal(shell.textContent, 'Sync is broken — open Settings');
+});

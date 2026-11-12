@@ -1687,3 +1687,14 @@ test('W3 #19: on a linked ACCOUNT device a boot link still lands on the home wit
   assert.equal(byId(host, 'acct-form'), null);
   assert.equal(errorText(host), ACCOUNT_COPY.already_linked);
 });
+
+test('W3 #27: the remembered email is the server\'s form (trimmed, lowercased, D1)', async () => {
+  const { host } = setup();
+  const { api } = fakeApi({ logIn: async () => ({ code: newCode(), accountId: 7, recoveryConfirmed: true }) });
+  mount(host, { api });
+  click(byId(host, 'acct-login'));
+  input(host, 'acct-email', '  Alex@Example.COM ');
+  input(host, 'acct-password', 'whatever');
+  await submit(host);
+  assert.match(allText(host), /Signed in as alex@example\.com/);
+});

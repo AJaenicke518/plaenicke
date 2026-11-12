@@ -151,8 +151,11 @@ function currentInfo() {
   return link && known && known.token === link.authToken ? known.info : null;
 }
 
+// The email is kept in the server's form (D1: trimmed, lowercased), so what
+// a form typed and what GET /account answers read the same (sweep W3 #27).
 function remember(link, info) {
-  known = { token: link.authToken, info };
+  const email = typeof info.email === 'string' ? info.email.trim().toLowerCase() : info.email;
+  known = { token: link.authToken, info: { ...info, email } };
   paintBanner();
 }
 

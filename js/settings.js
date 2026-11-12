@@ -744,7 +744,7 @@ export function initSettings({
         syncingFeedId = null;
         renderCalendars();
         // A signed-out result made no request: there is no fetch to report.
-      if (result.error !== 'signed_out') onFeedFetched(feed.id, result.ok);
+        if (result.error !== 'signed_out') onFeedFetched(feed.id, result.ok);
         notifyViewChanged();
       }
 
