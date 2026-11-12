@@ -11,23 +11,35 @@ import {
 import { bytesToBase64url, generateEncKey, composeLinkCode, parseLinkCode, decryptBlob } from './crypto.js';
 
 export class AccountError extends Error {
-  constructor(code, extra = {}) {
+  constructor(code, extra = {}, status = null) {
     super(code);
     this.name = 'AccountError';
     this.code = code;
     this.extra = extra;
+    this.status = status;
   }
 }
 
 const KEY_ERRORS = new Set(['kdf_iters_too_low', 'unwrap_failed', 'bad_salt', 'bad_recovery_code']);
 
-// Maps js/keys.js failures to AccountError; anything else propagates unchanged.
+// Every failure inside becomes an AccountError: known js/keys.js codes keep
+// their code, anything else is 'server' (never a bare Error). Caller-supplied
+// hooks must run outside keyOp so their throws propagate unchanged.
 async function keyOp(fn) {
   try { return await fn(); } catch (e) {
     if (e instanceof AccountError) throw e;
     if (e && KEY_ERRORS.has(e.message)) throw new AccountError(e.message);
-    throw e;
+    throw new AccountError('server');
   }
+}
+
+const isStr = (v) => typeof v === 'string' && v.length > 0;
+const isId = (v) => Number.isSafeInteger(v) && v > 0;
+// Throws AccountError('server') unless every named check passes on the 2xx body.
+function shape(res, checks) {
+  if (!res || typeof res !== 'object') throw new AccountError('server');
+  for (const [k, ok] of Object.entries(checks)) if (!ok(res[k])) throw new AccountError('server');
+  return res;
 }
 
 function ctx(o = {}) {
@@ -55,7 +67,7 @@ async function call(c, method, path, { body, token } = {}) {
   if (!res.ok) {
     if (!json || typeof json.error !== 'string') throw new AccountError('server');
     const { error, ...extra } = json;
-    throw new AccountError(error, extra);
+    throw new AccountError(error, extra, res.status);
   }
   return json;
 }
@@ -63,7 +75,7 @@ async function call(c, method, path, { body, token } = {}) {
 const post = (c, path, body, token) => call(c, 'POST', path, { body, token });
 
 async function prelogin(c, email) {
-  return post(c, '/auth/prelogin', { email });
+  return shape(await post(c, '/auth/prelogin', { email }), { kdfSalt: isStr, kdfIters: Number.isInteger });
 }
 
 // D18: before any password / recovery change, prove this device's key decrypts
@@ -83,11 +95,11 @@ export async function signUp({ invite, email, password, deviceName, iters = KDF_
     const salt = bytesToBase64url(newSalt());
     const { authKey, wrapKey } = await derivePasswordKeys(password, salt, iters, { minKdfIters: c.minKdfIters });
     const rec = await deriveRecoveryKeys(recoveryCode);
-    const res = await post(c, '/auth/signup', {
+    const res = shape(await post(c, '/auth/signup', {
       invite, email, kdfSalt: salt, kdfIters: iters, authKey, recAuthKey: rec.recAuthKey,
       wrappedDekPw: await wrapDek(wrapKey, dek, 'pw'), wrappedDekRec: await wrapDek(rec.wrapKey, dek, 'rec'),
       dekCheck: await dekCheck(dek), deviceName,
-    });
+    }), { token: isStr, accountId: isId });
     return { code: composeLinkCode(res.token, dek), accountId: res.accountId, recoveryCode };
   });
 }
@@ -97,7 +109,8 @@ export async function logIn({ email, password, deviceName, ...o }) {
   return keyOp(async () => {
     const pre = await prelogin(c, email);
     const { authKey, wrapKey } = await derivePasswordKeys(password, pre.kdfSalt, pre.kdfIters, { minKdfIters: c.minKdfIters });
-    const res = await post(c, '/auth/login', { email, authKey, deviceName });
+    const res = shape(await post(c, '/auth/login', { email, authKey, deviceName }),
+      { token: isStr, accountId: isId, wrappedDekPw: isStr, dekCheck: isStr, recoveryConfirmed: (v) => typeof v === 'boolean' });
     const dek = await unwrapDek(wrapKey, res.wrappedDekPw, 'pw');
     if (await dekCheck(dek) !== res.dekCheck) throw new AccountError('dek_check_failed');
     return { code: composeLinkCode(res.token, dek), accountId: res.accountId, recoveryConfirmed: res.recoveryConfirmed };
@@ -106,20 +119,26 @@ export async function logIn({ email, password, deviceName, ...o }) {
 
 export async function recover({ email, recoveryCode, newPassword, deviceName, onAccountKnown, iters = KDF_ITERS, ...o }) {
   const c = ctx(o);
-  return keyOp(async () => {
+  const known = await keyOp(async () => {
     const old = await deriveRecoveryKeys(recoveryCode);
-    const start = await post(c, '/auth/recover/start', { email, recAuthKey: old.recAuthKey });
+    const start = shape(await post(c, '/auth/recover/start', { email, recAuthKey: old.recAuthKey }),
+      { accountId: isId, wrappedDekRec: isStr, dekCheck: isStr });
     const dek = await unwrapDek(old.wrapKey, start.wrappedDekRec, 'rec');
     if (await dekCheck(dek) !== start.dekCheck) throw new AccountError('dek_check_failed');
-    await onAccountKnown?.(start.accountId);
+    return { old, dek, accountId: start.accountId };
+  });
+  // Outside keyOp: a throw from the hook propagates unchanged and aborts before finish.
+  await onAccountKnown?.(known.accountId);
+  return keyOp(async () => {
+    const { old, dek } = known;
     const salt = bytesToBase64url(newSalt());
     const { authKey, wrapKey } = await derivePasswordKeys(newPassword, salt, iters, { minKdfIters: c.minKdfIters });
     const newCode = newRecoveryCode();
     const nrec = await deriveRecoveryKeys(newCode);
-    const fin = await post(c, '/auth/recover/finish', {
+    const fin = shape(await post(c, '/auth/recover/finish', {
       email, recAuthKey: old.recAuthKey, kdfSalt: salt, kdfIters: iters, authKey, recAuthKey2: nrec.recAuthKey,
       wrappedDekPw: await wrapDek(wrapKey, dek, 'pw'), wrappedDekRec2: await wrapDek(nrec.wrapKey, dek, 'rec'), deviceName,
-    });
+    }), { token: isStr, accountId: isId });
     return { code: composeLinkCode(fin.token, dek), accountId: fin.accountId, recoveryCode: newCode };
   });
 }
@@ -129,7 +148,7 @@ async function currentAuthKey(c, email, currentPassword) {
   return (await derivePasswordKeys(currentPassword, pre.kdfSalt, pre.kdfIters, { minKdfIters: c.minKdfIters })).authKey;
 }
 
-export async function changePassword({ link, email, currentPassword, newPassword, signOutOthers, iters = KDF_ITERS, ...o }) {
+export async function changePassword({ link, email, currentPassword, newPassword, signOutOthers: signOutOtherDevices, iters = KDF_ITERS, ...o }) {
   const c = ctx(o);
   return keyOp(async () => {
     await checkDeviceKey(c, link);
@@ -138,7 +157,7 @@ export async function changePassword({ link, email, currentPassword, newPassword
     const { authKey, wrapKey } = await derivePasswordKeys(newPassword, salt, iters, { minKdfIters: c.minKdfIters });
     await post(c, '/account/password', {
       currentAuthKey: currentAuth, kdfSalt: salt, kdfIters: iters, authKey,
-      wrappedDekPw: await wrapDek(wrapKey, link.encKey, 'pw'), signOutOthers: signOutOthers === true,
+      wrappedDekPw: await wrapDek(wrapKey, link.encKey, 'pw'), signOutOthers: signOutOtherDevices === true,
     }, link.authToken);
     return { ok: true };
   });
@@ -166,11 +185,11 @@ export async function upgrade({ link, email, password, iters = KDF_ITERS, ...o }
     const salt = bytesToBase64url(newSalt());
     const { authKey, wrapKey } = await derivePasswordKeys(password, salt, iters, { minKdfIters: c.minKdfIters });
     const rec = await deriveRecoveryKeys(recoveryCode);
-    const res = await post(c, '/account/upgrade', {
+    const res = shape(await post(c, '/account/upgrade', {
       email, kdfSalt: salt, kdfIters: iters, authKey, recAuthKey: rec.recAuthKey,
       wrappedDekPw: await wrapDek(wrapKey, link.encKey, 'pw'), wrappedDekRec: await wrapDek(rec.wrapKey, link.encKey, 'rec'),
       dekCheck: await dekCheck(link.encKey),
-    }, link.authToken);
+    }, link.authToken), { accountId: isId });
     return { recoveryCode, accountId: res.accountId };
   });
 }
@@ -186,7 +205,7 @@ export async function logOut({ link, ...o }) {
     await post(ctx(o), '/auth/logout', undefined, link.authToken);
     return { revoked: true };
   } catch (e) {
-    if (e instanceof AccountError && e.code === 'unauthorized') return { revoked: true };
+    if (e instanceof AccountError && e.status === 401) return { revoked: true };
     return { revoked: false };
   }
 }

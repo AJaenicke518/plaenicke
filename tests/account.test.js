@@ -9,8 +9,6 @@ import {
 import { parseLinkCode, generateEncKey, encryptBlob } from '../js/crypto.js';
 import { APP_URL } from '../js/config.js';
 
-const FAST = {}; // the Worker enforces kdfIters >= 600000, so tests use the production iteration count
-const LOW = {};
 
 // A fake server built from the real Worker. `calls` records every request path;
 // `stub(path, fn)` lets a test rewrite one response.
@@ -34,7 +32,7 @@ async function setup() {
   const env = envWith();
   const s = server(env);
   await invite(env);
-  const su = await signUp({ invite: 'INVITE-1', email: EMAIL, password: PW, deviceName: 'iPhone', ...FAST, ...s });
+  const su = await signUp({ invite: 'INVITE-1', email: EMAIL, password: PW, deviceName: 'iPhone', ...s });
   return { env, s, su };
 }
 const linkOf = (code) => ({ ...parseLinkCode(code), code });
@@ -43,7 +41,7 @@ test('signUp then logIn yield the same DEK and different tokens', async () => {
   const { s, su } = await setup();
   assert.equal(su.code.length, 86);
   assert.equal(su.recoveryCode.length, 22);
-  const li = await logIn({ email: EMAIL, password: PW, deviceName: 'Mac', ...LOW, ...s });
+  const li = await logIn({ email: EMAIL, password: PW, deviceName: 'Mac', ...s });
   assert.deepEqual(parseLinkCode(li.code).encKey, parseLinkCode(su.code).encKey);
   assert.notEqual(parseLinkCode(li.code).authToken, parseLinkCode(su.code).authToken);
   assert.equal(li.accountId, su.accountId);
@@ -61,13 +59,13 @@ test('signUp sends kdfIters 600000 by default', async () => {
 
 test('wrong password gives bad_credentials', async () => {
   const { s } = await setup();
-  await assert.rejects(logIn({ email: EMAIL, password: 'nope-nope-1!', deviceName: 'Mac', ...LOW, ...s }),
+  await assert.rejects(logIn({ email: EMAIL, password: 'nope-nope-1!', deviceName: 'Mac', ...s }),
     (e) => e instanceof AccountError && e.code === 'bad_credentials');
 });
 
 test('unknown email gives no_account', async () => {
   const { s } = await setup();
-  await assert.rejects(logIn({ email: 'x@example.com', password: PW, deviceName: 'Mac', ...LOW, ...s }),
+  await assert.rejects(logIn({ email: 'x@example.com', password: PW, deviceName: 'Mac', ...s }),
     (e) => e.code === 'no_account');
 });
 
@@ -75,14 +73,14 @@ test('recover resets the password, rotates the recovery code, hook runs before f
   const { s, su } = await setup();
   const known = [];
   const rec = await recover({ email: EMAIL, recoveryCode: su.recoveryCode, newPassword: 'brand-new-pw-2#', deviceName: 'Mac',
-    onAccountKnown: async (id) => { known.push([id, s.calls.includes('/auth/recover/finish')]); }, ...FAST, ...s });
+    onAccountKnown: async (id) => { known.push([id, s.calls.includes('/auth/recover/finish')]); }, ...s });
   assert.deepEqual(known, [[su.accountId, false]]);
   assert.deepEqual(parseLinkCode(rec.code).encKey, parseLinkCode(su.code).encKey);
-  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'x', ...LOW, ...s }), (e) => e.code === 'bad_credentials');
-  await logIn({ email: EMAIL, password: 'brand-new-pw-2#', deviceName: 'x', ...LOW, ...s });
-  const rec2 = await recover({ email: EMAIL, recoveryCode: rec.recoveryCode, newPassword: 'third-pw-3$', deviceName: 'Mac', ...FAST, ...s });
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'x', ...s }), (e) => e.code === 'bad_credentials');
+  await logIn({ email: EMAIL, password: 'brand-new-pw-2#', deviceName: 'x', ...s });
+  const rec2 = await recover({ email: EMAIL, recoveryCode: rec.recoveryCode, newPassword: 'third-pw-3$', deviceName: 'Mac', ...s });
   assert.equal(rec2.recoveryCode.length, 22);
-  await assert.rejects(recover({ email: EMAIL, recoveryCode: su.recoveryCode, newPassword: 'fourth-pw-4%', deviceName: 'Mac', ...FAST, ...s }),
+  await assert.rejects(recover({ email: EMAIL, recoveryCode: su.recoveryCode, newPassword: 'fourth-pw-4%', deviceName: 'Mac', ...s }),
     (e) => e.code === 'bad_recovery');
 });
 
@@ -90,7 +88,7 @@ test('recover: a throwing onAccountKnown aborts before finish and propagates', a
   const { s, su } = await setup();
   const boom = new Error('hook');
   await assert.rejects(recover({ email: EMAIL, recoveryCode: su.recoveryCode, newPassword: 'brand-new-pw-2#', deviceName: 'Mac',
-    onAccountKnown: () => { throw boom; }, ...FAST, ...s }), (e) => e === boom);
+    onAccountKnown: () => { throw boom; }, ...s }), (e) => e === boom);
   assert.ok(!s.calls.includes('/auth/recover/finish'));
 });
 
@@ -106,13 +104,13 @@ test('a server-sent kdfIters below the floor gives kdf_iters_too_low and sends n
 test('tampered dekCheck on login gives dek_check_failed', async () => {
   const { s } = await setup();
   s.stub('/auth/login', (b) => ({ ...b, dekCheck: 'b'.repeat(64) }));
-  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'Mac', ...LOW, ...s }), (e) => e.code === 'dek_check_failed');
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'Mac', ...s }), (e) => e.code === 'dek_check_failed');
 });
 
 test('tampered dekCheck on recover/start gives dek_check_failed and sends no finish', async () => {
   const { s, su } = await setup();
   s.stub('/auth/recover/start', (b) => ({ ...b, dekCheck: 'b'.repeat(64) }));
-  await assert.rejects(recover({ email: EMAIL, recoveryCode: su.recoveryCode, newPassword: 'brand-new-pw-2#', deviceName: 'Mac', ...FAST, ...s }),
+  await assert.rejects(recover({ email: EMAIL, recoveryCode: su.recoveryCode, newPassword: 'brand-new-pw-2#', deviceName: 'Mac', ...s }),
     (e) => e.code === 'dek_check_failed');
   assert.ok(!s.calls.includes('/auth/recover/finish'));
 });
@@ -123,7 +121,7 @@ test('upgrade with a key that cannot decrypt the blob gives wrong_key_on_device,
   await env.DB.prepare('UPDATE data SET blob = ? WHERE id = ?').bind(await encryptBlob(keyA, { items: [] }), su.accountId).run();
   const link = { authToken: parseLinkCode(su.code).authToken, encKey: generateEncKey() };
   s.calls.length = 0;
-  await assert.rejects(upgrade({ link, email: 'new@example.com', password: PW, ...FAST, ...s }),
+  await assert.rejects(upgrade({ link, email: 'new@example.com', password: PW, ...s }),
     (e) => e.code === 'wrong_key_on_device');
   assert.ok(!s.calls.includes('/account/upgrade'));
 });
@@ -134,24 +132,24 @@ test('changePassword: D18 check blocks a wrong-key device, then works with the r
   await env.DB.prepare('UPDATE data SET blob = ? WHERE id = ?').bind(await encryptBlob(real.encKey, { items: [] }), su.accountId).run();
   const bad = { authToken: real.authToken, encKey: generateEncKey() };
   s.calls.length = 0;
-  await assert.rejects(changePassword({ link: bad, email: EMAIL, currentPassword: PW, newPassword: 'changed-pw-5^', signOutOthers: false, ...FAST, ...s }),
+  await assert.rejects(changePassword({ link: bad, email: EMAIL, currentPassword: PW, newPassword: 'changed-pw-5^', signOutOthers: false, ...s }),
     (e) => e.code === 'wrong_key_on_device');
   assert.ok(!s.calls.includes('/account/password'));
-  await changePassword({ link: real, email: EMAIL, currentPassword: PW, newPassword: 'changed-pw-5^', signOutOthers: false, ...FAST, ...s });
-  const li = await logIn({ email: EMAIL, password: 'changed-pw-5^', deviceName: 'x', ...LOW, ...s });
+  await changePassword({ link: real, email: EMAIL, currentPassword: PW, newPassword: 'changed-pw-5^', signOutOthers: false, ...s });
+  const li = await logIn({ email: EMAIL, password: 'changed-pw-5^', deviceName: 'x', ...s });
   assert.deepEqual(parseLinkCode(li.code).encKey, real.encKey);
-  await assert.rejects(changePassword({ link: real, email: EMAIL, currentPassword: 'wrong-wrong-1!', newPassword: 'zzzzzzzz-1!', signOutOthers: false, ...FAST, ...s }),
+  await assert.rejects(changePassword({ link: real, email: EMAIL, currentPassword: 'wrong-wrong-1!', newPassword: 'zzzzzzzz-1!', signOutOthers: false, ...s }),
     (e) => e.code === 'bad_credentials');
 });
 
 test('newRecoveryLink issues a code that recovers, and getAccount/listDevices/confirmRecovery/signOutOthers work', async () => {
   const { s, su } = await setup();
   const link = linkOf(su.code);
-  const { recoveryCode } = await newRecoveryLink({ link, email: EMAIL, currentPassword: PW, ...LOW, ...s });
+  const { recoveryCode } = await newRecoveryLink({ link, email: EMAIL, currentPassword: PW, ...s });
   assert.equal(recoveryCode.length, 22);
-  await recover({ email: EMAIL, recoveryCode, newPassword: 'brand-new-pw-2#', deviceName: 'Mac', ...FAST, ...s });
+  await recover({ email: EMAIL, recoveryCode, newPassword: 'brand-new-pw-2#', deviceName: 'Mac', ...s });
   // recovery signed every device out; log in again for a fresh link
-  const li = await logIn({ email: EMAIL, password: 'brand-new-pw-2#', deviceName: 'B', ...LOW, ...s });
+  const li = await logIn({ email: EMAIL, password: 'brand-new-pw-2#', deviceName: 'B', ...s });
   const l2 = linkOf(li.code);
   const acct = await getAccount({ link: l2, ...s });
   assert.equal(acct.email, EMAIL);
@@ -195,4 +193,20 @@ test('mailtoHref round-trips and recoveryLink uses APP_URL', () => {
   const body = u.searchParams.get('body');
   assert.ok(body.includes(`#recover=${code}`));
   assert.ok(body.includes('Keep this email. If you forget your password, open this link to reset it. Anyone with access to this email can reset your password.'));
+});
+
+test('a login response without a token throws AccountError(server)', async () => {
+  const { s } = await setup();
+  s.stub('/auth/login', ({ token, ...rest }) => rest);
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'Mac', ...s }),
+    (e) => e instanceof AccountError && e.code === 'server');
+});
+
+test('logIn forwards minKdfIters (a 1000-iteration prelogin is accepted when the floor is lowered)', async () => {
+  const { s } = await setup();
+  s.stub('/auth/prelogin', (b) => ({ ...b, kdfIters: 1000 }));
+  s.calls.length = 0;
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'Mac', minKdfIters: 1000, ...s }),
+    (e) => e.code === 'bad_credentials'); // wrong derived key, but the request WAS sent
+  assert.ok(s.calls.includes('/auth/login'));
 });
