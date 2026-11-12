@@ -392,9 +392,9 @@ Result log:
 
 | Item | Value |
 |---|---|
-| Phase 1 Time Travel bookmark | |
-| Phase 1 `/version` | |
-| Phase-1 checks 1–4 | |
+| Phase 1 Time Travel bookmark | `00000096-00000002-00005121-3566d88ae37927ffa43006833fd2e082` (2026-11-12 15:39 PT; export `~/plaenicke-backups/backup-2026-11-12-1539.sql`, 25,327 B) |
+| Phase 1 `/version` | `worker-2026-11-12.1` (2026-11-12, Version ID 5a367de6-917e-4e48-808a-15658c1291ee; probes: feed 400 bad_url, prelogin 404 no_account, accounts 1 row id 1 email null devices 3) |
+| Phase-1 checks 1–4 | All pass 2026-11-12: signup token 43 chars; duplicate 409 email_taken + second invite revoked (rollback ok); login sealRoundTrip true, devices 2; cleanup deleted, accounts length 1. Step 7 (legacy two-device sync) pass. |
 | Phase 2 step 5 smartAddToday before / after | |
 | Phase 3 `/version` | |
 | Phase 3 smoke result | |
