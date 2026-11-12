@@ -41,9 +41,10 @@ shapes for every admin route are in `docs/admin.md`.
 
 `GET /feed` is dispatched before the shared CORS/OPTIONS handling and answers
 its own preflight with a narrower `Access-Control-Allow-Methods: GET, OPTIONS`
-and its own header allowlist (`content-type, cache-control` — no
-`authorization`, since the feed route takes no bearer token). `/`, `/data`,
-and `/admin/device` share one CORS policy from `cors.js`
+and its own header allowlist (`content-type, cache-control, authorization` —
+the client sends its device token as a bearer, and `REQUIRE_SESSION=true`
+makes the feed route demand it). `/`, `/data`, the `/auth/*`, `/account/*`
+and `/admin/*` routes share one CORS policy from `cors.js`
 (`GET, POST, PUT, DELETE, OPTIONS` / `content-type, authorization`).
 
 `/data` and `/admin/device` both check auth before checking method, so an
@@ -129,8 +130,11 @@ same as the Anthropic API key.
 curl -X POST https://<worker-host>/admin/device \
   -H "authorization: Bearer $ADMIN_SECRET" \
   -H "content-type: application/json" \
-  -d '{"name":"laptop"}'
+  -d '{"accountId":1,"name":"laptop"}'
 ```
+
+`accountId` is required (400 `bad_request` without it, 404 `no_account` for an
+unknown id). All admin recipes are in `docs/admin.md`.
 
 Response: `{"token": "...", "name": "laptop"}`.
 
@@ -150,9 +154,9 @@ curl -X DELETE https://<worker-host>/admin/device \
   -d '{"token_hash":"<sha256 hex>"}'
 ```
 
-There is no HTTP route that lists devices or looks up a token's hash — the
-API surface is deliberately minimal (mint and revoke only; see
-`src/index.js`'s `handleAdminDevice`). Two ways to get the hash:
+There is no HTTP route that lists devices or looks up a token's hash
+(`GET /admin/accounts` returns only a device count; the device routes are in
+`handleAdminDevice`, `src/admin.js`). Two ways to get the hash:
 
 - **You still have the plaintext token.** Hash it yourself — the algorithm
   is exactly lowercase-hex SHA-256 of the token string
@@ -173,7 +177,7 @@ API surface is deliberately minimal (mint and revoke only; see
 by name (e.g. two devices were minted with the same name), there is no API
 path to disambiguate them — you're comparing `created_at`/`last_seen_at`
 timestamps by eye in the D1 query output, or deleting both and re-minting.
-This is a minimal admin surface, not a device management console.
+The device routes are not a device management console.
 
 ## What the server does not know
 

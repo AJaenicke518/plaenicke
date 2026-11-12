@@ -18,6 +18,7 @@ Every admin route checks auth first (401 `unauthorized`), then method (405), the
 curl -s -X POST "$WORKER_URL/admin/invite" -H "authorization: Bearer $ADMIN" \
   -H 'content-type: application/json' -d '{"note":"Sam"}'
 # -> {"invite":"<22-char base64url>"}
+# With no note, still send a body: -d '{}'. A bodiless request returns 400 bad_json.
 ```
 
 **Revoke an unused invite** by hash prefix (8 to 64 lowercase hex characters of the invite's SHA-256). 404 `not_found`; 409 `ambiguous` (prefix matches more than one); 409 `already_used`.
@@ -48,7 +49,7 @@ curl -s -X POST "$WORKER_URL/admin/account/email" -H "authorization: Bearer $ADM
 # -> {"id":2}
 ```
 
-**Delete an account** (usage, devices, data, account row in one batch; the invite stays used). `confirm` must equal the account's email, case-insensitive; 400 `confirm_mismatch`.
+**Delete an account** (usage, devices, data, account row in one batch; the invite stays used). `confirm` must equal the account's email, case-insensitive; 400 `confirm_mismatch`. On the un-upgraded legacy account 1 (email is null) this always returns 400 `confirm_mismatch`, so it cannot be deleted this way.
 ```
 curl -s -X DELETE "$WORKER_URL/admin/account" -H "authorization: Bearer $ADMIN" \
   -H 'content-type: application/json' -d '{"id":2,"confirm":"sam@example.com"}'
@@ -62,7 +63,7 @@ curl -s -X POST "$WORKER_URL/admin/device" -H "authorization: Bearer $ADMIN" \
 # -> {"token":"<43 chars, shown once>","name":"smoke"}
 curl -s -X DELETE "$WORKER_URL/admin/device" -H "authorization: Bearer $ADMIN" \
   -H 'content-type: application/json' -d '{"token_hash":"<sha256 hex>"}'
-# -> {"revoked":<boolean from revokeDevice>}
+# -> 200 {"revoked":true} when a row was deleted; 200 {"revoked":false} for an unknown hash (never 404)
 ```
 Testers never need a device token or a link code; the app mints their device at sign-up and login.
 
@@ -89,9 +90,9 @@ Testers never need a device token or a link code; the app mints their device at 
 
 **Phase 2: client** (merge to `main`). The client sends the bearer and shows the Account UI. Wait until both devices show the new `CACHE` (`plaenicke-v7-0`).
 
-**Phase 3: require sessions.** Set `REQUIRE_SESSION=true` on the Worker, bump `version.js`, deploy, then `npm run smoke:worker`.
+**Phase 3: require sessions.** Set `REQUIRE_SESSION=true` on the Worker, bump `version.js`, deploy, then `PLAENICKE_SMOKE_TOKEN=<device token minted on account 1> npm run smoke:worker`.
 
-**Then:** `GET /admin/accounts`; list account 1's devices (`wrangler d1 execute plaenicke --remote --command "SELECT name, token_hash, last_seen_at FROM devices WHERE account_id = 1"`) and revoke any you do not recognise; upgrade account 1 (Settings, Account, Create your login) on one device; confirm the other device still syncs; then mint invites.
+**Then:** `GET /admin/accounts`; list account 1's devices (`wrangler d1 execute plaenicke --remote --command "SELECT name, token_hash, last_seen_at FROM devices WHERE account_id = 1"`) and revoke any you do not recognise (this uses a read-only `wrangler d1 execute ... SELECT` because `GET /admin/accounts` returns only a device count); upgrade account 1 (Settings, Account, Create your login) on one device; confirm the other device still syncs; then mint invites.
 
 ### Release-window rules
 

@@ -91,4 +91,4 @@ A raw 43-character token from `POST /admin/device` is correct **only for the fir
 
 Testers (accounts made through an invite) never see or handle link codes: sign-up and login mint their device. Codes are for Alex's legacy account 1 until it is upgraded.
 
-`encKey` never touches the server and a device never re-displays its own code, so **the codes in the devices' `localStorage` are the account's only decryption credential.** There is no reset.
+For a legacy (not yet upgraded) account 1: `encKey` never touches the server and a device never re-displays its own code, so **the codes in the devices' `localStorage` are the account's only decryption credential.** There is no reset. For invite accounts and an upgraded account 1, the password or the recovery link restores the key (spec § 4.1); losing both loses the data.
