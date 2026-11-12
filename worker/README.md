@@ -2,7 +2,8 @@
 
 A Cloudflare Worker that does three unrelated things behind one origin:
 proxies ICS calendar feeds, runs the smart-add prompt against Claude, and
-holds one opaque, client-encrypted sync blob in D1 behind device-token auth.
+holds one opaque, client-encrypted sync blob per account in D1 behind device-token auth.
+Accounts are invite-only (V7); see `docs/admin.md` for admin recipes and the release checklist.
 
 ## Routes
 
@@ -17,7 +18,26 @@ holds one opaque, client-encrypted sync blob in D1 behind device-token auth.
 | `POST /admin/device` | POST | `Bearer <ADMIN_SECRET>` | Mint a device token (returned once) |
 | `DELETE /admin/device` | DELETE | `Bearer <ADMIN_SECRET>` | Revoke by `token_hash` |
 | `/admin/device` | anything but POST/DELETE/OPTIONS | `Bearer <ADMIN_SECRET>` (checked first — unauthenticated callers get 401, not a hint about which methods exist) | 405 `method_not_allowed` once authenticated (`OPTIONS` never reaches here — it is answered as an unauthenticated 200 preflight before pathname dispatch) |
+| `POST /auth/signup`, `/auth/prelogin`, `/auth/login`, `/auth/recover/start`, `/auth/recover/finish` | POST | none (public; 50 consecutive failed password checks lock an account for 1 hour, recovery routes exempt) | Invite sign-up, login, recovery |
+| `POST /auth/logout` | POST | `Bearer <device token>` | End this device's session |
+| `GET /account` | GET | `Bearer <device token>` | Account state (`email` is `null` for an un-upgraded legacy account) |
+| `POST /account/password`, `/account/recovery`, `/account/recovery/confirm`, `/account/upgrade`, `/account/devices/signout-others` | POST | `Bearer <device token>` | Change password, new recovery link, confirm it, upgrade legacy account 1, sign out other devices |
+| `GET /account/devices` | GET | `Bearer <device token>` | List this account's devices |
+| `POST /admin/invite`, `DELETE /admin/invite` | POST/DELETE | `Bearer <ADMIN_SECRET>` | Mint / revoke an invite |
+| `GET /admin/accounts` | GET | `Bearer <ADMIN_SECRET>` | List accounts |
+| `POST /admin/account/disable`, `POST /admin/account/email`, `DELETE /admin/account` | POST/DELETE | `Bearer <ADMIN_SECRET>` | Disable, correct email, delete |
 | anything else | — | — | 404 `not_found` |
+
+`POST /admin/device` now requires `accountId` in the body. Request and response
+shapes for every admin route are in `docs/admin.md`.
+
+### Secrets and variables
+
+| Name | Kind | Purpose |
+|---|---|---|
+| `ADMIN_SECRET` | secret | Bearer for `/admin/*` |
+| `AT_REST_KEY` | secret | 32 bytes base64url. Seals the stored password wraps and MACs the stored auth keys (`src/seal.js`). Keep a second copy in a password manager: if it is lost or changed, every auth route returns 500 `at_rest_key_mismatch` and sealed values cannot be read. Set with `wrangler secret put AT_REST_KEY`. |
+| `REQUIRE_SESSION` | var | Exactly `true` makes `GET /feed` and smart add (`POST /`) require a device token (401 `unauthorized` without one). Any other value, or unset, is tolerant: a bearer is used when sent but not required. Smart add is capped at 50 per account per UTC day (429 `daily_limit`). |
 
 `GET /feed` is dispatched before the shared CORS/OPTIONS handling and answers
 its own preflight with a narrower `Access-Control-Allow-Methods: GET, OPTIONS`
@@ -165,10 +185,8 @@ its `url` query param either, since a published-calendar URL is itself a
 capability token. Don't add request-body logging to either route without
 re-reading those two files' header comments first.
 
-## Not yet done
+## Smart add exposure
 
-`POST /` (smart-add) is still public — no device token, no passphrase.
-Abuse of it is bounded only by the monthly spend cap set in the Anthropic
-Console. Requiring a device token there is sequenced last, deliberately,
-in Plan 3, after sync is proven end-to-end — see spec § 9. This is an
-accepted, tracked gap, not an oversight.
+`POST /` and `GET /feed` accept anonymous callers until `REQUIRE_SESSION=true`
+is deployed (release Phase 3, `docs/admin.md`). Until then, abuse of smart add
+is bounded only by the monthly spend cap set in the Anthropic Console.

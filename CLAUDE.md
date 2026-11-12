@@ -1,6 +1,6 @@
 # plaenicke
 
-A personal calendar/to-do PWA. Vanilla ES modules — **no framework, no build step, no bundler.** Static files on GitHub Pages, with a Cloudflare Worker (+ D1) for smart-add, an ICS proxy, and device sync. Single user.
+A personal calendar/to-do PWA. Vanilla ES modules — **no framework, no build step, no bundler.** Static files on GitHub Pages, with a Cloudflare Worker (+ D1) for smart-add, an ICS proxy, and device sync. Invite-only multi-user (V7 accounts, spec 2026-11-11).
 
 ## Running tests
 
@@ -66,6 +66,13 @@ Things the 2026-10-19 release changed that are easy to undo by accident:
 - **"Replace this device" no longer exists.** The adoption dialog offers Merge and Cancel; `applySyncedState` always re-merges live storage. Do not reintroduce a discard path.
 - **Removing a calendar asks first.** The first tap on Remove only asks, inline; "Remove from every device" removes. A feed URL cannot be typed back in.
 
+## Accounts
+
+- **`AT_REST_KEY` is a Worker secret.** Keep two copies (laptop and password manager). Losing or changing it makes every auth route return 500 `at_rest_key_mismatch`.
+- **`REQUIRE_SESSION`** (Worker var): only the exact string `true` makes `/feed` and smart add demand a session. Release phases are in `docs/admin.md`.
+- **Login enters through `linkAndAdopt`, never `linkWithCode` directly.**
+- **`plaenicke.localOwner` guards cross-account merges; never clear it on sign-out.**
+
 ## Where things live
 
 | What | Where |
@@ -73,11 +80,15 @@ Things the 2026-10-19 release changed that are easy to undo by accident:
 | Punchlist (deferred work) | `~/punchlists/punchlist-plaenicke.md` |
 | V5 sync design | `docs/superpowers/specs/2026-08-01-plaenicke-v5-accounts-sync-design.md` |
 | V5 execution ledger | `.superpowers/sdd/2026-08-02-plaenicke-v5-plan3-client-sync/progress.md` |
+| V7 accounts design | `docs/superpowers/specs/2026-11-11-plaenicke-accounts-design.md` |
+| Admin recipes and release checklist | `docs/admin.md` |
 | Session handoffs | `~/handoffs/plaenicke/` — `/handoff read` |
 | Worker admin secret | `~/.plaenicke-admin-secret`, chmod 600 — **the only copy** |
 
 ## Device linking
 
 A raw 43-character token from `POST /admin/device` is correct **only for the first device**. `linkWithCode` branches on decoded byte length: 32 bytes means *bootstrap*, so it mints a fresh `encKey` and silently starts a new, empty account. To add a second device, compose an **86-character code** on an already-linked device via Settings → Sync → *Link another device*. Full procedure in spec § 4.1.
+
+Testers (accounts made through an invite) never see or handle link codes: sign-up and login mint their device. Codes are for Alex's legacy account 1 until it is upgraded.
 
 `encKey` never touches the server and a device never re-displays its own code, so **the codes in the devices' `localStorage` are the account's only decryption credential.** There is no reset.
