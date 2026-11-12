@@ -25,27 +25,52 @@ export function decideFlow(result) {
 //                   SMART_ADD_TIMEOUT_MS (headers and body, end to end);
 //   'too_long'    — 413;
 //   'server'      — any other non-ok status, or a 200 whose body is not JSON
-//                   or not an object with an `items` array.
+//                   or not an object with an `items` array;
+//   'limit'       — 429 {error:'daily_limit', resetsAt}: the account's daily
+//                   cap (spec D19). The Error carries `resetsAt` (ISO);
+//   'unauthorized'— 401: the session was revoked or never existed;
+//   'signed_out'  — authToken null: no request is made (spec D21).
+//
+// `authToken` is a REQUIRED key (accounts plan review I10's rule, applied here
+// too): undefined throws TypeError('authToken required'), so a forgotten call
+// site fails loudly instead of reading as "signed out". The token is a
+// parameter, not a getLink() import, so this module's tests stay storage-free.
 //
 // THE BODY IS ALWAYS READ, even on an error status: fetchWithTimeout disarms
 // its deadline only when a body read settles, so throwing straight from the
 // status would leave the timer to abort a finished request a minute later.
-export async function parseViaWorker(text) {
+export async function parseViaWorker(text, { authToken } = {}) {
+  if (authToken === undefined) throw new TypeError('authToken required');
+  if (authToken === null) throw new Error('signed_out');
   let res;
   try {
     res = await fetchWithTimeout(WORKER_URL, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${authToken}` },
       body: JSON.stringify({ text, today: toISO(new Date()) }),
     }, SMART_ADD_TIMEOUT_MS);
   } catch {
     throw new Error('unreachable');
+  }
+  if (res.status === 429) {
+    // The body IS the answer here (resetsAt), so it is read, which also
+    // settles it for fetchWithTimeout. Anything but a well-formed daily_limit
+    // is a server fault, never a guessed limit.
+    let body = null;
+    try { body = await res.json(); } catch { /* reported as server below */ }
+    if (body && body.error === 'daily_limit' && typeof body.resetsAt === 'string' && !Number.isNaN(Date.parse(body.resetsAt))) {
+      const err = new Error('limit');
+      err.resetsAt = body.resetsAt;
+      throw err;
+    }
+    throw new Error('server');
   }
   if (!res.ok) {
     // Drained, not awaited: the status already decides the error, and a
     // stalled body must not hold the message back. Draining lets
     // fetchWithTimeout disarm once the body settles.
     res.text().catch(() => {});
+    if (res.status === 401) throw new Error('unauthorized');
     throw new Error(res.status === 413 ? 'too_long' : 'server');
   }
   let body;

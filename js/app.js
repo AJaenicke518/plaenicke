@@ -31,9 +31,11 @@ import { showToast } from './toast.js';
 import { applyEdit, typeChangePatch, snapshotOf, nextStamp, userWriteStamp, STAMP_EXHAUSTED_ERROR, EDITABLE_FIELDS } from './edit.js';
 import { uid } from './uid.js';
 import { syncOnce, recordSyncFailure, localState } from './sync.js';
-import { isLinked, isAdoptionPending } from './auth.js';
+import { isLinked, isAdoptionPending, getLink } from './auth.js';
 import { merge } from './merge.js';
 import { renderSyncStatus, syncWriteStarted, syncWriteSettled } from './linkui.js';
+import { initAccountBanner, refreshAccount } from './accountui.js';
+import { readBootIntent } from './fragment.js';
 import { WORKER_URL } from './config.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
 import { installPress } from './press.js';
@@ -41,6 +43,13 @@ import { buildToday, relativeLabel, NEXT_DAYS, LOOKAHEAD_DAYS, doneStillShown, t
 import { renderTodayView, renderTally } from './todayview.js';
 import { createCapture } from './capture.js';
 import { createTypeChips, PRIMARY_TYPES, MORE_TYPES } from './typechips.js';
+
+// THE BOOT FRAGMENT IS READ FIRST (sweep W2-I7). #invite=<code> and
+// #recover=<code> are secrets in the URL; readBootIntent strips them with
+// history.replaceState. Read anywhere later, a throw in between (a missing
+// element, a storage error) left the code in the address bar and in history.
+// The intent is kept here and acted on at the end of boot, as before.
+const bootIntent = readBootIntent({ location: window.location, history: window.history });
 
 const els = {
   // The shell's status line (capture date row, 2026-10-27): every message
@@ -160,6 +169,11 @@ let feedCache = loadFeedCache();
 // stampFromFeeds). Fed by every fetch this page makes: each background batch
 // and Settings' own Sync and Add calendar (onFeedFetched below).
 const failedFeedIds = new Set();
+// The session token /feed last refused (401 unauthorized, sweep W3-I7), or
+// null. While this device still holds THAT token the stamp says signed out
+// instead of "Couldn't refresh"; a new sign-in holds another token, and a
+// fetch that succeeds with this one clears it.
+let feedRefusedToken = null;
 // Which feed series this device hides, and where (js/visibility.js; option A,
 // 2026-10-26). DEVICE-LOCAL, NEVER SYNCED: nothing in this file that touches
 // it calls scheduleSync. Re-read at the top of every render(), so a write from
@@ -249,7 +263,14 @@ function ideaItems() { return sortIdeasNewestFirst(liveItems().filter(isIdea)); 
 // Declared before initSettings so nothing it calls can meet the TDZ. The
 // same hooks object goes to Settings and is exported for the tests.
 let deadlineStatus = { note: null, held: [] };
-export const deadlines = { status: () => deadlineStatus, removeHeld: removeHeldDeadlines };
+// What the last import that actually ran (past the wait for sync) judged:
+// how many have run, and each feed's cache fetchedAt it read. Read by the
+// tests to know an import has judged a given fetch — a deferred import never
+// counts. Settings ignores it.
+let lastImport = { runs: 0, fetchedAt: {} };
+export const deadlines = {
+  status: () => deadlineStatus, removeHeld: removeHeldDeadlines, lastImport: () => lastImport,
+};
 // THE IMPORT WAITS FOR SYNC ON A LINKED DEVICE (final review C2). A device that
 // has not pulled the account's latest items would patch a stale copy, stamped
 // later than Alex's tick on the other device, and whole-record last-write-wins
@@ -270,7 +291,7 @@ let visit = 1;
 let deadlineImportDeferred = false;
 const importWaitsForSync = () => isLinked() && (isAdoptionPending() || !syncedSinceVisible);
 
-initSettings({
+const settings = initSettings({
   button: els.settingsBtn,
   host: els.settingsHost,
   // The stamp is repainted too (sweep F, O5): adding, removing or hiding a
@@ -300,6 +321,9 @@ initSettings({
   applyState: applySyncedState,
   // Brightspace deadlines: the Settings row's note and its "Remove them".
   deadlines,
+  // A sign-in from Settings → Account: refetch calendars with the new
+  // session (sweep W3 #20); signed out they only rendered from the cache.
+  onSignedIn: () => backgroundSyncFeeds(feeds),
 });
 
 // The status line: Ideas, ticks, deletes, edits and notices. Never an add's.
@@ -498,11 +522,24 @@ async function handleAdd(target) {
 
   let result;
   try {
-    result = await parseViaWorker(raw);
+    // The session token, read at send time (spec § 6.8): null when signed
+    // out, which parseViaWorker answers without a request.
+    result = await parseViaWorker(raw, { authToken: getLink()?.authToken ?? null });
   } catch (e) {
     if (generation !== addGeneration) return 'superseded';
     if (e.message === 'too_long') say('That was a lot at once — try adding fewer items in one go.');
-    else { say(target.unavailable()); target.onUnavailable(); }
+    // Each account refusal has its own line, and each still shows the date
+    // row: a date picked by hand adds without smart add.
+    else if (e.message === 'limit') {
+      say(`You've used today's smart adds. They reset at ${clockLabel(new Date(e.resetsAt))}. You can still add it by picking a date.`);
+      target.onUnavailable();
+    } else if (e.message === 'unauthorized') {
+      say('Signed out — sign in again to use smart add.');
+      target.onUnavailable();
+    } else if (e.message === 'signed_out') {
+      say('Sign in to use smart add.');
+      target.onUnavailable();
+    } else { say(target.unavailable()); target.onUnavailable(); }
     return 'failed';
   }
   if (generation !== addGeneration) return 'superseded';
@@ -637,6 +674,10 @@ function applyDeadlinePlan({ create, update, remove }) {
 function importDeadlines() {
   if (importWaitsForSync()) { deadlineImportDeferred = true; return; }
   deadlineImportDeferred = false;
+  lastImport = {
+    runs: lastImport.runs + 1,
+    fetchedAt: Object.fromEntries(Object.entries(feedCache).map(([id, e]) => [id, e && e.fetchedAt])),
+  };
   try {
     const baseline = loadDeadlineBaseline();
     const plan = planDeadlineImport({
@@ -1553,6 +1594,7 @@ function backgroundSyncFeeds(feedList) {
   }
   if (feedList.length === 0) return;
   feedBatch = new Set(feedList.map((f) => f.id));
+  const batchToken = getLink()?.authToken ?? null;
   // results is syncStale's per-feed map (only the calendars it fetched), or
   // null when the whole batch failed and which calendars it reached is
   // unknown: then every one in it counts as failed. A calendar this batch did
@@ -1562,7 +1604,14 @@ function backgroundSyncFeeds(feedList) {
     feedCache = loadFeedCache();
     render();
     if (results === null) for (const f of feedList) failedFeedIds.add(f.id);
-    else for (const [id, r] of Object.entries(results)) { if (r.ok) failedFeedIds.delete(id); else failedFeedIds.add(id); }
+    // A signed-out result made no request: not a failed fetch, so it neither
+    // sets nor clears this calendar's failure memory.
+    else for (const [id, r] of Object.entries(results)) {
+      if (r.ok) failedFeedIds.delete(id);
+      else if (r.error !== 'signed_out') failedFeedIds.add(id);
+      if (r.ok && feedRefusedToken === batchToken) feedRefusedToken = null;
+      if (!r.ok && r.error === 'unauthorized') feedRefusedToken = batchToken;
+    }
     importDeadlines();
     stampFromFeeds();
     if (feedQueue.size > 0) {
@@ -1571,7 +1620,10 @@ function backgroundSyncFeeds(feedList) {
       backgroundSyncFeeds(feeds.filter((f) => queued.has(f.id)));
     }
   };
-  syncStale(feedList, feedCache, { fetchImpl: fetchWithTimeout }).then((results) => {
+  // The session token, read when the batch starts (spec § 6.8): null when
+  // signed out, and syncFeed then fetches nothing ({ok:false,
+  // error:'signed_out'}) while the cache keeps rendering.
+  syncStale(feedList, feedCache, { fetchImpl: fetchWithTimeout, authToken: batchToken }).then((results) => {
     // A per-feed failure comes back as {ok:false}, never as a rejection.
     settle(results);
   }, (err) => {
@@ -1840,6 +1892,16 @@ function stampUpdated() {
 function stampFromFeeds() {
   const visible = visibleFeeds();
   if (visible.length === 0) return; // keep the render-time stamp
+  // Signed out (spec D21, § 6.8): nothing refreshes, and that is not a
+  // failure to report — the cached events still render.
+  if (getLink() === null) {
+    els.updatedStamp.textContent = 'Sign in to refresh calendars.';
+    return;
+  }
+  if (feedRefusedToken !== null && feedRefusedToken === getLink().authToken) {
+    els.updatedStamp.textContent = 'Signed out — sign in again.';
+    return;
+  }
   if (visible.some((f) => failedFeedIds.has(f.id))) {
     els.updatedStamp.textContent = "Couldn't refresh calendars";
     return;
@@ -1903,6 +1965,28 @@ window.addEventListener('online', runSync);
 // tests/apply.test.js).
 renderSyncStatus();
 runSync();
+
+// --- accounts (Task 13) -----------------------------------------------------
+//
+// The "Save your recovery link" banner (spec D8) opens Settings on Make a new
+// recovery link.
+initAccountBanner({ onOpen: () => settings.open({ kind: 'new-recovery' }) });
+
+// A boot link (#invite= / #recover=, D24): read and stripped from the URL
+// before anything else (top of this file), then Settings opens on the
+// matching form. NO request is made for it — a link scanner opening the URL
+// must not spend the invite.
+if (bootIntent) settings.open(bootIntent);
+
+// GET /account on EVERY linked device, legacy included (§ 6.7 step 4): paints
+// the banner from the answer and records localOwner on a legacy device whose
+// account now has a login. If it fails (offline, or any error) the banner
+// keeps its last painted state and the next successful answer repaints it.
+// The failure is deliberately NOT written to plaenicke.syncState: that state
+// and its shell indicator belong to sync, and an account check failing says
+// nothing about whether sync works. Only a storage throw (saveLocalOwner)
+// rejects; it is logged by name.
+refreshAccount().catch((e) => { console.error('plaenicke: account check failed', e && e.name); });
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => { navigator.serviceWorker.register('service-worker.js'); });

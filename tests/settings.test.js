@@ -4,11 +4,11 @@ import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
 import { makeFakeDocument, makeFakeWindow, allText } from './fake-dom.js';
 import {
-  loadFeeds, saveFeeds, saveItems, loadItems, loadSyncState, loadTombstones, loadFeedCache, saveFeedCache,
+  loadFeeds, saveFeeds, saveItems, loadItems, loadSyncState, loadTombstones, loadFeedCache, saveFeedCache, saveAuth,
 } from '../js/storage.js';
 import { initSettings } from '../js/settings.js';
 import { linkWithCode } from '../js/auth.js';
-import { bytesToBase64url, generateEncKey, encryptBlob } from '../js/crypto.js';
+import { bytesToBase64url, generateEncKey, encryptBlob, composeLinkCode } from '../js/crypto.js';
 import { SCHEMA_VERSION } from '../js/merge.js';
 
 // --- fake DOM: tests/fake-dom.js ---------------------------------------------
@@ -27,7 +27,24 @@ function findButtonByText(el, text) {
   return null;
 }
 
-function openPanel(feeds, seed = () => {}, deadlineStatus = { note: null, held: [] }) {
+// js/account.js stand-in: every call is recorded, and one the test did not
+// supply rejects, so the panel can never reach a server from this file.
+const ACCOUNT_API_NAMES = ['signUp', 'logIn', 'recover', 'changePassword', 'newRecoveryLink', 'upgrade',
+  'getAccount', 'listDevices', 'signOutOthers', 'confirmRecovery', 'logOut'];
+function trapAccountApi(impl = {}) {
+  const calls = [];
+  const api = {};
+  for (const name of ACCOUNT_API_NAMES) {
+    api[name] = async (args) => {
+      calls.push({ name, args });
+      if (!impl[name]) throw new Error(`unexpected account api.${name}`);
+      return impl[name](args);
+    };
+  }
+  return { api, calls };
+}
+
+function openPanel(feeds, seed = () => {}, deadlineStatus = { note: null, held: [] }, { accountImpl = {}, open = true } = {}) {
   globalThis.window = makeFakeWindow();
   globalThis.document = makeFakeDocument();
   installFakeLocalStorage();
@@ -42,21 +59,32 @@ function openPanel(feeds, seed = () => {}, deadlineStatus = { note: null, held: 
   const notified = [];
   const fetched = [];
   const removed = [];
-  initSettings({
+  const signedIn = [];
+  const account = trapAccountApi(accountImpl);
+  const settings = initSettings({
     button,
     host,
     onFeedsChanged: () => notified.push('view'),
     onSyncedDataChanged: () => notified.push('synced'),
     // Every fetch's result, in order: [feedId, ok].
     onFeedFetched: (id, ok) => fetched.push([id, ok]),
+    onSignedIn: () => signedIn.push('in'),
     // Not exercised by any test that uses this helper — they drive the theme
     // and calendar controls — but open() mounts initLinkUI, which refuses to
     // mount without one. app.js always passes applySyncedState here.
     applyState: (s) => s,
     deadlines: { status: () => deadlineStatus, removeHeld: () => removed.push('held') },
+    accountApi: account.api,
   });
-  button.click(); // host.childElementCount === 0 -> open()
-  return { host, notified, button, fetched, removed };
+  if (open) button.click(); // host.childElementCount === 0 -> open()
+  return { host, notified, button, fetched, removed, settings, signedIn, accountCalls: account.calls };
+}
+
+// A linked device: calendars refresh only with a session (accounts spec D21).
+// A stored link code and nothing else — no adoption pending, so mounting the
+// Sync section makes no request.
+function session() {
+  saveAuth(composeLinkCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(32))), generateEncKey()));
 }
 
 // --- the second-writer fix --------------------------------------------------
@@ -455,6 +483,7 @@ test('settings: the panel refuses to open its sync section without an applyState
     onFeedsChanged: () => {},
     onSyncedDataChanged: () => {},
     onFeedFetched: () => {},
+    onSignedIn: () => {},
     deadlines: { status: () => ({ note: null, held: [] }), removeHeld() {} },
   });
   assert.throws(() => button.click(), /applyState/,
@@ -507,6 +536,7 @@ test('settings: the calendar list refreshes when an adoption lands while the pan
       onFeedsChanged: () => {},
       onSyncedDataChanged: () => {},
       onFeedFetched: () => {},
+      onSignedIn: () => {},
       deadlines: { status: () => ({ note: null, held: [] }), removeHeld() {} },
       // Stands in for app.js's applySyncedState: the feed owner assigns a
       // real colour before saving (merge.js hands a first-seen feed
@@ -741,7 +771,7 @@ for (const [label, start] of [
     globalThis.fetch = (url, init) => { signals.push(init && init.signal); return new Promise(() => {}); };
     t.mock.timers.enable({ apis: ['setTimeout'] });
     try {
-      const { host } = openPanel(label === 'Sync' ? [feedA] : []);
+      const { host } = openPanel(label === 'Sync' ? [feedA] : [], session);
       start(host);
       await settleMicro();
       assert.equal(signals.length, 1, 'fixture check: one fetch in flight');
@@ -791,7 +821,7 @@ test('settings: a manual Sync and an Add each report their fetch result, before 
     ? { ok: true, status: 200, text: async () => '' }
     : { ok: false, status: 502, json: async () => ({ error: 'upstream_error' }) });
   try {
-    const { host, fetched, notified } = openPanel([feedA]);
+    const { host, fetched, notified } = openPanel([feedA], session);
     const order = [];
     notified.push = (x) => { order.push(`view:${x}`); return Array.prototype.push.call(notified, x); };
     fetched.push = (x) => { order.push(`fetched:${x[1]}`); return Array.prototype.push.call(fetched, x); };
@@ -919,7 +949,8 @@ function pressTab(shiftKey = false) {
 test('settings: Tab from the last control wraps to the first, and Shift+Tab from the first wraps to the last', () => {
   const { host } = openPanel(twoFeeds());
   const first = findButtonByText(host, 'Light');
-  const last = findButtonByText(host, 'Link this device');
+  // A new device's Sync section ends in the W3-I10 disclosure.
+  const last = findButtonByText(host, 'Advanced: link with a code');
   assert.ok(first && last, 'fixture check: the first and last controls');
   last.focus();
   assert.equal(pressTab(), true, 'Tab on the last control is taken over');
@@ -940,11 +971,12 @@ test('settings: Tab from the heading, or from anywhere outside the panel, goes t
   assert.equal(document.activeElement, findButtonByText(host, 'Light'));
   button.focus(); // the gear, outside the panel, as the nav would be
   assert.equal(pressTab(true), true, 'Shift+Tab from outside is taken over too');
-  assert.equal(document.activeElement, findButtonByText(host, 'Link this device'));
+  assert.equal(document.activeElement, findButtonByText(host, 'Advanced: link with a code'));
 });
 
 test('settings: a control drawn after the panel opened is inside the Tab order; a disabled one is not', () => {
   const { host } = openPanel(twoFeeds());
+  findButtonByText(host, 'Advanced: link with a code').click(); // sweep W3-I10: show the paste field
   findButtonByText(host, 'Remove').click(); // draws the question's two buttons
   const confirm = findButtonByText(host, 'Remove from every device');
   assert.ok(confirm, 'fixture check: the question is drawn');
@@ -1168,4 +1200,222 @@ test('uws: "Track deadlines" on a calendar stamped at the maximum Date is refuse
   assert.ok(allText(host).includes(UWS_CAL_MSG), 'the row shows why');
   assert.ok(findButtonByText(host, 'Track deadlines'), 'still offers Track, so it does not look tracked');
   assert.deepEqual(notified, [], 'nothing changed, so nothing is announced');
+});
+
+// --- signed out: calendars need an account (accounts spec D21, § 6.8) ---------
+
+test('settings: signed out, the Calendars list says to sign in, and Sync fetches nothing', async () => {
+  const feedA = {
+    id: 'feedO', url: 'https://example.com/o.ics', name: 'O', color: 'var(--feed-palette-1)', hidden: false,
+    updatedAt: '2026-07-01T00:00:00.000Z',
+  };
+  const originalFetch = globalThis.fetch;
+  let fetched = 0;
+  globalThis.fetch = async () => { fetched += 1; return { ok: true, status: 200, text: async () => '' }; };
+  try {
+    const { host, fetched: results } = openPanel([feedA]);
+    assert.match(allText(host), /Sign in to refresh calendars\./);
+    findButtonByText(host, 'Sync').click();
+    await waitFor(() => /error: sign in to refresh/.test(allText(host)), 'the manual Sync to settle');
+    assert.equal(fetched, 0, 'no request without a session');
+    assert.deepEqual(results, [], 'no request, so no fetch result is reported (no "Couldn\'t refresh")');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('settings: linked, the Calendars list has no sign-in note, and Sync sends the bearer', async () => {
+  const feedA = {
+    id: 'feedL', url: 'https://example.com/l.ics', name: 'L', color: 'var(--feed-palette-1)', hidden: false,
+    updatedAt: '2026-07-01T00:00:00.000Z',
+  };
+  const originalFetch = globalThis.fetch;
+  const auths = [];
+  globalThis.fetch = async (url, init) => { auths.push(init.headers.authorization); return { ok: true, status: 200, text: async () => '' }; };
+  try {
+    const { host, fetched } = openPanel([feedA], session);
+    assert.doesNotMatch(allText(host), /Sign in to refresh calendars/);
+    findButtonByText(host, 'Sync').click();
+    await waitFor(() => fetched.length === 1, 'the manual Sync to settle');
+    const { getLink } = await import('../js/auth.js');
+    assert.deepEqual(auths, [`Bearer ${getLink().authToken}`]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// --- Account (accounts Task 13) ----------------------------------------------
+
+function byIdIn(root, id) {
+  if (root.id === id) return root;
+  for (const c of root.children) {
+    const f = byIdIn(c, id);
+    if (f) return f;
+  }
+  return null;
+}
+
+function sectionTitled(host, title) {
+  return host.querySelectorAll('div').find((d) => d._classes.has('settings-section')
+    && d.children[0] && d.children[0].tagName === 'H3' && d.children[0].textContent === title);
+}
+
+test('settings: the Account section sits above Sync, as #account-section with heading Account, and opening makes no request', () => {
+  const { host, accountCalls } = openPanel([]);
+  const sections = host.querySelectorAll('div').filter((d) => d._classes.has('settings-section'));
+  const titles = sections.map((d) => d.children[0].textContent);
+  assert.ok(titles.indexOf('Account') >= 0, 'an Account section');
+  assert.equal(titles.indexOf('Account') + 1, titles.indexOf('Sync'), 'directly above Sync');
+  assert.equal(sectionTitled(host, 'Account').id, 'account-section');
+  assert.ok(byIdIn(host, 'acct-login'), 'an unlinked device can log in');
+  assert.equal(accountCalls.length, 0);
+});
+
+test('settings: initSettings returns open(intent); open({kind:recover, code}) renders the reset form pre-filled, with no request', () => {
+  const { host, settings, accountCalls } = openPanel([], () => {}, undefined, { open: false });
+  assert.equal(host.childElementCount, 0, 'fixture check: closed');
+  settings.open({ kind: 'recover', code: 'X' });
+  assert.ok(host.childElementCount > 0, 'the panel is open');
+  assert.equal(byIdIn(host, 'acct-recovery-code').value, 'X');
+  assert.equal(byIdIn(host, 'acct-password').autocomplete, 'new-password');
+  assert.equal(accountCalls.length, 0, 'a boot link makes no request (link-scanner rule)');
+});
+
+test('settings: open({kind:invite, code}) renders the sign-up form pre-filled; open() while open re-opens it', () => {
+  const { host, settings, accountCalls } = openPanel([]);
+  settings.open({ kind: 'invite', code: 'INV' });
+  assert.equal(byIdIn(host, 'acct-invite-code').value, 'INV');
+  assert.equal(host.childElementCount, 1, 'one panel, not two');
+  assert.equal(accountCalls.length, 0);
+});
+
+test('settings: on an account device, linkui\'s Sign out revokes through account.logOut, keeps localOwner, and the Account section follows', async () => {
+  const { saveLocalOwner, loadLocalOwner, loadAuth } = await import('../js/storage.js');
+  const { host, accountCalls } = openPanel([], () => { session(); saveLocalOwner(5); }, undefined, {
+    accountImpl: { logOut: async () => ({ revoked: true }) },
+  });
+  const sync = sectionTitled(host, 'Sync');
+  const linkSignOut = sync.querySelectorAll('button').find((b) => b.textContent === 'Sign out');
+  assert.ok(linkSignOut, 'fixture check: linkui offers Sign out on an account device');
+  linkSignOut.click();
+  await waitFor(() => loadAuth() === null, 'the sign-out');
+  assert.deepEqual(accountCalls.map((c) => c.name), ['logOut']);
+  assert.equal(loadLocalOwner(), 5);
+  await waitFor(() => byIdIn(host, 'acct-login') !== null, 'the Account section to show Log in');
+});
+
+test('settings: Sign out in the Account section re-renders the Sync section as signed out', async () => {
+  const { saveLocalOwner, loadAuth } = await import('../js/storage.js');
+  const { host, accountCalls } = openPanel([], () => { session(); saveLocalOwner(5); }, undefined, {
+    accountImpl: { logOut: async () => ({ revoked: true }) },
+  });
+  assert.ok(sectionTitled(host, 'Sync').querySelectorAll('button').some((b) => b.textContent === 'Sign out'), 'fixture check');
+  byIdIn(host, 'acct-signout').click();
+  await waitFor(() => loadAuth() === null, 'the sign-out');
+  await waitFor(() => allText(sectionTitled(host, 'Sync')).includes('This device is signed out. Sign in to sync it again.'), 'the Sync section to follow');
+  assert.deepEqual(accountCalls.map((c) => c.name), ['logOut']);
+  assert.match(allText(host), /Sign in to refresh calendars\./, 'and the calendars say so');
+});
+
+// Sweep W3-I1b: a recovery code on screen, or a submit still out, is not
+// thrown away by Escape, a backdrop tap or the Settings button.
+// W3 re-review 1: a busy submit no longer holds the panel — a request that
+// never settled used to trap the user in Settings. Only a recovery code on
+// screen holds it (the accountui tests pin that half).
+test('W3-rr 1: Escape closes Settings while a (non-recovery) submit is still pending', async () => {
+  let release;
+  const { host, settings } = openPanel([], () => {}, undefined, {
+    accountImpl: { signUp: () => new Promise((_, reject) => { release = () => reject(new Error('no')); }) },
+  });
+  settings.open({ kind: 'invite', code: 'INV' });
+  const fill = (id, v) => { const el = byIdIn(host, id); el.value = v; (el._listeners.input || []).forEach((fn) => fn({ target: el })); };
+  fill('acct-email', 'a@x.de');
+  fill('acct-password', 'correct-horse-7!');
+  fill('acct-password2', 'correct-horse-7!');
+  const form = byIdIn(host, 'acct-form');
+  const settled = Promise.all(form._listeners.submit.map((fn) => fn({ target: form, preventDefault() {} })));
+  await waitFor(() => typeof release === 'function', 'signUp to be called');
+  document._listeners.keydown.slice().forEach((fn) => fn({ key: 'Escape' }));
+  assert.equal(host.childElementCount, 0, 'Escape closes');
+  release();
+  await settled;
+});
+
+test('W3-I1b: Escape, a backdrop tap and the Settings button leave the panel open while a recovery code is on screen', async () => {
+  const { host, button, settings } = openPanel([], () => {}, undefined, {
+    accountImpl: { signUp: async () => ({ code: composeLinkCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(32))), generateEncKey()), accountId: 7, recoveryCode: 'RECOVERYCODE1234567890' }), logOut: async () => ({ revoked: true }) },
+  });
+  settings.open({ kind: 'invite', code: 'INV' });
+  const fill = (id, v) => { const el = byIdIn(host, id); el.value = v; (el._listeners.input || []).forEach((fn) => fn({ target: el })); };
+  fill('acct-email', 'a@x.de');
+  fill('acct-password', 'correct-horse-7!');
+  fill('acct-password2', 'correct-horse-7!');
+  const form = byIdIn(host, 'acct-form');
+  await Promise.all(form._listeners.submit.map((fn) => fn({ target: form, preventDefault() {} })));
+  await waitFor(() => byIdIn(host, 'acct-recovery-screen') !== null, 'the recovery screen');
+  document._listeners.keydown.slice().forEach((fn) => fn({ key: 'Escape' }));
+  assert.equal(host.childElementCount, 1, 'Escape');
+  host.children[0].click();
+  assert.equal(host.childElementCount, 1, 'backdrop tap');
+  button.click();
+  assert.equal(host.childElementCount, 1, 'Settings button');
+});
+
+// W3 re-review 2: a mount that is gone must not re-mount linkui into a
+// detached slot (an invisible adoption preview could start there).
+test('W3-rr 2: after close, a late GET /account answer that changes the mode does not re-mount the old Sync section', async () => {
+  const { refreshAccount } = await import('../js/accountui.js');
+  let email = null;
+  const api = { getAccount: async () => ({ accountId: 1, email, recoveryConfirmed: false }) };
+  const { host, settings } = openPanel([], () => { session(); }, undefined, { open: false });
+  assert.equal(await refreshAccount({ api }), 'ok');
+  settings.open();
+  const slot = sectionTitled(host, 'Sync').children[1];
+  const mounted = slot.children[0];
+  document._listeners.keydown.slice().forEach((fn) => fn({ key: 'Escape' }));
+  assert.equal(host.childElementCount, 0, 'fixture check: closed');
+  email = 'alex@example.com';
+  assert.equal(await refreshAccount({ api }), 'ok');
+  assert.equal(slot.children[0], mounted, 'nothing was mounted into the detached slot');
+});
+
+test('W3 #20: initSettings refuses to mount without an onSignedIn callback', () => {
+  globalThis.window = makeFakeWindow();
+  globalThis.document = makeFakeDocument();
+  installFakeLocalStorage();
+  assert.throws(() => initSettings({
+    button: document.createElement('button'), host: document.createElement('div'),
+    onFeedsChanged() {}, onSyncedDataChanged() {}, onFeedFetched() {}, applyState: (s) => s,
+    deadlines: { status: () => ({ note: null, held: [] }), removeHeld() {} },
+  }), /onSignedIn/);
+});
+
+test('W3 #15: the Account heading is a script-only focus target (tabindex -1)', () => {
+  const { host } = openPanel([]);
+  const heading = sectionTitled(host, 'Account').children[0];
+  assert.equal(heading.getAttribute('tabindex'), '-1');
+});
+
+test('W3-I5: Create your login re-mounts the Sync section as an account device (Sign out, no Unlink)', async () => {
+  const { refreshAccount } = await import('../js/accountui.js');
+  const legacyAnswer = async () => ({ accountId: 1, email: null, recoveryConfirmed: false });
+  const { host, settings } = openPanel([], () => { session(); }, undefined, {
+    open: false,
+    accountImpl: { upgrade: async () => ({ recoveryCode: 'UPGRADERECOVERY1234567', accountId: 1 }) },
+  });
+  assert.equal(await refreshAccount({ api: { getAccount: legacyAnswer } }), 'ok');
+  settings.open();
+  const syncButtons = () => sectionTitled(host, 'Sync').querySelectorAll('button').map((b) => b.textContent);
+  assert.ok(syncButtons().includes('Unlink this device'), 'fixture check: legacy Sync section');
+  byIdIn(host, 'acct-upgrade').click();
+  const fill = (id, v) => { const el = byIdIn(host, id); el.value = v; (el._listeners.input || []).forEach((fn) => fn({ target: el })); };
+  fill('acct-upgrade-code', 'UPGRADECODE12345678901');
+  fill('acct-email', 'alex@example.com');
+  fill('acct-password', 'correct-horse-7!');
+  fill('acct-password2', 'correct-horse-7!');
+  const form = byIdIn(host, 'acct-form');
+  await Promise.all(form._listeners.submit.map((fn) => fn({ target: form, preventDefault() {} })));
+  assert.ok(byIdIn(host, 'acct-recovery-screen'), 'fixture check: upgraded');
+  assert.ok(syncButtons().includes('Sign out'), 'the Sync section follows the new mode');
+  assert.ok(!syncButtons().includes('Unlink this device'));
 });

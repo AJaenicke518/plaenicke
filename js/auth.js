@@ -51,7 +51,13 @@ export function clearAdoptionPending() {
   saveSyncState({ adoptionPending: false }); // merges over the stored state
 }
 
-export async function linkWithCode(input) {
+// `plainAdoption` (sweep W2-C3): true when this link is a sign-in back to
+// the account that owns this device's data; stored with the raised gate, so
+// it lives exactly as long as the adoption it describes.
+// `linkOwner` (sweep W2 re-review): the account id this link is known to
+// belong to, when the caller has shown it (a sign-in, a checked legacy
+// paste); stored with the gate, like plainAdoption.
+export async function linkWithCode(input, { plainAdoption = false, linkOwner = null } = {}) {
   const trimmed = (input || '').trim();
   const bytes = base64urlToBytes(trimmed); // throws on junk BEFORE anything is stored
   let code;
@@ -69,7 +75,9 @@ export async function linkWithCode(input) {
   // exists to prevent. With this order a failure leaves a cursor and no
   // credential, which reads as unlinked and is inert.
   const hash = await tokenHash(authToken);
-  saveSyncState({ ...ZERO_SYNC_STATE, tokenHash: hash, adoptionPending: true });
+  saveSyncState({
+    ...ZERO_SYNC_STATE, tokenHash: hash, adoptionPending: true, plainAdoption: plainAdoption === true, linkOwner,
+  });
   saveAuth(code);
   return getLink();
 }
@@ -79,8 +87,12 @@ export function unlink() {
   saveSyncState({ ...ZERO_SYNC_STATE });
 }
 
-export async function resetSyncStateIfDeviceChanged(authToken) {
+// `stillCurrent` (optional): asked after the hash's await and before any
+// write, so a caller holding a link it read earlier (syncOnce, sweep W2-C2)
+// never resets the cursor of a link that replaced it in the meantime.
+export async function resetSyncStateIfDeviceChanged(authToken, { stillCurrent = () => true } = {}) {
   const hash = await tokenHash(authToken);
+  if (!stillCurrent()) return;
   const state = loadSyncState();
   if (state.tokenHash !== hash) saveSyncState({ ...ZERO_SYNC_STATE, tokenHash: hash, adoptionPending: true });
 }

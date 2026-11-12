@@ -18,3 +18,9 @@ invocation_logs = false
 binding = "DB"
 database_name = "plaenicke"
 database_id = "6c06de93-26e5-495f-81e8-4193941635dc"
+
+# No [vars] block until release Phase 3 (docs/admin.md): REQUIRE_SESSION unset
+# is tolerant. Phase 3 adds `[vars] REQUIRE_SESSION = "true"` here in a
+# commit. Never set it in the dashboard or with --var: `wrangler deploy`
+# overwrites dashboard variables (keep_vars is unset; Cloudflare's "Source of
+# truth" note), so a later deploy would silently drop it.

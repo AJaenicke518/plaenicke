@@ -1,6 +1,10 @@
 // smoke-worker.mjs — classify a fixed phrase set through the DEPLOYED Worker.
 //
-//   npm run smoke:worker
+//   PLAENICKE_SMOKE_TOKEN=<device token> npm run smoke:worker
+//
+// Needs a device token (PLAENICKE_SMOKE_TOKEN): smart add is per-account and
+// capped at 50 calls per UTC day; each run uses 6 of them. Unset, it exits
+// non-zero with a message before any request.
 //
 // EVERY RUN SPENDS ANTHROPIC CREDITS: one smart-add call (one Claude request)
 // per phrase below. Run it on purpose, after a Worker deploy — never as part of
@@ -145,10 +149,11 @@ export async function checkVersion({ fetchImpl, url, expected } = {}) {
 
 // Every phrase once, in order, sequentially. No default fetch and no default
 // URL: a caller that forgets to inject one gets a throw, not production.
-export async function runSmoke({ fetchImpl, url, today, phrases = PHRASES } = {}) {
+export async function runSmoke({ fetchImpl, url, today, token, phrases = PHRASES } = {}) {
   if (typeof fetchImpl !== 'function') throw new TypeError('runSmoke: fetchImpl is required');
   if (typeof url !== 'string' || !url) throw new TypeError('runSmoke: url is required');
   if (typeof today !== 'string' || !today) throw new TypeError('runSmoke: today is required');
+  if (typeof token !== 'string' || !token) throw new TypeError('runSmoke: token is required');
   const endpoint = new URL('/', url).href;
   const results = [];
   for (const phrase of phrases) {
@@ -156,7 +161,7 @@ export async function runSmoke({ fetchImpl, url, today, phrases = PHRASES } = {}
     try {
       const res = await fetchImpl(endpoint, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
         body: JSON.stringify({ text: phrase.text, today }),
       });
       const raw = await res.text();
@@ -174,10 +179,12 @@ export async function runSmoke({ fetchImpl, url, today, phrases = PHRASES } = {}
 // The ordering that protects the credits: version first, and phrases only if it
 // matches. Returns { ok, version, results } with results null when the version
 // check failed (no phrase was sent).
-export async function runAll({ fetchImpl, url, today, expected, phrases = PHRASES } = {}) {
+export async function runAll({ fetchImpl, url, today, expected, token, phrases = PHRASES } = {}) {
+  // Checked before the free version call too: a tokenless run must fail loudly.
+  if (typeof token !== 'string' || !token) throw new TypeError('runAll: token is required');
   const version = await checkVersion({ fetchImpl, url, expected });
   if (!version.pass) return { ok: false, version, results: null };
-  const results = await runSmoke({ fetchImpl, url, today, phrases });
+  const results = await runSmoke({ fetchImpl, url, today, token, phrases });
   return { ok: results.every((r) => r.pass), version, results };
 }
 
@@ -214,10 +221,22 @@ export function isMain(argv1 = process.argv[1], execArgv = process.execArgv) {
 // the script until Ctrl-C.
 export const MAIN_FETCH = fetchWithTimeout;
 
-async function main() {
+// A session token for the deployed Worker (smart add requires one once
+// REQUIRE_SESSION is on). Never defaulted: a missing variable is an error.
+// Read here, not at import, so the test file can import this module without it.
+export function readToken(env = process.env) {
+  const t = env.PLAENICKE_SMOKE_TOKEN;
+  if (typeof t !== 'string' || !t.trim()) {
+    throw new Error('PLAENICKE_SMOKE_TOKEN is not set: smoke:worker needs a device token for a real account (smart add is per-account). No requests were made.');
+  }
+  return t.trim();
+}
+
+export async function main({ env = process.env } = {}) {
+  const token = readToken(env);
   const today = toISO(new Date());
   console.log(`smoke:worker -> ${WORKER_URL} (today ${today})`);
-  const out = await runAll({ fetchImpl: MAIN_FETCH, url: WORKER_URL, today, expected: VERSION });
+  const out = await runAll({ fetchImpl: MAIN_FETCH, url: WORKER_URL, today, expected: VERSION, token });
   if (!out.version.pass) {
     console.log(`VERSION CHECK FAILED (no Claude calls made): ${out.version.failures.join('; ')}`);
     process.exitCode = 1;

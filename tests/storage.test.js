@@ -329,12 +329,12 @@ test('auth round-trips and clears', () => {
 test('loadSyncState returns a zeroed state when nothing is stored', () => {
   installFakeLocalStorage();
   assert.deepEqual(loadSyncState(),
-    { version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false });
+    { version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false, plainAdoption: false, linkOwner: null });
 });
 
 test('syncState round-trips including adoptionPending', () => {
   installFakeLocalStorage();
-  const s = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-08-02T00:00:00.000Z', lastError: null, adoptionPending: true };
+  const s = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-08-02T00:00:00.000Z', lastError: null, adoptionPending: true, plainAdoption: true, linkOwner: 3 };
   saveSyncState(s);
   assert.deepEqual(loadSyncState(), s);
 });
@@ -429,7 +429,7 @@ test('saveSyncState preserves adoptionPending on a partial update instead of res
 // were a plain setter.
 test('saveSyncState merges a one-field patch over every existing field', () => {
   installFakeLocalStorage();
-  const full = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-10-01T00:00:00.000Z', lastError: 'offline', adoptionPending: true };
+  const full = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-10-01T00:00:00.000Z', lastError: 'offline', adoptionPending: true, plainAdoption: true, linkOwner: 3 };
   saveSyncState(full);
   saveSyncState({ lastError: null });
   assert.deepEqual(loadSyncState(), { ...full, lastError: null });
@@ -439,10 +439,10 @@ test('saveSyncState merges a one-field patch over every existing field', () => {
 // a caller supplying every field still gets exactly that object back.
 test('saveSyncState with a complete object overwrites every field, including lifting adoptionPending', () => {
   installFakeLocalStorage();
-  saveSyncState({ version: 1, tokenHash: 'h', lastSyncedAt: null, lastError: null, adoptionPending: true });
-  saveSyncState({ version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false });
+  saveSyncState({ version: 1, tokenHash: 'h', lastSyncedAt: null, lastError: null, adoptionPending: true, plainAdoption: true, linkOwner: 3 });
+  saveSyncState({ version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false, plainAdoption: false, linkOwner: null });
   assert.deepEqual(loadSyncState(),
-    { version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false });
+    { version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false, plainAdoption: false, linkOwner: null });
 });
 
 // --- launch log (Phase 0 baseline) ------------------------------------------
@@ -606,4 +606,80 @@ test('deadline baseline: a quota failure is a QuotaError', () => {
   installFakeLocalStorage();
   localStorage.setItem = () => { const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; };
   assert.throws(() => saveDeadlineBaseline({}), QuotaError);
+});
+
+// --- plaenicke.localOwner (spec D16) ---
+import { LOCAL_OWNER_KEY, loadLocalOwner, saveLocalOwner, clearLocalOwner } from '../js/storage.js';
+
+test('localOwner round trips and clears', () => {
+  installFakeLocalStorage();
+  assert.equal(LOCAL_OWNER_KEY, 'plaenicke.localOwner');
+  assert.equal(loadLocalOwner(), null);
+  saveLocalOwner(42);
+  assert.equal(loadLocalOwner(), 42);
+  clearLocalOwner();
+  assert.equal(loadLocalOwner(), null);
+  assert.equal(localStorage.getItem(LOCAL_OWNER_KEY), null);
+});
+
+test('localOwner: anything stored that is not a positive safe integer reads as null', () => {
+  installFakeLocalStorage();
+  for (const bad of ['abc', '0', '-3', '1.5', '', '1e3', ' 7', '9007199254740993', 'null', '{}']) {
+    localStorage.setItem(LOCAL_OWNER_KEY, bad);
+    assert.equal(loadLocalOwner(), null, `stored ${JSON.stringify(bad)}`);
+  }
+});
+
+test('saveLocalOwner throws TypeError for anything but a positive safe integer and stores nothing', () => {
+  installFakeLocalStorage();
+  for (const bad of [0, -1, 1.5, NaN, Infinity, 2 ** 53, '5', null, undefined, {}]) {
+    assert.throws(() => saveLocalOwner(bad), TypeError, String(bad));
+  }
+  assert.equal(localStorage.getItem(LOCAL_OWNER_KEY), null);
+});
+
+// --- plaenicke.legacyOwner (sweep W2-C1) ---
+import * as storageNs from '../js/storage.js';
+
+test('W2-C1: legacyOwner round trips, clears, and reads a malformed value as null', () => {
+  installFakeLocalStorage();
+  assert.equal(storageNs.LEGACY_OWNER_KEY, 'plaenicke.legacyOwner');
+  assert.equal(storageNs.loadLegacyOwner(), null);
+  storageNs.saveLegacyOwner(1);
+  assert.equal(storageNs.loadLegacyOwner(), 1);
+  storageNs.clearLegacyOwner();
+  assert.equal(storageNs.loadLegacyOwner(), null);
+  for (const bad of ['abc', '0', '-3', '1.5', '', 'null']) {
+    localStorage.setItem(storageNs.LEGACY_OWNER_KEY, bad);
+    assert.equal(storageNs.loadLegacyOwner(), null, `stored ${JSON.stringify(bad)}`);
+  }
+  assert.throws(() => storageNs.saveLegacyOwner(0), TypeError);
+});
+
+test('W2-C1: a quota failure on legacyOwner is a QuotaError', () => {
+  installFakeLocalStorage();
+  localStorage.setItem = () => { const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; };
+  assert.throws(() => storageNs.saveLegacyOwner(1), QuotaError);
+});
+
+test('W2-C3: plainAdoption reads true ONLY from an explicit true (a cursor stored before the field existed reads false)', () => {
+  installFakeLocalStorage();
+  for (const v of [undefined, null, 'true', 1, {}]) {
+    const stored = { version: 1, tokenHash: 'h', lastSyncedAt: null, lastError: null, adoptionPending: true };
+    if (v !== undefined) stored.plainAdoption = v;
+    localStorage.setItem('plaenicke.syncState', JSON.stringify(stored));
+    assert.equal(loadSyncState().plainAdoption, false, JSON.stringify(v));
+  }
+  localStorage.setItem('plaenicke.syncState', JSON.stringify({ adoptionPending: true, plainAdoption: true }));
+  assert.equal(loadSyncState().plainAdoption, true);
+});
+
+test('W2-rr: linkOwner reads only a positive safe integer; anything else is null', () => {
+  installFakeLocalStorage();
+  for (const v of ['1', 0, -1, 1.5, true, null, {}]) {
+    localStorage.setItem('plaenicke.syncState', JSON.stringify({ adoptionPending: true, linkOwner: v }));
+    assert.equal(loadSyncState().linkOwner, null, JSON.stringify(v));
+  }
+  localStorage.setItem('plaenicke.syncState', JSON.stringify({ adoptionPending: true, linkOwner: 7 }));
+  assert.equal(loadSyncState().linkOwner, 7);
 });

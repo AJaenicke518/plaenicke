@@ -195,8 +195,25 @@ test('a corrupt stored link code reads as unlinked rather than throwing on every
 // clearAdoptionPending changes adoptionPending and nothing else.
 test('clearAdoptionPending lowers the gate and leaves every other sync-state field alone', () => {
   installFakeLocalStorage();
-  const full = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-10-01T00:00:00.000Z', lastError: 'offline', adoptionPending: true };
+  const full = { version: 7, tokenHash: 'h', lastSyncedAt: '2026-10-01T00:00:00.000Z', lastError: 'offline', adoptionPending: true, plainAdoption: true, linkOwner: 3 };
   saveSyncState(full);
   clearAdoptionPending();
   assert.deepEqual(loadSyncState(), { ...full, adoptionPending: false });
+});
+
+// Sweep W2-C3: whether this link's adoption may dedupe is decided at link
+// time (re-sign-in to the owner account: no) and stored WITH the raised gate,
+// in the one write that raises it — so it cannot be lost while the gate is up.
+test('W2-C3: linkWithCode stores plainAdoption with the raised gate; unlink and a different device reset it', async () => {
+  installFakeLocalStorage();
+  await linkWithCode(bareToken(), { plainAdoption: true });
+  assert.equal(loadSyncState().adoptionPending, true);
+  assert.equal(loadSyncState().plainAdoption, true);
+  unlink();
+  assert.equal(loadSyncState().plainAdoption, false);
+  await linkWithCode(bareToken());
+  assert.equal(loadSyncState().plainAdoption, false, 'default: dedupe allowed (today\'s first-link behaviour)');
+  await linkWithCode(bareToken(), { plainAdoption: true });
+  await resetSyncStateIfDeviceChanged(bareToken());
+  assert.equal(loadSyncState().plainAdoption, false);
 });

@@ -1,0 +1,375 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import worker from '../worker/src/index.js';
+import { envWith, invite } from '../worker/tests/account-helpers.js';
+import {
+  AccountError, signUp, logIn, recover, changePassword, newRecoveryLink, upgrade, getAccount,
+  listDevices, signOutOthers, confirmRecovery, logOut, recoveryLink, mailtoHref,
+} from '../js/account.js';
+import { parseLinkCode, generateEncKey, encryptBlob } from '../js/crypto.js';
+import { deriveRecoveryKeys } from '../js/keys.js';
+import { mintDevice } from '../worker/src/auth.js';
+import { APP_URL } from '../js/config.js';
+
+
+// A fake server built from the real Worker. `calls` records every request path;
+// `stub(path, fn)` lets a test rewrite one response.
+function server(env) {
+  const calls = [];
+  const stubs = {};
+  const fetchImpl = async (url, opts) => {
+    const path = new URL(url).pathname;
+    calls.push(path);
+    const res = await worker.fetch(new Request(url, opts), env);
+    if (stubs[path]) return stubs[path](res);
+    return res;
+  };
+  const stub = (path, fn) => { stubs[path] = async (res) => new Response(JSON.stringify(fn(await res.json())), { status: res.status, headers: { 'content-type': 'application/json' } }); };
+  return { fetchImpl, calls, stub, apiBase: 'https://w' };
+}
+const EMAIL = 'tester@example.com';
+const PW = 'correct-horse-1!';
+
+async function setup() {
+  const env = envWith();
+  const s = server(env);
+  await invite(env);
+  const su = await signUp({ invite: 'INVITE-1', email: EMAIL, password: PW, deviceName: 'iPhone', ...s });
+  return { env, s, su };
+}
+const linkOf = (code) => ({ ...parseLinkCode(code), code });
+
+test('signUp then logIn yield the same DEK and different tokens', async () => {
+  const { s, su } = await setup();
+  assert.equal(su.code.length, 86);
+  assert.equal(su.recoveryCode.length, 22);
+  const li = await logIn({ email: EMAIL, password: PW, deviceName: 'Mac', ...s });
+  assert.deepEqual(parseLinkCode(li.code).encKey, parseLinkCode(su.code).encKey);
+  assert.notEqual(parseLinkCode(li.code).authToken, parseLinkCode(su.code).authToken);
+  assert.equal(li.accountId, su.accountId);
+  assert.equal(li.recoveryConfirmed, false);
+});
+
+test('signUp sends kdfIters 600000 by default', async () => {
+  const env = envWith();
+  await invite(env);
+  let sent;
+  const fetchImpl = async (url, opts) => { sent = JSON.parse(opts.body); return worker.fetch(new Request(url, opts), env); };
+  await signUp({ invite: 'INVITE-1', email: EMAIL, password: PW, deviceName: 'iPhone', fetchImpl, apiBase: 'https://w' });
+  assert.equal(sent.kdfIters, 600000);
+});
+
+test('wrong password gives bad_credentials', async () => {
+  const { s } = await setup();
+  await assert.rejects(logIn({ email: EMAIL, password: 'nope-nope-1!', deviceName: 'Mac', ...s }),
+    (e) => e instanceof AccountError && e.code === 'bad_credentials');
+});
+
+test('unknown email gives no_account', async () => {
+  const { s } = await setup();
+  await assert.rejects(logIn({ email: 'x@example.com', password: PW, deviceName: 'Mac', ...s }),
+    (e) => e.code === 'no_account');
+});
+
+test('recover resets the password, rotates the recovery code, hook runs before finish', async () => {
+  const { s, su } = await setup();
+  const known = [];
+  const rec = await recover({ email: EMAIL, recoveryCode: su.recoveryCode, newPassword: 'brand-new-pw-2#', deviceName: 'Mac',
+    onAccountKnown: async (id) => { known.push([id, s.calls.includes('/auth/recover/finish')]); }, ...s });
+  assert.deepEqual(known, [[su.accountId, false]]);
+  assert.deepEqual(parseLinkCode(rec.code).encKey, parseLinkCode(su.code).encKey);
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'x', ...s }), (e) => e.code === 'bad_credentials');
+  await logIn({ email: EMAIL, password: 'brand-new-pw-2#', deviceName: 'x', ...s });
+  const rec2 = await recover({ email: EMAIL, recoveryCode: rec.recoveryCode, newPassword: 'third-pw-3$', deviceName: 'Mac', ...s });
+  assert.equal(rec2.recoveryCode.length, 22);
+  await assert.rejects(recover({ email: EMAIL, recoveryCode: su.recoveryCode, newPassword: 'fourth-pw-4%', deviceName: 'Mac', ...s }),
+    (e) => e.code === 'bad_recovery');
+});
+
+test('recover: a throwing onAccountKnown aborts before finish and propagates', async () => {
+  const { s, su } = await setup();
+  const boom = new Error('hook');
+  await assert.rejects(recover({ email: EMAIL, recoveryCode: su.recoveryCode, newPassword: 'brand-new-pw-2#', deviceName: 'Mac',
+    onAccountKnown: () => { throw boom; }, ...s }), (e) => e === boom);
+  assert.ok(!s.calls.includes('/auth/recover/finish'));
+});
+
+test('a server-sent kdfIters below the floor gives kdf_iters_too_low and sends no login', async () => {
+  const { s } = await setup();
+  s.stub('/auth/prelogin', (b) => ({ ...b, kdfIters: 1000 }));
+  s.calls.length = 0;
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'Mac', ...s }),
+    (e) => e instanceof AccountError && e.code === 'kdf_iters_too_low');
+  assert.ok(!s.calls.includes('/auth/login'));
+});
+
+test('tampered dekCheck on login gives dek_check_failed', async () => {
+  const { s } = await setup();
+  s.stub('/auth/login', (b) => ({ ...b, dekCheck: 'b'.repeat(64) }));
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'Mac', ...s }), (e) => e.code === 'dek_check_failed');
+});
+
+test('tampered dekCheck on recover/start gives dek_check_failed and sends no finish', async () => {
+  const { s, su } = await setup();
+  s.stub('/auth/recover/start', (b) => ({ ...b, dekCheck: 'b'.repeat(64) }));
+  await assert.rejects(recover({ email: EMAIL, recoveryCode: su.recoveryCode, newPassword: 'brand-new-pw-2#', deviceName: 'Mac', ...s }),
+    (e) => e.code === 'dek_check_failed');
+  assert.ok(!s.calls.includes('/auth/recover/finish'));
+});
+
+test('upgrade with a key that cannot decrypt the blob gives wrong_key_on_device, no upgrade request', async () => {
+  const { env, s, su } = await setup();
+  const keyA = generateEncKey();
+  await env.DB.prepare('UPDATE data SET blob = ? WHERE id = ?').bind(await encryptBlob(keyA, { items: [] }), su.accountId).run();
+  const link = { authToken: parseLinkCode(su.code).authToken, encKey: generateEncKey() };
+  s.calls.length = 0;
+  await assert.rejects(upgrade({ link, email: 'new@example.com', password: PW, upgradeCode: 'AAAAAAAAAAAAAAAAAAAAAA', ...s }),
+    (e) => e.code === 'wrong_key_on_device');
+  assert.ok(!s.calls.includes('/account/upgrade'));
+});
+
+test('changePassword: D18 check blocks a wrong-key device, then works with the right key', async () => {
+  const { env, s, su } = await setup();
+  const real = linkOf(su.code);
+  await env.DB.prepare('UPDATE data SET blob = ? WHERE id = ?').bind(await encryptBlob(real.encKey, { items: [] }), su.accountId).run();
+  const bad = { authToken: real.authToken, encKey: generateEncKey() };
+  s.calls.length = 0;
+  await assert.rejects(changePassword({ link: bad, email: EMAIL, currentPassword: PW, newPassword: 'changed-pw-5^', signOutOthers: false, ...s }),
+    (e) => e.code === 'wrong_key_on_device');
+  assert.ok(!s.calls.includes('/account/password'));
+  await changePassword({ link: real, email: EMAIL, currentPassword: PW, newPassword: 'changed-pw-5^', signOutOthers: false, ...s });
+  const li = await logIn({ email: EMAIL, password: 'changed-pw-5^', deviceName: 'x', ...s });
+  assert.deepEqual(parseLinkCode(li.code).encKey, real.encKey);
+  await assert.rejects(changePassword({ link: real, email: EMAIL, currentPassword: 'wrong-wrong-1!', newPassword: 'zzzzzzzz-1!', signOutOthers: false, ...s }),
+    (e) => e.code === 'bad_credentials');
+});
+
+test('newRecoveryLink issues a code that recovers, and getAccount/listDevices/confirmRecovery/signOutOthers work', async () => {
+  const { s, su } = await setup();
+  const link = linkOf(su.code);
+  const { recoveryCode } = await newRecoveryLink({ link, email: EMAIL, currentPassword: PW, ...s });
+  assert.equal(recoveryCode.length, 22);
+  const recovered = await recover({ email: EMAIL, recoveryCode, newPassword: 'brand-new-pw-2#', deviceName: 'Mac', ...s });
+  // recovery signed every device out; log in again for a fresh link
+  const li = await logIn({ email: EMAIL, password: 'brand-new-pw-2#', deviceName: 'B', ...s });
+  const l2 = linkOf(li.code);
+  const acct = await getAccount({ link: l2, ...s });
+  assert.equal(acct.email, EMAIL);
+  assert.equal(acct.recoveryConfirmed, false);
+  await confirmRecovery({ link: l2, recoveryCode: recovered.recoveryCode, ...s });
+  assert.equal((await getAccount({ link: l2, ...s })).recoveryConfirmed, true);
+  const devs = await listDevices({ link: l2, ...s });
+  assert.ok(devs.devices.some((d) => d.current));
+  await signOutOthers({ link: l2, ...s });
+});
+
+test('logOut offline returns revoked:false without throwing', async () => {
+  const link = { authToken: 'a'.repeat(43), encKey: generateEncKey() };
+  const r = await logOut({ link, fetchImpl: async () => { throw new TypeError('offline'); }, apiBase: 'https://w' });
+  assert.deepEqual(r, { revoked: false });
+});
+
+test('logOut on 401 returns revoked:true; on success revoked:true', async () => {
+  const { s, su } = await setup();
+  const link = linkOf(su.code);
+  assert.deepEqual(await logOut({ link, ...s }), { revoked: true });
+  assert.deepEqual(await logOut({ link, ...s }), { revoked: true }); // now 401
+});
+
+test('error mapping: unreachable, server, retryAt', async () => {
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'x', fetchImpl: async () => { throw new Error('x'); }, apiBase: 'https://w' }),
+    (e) => e.code === 'unreachable');
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'x', fetchImpl: async () => new Response('<html>', { status: 502 }), apiBase: 'https://w' }),
+    (e) => e.code === 'server');
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'x', fetchImpl: async () => new Response(JSON.stringify({ error: 'locked', retryAt: 'T' }), { status: 429 }), apiBase: 'https://w' }),
+    (e) => e.code === 'locked' && e.extra.retryAt === 'T');
+});
+
+test('mailtoHref round-trips and recoveryLink uses APP_URL', () => {
+  const code = 'AbCdEfGhIjKlMnOpQrStUv';
+  assert.equal(recoveryLink(code), `${APP_URL}#recover=${code}`);
+  const u = new URL(mailtoHref('a+b@example.com', code));
+  assert.equal(u.protocol, 'mailto:');
+  assert.equal(decodeURIComponent(u.pathname), 'a+b@example.com');
+  assert.equal(u.searchParams.get('subject'), 'Your plaenicke recovery link');
+  const body = u.searchParams.get('body');
+  assert.ok(body.includes(`#recover=${code}`));
+  assert.ok(body.includes('Keep this email. If you forget your password, open this link to reset it. Anyone with this link can reset your password and read your planner. Keep it private.'));
+});
+
+test('a login response without a token throws AccountError(server)', async () => {
+  const { s } = await setup();
+  s.stub('/auth/login', ({ token, ...rest }) => rest);
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'Mac', ...s }),
+    (e) => e instanceof AccountError && e.code === 'server');
+});
+
+test('logIn forwards minKdfIters (a 1000-iteration prelogin is accepted when the floor is lowered)', async () => {
+  const { s } = await setup();
+  s.stub('/auth/prelogin', (b) => ({ ...b, kdfIters: 1000 }));
+  s.calls.length = 0;
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'Mac', minKdfIters: 1000, ...s }),
+    (e) => e.code === 'bad_credentials'); // wrong derived key, but the request WAS sent
+  assert.ok(s.calls.includes('/auth/login'));
+});
+
+// Sweep W2-I2: /auth/login minted a session before the device's own checks
+// (unwrap, dek_check, the answer's shape). A throw after it left a device row
+// nothing holds — a session that never expires. It is revoked, then the
+// error propagates unchanged.
+const deviceRows = async (env, accountId) => (await env.DB.prepare('SELECT COUNT(*) AS n FROM devices WHERE account_id = ?').bind(accountId).first()).n;
+
+test('W2-I2: a login whose dek_check fails revokes the session it was given, then throws dek_check_failed', async () => {
+  const { env, s, su } = await setup();
+  const before = await deviceRows(env, su.accountId);
+  s.stub('/auth/login', (b) => ({ ...b, dekCheck: 'b'.repeat(64) }));
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'Mac', ...s }), (e) => e.code === 'dek_check_failed');
+  assert.equal(await deviceRows(env, su.accountId), before, 'no orphan device row');
+  assert.ok(s.calls.includes('/auth/logout'));
+});
+
+test('W2-I2: a login whose wrapped key does not unwrap revokes the session, then throws unwrap_failed', async () => {
+  const { env, s, su } = await setup();
+  const before = await deviceRows(env, su.accountId);
+  s.stub('/auth/login', (b) => ({ ...b, wrappedDekPw: btoa('x'.repeat(60)) }));
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'Mac', ...s }), (e) => e.code === 'unwrap_failed');
+  assert.equal(await deviceRows(env, su.accountId), before);
+});
+
+test('W2-I2: a login answer of the wrong shape that still carries a token revokes it, then throws server', async () => {
+  const { env, s, su } = await setup();
+  const before = await deviceRows(env, su.accountId);
+  s.stub('/auth/login', ({ recoveryConfirmed, ...rest }) => rest);
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'Mac', ...s }), (e) => e.code === 'server');
+  assert.equal(await deviceRows(env, su.accountId), before);
+});
+
+test('W2-I2: a revoke that fails does not mask the original error', async () => {
+  const { s } = await setup();
+  s.stub('/auth/login', (b) => ({ ...b, dekCheck: 'b'.repeat(64) }));
+  const fetchImpl = async (url, opts) => {
+    if (new URL(url).pathname === '/auth/logout') throw new TypeError('offline');
+    return s.fetchImpl(url, opts);
+  };
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'Mac', ...s, fetchImpl }), (e) => e.code === 'dek_check_failed');
+});
+
+// Sweep W2-I6 (SEC #8, client half): the server answers prelogin with the
+// account's kdfIters; an absurd value is a denial of service on this device
+// (PBKDF2 runs on it). Refused before any derivation, and no login is sent.
+test('W2-I6: a server-sent kdfIters above 10,000,000 gives kdf_iters_out_of_range and sends no login', async () => {
+  const { s } = await setup();
+  s.stub('/auth/prelogin', (b) => ({ ...b, kdfIters: 10000001 }));
+  s.calls.length = 0;
+  await assert.rejects(logIn({ email: EMAIL, password: PW, deviceName: 'Mac', ...s }),
+    (e) => e instanceof AccountError && e.code === 'kdf_iters_out_of_range');
+  assert.ok(!s.calls.includes('/auth/login'));
+});
+
+// --- sweep W3-I2 / W3-I3: the client side of W1's contracts -----------------
+
+// W1-I3: POST /account/recovery/confirm takes {recAuthKey} of the code on
+// screen. confirmRecovery derives it from that code, so a link replaced on
+// another device meanwhile answers 409 recovery_changed instead of
+// confirming a code nobody saved.
+test('W3-I2: confirmRecovery sends the recAuthKey of the code it is given', async () => {
+  const { s, su } = await setup();
+  const link = linkOf(su.code);
+  let sent;
+  const spy = async (url, opts) => {
+    if (new URL(url).pathname === '/account/recovery/confirm') sent = JSON.parse(opts.body);
+    return s.fetchImpl(url, opts);
+  };
+  await confirmRecovery({ link, recoveryCode: su.recoveryCode, ...s, fetchImpl: spy });
+  assert.deepEqual(sent, { recAuthKey: (await deriveRecoveryKeys(su.recoveryCode)).recAuthKey });
+  assert.equal((await getAccount({ link, ...s })).recoveryConfirmed, true);
+});
+
+test('W3-I2: confirming a code that was replaced on another device is 409 recovery_changed, nothing confirmed', async () => {
+  const { s, su } = await setup();
+  const link = linkOf(su.code);
+  await newRecoveryLink({ link, email: EMAIL, currentPassword: PW, ...s }); // "another device"
+  await assert.rejects(confirmRecovery({ link, recoveryCode: su.recoveryCode, ...s }),
+    (e) => e instanceof AccountError && e.code === 'recovery_changed' && e.status === 409);
+  assert.equal((await getAccount({ link, ...s })).recoveryConfirmed, false);
+});
+
+test('W3-I2: confirmRecovery without a well-formed code sends nothing', async () => {
+  const { s, su } = await setup();
+  const link = linkOf(su.code);
+  for (const recoveryCode of [undefined, '', 'not a code']) {
+    s.calls.length = 0;
+    await assert.rejects(confirmRecovery({ link, recoveryCode, ...s }),
+      (e) => e instanceof AccountError && e.code === 'bad_recovery_code', String(recoveryCode));
+    assert.deepEqual(s.calls, []);
+  }
+});
+
+// W1-C1: /account/upgrade needs a one-time upgrade code Alex mints with
+// POST /admin/upgrade-code. upgrade() sends it; a missing one is refused on
+// the device before any key is derived or request made.
+async function legacyAccount1() {
+  const env = envWith();
+  const s = server(env);
+  const token = await mintDevice(env, 1, 'A', '2026-11-11T12:00:00.000Z');
+  const link = { authToken: token, encKey: generateEncKey() };
+  await env.DB.prepare('UPDATE data SET blob = ? WHERE id = 1').bind(await encryptBlob(link.encKey, { items: [] })).run();
+  const mint = async () => {
+    const res = await worker.fetch(new Request('https://w/admin/upgrade-code', {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${env.ADMIN_SECRET}` },
+      body: JSON.stringify({ accountId: 1 }),
+    }), env);
+    assert.equal(res.status, 200);
+    return (await res.json()).upgradeCode;
+  };
+  return { env, s, link, mint };
+}
+
+test('W3-I3: upgrade sends the upgrade code and succeeds with one Alex minted', async () => {
+  const { s, link, mint } = await legacyAccount1();
+  const upgradeCode = await mint();
+  let sent;
+  const spy = async (url, opts) => {
+    if (new URL(url).pathname === '/account/upgrade') sent = JSON.parse(opts.body);
+    return s.fetchImpl(url, opts);
+  };
+  const up = await upgrade({ link, email: EMAIL, password: PW, upgradeCode: ` ${upgradeCode} `, ...s, fetchImpl: spy });
+  assert.equal(up.accountId, 1);
+  assert.equal(sent.upgradeCode, upgradeCode, 'trimmed');
+  assert.equal((await getAccount({ link, ...s })).email, EMAIL);
+});
+
+test('W3-I3: a wrong upgrade code is 403 invalid_upgrade_code; a missing one sends nothing', async () => {
+  const { s, link } = await legacyAccount1();
+  await assert.rejects(upgrade({ link, email: EMAIL, password: PW, upgradeCode: 'AAAAAAAAAAAAAAAAAAAAAA', ...s }),
+    (e) => e instanceof AccountError && e.code === 'invalid_upgrade_code');
+  for (const upgradeCode of [undefined, '', '   ']) {
+    s.calls.length = 0;
+    await assert.rejects(upgrade({ link, email: EMAIL, password: PW, upgradeCode, ...s }),
+      (e) => e instanceof AccountError && e.code === 'missing_upgrade_code');
+    assert.deepEqual(s.calls, []);
+  }
+  assert.equal((await getAccount({ link, ...s })).email, null);
+});
+
+// W3 re-review 1: every account request has a deadline. A request that never
+// answers used to keep its caller busy for ever.
+test('W3-rr 1: a request that never answers gives up at the deadline as unreachable', async () => {
+  const held = [];
+  const fetchImpl = (url, init) => new Promise((_, reject) => { held.push(init.signal); init.signal.addEventListener('abort', () => reject(new Error('aborted'))); });
+  await assert.rejects(getAccount({ link: { authToken: 'a'.repeat(43) }, fetchImpl, apiBase: 'https://w', timeoutMs: 20 }),
+    (e) => e instanceof AccountError && e.code === 'unreachable');
+  assert.equal(held.length, 1);
+  assert.equal(held[0].aborted, true, 'the request is aborted, not merely abandoned');
+});
+
+test('W3-rr 1: a body that never arrives also gives up as unreachable', async () => {
+  const fetchImpl = async () => ({ ok: true, status: 200, json: () => new Promise(() => {}) });
+  await assert.rejects(getAccount({ link: { authToken: 'a'.repeat(43) }, fetchImpl, apiBase: 'https://w', timeoutMs: 20 }),
+    (e) => e instanceof AccountError && e.code === 'unreachable');
+});
+
+test('W3-rr 1: the default account deadline is 30 s', async () => {
+  const { ACCOUNT_TIMEOUT_MS } = await import('../js/account.js');
+  assert.equal(ACCOUNT_TIMEOUT_MS, 30000);
+});

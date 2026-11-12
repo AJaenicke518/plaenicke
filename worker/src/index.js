@@ -2,20 +2,30 @@
 //
 // Env it depends on:
 //   env.ANTHROPIC_API_KEY — Worker secret, smart-add (POST /)
-//   env.ADMIN_SECRET      — Worker secret, mint/revoke device tokens
-//   env.DB                — D1 binding, the sync store and the device table
+//   env.ADMIN_SECRET      — Worker secret, the /admin/* routes (admin.js)
+//   env.AT_REST_KEY       — Worker secret, 32 bytes base64url; MACs and seals
+//                           account columns (seal.js). Missing → 500 not_configured
+//                           on the account routes only.
+//   env.REQUIRE_SESSION   — var, phased-release flag for POST / and /feed:
+//                           true / "true" → a device session is required;
+//                           false / "false" / unset → tolerant (a session is
+//                           counted when present); anything else → 500 bad_config.
+//   env.DB                — D1 binding: accounts, devices, data, usage, invites
 //
-// There is no passphrase: POST / is deliberately public (see handleSmartAdd).
-// GET /version is public too: a static deploy marker, no env, no Claude, no D1.
+// POST / and /feed are public only while REQUIRE_SESSION is tolerant; a
+// session's smart adds are capped per account per UTC day either way (usage.js).
+// GET /version is always public: a static deploy marker, no env, no Claude, no D1.
 import { buildRequestBody } from './prompt.js';
 import { normalizeClaudeJson } from './normalize.js';
 import { handleFeed } from './feed.js';
 import { VERSION } from './version.js';
 import { cors, json } from './cors.js';
 import { handleGetData, handlePutData } from './data.js';
-import {
-  authenticateDevice, isAdmin, mintDevice, revokeDevice,
-} from './auth.js';
+import { handleAccountRoute } from './accounts.js';
+import { handleAdminRoute } from './admin.js';
+import { nowISO } from './clock.js';
+import { authenticateDevice } from './auth.js';
+import { utcDay, nextUtcMidnight, takeSmartAddSlot, recordTokens } from './usage.js';
 
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -30,12 +40,26 @@ function utcTodayISO() {
 // Latency and status ONLY. Never the user's text, never Claude's reply, never
 // the key: worker logs are retained, and the text is the user's own notes.
 // Time is to response headers (the body is read afterwards).
-function logClaudeLatency(ms, status) {
-  console.log(`smart-add claude_ms=${ms} status=${status}`);
+function logClaudeLatency(ms, status, inTok, outTok) {
+  const tokens = inTok === undefined ? '' : ` in=${inTok} out=${outTok}`;
+  console.log(`smart-add claude_ms=${ms} status=${status}${tokens}`);
 }
+
+// Phased release. Returns true (required), false (tolerant) or null for a
+// value that is neither — the caller answers 500 bad_config rather than guess
+// (a typo such as '1' or 'TRUE' must not silently leave the endpoints open).
+function requireSession(env) {
+  const v = env.REQUIRE_SESSION;
+  if (v === true || v === 'true') return true;
+  if (v === false || v === 'false' || v === undefined) return false;
+  return null;
+}
+const badConfig = () => json({ error: 'bad_config' }, 500);
 
 async function handleSmartAdd(request, env) {
   if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+  const required = requireSession(env);
+  if (required === null) return badConfig();
 
   let payload;
   try {
@@ -44,10 +68,19 @@ async function handleSmartAdd(request, env) {
     return json({ error: 'bad_json' }, 400);
   }
 
-  // No passphrase (personal use). Abuse of this public endpoint is bounded
-  // by the monthly spend cap set in the Anthropic Console.
+  // Tolerant mode leaves this endpoint public; abuse is then bounded by the
+  // monthly spend cap set in the Anthropic Console.
   const text = payload && typeof payload.text === 'string' ? payload.text.trim() : '';
   if (!text) return json({ error: 'empty_text' }, 400);
+
+  // Auth and the slot come after validation so a client bug cannot burn the cap.
+  const device = await authenticateDevice(request, env, nowISO(env));
+  if (!device && required) return json({ error: 'unauthorized' }, 401);
+  const day = utcDay(nowISO(env)); // captured once: a call straddling midnight bills the request's day
+  if (device) {
+    const slot = await takeSmartAddSlot(env, device.accountId, day);
+    if (!slot.ok) return json({ error: 'daily_limit', resetsAt: nextUtcMidnight(day) }, 429);
+  }
 
   const today = ISO.test(payload.today) ? payload.today : utcTodayISO();
   const body = buildRequestBody(text, today);
@@ -68,9 +101,12 @@ async function handleSmartAdd(request, env) {
     logClaudeLatency(Date.now() - startedAt, 'unreachable');
     return json({ error: 'upstream_unreachable' }, 502);
   }
-  logClaudeLatency(Date.now() - startedAt, claudeRes.status);
 
-  if (!claudeRes.ok) return json({ error: 'upstream_error', status: claudeRes.status }, 502);
+  const headersMs = Date.now() - startedAt; // to response headers; the body is read afterwards
+  if (!claudeRes.ok) {
+    logClaudeLatency(headersMs, claudeRes.status);
+    return json({ error: 'upstream_error', status: claudeRes.status }, 502);
+  }
 
   // Its own try: a JSON.parse failure message quotes a fragment of the body,
   // and the outer catch logs err.message.
@@ -78,7 +114,18 @@ async function handleSmartAdd(request, env) {
   try {
     data = await claudeRes.json();
   } catch {
+    logClaudeLatency(headersMs, claudeRes.status);
     return json({ error: 'unparseable_model_output' }, 502);
+  }
+  // Every path where Claude returned a body records its tokens, refusal and
+  // max_tokens included. The log line carries counts only.
+  if (data.usage) {
+    const inTok = data.usage.input_tokens | 0;
+    const outTok = data.usage.output_tokens | 0;
+    logClaudeLatency(headersMs, claudeRes.status, inTok, outTok);
+    if (device) await recordTokens(env, device.accountId, day, inTok, outTok);
+  } else {
+    logClaudeLatency(headersMs, claudeRes.status);
   }
   if (data.stop_reason === 'refusal') return json({ error: 'refused' }, 422);
   if (data.stop_reason === 'max_tokens') return json({ error: 'too_long' }, 413);
@@ -95,50 +142,16 @@ async function handleSmartAdd(request, env) {
   return json(normalizeClaudeJson(parsed));
 }
 
-// The single clock boundary for this router. authenticateDevice and
+// The clock boundary is clock.js's nowISO(env). authenticateDevice and
 // handlePutData take `now` as a parameter rather than reading the clock
-// themselves, so tests can inject a fixed instant — see auth.js/data.js.
-function nowISO() { return new Date().toISOString(); }
+// themselves, so tests can inject a fixed instant (env.NOW) — see auth.js/data.js.
 
 async function handleData(request, env) {
-  const device = await authenticateDevice(request, env, nowISO());
+  const device = await authenticateDevice(request, env, nowISO(env));
   if (!device) return json({ error: 'unauthorized' }, 401);
-  if (request.method === 'GET') return handleGetData(env);
-  if (request.method === 'PUT') return handlePutData(request, env, nowISO());
+  if (request.method === 'GET') return handleGetData(env, device.accountId);
+  if (request.method === 'PUT') return handlePutData(request, env, nowISO(env), device.accountId);
   return json({ error: 'method_not_allowed' }, 405);
-}
-
-async function handleAdminDevice(request, env) {
-  // Auth before method: an unauthenticated caller must not be able to probe
-  // which methods this route supports.
-  if (!isAdmin(request, env)) return json({ error: 'unauthorized' }, 401);
-
-  // Method before body: reject unsupported methods without ever touching the
-  // request body, so e.g. a bodiless GET gets a real 405 instead of a
-  // misleading bad_json.
-  if (request.method !== 'POST' && request.method !== 'DELETE') {
-    return json({ error: 'method_not_allowed' }, 405);
-  }
-
-  let payload;
-  try {
-    payload = await request.json();
-  } catch {
-    return json({ error: 'bad_json' }, 400);
-  }
-
-  if (request.method === 'POST') {
-    const name = payload && typeof payload.name === 'string' ? payload.name.trim() : '';
-    if (!name) return json({ error: 'bad_request' }, 400);
-    // The token is returned here and never again — only its hash is stored.
-    const token = await mintDevice(env, name, nowISO());
-    return json({ token, name });
-  }
-
-  // DELETE
-  const hash = payload && typeof payload.token_hash === 'string' ? payload.token_hash : '';
-  if (!hash) return json({ error: 'bad_request' }, 400);
-  return json({ revoked: await revokeDevice(env, hash) });
 }
 
 export default {
@@ -149,7 +162,15 @@ export default {
     // and enforces its own origin allowlist, so the shared preflight below
     // must not intercept it — dispatch here first, unconditionally.
     if (pathname === '/feed') {
-      return handleFeed(request, { fetchImpl: fetch, cache: caches.default });
+      // requireSession's null (a malformed flag) is passed through, not
+      // answered here: feed.js answers OPTIONS, a foreign Origin and a wrong
+      // method first, and only the real GET is 500 bad_config.
+      return handleFeed(request, {
+        fetchImpl: fetch,
+        cache: caches.default,
+        requireSession: requireSession(env),
+        authenticate: (req) => authenticateDevice(req, env, nowISO(env)),
+      });
     }
 
     // Everything below is wrapped so an unexpected throw (a D1 outage, say)
@@ -170,7 +191,11 @@ export default {
       }
       if (pathname === '/') return await handleSmartAdd(request, env);
       if (pathname === '/data') return await handleData(request, env);
-      if (pathname === '/admin/device') return await handleAdminDevice(request, env);
+      const adminRes = await handleAdminRoute(pathname, request, env);
+      if (adminRes) return adminRes;
+
+      const accountRes = await handleAccountRoute(pathname, request, env);
+      if (accountRes) return accountRes;
 
       return json({ error: 'not_found' }, 404);
     } catch (err) {

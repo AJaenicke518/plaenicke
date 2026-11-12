@@ -1,6 +1,6 @@
 # plaenicke
 
-A personal calendar/to-do PWA. Vanilla ES modules — **no framework, no build step, no bundler.** Static files on GitHub Pages, with a Cloudflare Worker (+ D1) for smart-add, an ICS proxy, and device sync. Single user.
+A personal calendar/to-do PWA. Vanilla ES modules — **no framework, no build step, no bundler.** Static files on GitHub Pages, with a Cloudflare Worker (+ D1) for smart-add, an ICS proxy, and device sync. Invite-only multi-user (V7 accounts, spec 2026-11-11).
 
 ## Running tests
 
@@ -12,13 +12,13 @@ A personal calendar/to-do PWA. Vanilla ES modules — **no framework, no build s
 - **`apply.test.js` installs an offline `fetch` at the top of the file.** app.js arms real sync timers that can fire after a test has restored its stub, and without the guard they reached the production Worker. Keep it; a test that holds a request open must release it in `finally`.
 - **`syncOnce` serialises every call through a module-scope queue (`js/sync.js`).** A test that leaves a `syncOnce` pending — a held fetch never released, an `applyState` that never returns — blocks every later `syncOnce` in that test file. Release held requests in `finally`. When a test waits for a sync to reach the network, poll, never a fixed tick. Each file has its own poll helper: `drainUntil` in `apply.test.js`, `settleUntil` in `linkui.test.js` and `sync.test.js`. Why: `syncOnce` hashes the token through WebCrypto first, which completes as a thread-pool macrotask.
 - **`tests/fake-dom.js` is the shared fake DOM, and its `getElementById` returns `null` for an unmounted id.** `apply.test.js` mounts every id `index.html` declares before importing app.js; anything else (the Settings panel's `#sync-status`) a test must mount itself.
-- **`scripts/` is outside `npm test` on purpose, and `npm run smoke:worker` (`scripts/smoke-worker.mjs`) calls the production Worker — every run spends Anthropic credits.** Run it by hand after a Worker deploy, once the edge has propagated; it never retries. Renaming it to a test pattern (`test-*.mjs`, `*.test.*`) or moving it under `test/` would make every `npm test` spend credits. Its `isMain()` returns false whenever `NODE_TEST_CONTEXT` is set or the process was started with a `--test` flag (which covers `--experimental-test-isolation=none`, where that variable is unset), so running it through the test runner runs nothing.
+- **`scripts/` is outside `npm test` on purpose, and `npm run smoke:worker` (`scripts/smoke-worker.mjs`) calls the production Worker — every run spends Anthropic credits.** Run it by hand after a Worker deploy, once the edge has propagated; it never retries. It needs `PLAENICKE_SMOKE_TOKEN`, a device token for account 1, and spends 6 of that account's 50 daily smart adds. Renaming it to a test pattern (`test-*.mjs`, `*.test.*`) or moving it under `test/` would make every `npm test` spend credits. Its `isMain()` returns false whenever `NODE_TEST_CONTEXT` is set or the process was started with a `--test` flag (which covers `--experimental-test-isolation=none`, where that variable is unset), so running it through the test runner runs nothing.
 - A literal U+0001 in a Bash heredoc is rejected as a control character. Use Python. (`js/merge.js` uses one as a dedupe field separator.)
 
 ## Deploying
 
 - **There is no CI workflow. GitHub Pages serves `main` directly, so merging to `main` IS the deploy.** Treat a merge as a production release.
-- The Worker deploys separately via `wrangler`. Expect **~20s of edge propagation**. **Bump `worker/src/version.js` by hand on every Worker deploy**, then confirm with `curl -s <WORKER_URL>/version` (free). `npm run smoke:worker` checks `/version` first and makes no paid calls on a mismatch, so it can no longer pass against the old deploy — unless the bump was forgotten.
+- The Worker deploys separately via `wrangler`, **run from `worker/`** (`(cd worker && npx wrangler deploy)`): wrangler reads `worker/wrangler.toml` from its working directory. Expect **~20s of edge propagation**. **Bump `worker/src/version.js` by hand on every Worker deploy**, then confirm with `curl -s <WORKER_URL>/version` (free). `npm run smoke:worker` checks `/version` first and makes no paid calls on a mismatch, so it can no longer pass against the old deploy — unless the bump was forgotten.
 
 ## Before you touch sync
 
@@ -66,6 +66,16 @@ Things the 2026-10-19 release changed that are easy to undo by accident:
 - **"Replace this device" no longer exists.** The adoption dialog offers Merge and Cancel; `applySyncedState` always re-merges live storage. Do not reintroduce a discard path.
 - **Removing a calendar asks first.** The first tap on Remove only asks, inline; "Remove from every device" removes. A feed URL cannot be typed back in.
 
+## Accounts
+
+- **V7 release order is Worker, then client, then account 1's upgrade, then the flag** (`docs/admin.md`). That is the reverse of the item-type rule above ("ship the client before the Worker"), which is about `ITEM_TYPES` only.
+- **`AT_REST_KEY` is a Worker secret.** Keep two copies (`~/.plaenicke-at-rest-key` and the password manager). Missing or not 32 bytes: the account routes answer 500 `not_configured`. Changed after first use: 500 `at_rest_key_mismatch`. Sync, smart add and `/feed` never read it.
+- **`REQUIRE_SESSION` lives in `worker/wrangler.toml` `[vars]` and nowhere else.** `true`/`"true"` requires a session on `GET /feed` and smart add; `false`/`"false"`/unset is tolerant; anything else is 500 `bad_config`. `wrangler deploy` overwrites dashboard variables unless `keep_vars = true` (Cloudflare's configuration reference, "Source of truth", checked 2026-11-12), so a dashboard or `--var` value disappears on the next deploy. `worker/tests/wrangler-config.test.js` refuses `keep_vars = true` and a malformed flag. Phase 1 deploys with no `[vars]` block; Phase 3 is a commit that adds it.
+- **Account 1's upgrade needs a one-time code** (`POST /admin/upgrade-code`, 24 h, single use). Mint it, upgrade in the app, and only then mint any other account-1 token. The smoke token is minted for Phase 3, kept in a chmod-600 file, revoked straight after, and never pasted into the app (a raw 43-character token bootstraps a new key; see Device linking).
+- **The password blocklist has two generated files.** `js/common-passwords.js` (whole passwords) and `js/common-bases.js` (base words: `checkPassword` refuses a common word plus digits/symbols/leetspeak, e.g. `Summer2024!`). `js/common-bases.js` is built by `node scripts/gen-common-bases.mjs <list.txt>` using `js/password-policy.js`'s own `baseWord()`; change `baseWord()` and the file must be regenerated, or the two disagree. Both are precached by `service-worker.js`.
+- **Login enters through `linkAndAdopt`, never `linkWithCode` directly.**
+- **`plaenicke.localOwner` guards cross-account merges; never clear it on sign-out.**
+
 ## Where things live
 
 | What | Where |
@@ -73,6 +83,8 @@ Things the 2026-10-19 release changed that are easy to undo by accident:
 | Punchlist (deferred work) | `~/punchlists/punchlist-plaenicke.md` |
 | V5 sync design | `docs/superpowers/specs/2026-08-01-plaenicke-v5-accounts-sync-design.md` |
 | V5 execution ledger | `.superpowers/sdd/2026-08-02-plaenicke-v5-plan3-client-sync/progress.md` |
+| V7 accounts design | `docs/superpowers/specs/2026-11-11-plaenicke-accounts-design.md` |
+| Admin recipes and release checklist | `docs/admin.md` |
 | Session handoffs | `~/handoffs/plaenicke/` — `/handoff read` |
 | Worker admin secret | `~/.plaenicke-admin-secret`, chmod 600 — **the only copy** |
 
@@ -80,4 +92,6 @@ Things the 2026-10-19 release changed that are easy to undo by accident:
 
 A raw 43-character token from `POST /admin/device` is correct **only for the first device**. `linkWithCode` branches on decoded byte length: 32 bytes means *bootstrap*, so it mints a fresh `encKey` and silently starts a new, empty account. To add a second device, compose an **86-character code** on an already-linked device via Settings → Sync → *Link another device*. Full procedure in spec § 4.1.
 
-`encKey` never touches the server and a device never re-displays its own code, so **the codes in the devices' `localStorage` are the account's only decryption credential.** There is no reset.
+Testers (accounts made through an invite) never see or handle link codes: sign-up and login mint their device. Codes are for Alex's legacy account 1 until it is upgraded.
+
+For a legacy (not yet upgraded) account 1: `encKey` never touches the server and a device never re-displays its own code, so **the codes in the devices' `localStorage` are the account's only decryption credential.** There is no reset. For invite accounts and an upgraded account 1, the password or the recovery link restores the key (spec § 4.1); losing both loses the data.

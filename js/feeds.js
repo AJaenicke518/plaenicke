@@ -214,10 +214,21 @@ function dropLargestFeed(cache) {
 // happened is recorded in the persisted cache entry (`quotaPruned` /
 // `quotaDropped`) so feedStatus can surface it later, independent of which
 // feed triggered the recovery.
-export async function syncFeed(feed, { fetchImpl, now = () => new Date(), manual = false } = {}) {
+//
+// `authToken` is a REQUIRED key (accounts plan review I10): undefined throws
+// TypeError('authToken required'), so a forgotten call site fails loudly
+// instead of reading as "signed out". null IS signed out (spec D21): the
+// Worker's /feed needs a session, so nothing is fetched and the result is
+// {ok:false, error:'signed_out'} with the cache untouched — it keeps rendering.
+export async function syncFeed(feed, {
+  fetchImpl, now = () => new Date(), manual = false, authToken,
+} = {}) {
+  if (authToken === undefined) throw new TypeError('authToken required');
+  if (authToken === null) return { ok: false, error: 'signed_out' };
   const nowDate = now();
   const url = `${WORKER_URL}/feed?url=${encodeURIComponent(feed.url)}`;
   const headers = manual ? { 'Cache-Control': 'no-cache' } : {};
+  headers.authorization = `Bearer ${authToken}`;
 
   let res;
   try {
@@ -312,9 +323,12 @@ export async function syncFeed(feed, { fetchImpl, now = () => new Date(), manual
 // Promise.all'd): they share one localStorage cache key, and a
 // read-modify-write race between concurrent syncFeed calls could silently
 // drop one feed's write.
+// `authToken` is forwarded to every syncFeed, and required here too: checked
+// before the loop, so a forgotten token throws even when nothing is stale.
 export async function syncStale(feeds, cache, {
-  maxAgeMin = 30, fetchImpl, now = () => new Date(), manual = false,
+  maxAgeMin = 30, fetchImpl, now = () => new Date(), manual = false, authToken,
 } = {}) {
+  if (authToken === undefined) throw new TypeError('authToken required');
   const nowDate = now();
   const results = {};
   for (const feed of feeds) {
@@ -326,7 +340,7 @@ export async function syncStale(feeds, cache, {
     }
     if (!stale) continue;
     // eslint-disable-next-line no-await-in-loop
-    results[feed.id] = await syncFeed(feed, { fetchImpl, now, manual });
+    results[feed.id] = await syncFeed(feed, { fetchImpl, now, manual, authToken });
   }
   return results;
 }
@@ -347,6 +361,10 @@ const ERROR_TEXT = {
   parse_error: "couldn't read calendar data",
   storage_full: 'device storage full',
   server: 'sync failed',
+  // No session on this device (spec D21): /feed needs one.
+  signed_out: 'sign in to refresh',
+  // /feed refused this device's session: it was deleted (§ 6.10, sweep W3-I7).
+  unauthorized: 'signed out — sign in again',
   remove_failed: 'could not remove — try again',
   // A user write refused by edit.js's userWriteStamp (Remove, Track
   // deadlines): retrying can never succeed, so the row says why instead.

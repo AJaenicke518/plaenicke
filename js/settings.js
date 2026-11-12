@@ -16,6 +16,9 @@ import {
 import { loadFeeds, saveFeeds, loadFeedCache, loadLaunches, QuotaError } from './storage.js';
 import { describeLaunches } from './freshness.js';
 import { initLinkUI } from './linkui.js';
+import { initAccountUI } from './accountui.js';
+import * as accountModule from './account.js';
+import { getLink } from './auth.js';
 import { uid } from './uid.js';
 import { nowISO, toISO } from './dateparse.js';
 import { userWriteStamp, STAMP_EXHAUSTED_ERROR } from './edit.js';
@@ -61,13 +64,15 @@ function getSetting() {
 // controls outside any `hidden` subtree. These are the only kinds the panel
 // draws (its heading is a script-only target, tabindex -1); a link added to
 // it would need adding here.
-const TAB_STOP_TAGS = new Set(['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA']);
+// The Account section's recovery screen draws one link (Email it to me, an
+// <a href>), so A is listed; an <a> without an href is not a Tab stop.
+const TAB_STOP_TAGS = new Set(['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'A']);
 function tabStops(root) {
   const out = [];
   const walk = (el) => {
     for (const c of el.children) {
       if (c.hidden) continue;
-      if (TAB_STOP_TAGS.has(c.tagName) && !c.disabled) out.push(c);
+      if (TAB_STOP_TAGS.has(c.tagName) && !c.disabled && (c.tagName !== 'A' || c.href)) out.push(c);
       walk(c);
     }
   };
@@ -75,8 +80,13 @@ function tabStops(root) {
   return out;
 }
 
+// Returns { open(intent) }: app.js opens the panel for a boot fragment
+// (#invite= / #recover=, js/fragment.js) and for the recovery banner.
+// `accountApi` is js/account.js, injected so tests never run PBKDF2 or reach
+// a server.
 export function initSettings({
-  button, host, onFeedsChanged, onSyncedDataChanged, onFeedFetched, applyState, deadlines,
+  button, host, onFeedsChanged, onSyncedDataChanged, onFeedFetched, applyState, deadlines, onSignedIn,
+  accountApi = accountModule,
 }) {
   // A missing wire here is silent data loss, not a degraded feature: without
   // it a calendar added or removed in this panel never reaches the account
@@ -95,6 +105,12 @@ export function initSettings({
   // apply a held removal. Missing wiring would hide a held removal silently.
   if (!deadlines || typeof deadlines.status !== 'function' || typeof deadlines.removeHeld !== 'function') {
     throw new Error('initSettings requires deadlines: { status, removeHeld }');
+  }
+  // A sign-in from the Account section refetches calendars with the new
+  // session (sweep W3 #20). Without the wire nothing would until the next
+  // launch, and the stamp would keep saying "Sign in to refresh calendars."
+  if (typeof onSignedIn !== 'function') {
+    throw new Error('initSettings requires an onSignedIn callback');
   }
 
   // Follow the phone while in auto.
@@ -144,7 +160,7 @@ export function initSettings({
   // it is open (a Remove question, the sync section, a disabled Add), so the
   // list is read from the panel at each Tab press.
   function onKey(e) {
-    if (e.key === 'Escape') { close(); return; }
+    if (e.key === 'Escape') { if (!accountHolds()) close(); return; }
     if (e.key !== 'Tab') return;
     const focusables = tabStops(host);
     if (focusables.length === 0) return;
@@ -162,6 +178,12 @@ export function initSettings({
   // Stops fitting the backdrop to the visual viewport (the iOS keyboard,
   // punchlist L139: js/viewport.js fillVisualViewport), or null while closed.
   let stopViewport = null;
+  // The open panel's Account handle, or null while closed. While it holds the
+  // panel — a recovery code on screen, a submit still out (sweep W3-I1b) —
+  // Escape, a backdrop tap and the Settings button do not close it: a code
+  // lost that way is gone, and Mail can evict the app moments later.
+  let accountHandle = null;
+  const accountHolds = () => Boolean(accountHandle && accountHandle.holdsPanel());
 
   // Focus goes back to the Settings button on every close path (the button,
   // Escape, a backdrop tap), as the item sheet returns it to its opener (app.js's
@@ -169,6 +191,8 @@ export function initSettings({
   // scrolling, for the same reason.
   function close() {
     repaintRows = null;
+    if (accountHandle) accountHandle.detach();
+    accountHandle = null;
     host.innerHTML = '';
     if (releaseScroll) { releaseScroll(); releaseScroll = null; }
     if (stopViewport) { stopViewport(); stopViewport = null; }
@@ -176,13 +200,15 @@ export function initSettings({
     button.focus({ preventScroll: true });
   }
 
-  function open() {
+  // `intent` is null (the button) or {kind:'invite'|'recover'|'login'|
+  // 'new-recovery', code?}: the panel renders, then the matching Account form.
+  function open(intent = null) {
     const backdrop = document.createElement('div');
     backdrop.className = 'settings-backdrop';
     backdrop.setAttribute('role', 'dialog');
     backdrop.setAttribute('aria-modal', 'true');
     backdrop.setAttribute('aria-label', 'Settings');
-    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop && !accountHolds()) close(); });
 
     const panel = document.createElement('div');
     panel.className = 'settings-panel';
@@ -392,7 +418,7 @@ export function initSettings({
       renderCalendars();
       let result;
       try {
-        result = await syncFeed(feed, { fetchImpl: fetchWithTimeout, manual: true });
+        result = await syncFeed(feed, { fetchImpl: fetchWithTimeout, manual: true, authToken: getLink()?.authToken ?? null });
       } catch (err) {
         // syncFeed only throws on a genuine non-quota storage bug (see
         // feeds.js); never include the feed object/URL in the log, same
@@ -405,13 +431,24 @@ export function initSettings({
       feedCache = loadFeedCache();
       syncingFeedId = null;
       renderCalendars();
-      onFeedFetched(feed.id, result.ok);
+      // A signed-out result made no request: there is no fetch to report.
+      if (result.error !== 'signed_out') onFeedFetched(feed.id, result.ok);
       notifyViewChanged();
     }
 
     function renderCalendars() {
       body.innerHTML = '';
       const visMap = loadVisibility();
+
+      // Signed out (spec D21): the Worker's /feed needs a session, so nothing
+      // refreshes; the cached events keep rendering. Read at each render, so a
+      // sign-in or sign-out while the panel is open is reflected.
+      if (getLink() === null) {
+        const signIn = document.createElement('p');
+        signIn.className = 'note feed-signin-note';
+        signIn.textContent = 'Sign in to refresh calendars.';
+        body.appendChild(signIn);
+      }
 
       if (feeds.length === 0) {
         const empty = document.createElement('p');
@@ -696,7 +733,7 @@ export function initSettings({
 
         let result;
         try {
-          result = await syncFeed(feed, { fetchImpl: fetchWithTimeout, manual: true });
+          result = await syncFeed(feed, { fetchImpl: fetchWithTimeout, manual: true, authToken: getLink()?.authToken ?? null });
         } catch (err) {
           result = { ok: false, error: 'server' };
           console.error('plaenicke: initial calendar sync failed', err && err.name);
@@ -707,7 +744,8 @@ export function initSettings({
         addBusy = false;
         syncingFeedId = null;
         renderCalendars();
-        onFeedFetched(feed.id, result.ok);
+        // A signed-out result made no request: there is no fetch to report.
+        if (result.error !== 'signed_out') onFeedFetched(feed.id, result.ok);
         notifyViewChanged();
       }
 
@@ -743,32 +781,77 @@ export function initSettings({
     // idempotent: no listener ever accumulates, because the element every
     // listener is attached to is discarded with the panel. initLinkUI itself
     // makes no network call on mount unless an adoption is already pending.
-    const account = document.createElement('div');
-    account.className = 'settings-section';
+    const syncSection = document.createElement('div');
+    syncSection.className = 'settings-section';
     const sh = document.createElement('h3');
     sh.textContent = 'Sync';
-    const linkHost = document.createElement('div');
-    account.append(sh, linkHost);
+    const linkSlot = document.createElement('div');
+    syncSection.append(sh, linkSlot);
 
-    panel.append(appearance, calendars, account);
+    // --- Account (accounts Task 13), above Sync --------------------------
+    // Same per-open mount as Sync, against its own fresh sub-element.
+    const accountSection = document.createElement('div');
+    accountSection.className = 'settings-section';
+    accountSection.id = 'account-section';
+    const acH = document.createElement('h3');
+    acH.textContent = 'Account';
+    // Where focus goes when the Account section re-renders away the focused
+    // control (sweep W3 #15): script-only, never a Tab stop.
+    acH.setAttribute('tabindex', '-1');
+    const accountHost = document.createElement('div');
+    accountSection.append(acH, accountHost);
+
+    panel.append(appearance, calendars, accountSection, syncSection);
     backdrop.appendChild(panel);
     host.appendChild(backdrop);
+
+    // linkui and accountui reach each other through these two bindings:
+    // linkui's Sign out / Sign in (account devices, § 6.11) are accountui's,
+    // and accountui links through linkui's linkAndAdopt (D15). `acct` is set
+    // just below, before any control either renders can be tapped.
+    let linkHandle = null;
+    let acct = null;
     // AFTER the panel is in the document: linkui.js's status line is found by
     // id (renderSyncStatus), and an element that is not in the document is
-    // not findable.
-    initLinkUI({
-      host: linkHost,
-      applyState,
-      // Adoption can pull an entire account's worth of calendars. notifyChanged
-      // alone only refreshes app.js's snapshot — THIS panel's own `feeds` and
-      // `feedCache` bindings were captured when open() ran, and
-      // renderCalendars() would never re-run, so the list sitting directly
-      // above still read "No calendars linked yet" next to five freshly pulled
-      // subscriptions. Display only (reapplyFeedField, handleAdd and Remove
-      // all re-read storage before writing), but wrong on screen.
-      onLinked: refreshCalendars,
-      onUnlinked: refreshCalendars,
+    // not findable. Re-mounted against a fresh element when accountui signs
+    // out from its own section, which linkui cannot otherwise see.
+    function mountLink() {
+      linkSlot.innerHTML = '';
+      const linkHost = document.createElement('div');
+      linkSlot.appendChild(linkHost);
+      linkHandle = initLinkUI({
+        host: linkHost,
+        applyState,
+        // Adoption can pull an entire account's worth of calendars. notifyChanged
+        // alone only refreshes app.js's snapshot — THIS panel's own `feeds` and
+        // `feedCache` bindings were captured when open() ran, and
+        // renderCalendars() would never re-run, so the list sitting directly
+        // above still read "No calendars linked yet" next to five freshly pulled
+        // subscriptions. Display only (reapplyFeedField, handleAdd and Remove
+        // all re-read storage before writing), but wrong on screen.
+        onLinked: refreshCalendars,
+        onUnlinked: refreshCalendars,
+        // Each RETURNS signOutLocal()'s result, so linkui can say a refusal.
+        onSignOut: () => acct.signOut(),
+        onSignIn: () => acct.signIn(),
+      });
+    }
+    mountLink();
+    acct = initAccountUI({
+      host: accountHost,
+      api: accountApi,
+      linkui: () => linkHandle,
+      onSignedOut: () => { mountLink(); refreshCalendars(); },
+      // Legacy -> account (an upgrade, here or on another device): linkui's
+      // section still shows Unlink and the code tools until re-mounted.
+      // Only for the mount on screen (W3 re-review): a closed panel's slot
+      // is detached, and a linkui mounted there could start an invisible
+      // adoption preview.
+      onAccountChanged: () => { if (accountHandle === acct) mountLink(); },
+      onSignedIn: () => { refreshCalendars(); onSignedIn(); },
+      focusTarget: acH,
     });
+    accountHandle = acct;
     if (!releaseScroll) releaseScroll = lock(); // no scrolling behind the modal (iOS)
     // The backdrop is the panel's scroll container. Fixed at inset: 0 it is
     // the layout viewport's height, and the iOS keyboard shrinks only the
@@ -777,11 +860,24 @@ export function initSettings({
     if (!stopViewport) stopViewport = fillVisualViewport(backdrop);
     document.addEventListener('keydown', onKey);
     h.focus();
+    // Last, so the form's first empty field takes focus from the heading.
+    if (intent) acct.open(intent);
   }
 
-  button.addEventListener('click', () => { host.childElementCount ? close() : open(); });
+  button.addEventListener('click', () => {
+    if (!host.childElementCount) open();
+    else if (!accountHolds()) close();
+  });
 
   // The inline pre-paint script already applied a theme from its own copy of this
   // logic; re-apply through resolveTheme() so js/theme.js is the source of truth.
   applyTheme(getSetting());
+
+  return {
+    // Renders the panel (re-rendered if already open), then the intent's form.
+    open(intent = null) {
+      if (host.childElementCount) close();
+      open(intent);
+    },
+  };
 }

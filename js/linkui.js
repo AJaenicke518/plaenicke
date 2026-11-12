@@ -20,10 +20,13 @@
 // failure that string IS a real link code, so no error path may echo it.
 
 import { getLink, linkWithCode, unlink, isAdoptionPending } from './auth.js';
-import { composeForNewDevice, base64urlToBytes, TOKEN_BYTES, KEY_BYTES } from './crypto.js';
-import { previewRemote, syncOnce, localState } from './sync.js';
+import { composeForNewDevice, base64urlToBytes, parseLinkCode, TOKEN_BYTES, KEY_BYTES } from './crypto.js';
+import { previewRemote, syncOnce, localState, syncHoldsTurn } from './sync.js';
 import { applyTombstones } from './merge.js';
-import { loadAuth, loadSyncState } from './storage.js';
+import {
+  loadAuth, loadSyncState, loadLocalOwner, saveLocalOwner, loadLegacyOwner, clearLegacyOwner,
+} from './storage.js';
+import { getAccount } from './account.js';
 import { WORKER_URL } from './config.js';
 import { fetchWithTimeout } from './fetchtimeout.js';
 
@@ -51,6 +54,104 @@ const NEVER_SYNCED_TEXT = 'Linked. Nothing has synced yet.';
 const PENDING_TEXT = 'Linked — but nothing syncs until you choose how to combine this device with the account.';
 const CORRUPT_TEXT = "This device's saved code is unreadable, so it will never sync. Re-link with the 86-character code from a device that is already linked.";
 
+// --- accounts (spec D16, D17, § 6.10, § 6.11) ------------------------------
+//
+// EXPORTED, and the ONE copy: accountui (Task 13) imports these rather than
+// restating them, so the two surfaces cannot drift (controller ruling R2).
+//
+// AN ACCOUNT DEVICE HAS NO CODE TO PASTE. Every screen an owned device can
+// reach sends it to Sign in, never to "the 86-character code" the legacy copy
+// names — that advice beside no paste field is a dead end.
+export const ACCOUNT_COPY = {
+  other_account_data: "This device holds another account's planner. Signing in here would copy it into that account.",
+  already_linked: 'This device is already signed in. Sign out first.',
+  // A pasted code / bootstrap token, or a link with no account id, on a device
+  // that records an owner (D16, ruling R11).
+  owned_device: 'This device belongs to an account. Sign in to sync it.',
+  // The session was deleted (recovery, sign-out-others, disable) — § 6.10.
+  signed_out: 'This device was signed out. Sign in again.',
+  undecryptable: "This device can't read your planner with its saved key. Sign in again.",
+  corrupt: "This device's saved sign-in is damaged. Sign in again.",
+  sign_out_note: 'Signing out stops syncing on this device. Your items and calendars stay on this device.',
+  signed_out_unlinked: 'This device is signed out. Sign in to sync it again.',
+  signed_out_notice: 'Signed out. Everything on this device was kept — items, calendars and all.',
+  sign_out_refused: 'A sync is finishing — try signing out again in a moment.',
+  // A device owned by a LEGACY account (no login yet: Alex's account 1 before
+  // its upgrade) has no sign-in to fall back on (sweep W3, carried from the
+  // W2 re-review), so its refusals say what it CAN do.
+  legacy_wrong_account: "That code belongs to a different account from the one this device's planner came from, so it was not linked. Paste a code from one of your own linked devices.",
+  legacy_check_failed: "Couldn't check which account that code belongs to, so it was not linked. Try again when you're online.",
+  legacy_link_unchecked: "This device's link hasn't been shown to belong to the account its planner came from, so it won't sync. Use Check again in Account above when you're online, or unlink it.",
+  // A raw 43-character token on an owned device: linkWithCode would
+  // bootstrap, minting a fresh key for an account that already has data.
+  owned_token: 'That is a 43-character device token. On this device it would start a new encryption key for an account that already has a planner, so it was not linked. Paste the 86-character code from one of your linked devices instead.',
+  // D17 on a linked legacy device (sweep W3 #19): its way out is Unlink.
+  already_linked_legacy: "This device is linked to Alex's legacy account — unlink it in Sync first.",
+};
+const ACCOUNT_SIGNED_OUT_TEXT = ACCOUNT_COPY.signed_out;
+
+// adoptionBlocker — may this device be linked into `targetAccountId`?
+// PURE: reads local storage, never the network. Every link path runs it first
+// (doLink, below), and accountui runs it before any request that changes
+// server state.
+//
+//   'already_linked'      — D17: login only on an unlinked device. Linking over
+//                           a live link overwrites plaenicke.auth and orphans a
+//                           session that never expires.
+//   'other_account_data'  — D16: the device holds items or feeds that belong to
+//                           ANOTHER account (localOwner set and different). A
+//                           null target (sign-up; a pasted code, which carries
+//                           no account id) always differs. Adopting would merge
+//                           one person's planner — feed capability URLs
+//                           included — into someone else's account.
+//
+// TOMBSTONES ARE COUNTED (sweep W2-I1). They are not a planner, but they are
+// the previous owner's DELETIONS: adopted into another account, a tombstone
+// deletes that account's record with the same id on every device — a
+// Brightspace deadline's bs-<UID> id is the same for every student of the
+// course (reproduced: scen/s2.mjs). Blocking is the whole fix: clearing them
+// would add a tombstone writer outside app.js/feeds.js (js/storage.js).
+export function adoptionBlocker(targetAccountId) {
+  if (getLink() !== null) return 'already_linked';
+  const owner = loadLocalOwner();
+  if (owner !== null && owner !== targetAccountId) {
+    const local = localState();
+    if (local.items.length + local.feeds.length + local.tombstones.length > 0) return 'other_account_data';
+  }
+  return null;
+}
+
+// Does this device's recorded owner have a login? (sweep W2-C1.) The owner
+// tag alone used to decide the UI mode, so a legacy device could not record
+// one without losing today's UI — and an unlinked legacy device then leaked
+// its planner into the next account to sign in. The owner tag now guards
+// (D16) and plaenicke.legacyOwner, set from GET /account's email-null answer,
+// says that owner has no login yet.
+function ownerHasLogin() {
+  const owner = loadLocalOwner();
+  return owner !== null && loadLegacyOwner() !== owner;
+}
+
+// True when this device is linked, records an owner, and the stored link was
+// never shown to belong to that owner (W2 re-review). Its pending adoption is
+// neither previewed nor adopted.
+function linkNotShownOwners() {
+  const owner = loadLocalOwner();
+  return getLink() !== null && owner !== null && loadSyncState().linkOwner !== owner;
+}
+
+// Derived from storage at CALL time, never held in a closure: app.js calls
+// renderSyncStatus() with no arguments, and a panel mounted before a sign-in or
+// sign-out must render the mode storage holds now.
+//   'unlinked' — no readable link (a corrupt stored code included);
+//   'account'  — linked, and the device's owner is an account with a login;
+//   'legacy'   — linked with no owner, or owned by an account with no login
+//                yet (Alex's account 1 before its upgrade): today's UI.
+export function accountModeFromStorage() {
+  if (getLink() === null) return 'unlinked';
+  return ownerHasLogin() ? 'account' : 'legacy';
+}
+
 const ERROR_LABELS = {
   offline: 'this device could not reach the account',
   unauthorized: "the account rejected this device's code",
@@ -64,7 +165,8 @@ const ERROR_LABELS = {
   http_413: "the synced data has reached the account's size limit",
 };
 
-function errorLabel(code) {
+function errorLabel(code, mode) {
+  if (mode === 'account' && code === 'unauthorized') return ACCOUNT_SIGNED_OUT_TEXT;
   if (ERROR_LABELS[code]) return ERROR_LABELS[code];
   if (typeof code === 'string' && code.startsWith('http_')) return 'the server returned an error';
   return 'something went wrong';
@@ -93,9 +195,20 @@ function relative(iso, now) {
 // dialog; the failure mode is "silently does nothing". If lastError won, the
 // load-bearing signal would be hidden behind an offline banner precisely when
 // it matters.
-export function describeSyncStatus(syncState, now) {
+//
+// `mode` is accountModeFromStorage(), passed by the paint path (statusText,
+// below) that reads it from storage at call time. It is a parameter rather
+// than read in here because this function is otherwise pure over its
+// arguments and is called with no storage at all (tests/linkui.test.js's
+// first describeSyncStatus tests run before any localStorage exists; reading
+// it here throws a ReferenceError there). Omitted, it renders the legacy copy.
+export function describeSyncStatus(syncState, now, mode) {
   const s = syncState || {};
   if (s.adoptionPending === true) return PENDING_TEXT;
+  if (mode === 'account' && s.lastError === 'unauthorized') {
+    const tail = s.lastSyncedAt ? ` Last synced ${relative(s.lastSyncedAt, now)}.` : '';
+    return `${ACCOUNT_SIGNED_OUT_TEXT}${tail}`;
+  }
   if (s.lastError) {
     const tail = s.lastSyncedAt ? ` Last synced ${relative(s.lastSyncedAt, now)}.` : '';
     return `Sync problem: ${errorLabel(s.lastError)}.${tail}`;
@@ -265,8 +378,8 @@ function statusText(now) {
   const facts = readSyncFacts();
   const kind = classifySyncState(facts);
   if (kind === SYNC_NOT_LINKED) return NOT_LINKED_TEXT;
-  if (kind === SYNC_CORRUPT) return CORRUPT_TEXT;
-  return describeSyncStatus(facts.syncState, now);
+  if (kind === SYNC_CORRUPT) return ownerHasLogin() ? ACCOUNT_COPY.corrupt : CORRUPT_TEXT;
+  return describeSyncStatus(facts.syncState, now, accountModeFromStorage());
 }
 
 function paintStatus(el, now) {
@@ -294,7 +407,14 @@ function paintShellIndicator(el, now = new Date()) {
   }
   const attention = shellNeedsAttention(kind);
   el.hidden = !attention;
-  el.textContent = attention ? SHELL_TEXT[kind] : '';
+  // An account device signed out by the server (recovery, sign-out-others,
+  // disable) says so in the shell too — "Sync problem" names no action.
+  const signedOut = kind === SYNC_ERROR && readSyncFacts().syncState.lastError === 'unauthorized'
+    && accountModeFromStorage() === 'account';
+  // A damaged code on an account device is fixed by signing in, not by the
+  // legacy re-link (Task 12 deferred, sweep W3).
+  const accountCorrupt = kind === SYNC_CORRUPT && ownerHasLogin();
+  el.textContent = !attention ? '' : signedOut ? ACCOUNT_SIGNED_OUT_TEXT : accountCorrupt ? ACCOUNT_COPY.corrupt : SHELL_TEXT[kind];
   el.className = attention ? 'sync-indicator sync-indicator-problem' : 'sync-indicator';
 }
 
@@ -370,7 +490,12 @@ const APPLIED_FAILURE_TEXT = {
 // EXPORTED so the "no message may claim nothing was combined on a status
 // reachable after the write" check is a test over this table, not over one
 // hand-picked path through the UI.
-export function failureText(status, applied) {
+//
+// `mode` defaults to the mode storage holds at call time (an account device
+// has no 86-character code to paste; it signs in again).
+export function failureText(status, applied, mode = accountModeFromStorage()) {
+  if (mode === 'account' && status === 'unauthorized') return ACCOUNT_SIGNED_OUT_TEXT;
+  if (mode === 'account' && status === 'undecryptable') return ACCOUNT_COPY.undecryptable;
   if (applied && APPLIED_FAILURE_TEXT[status]) return APPLIED_FAILURE_TEXT[status];
   return FAILURE_TEXT[status] || `Something went wrong (${status}).`;
 }
@@ -439,6 +564,48 @@ let activeAdoption = null;
 let adoptionGeneration = 0;
 let writeInFlight = false;
 let activeStartedAt = 0;
+
+// signOutLocal — the ONE local sign-out (spec D27), shared by linkui's own
+// Sign out button (via options.onSignOut) and accountui's #acct-signout.
+// accountui revokes the session (account.logOut) FIRST, then calls this.
+//
+// It refuses exactly where unlinkButton does, for the same reason (see the
+// note above unlinkButton): an adoption write in flight captured the link at
+// entry, so unlinking under it leaves that write pushing with a revoked
+// credential while its applyState lands the account's records here.
+//
+// unlink() keeps local data (js/auth.js) and this never touches
+// plaenicke.localOwner: the data on this device still belongs to that account
+// and D16 needs the tag to stop a different account adopting it.
+// True while signOutLocal() would refuse. accountui asks BEFORE it revokes
+// the session (account.logOut), as signOutButton below checks before
+// onSignOut: revoking and then being refused would leave this device linked
+// on a dead session while the write goes on pushing with it.
+//
+// AND while ANY syncOnce holds the turn — an ordinary sync from app.js's
+// runSync included (sweep W2-C2). That sync captured the link at entry too:
+// signed out under it, it used to go on to apply the old account's records
+// here and push them with the old credential. syncOnce now re-checks the
+// link itself before every effect; refusing here keeps the in-tab sign-out
+// from racing it at all. The wait is bounded by the read's deadline; a PUT
+// has none, and while one is out "it's safe to reload" applies.
+export function signOutBlocked() {
+  return Boolean(activeAdoption && writeInFlight) || syncHoldsTurn();
+}
+
+// IT ENDS THE ADOPTION EPISODE (sweep W2-I4). Sign-out is allowed while an
+// episode is only previewing, and that episode used to stay the active one:
+// the sign-in that followed JOINED it ('joined_other') instead of linking.
+// The old episode cannot act afterwards: doPreview drops a preview answered
+// for a session this device no longer holds, and a dialog left open from
+// one re-checks the session at the click (adoptAgainstFreshCounts).
+export function signOutLocal() {
+  if (signOutBlocked()) return 'refused_write_in_flight';
+  activeAdoption = null;
+  unlink();
+  renderSyncStatus();
+  return 'signed_out';
+}
 
 // A healthy adoption takes a second or two. Offering "Try again" instantly,
 // under text that invites the click, turns every ordinary two-second wait
@@ -526,6 +693,8 @@ export function syncWriteSettled() {
 // rather than implying nothing is lost. One constant so the views cannot drift.
 const UNLINK_NOTE = "Unlinking stops syncing and deletes this device's link code, which cannot be shown again. "
   + 'Your items and calendars stay on this device.';
+// The account-device counterpart, rendered beside Sign out (D27).
+const SIGN_OUT_NOTE = ACCOUNT_COPY.sign_out_note;
 
 function el(tag, props = {}) {
   const node = document.createElement(tag);
@@ -556,6 +725,11 @@ function isWellFormedState(state) {
 export function initLinkUI(options = {}) {
   const {
     host, onLinked, onUnlinked, applyState,
+    // Account devices only (§ 6.11). accountui supplies both: onSignOut is
+    // account.logOut then signOutLocal(); onSignIn is signOutLocal() then the
+    // login form. Each RETURNS signOutLocal()'s result, so a refusal can be
+    // shown. Absent, the control is not rendered — never a dead button.
+    onSignOut = null, onSignIn = null,
     // Effects, injected the way js/feeds.js and js/sync.js already do it. The
     // defaults are the production wiring; tests supply their own.
     // The WRITE (the PUT inside syncOnce): no deadline, ever.
@@ -592,6 +766,7 @@ export function initLinkUI(options = {}) {
   let stageData = {};
   let notice = '';
   let mintedCode = '';
+  let showPaste = false; // W3-I10: the disclosure on a new device
   let inflight = Promise.resolve();
   let joinTimer = null;
   // Bumped whenever THIS mount starts an episode of its own — see joinActive.
@@ -708,30 +883,205 @@ export function initLinkUI(options = {}) {
 
   // --- actions -------------------------------------------------------------
 
-  async function doLink(raw, generation) {
+  // EVERY link path comes through here — the paste field, Re-link and
+  // linkAndAdopt — so the owner guard cannot be bypassed by pasting a code
+  // (D16; plan review I5). Resolves 'blocked' | 'link_failed' | 'linked'.
+  async function doLink(raw, generation, { accountId = null } = {}) {
     notice = '';
+    const blocker = adoptionBlocker(accountId);
+    // THE ONE CARVE-OUT, and it is legacy-only. A LINKED legacy device whose
+    // code the account rejected ('unauthorized'/'undecryptable') re-links from
+    // renderFailed's paste field — today's UI, which must not change. That is
+    // a pasted code (accountId null) on a device with no owner, so D16 has
+    // nothing to guard, and D17 is about account sign-in, not this path. An
+    // account device (owner set) or any linkAndAdopt (accountId set) is still
+    // refused 'already_linked'.
+    const legacyRelink = blocker === 'already_linked' && accountId === null
+      && accountModeFromStorage() === 'legacy';
+    // A pasted code on a LEGACY-owned device (sweep W2-C1, below): which
+    // account it belongs to is unknown until GET /account answers, so D16's
+    // other_account_data is decided by that check instead of here.
+    const legacyOwnedPaste = blocker === 'other_account_data' && accountId === null
+      && loadLocalOwner() !== null && !ownerHasLogin();
+    if (blocker !== null && !legacyRelink && !legacyOwnedPaste) {
+      notice = ACCOUNT_COPY[blocker];
+      stage = null;
+      render();
+      return 'blocked';
+    }
+    // D16, ruling R11: an OWNED device is never linked without an account id,
+    // even with no local data. adoptionBlocker lets that through (an empty
+    // device has no planner to leak), but the link would leave localOwner
+    // naming the OLD account while holding the new one's records — and a
+    // later sign-in to the old account passes adoptionBlocker(old) and merges
+    // them into it. Covers a pasted 86-character code, a 43-character
+    // bootstrap token, and a corrupt-code re-link alike.
+    //
+    // ONE EXCEPTION (sweep W2-C1): a device owned by a LEGACY account (no
+    // login yet — Alex's account 1 before its upgrade) has no sign-in to fall
+    // back on; its paste field is today's UI (spec § 6.11). It may link a
+    // pasted code once GET /account, asked with the code's own token BEFORE
+    // anything is stored, names the owner. No answer, an error or another
+    // account stores nothing. (The first version linked first and checked
+    // after: an app killed while the check was out left a foreign credential
+    // linked with adoption pending, and the next mount adopted it — W2
+    // re-review.)
+    const owner = loadLocalOwner();
+    // RE-SIGN-IN (sweep W2-C3): the data here already belongs to the account
+    // being signed in to, so its adoption merges without dedupe. Decided from
+    // the owner BEFORE it is written below, and stored with the gate.
+    const plainAdoption = accountId !== null && owner === accountId;
+    let mustBeOwner = null;
+    if (accountId === null && owner !== null) {
+      if (ownerHasLogin()) {
+        notice = ACCOUNT_COPY.owned_device;
+        stage = null;
+        render();
+        return 'blocked';
+      }
+      mustBeOwner = owner;
+      if (isBareToken(raw)) {
+        notice = ACCOUNT_COPY.owned_token;
+        stage = null;
+        render();
+        return 'blocked';
+      }
+      let token;
+      try {
+        token = pastedToken(raw);
+      } catch (err) {
+        // Never the input itself — see the header note on secrets.
+        notice = `Could not link this device: ${(err && err.message) || 'unknown error'}`;
+        stage = null;
+        render();
+        return 'link_failed';
+      }
+      const verdict = await tokenBelongsTo(token, owner);
+      if (verdict !== 'owner') {
+        notice = verdict === 'other' ? ACCOUNT_COPY.legacy_wrong_account : ACCOUNT_COPY.legacy_check_failed;
+        stage = null;
+        render();
+        return 'blocked';
+      }
+    }
+    // THE OWNER IS WRITTEN BEFORE THE LINK (sweep W2-I3). Written after it, a
+    // storage failure on this write left a linked device with no owner — the
+    // D16 cross-account merge reopened. An owner with no credential reads as
+    // an unlinked, owned device, which is safe. A sign-in links only an
+    // account that has a login, so that account is no longer a legacy one
+    // here.
+    if (accountId !== null) {
+      saveLocalOwner(accountId);
+      if (loadLegacyOwner() === accountId) clearLegacyOwner();
+    }
     try {
-      await linkWithCode(raw);
+      await linkWithCode(raw, { plainAdoption, linkOwner: accountId !== null ? accountId : mustBeOwner });
     } catch (err) {
       // `raw` is NEVER interpolated: on a transient failure it is a real
       // link code. crypto.js/auth.js messages never echo their input.
       notice = `Could not link this device: ${(err && err.message) || 'unknown error'}`;
       stage = null;
       render();
-      return;
+      return 'link_failed';
     }
     if (onLinked) onLinked();
     await doPreview(1, generation);
+    return 'linked';
+  }
+
+  // The session token a pasted input carries: a 43-character token is
+  // itself; an 86-character code carries it in its first half. Throws on
+  // anything else, exactly as linkWithCode would.
+  function pastedToken(raw) {
+    const trimmed = String(raw || '').trim();
+    if (base64urlToBytes(trimmed).length === TOKEN_BYTES) return trimmed;
+    return parseLinkCode(trimmed).authToken;
+  }
+
+  // A 43-character token, which linkWithCode would BOOTSTRAP (a fresh key).
+  function isBareToken(raw) {
+    try { return base64urlToBytes(String(raw || '').trim()).length === TOKEN_BYTES; } catch { return false; }
+  }
+
+  // What GET /account, asked with `token`, says about `owner`: 'owner' when
+  // it names that account, 'other' when it names a different one, and
+  // 'unknown' for no answer, an error or a malformed body. Only 'owner'
+  // links. Never throws.
+  async function tokenBelongsTo(token, owner) {
+    try {
+      const body = await getAccount({ link: { authToken: token }, fetchImpl: readFetchImpl, apiBase });
+      if (!body || !Number.isSafeInteger(body.accountId)) return 'unknown';
+      return body.accountId === owner ? 'owner' : 'other';
+    } catch (err) {
+      console.error('plaenicke: account check before link failed', err && (err.code || err.name));
+      return 'unknown';
+    }
+  }
+
+  // Runs doLink as an adoption episode and reports what happened. runAdoption
+  // resolves to nothing (guarded() swallows), so the outcome is captured here.
+  // If runAdoption JOINED an episode already running instead of starting this
+  // one, doLink never ran: 'joined_other'. A throw inside doLink (guarded()
+  // has already rendered its notice) is re-raised to the caller, never
+  // reported as one of the four outcomes — it is none of them.
+  async function linkEpisode(code, accountId) {
+    let outcome;
+    let failed = false;
+    let failure;
+    await runAdoption(async (generation) => {
+      try {
+        outcome = await doLink(code, generation, { accountId });
+      } catch (err) {
+        failed = true;
+        failure = err;
+        throw err;
+      }
+    });
+    if (failed) throw failure;
+    return outcome === undefined ? 'joined_other' : outcome;
+  }
+
+  // Validated BEFORE anything is linked: saveLocalOwner throws on a bad id,
+  // and a throw after linkWithCode would leave a linked device with no owner.
+  // An account sign-in always knows its account id, so null is refused too
+  // (ruling R11): a link with no id cannot record an owner.
+  function linkAndAdopt(code, { accountId = null } = {}) {
+    if (!(Number.isSafeInteger(accountId) && accountId > 0)) {
+      return Promise.reject(new TypeError('linkAndAdopt: accountId must be a positive safe integer'));
+    }
+    return linkEpisode(code, accountId);
   }
 
   // `attempt` counts one adoption EPISODE's automatic re-previews. A human
   // clicking a button starts a fresh episode at 1 — the loop being bounded
   // here is the automatic one, which nothing else gates.
   async function doPreview(attempt, generation) {
+    // Defence in depth (W2 re-review): never preview — and so never adopt —
+    // a link on an owned device that was not shown to be the owner's.
+    if (linkNotShownOwners()) {
+      stage = null;
+      stageData = {};
+      notice = ownerHasLogin() ? ACCOUNT_COPY.owned_device : ACCOUNT_COPY.legacy_link_unchecked;
+      render();
+      return;
+    }
     stage = 'busy';
     stageData = { text: 'Checking the account…' };
     render();
-    await handlePreview(await previewRemote({ readFetchImpl, apiBase }), attempt, generation);
+    const asked = getLink();
+    const askedOnEpisode = mountEpisode;
+    const preview = await previewRemote({ readFetchImpl, apiBase });
+    // Signed out (and perhaps in again) while the read was out (sweep
+    // W2-I4): the answer describes an account this device has left. Nothing
+    // about it is shown and nothing is decided on it. This mount's view is
+    // re-derived from storage — unless this mount has since started an
+    // episode of its own, which owns the view now (see joinActive).
+    const nowLink = getLink();
+    if (asked && (!nowLink || nowLink.authToken !== asked.authToken)) {
+      if (mountEpisode === askedOnEpisode) { stage = null; stageData = {}; render(); }
+      return;
+    }
+    await handlePreview(preview, attempt, generation);
   }
 
   // True while a write is in flight and has been for at least the threshold.
@@ -797,7 +1147,9 @@ export function initLinkUI(options = {}) {
     const local = localState();
     if (chooseAdoption(local, remote) === 'ask') {
       stage = 'ask';
-      stageData = { version, remote, ...adoptionCounts(local, remote) };
+      // The session the dialog describes (sweep W2-I4), re-checked at the click.
+      const shownFor = getLink();
+      stageData = { version, remote, token: shownFor && shownFor.authToken, ...adoptionCounts(local, remote) };
       render();
       return;
     }
@@ -828,6 +1180,19 @@ export function initLinkUI(options = {}) {
   // the dialog described. So re-read at CLICK time and re-ask if it moved.
   async function adoptAgainstFreshCounts(adoptChoice, generation) {
     const shown = stageData;
+    // Signed out, or into another session, since the dialog was shown (sweep
+    // W2-I4 — another tab, say): it describes an account this device no
+    // longer holds, and its version pin could match the new account's by
+    // coincidence. Ask again about the session held now.
+    const current = getLink();
+    if (!current || current.authToken !== shown.token) {
+      stage = null;
+      stageData = {};
+      if (!current) { render(); return; }
+      notice = 'This device signed in again while the dialog was open. Here is what the account holds now — please choose again.';
+      await doPreview(1, generation);
+      return;
+    }
     const fresh = adoptionCounts(localState(), shown.remote);
     // Every count the dialog DESCRIBED, including remoteDeletesLocal, which
     // is a function of local records too.
@@ -853,9 +1218,15 @@ export function initLinkUI(options = {}) {
     stage = 'busy';
     stageData = { text: 'Combining…' };
     render();
+    // MERGE ON A RE-SIGN-IN IS A PLAIN UNION (sweep W2-C3). 'adopt-bootstrap'
+    // is exactly that — merge both sides, no dedupe; js/sync.js dedupes on
+    // 'adopt-merge' alone. Read from the gate's own record, so a reopened
+    // panel or a reload decides the same way.
+    const choice = adoptChoice === 'adopt-merge' && loadSyncState().plainAdoption ? 'adopt-bootstrap' : adoptChoice;
     // From here until syncOnceImpl settles there is an unabandonable write in
     // flight. No mount may take over from it — see `writeInFlight`.
     let res;
+    const writingFor = getLink();
     writeInFlight = true;
     writeStartedAt = now().getTime();
     // Repaint this mount's "Combining…" view once the write crosses the slow
@@ -864,7 +1235,7 @@ export function initLinkUI(options = {}) {
     armSlowWriteRepaint(() => stage === 'busy', (h) => { slowTimer = h; });
     try {
       res = await syncOnceImpl({
-        fetchImpl, readFetchImpl, now, apiBase, applyState, adoptChoice, expectVersion,
+        fetchImpl, readFetchImpl, now, apiBase, applyState, adoptChoice: choice, expectVersion,
       });
     } finally {
       writeInFlight = false;
@@ -895,6 +1266,16 @@ export function initLinkUI(options = {}) {
       stage = null;
       render();
       if (onLinked) onLinked();
+      return;
+    }
+    // Skipped because the link changed while the write was out (W2-C2):
+    // another tab signed in elsewhere. The device IS linked — to that one.
+    const nowLink = getLink();
+    if (res.status === 'skipped' && nowLink && writingFor && nowLink.authToken !== writingFor.authToken) {
+      stage = null;
+      stageData = {};
+      notice = 'This device was signed in to a different account while combining, so nothing was combined. Open Sync again to continue.';
+      render();
       return;
     }
     stage = 'failed';
@@ -962,12 +1343,38 @@ export function initLinkUI(options = {}) {
     wrap.append(input, warning, button);
   }
 
+  // An unlinked device whose owner is an account WITH A LOGIN gets NO paste
+  // field: doLink refuses a pasted code there (it carries no account id), so
+  // the field would be a dead control. It signs in through accountui
+  // instead. A legacy-owned device keeps the field (sweep W2-C1; doLink
+  // checks the code's account against the owner).
   function renderCorrupt(wrap) {
+    if (ownerHasLogin()) {
+      wrap.appendChild(el('p', { className: 'note', text: ACCOUNT_COPY.corrupt }));
+      if (onSignIn) wrap.appendChild(signInButton());
+      return;
+    }
     wrap.appendChild(el('p', { className: 'note', text: CORRUPT_TEXT }));
     pasteField(wrap, 'Re-link this device');
   }
 
   function renderUnlinked(wrap) {
+    if (ownerHasLogin()) {
+      wrap.appendChild(el('p', { className: 'note', text: ACCOUNT_COPY.signed_out_unlinked }));
+      return;
+    }
+    // A NEW device (no owner recorded: never linked to anything this client
+    // knows of) is a tester's (sweep W3-I10). Testers sign in; the
+    // 86-character field is Alex's legacy tool, one tap away. A legacy-owned
+    // device keeps it in view — that is today's UI for it (§ 6.11).
+    if (loadLocalOwner() === null && !showPaste) {
+      wrap.appendChild(el('p', { className: 'note', text: 'New here? Sign in or use your invite in Account above.' }));
+      const more = el('button', { type: 'button', text: 'Advanced: link with a code' });
+      more.setAttribute('aria-expanded', 'false');
+      more.addEventListener('click', () => { showPaste = true; render(); });
+      wrap.appendChild(more);
+      return;
+    }
     pasteField(wrap, 'Link this device',
       'Link this device to keep your items and calendar subscriptions in step with your other devices. '
       + 'Everything is encrypted here first — the server only ever holds ciphertext.');
@@ -996,13 +1403,86 @@ export function initLinkUI(options = {}) {
   // it shows what is actually happening rather than doing nothing. The button
   // itself must stay: omitting it is what leaves 'unauthorized' and
   // 'undecryptable' with no way to stop syncing at all.
+  //
+  // THE MODE IS READ AT THE CLICK (sweep W3-I5). A panel rendered while the
+  // device was legacy keeps this button after an upgrade (here, or another
+  // device's answer arriving): a bare unlink then would leave a live session
+  // nobody can revoke. In account mode it is Sign out (D27).
   function unlinkButton(text) {
     const btn = el('button', { type: 'button', className: 'remove', text });
     btn.addEventListener('click', () => {
       if (activeAdoption && writeInFlight) return joinActive();
+      if (accountModeFromStorage() === 'account' && onSignOut) {
+        return run(async () => { afterSignOut(await onSignOut()); });
+      }
       return doUnlink();
     });
     return btn;
+  }
+
+  // Account devices: Unlink is Sign out (D27), routed to options.onSignOut.
+  // It refuses during a write exactly as unlinkButton does — onSignOut revokes
+  // the session before signOutLocal() would refuse, so the check must come
+  // first, here.
+  function signOutButton() {
+    const btn = el('button', { type: 'button', className: 'remove', text: 'Sign out' });
+    btn.addEventListener('click', () => {
+      if (activeAdoption && writeInFlight) return joinActive();
+      return run(async () => {
+        afterSignOut(await onSignOut());
+      });
+    });
+    return btn;
+  }
+
+  // Shown on an account device whose session the server rejected (§ 6.10).
+  // onSignIn unlinks first (signOutLocal), so adoptionBlocker then allows a
+  // login back into the SAME account and blocks a different one.
+  function signInButton() {
+    const btn = el('button', { type: 'button', className: 'primary', text: 'Sign in' });
+    btn.id = 'link-signin';
+    btn.addEventListener('click', () => {
+      if (activeAdoption && writeInFlight) return joinActive();
+      return run(async () => {
+        afterSignOut(await onSignIn());
+      });
+    });
+    return btn;
+  }
+
+  // `result` is what onSignOut / onSignIn returned: accountui returns
+  // signOutLocal()'s answer. A refusal is SAID, never silent — a write can
+  // begin while logOut is still on the network, after the pre-check passed.
+  function afterSignOut(result) {
+    if (result === 'refused_write_in_flight') {
+      notice = ACCOUNT_COPY.sign_out_refused;
+      render();
+      return;
+    }
+    if (getLink() === null) {
+      stage = null;
+      stageData = {};
+      mintedCode = '';
+      notice = ACCOUNT_COPY.signed_out_notice;
+    }
+    render();
+    if (getLink() === null && onUnlinked) onUnlinked();
+  }
+
+  // The stop-syncing control and its note: Unlink on a legacy device, Sign out
+  // on an account device (only when accountui supplied onSignOut).
+  function appendStopControl(wrap, mode) {
+    if (mode === 'account') {
+      if (!onSignOut) return;
+      wrap.appendChild(signOutButton());
+      wrap.appendChild(el('p', { className: 'note', text: SIGN_OUT_NOTE }));
+      return;
+    }
+    wrap.appendChild(unlinkButton('Unlink this device'));
+    wrap.appendChild(el('p', {
+      className: 'note',
+      text: UNLINK_NOTE,
+    }));
   }
 
   function renderBusy(wrap) {
@@ -1036,11 +1516,8 @@ export function initLinkUI(options = {}) {
     }));
     const takeOver = el('button', { type: 'button', text: 'Try again' });
     takeOver.addEventListener('click', () => runAdoption((g) => doPreview(1, g), { takeOver: true }));
-    wrap.append(takeOver, unlinkButton('Unlink this device'));
-    wrap.appendChild(el('p', {
-      className: 'note',
-      text: UNLINK_NOTE,
-    }));
+    wrap.append(takeOver);
+    appendStopControl(wrap, accountModeFromStorage());
   }
 
   // A write is in flight. It cannot be abandoned and nothing may take over
@@ -1063,6 +1540,12 @@ export function initLinkUI(options = {}) {
   }
 
   function renderAdoptionEntry(wrap) {
+    if (linkNotShownOwners()) {
+      // A legacy owner has no sign-in to go to (sweep W3, carried).
+      wrap.appendChild(el('p', { className: 'note', text: ownerHasLogin() ? ACCOUNT_COPY.owned_device : ACCOUNT_COPY.legacy_link_unchecked }));
+      appendStopControl(wrap, accountModeFromStorage());
+      return;
+    }
     wrap.appendChild(el('p', {
       className: 'note',
       text: 'This device is linked but has not been combined with the account yet. Nothing syncs until you choose.',
@@ -1105,20 +1588,27 @@ export function initLinkUI(options = {}) {
     wrap.append(mergeBtn, cancelBtn);
     wrap.appendChild(el('p', {
       className: 'note',
-      text: 'Merge keeps everything from both sides and folds together anything that is obviously the same.',
+      text: loadSyncState().plainAdoption
+        ? 'Merge keeps everything from both sides.'
+        : 'Merge keeps everything from both sides and folds together anything that is obviously the same.',
     }));
   }
 
   function renderFailed(wrap) {
     const status = stageData.status;
+    const mode = accountModeFromStorage();
     wrap.appendChild(el('p', {
       className: 'note link-failure',
-      text: failureText(status, stageData.applied === true),
+      text: failureText(status, stageData.applied === true, mode),
     }));
     if (RETRYABLE.has(status)) {
       const retry = el('button', { type: 'button', text: 'Try again' });
       retry.addEventListener('click', () => runAdoption((g) => doPreview(1, g)));
       wrap.appendChild(retry);
+    } else if (mode === 'account') {
+      // 'unauthorized' and 'undecryptable'. No paste field on an account
+      // device (§ 6.11): it signs in again.
+      if (onSignIn) wrap.appendChild(signInButton());
     } else {
       // 'unauthorized' and 'undecryptable'. Re-linking is the right first
       // answer, but it cannot be the only one — see below.
@@ -1133,13 +1623,7 @@ export function initLinkUI(options = {}) {
     // a second device — precisely the user with no valid 86-character code —
     // could never stop syncing. On 'malformed', "Try again" re-previews the
     // same unusable blob forever.
-    if (getLink()) {
-      wrap.appendChild(unlinkButton('Unlink this device'));
-      wrap.appendChild(el('p', {
-        className: 'note',
-        text: UNLINK_NOTE,
-      }));
-    }
+    if (getLink()) appendStopControl(wrap, mode);
   }
 
   function renderNewDevice(wrap) {
@@ -1179,18 +1663,19 @@ export function initLinkUI(options = {}) {
 
   function renderLinked(wrap) {
     const state = loadSyncState();
-    if (state.lastError) {
+    const mode = accountModeFromStorage();
+    if (mode === 'account' && state.lastError === 'unauthorized') {
+      wrap.appendChild(el('p', { className: 'note link-failure', text: ACCOUNT_SIGNED_OUT_TEXT }));
+      if (onSignIn) wrap.appendChild(signInButton());
+    } else if (state.lastError) {
       wrap.appendChild(el('p', {
         className: 'note link-failure',
-        text: `Last sync failed: ${errorLabel(state.lastError)}.`,
+        text: `Last sync failed: ${errorLabel(state.lastError, mode)}.`,
       }));
     }
-    wrap.appendChild(unlinkButton('Unlink this device'));
-    wrap.appendChild(el('p', {
-      className: 'note',
-      text: UNLINK_NOTE,
-    }));
-    renderNewDevice(wrap);
+    appendStopControl(wrap, mode);
+    // Account devices join through sign-in, never a composed code (§ 6.11).
+    if (mode !== 'account') renderNewDevice(wrap);
   }
 
   function render() {
@@ -1239,7 +1724,17 @@ export function initLinkUI(options = {}) {
   // and empties the host on close (its close()), so this runs once per panel open
   // against a fresh sub-element — never accumulating listeners, and never
   // firing a request just because the user opened Settings.
+  // doPreview refuses a link on an owned device that was not shown to be
+  // the owner's (W2 re-review), so this mount-time preview cannot adopt one.
   if (getLink() && isAdoptionPending()) runAdoption((g) => doPreview(1, g));
 
-  return { settled: () => inflight };
+  return {
+    settled: () => inflight,
+    linkAndAdopt,
+    // TEST-ONLY SEAM (controller ruling R3): the paste handler's own call
+    // shape, runAdoption((g) => doLink(code, g, {accountId})), without
+    // linkAndAdopt's argument check, so a test can show the owner guard holds
+    // at doLink itself. Production code must not call it.
+    _linkForTest: (code, { accountId = null } = {}) => linkEpisode(code, accountId),
+  };
 }

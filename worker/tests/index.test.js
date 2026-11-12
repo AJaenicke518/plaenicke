@@ -144,7 +144,7 @@ test('/data requires a device token', async () => {
 
 test('/data with a valid token returns the seeded state', async () => {
   const env = { ...ENV, DB: makeD1() };
-  const token = await mintDevice(env, 'laptop', '2026-08-01T00:00:00.000Z');
+  const token = await mintDevice(env, 1, 'laptop', '2026-08-01T00:00:00.000Z');
   const res = await worker.fetch(new Request('https://worker.example/data', {
     headers: { authorization: `Bearer ${token}` },
   }), env);
@@ -154,7 +154,7 @@ test('/data with a valid token returns the seeded state', async () => {
 
 test('/data rejects an unsupported method', async () => {
   const env = { ...ENV, DB: makeD1() };
-  const token = await mintDevice(env, 'laptop', '2026-08-01T00:00:00.000Z');
+  const token = await mintDevice(env, 1, 'laptop', '2026-08-01T00:00:00.000Z');
   const res = await worker.fetch(new Request('https://worker.example/data', {
     method: 'DELETE', headers: { authorization: `Bearer ${token}` },
   }), env);
@@ -163,19 +163,19 @@ test('/data rejects an unsupported method', async () => {
 
 test('/admin/device requires the admin secret, not a device token', async () => {
   const env = { ...ENV, DB: makeD1(), ADMIN_SECRET: 'adm1n' };
-  const deviceToken = await mintDevice(env, 'laptop', '2026-08-01T00:00:00.000Z');
+  const deviceToken = await mintDevice(env, 1, 'laptop', '2026-08-01T00:00:00.000Z');
 
   const asDevice = await worker.fetch(new Request('https://worker.example/admin/device', {
     method: 'POST',
     headers: { authorization: `Bearer ${deviceToken}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ name: 'phone' }),
+    body: JSON.stringify({ name: 'phone', accountId: 1 }),
   }), env);
   assert.equal(asDevice.status, 401);
 
   const asAdmin = await worker.fetch(new Request('https://worker.example/admin/device', {
     method: 'POST',
     headers: { authorization: 'Bearer adm1n', 'content-type': 'application/json' },
-    body: JSON.stringify({ name: 'phone' }),
+    body: JSON.stringify({ name: 'phone', accountId: 1 }),
   }), env);
   assert.equal(asAdmin.status, 200);
   const body = await asAdmin.json();
@@ -188,7 +188,7 @@ test('a minted token immediately works against /data', async () => {
   const minted = await (await worker.fetch(new Request('https://worker.example/admin/device', {
     method: 'POST',
     headers: { authorization: 'Bearer adm1n', 'content-type': 'application/json' },
-    body: JSON.stringify({ name: 'phone' }),
+    body: JSON.stringify({ name: 'phone', accountId: 1 }),
   }), env)).json();
 
   const res = await worker.fetch(new Request('https://worker.example/data', {
@@ -208,7 +208,7 @@ test('DELETE /admin/device revokes a minted token, and the token then fails on /
   const minted = await (await worker.fetch(new Request('https://worker.example/admin/device', {
     method: 'POST',
     headers: { authorization: 'Bearer adm1n', 'content-type': 'application/json' },
-    body: JSON.stringify({ name: 'phone' }),
+    body: JSON.stringify({ name: 'phone', accountId: 1 }),
   }), env)).json();
   const row = await env.DB.prepare('SELECT token_hash FROM devices WHERE name = ?')
     .bind('phone').first();
@@ -298,7 +298,7 @@ test('the admin secret does not authenticate against /data', async () => {
 // their own unit tests using a fixed NOW).
 test('PUT /data stamps updated_at with the router\'s real clock, not the seeded epoch', async () => {
   const env = { ...ENV, DB: makeD1() };
-  const token = await mintDevice(env, 'laptop', '2026-08-01T00:00:00.000Z');
+  const token = await mintDevice(env, 1, 'laptop', '2026-08-01T00:00:00.000Z');
   const before = Date.now();
 
   const res = await worker.fetch(new Request('https://worker.example/data', {
@@ -320,7 +320,7 @@ test('POST /admin/device with a blank name returns 400 bad_request', async () =>
   const res = await worker.fetch(new Request('https://worker.example/admin/device', {
     method: 'POST',
     headers: { authorization: 'Bearer adm1n', 'content-type': 'application/json' },
-    body: JSON.stringify({ name: '  ' }),
+    body: JSON.stringify({ name: '  ', accountId: 1 }),
   }), env);
   assert.equal(res.status, 400);
   assert.equal((await res.json()).error, 'bad_request');
@@ -337,7 +337,7 @@ test('two devices share one blob: A writes through the router, B reads it back',
     new Request('https://worker.example/admin/device', {
       method: 'POST',
       headers: { authorization: 'Bearer adm1n', 'content-type': 'application/json' },
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, accountId: 1 }),
     }), env)).json()).token;
 
   const laptop = await mint('laptop');
@@ -369,7 +369,7 @@ test('two devices share one blob: A writes through the router, B reads it back',
 // failure lands inside the route rather than at authentication setup.
 async function envWithBrokenDB() {
   const env = { ...ENV, DB: makeD1() };
-  const token = await mintDevice(env, 'laptop', '2026-08-01T00:00:00.000Z');
+  const token = await mintDevice(env, 1, 'laptop', '2026-08-01T00:00:00.000Z');
   env.DB = { prepare() { throw new Error('D1_ERROR: network failure'); } };
   return { env, token };
 }
@@ -461,7 +461,7 @@ test('an unhandled failure on POST / is caught too, and stays public', async () 
 
 test('authenticateDevice via /data stamps last_seen_at with the router\'s real clock', async () => {
   const env = { ...ENV, DB: makeD1() };
-  const token = await mintDevice(env, 'laptop', '2026-08-01T00:00:00.000Z');
+  const token = await mintDevice(env, 1, 'laptop', '2026-08-01T00:00:00.000Z');
   const before = Date.now();
 
   const res = await worker.fetch(new Request('https://worker.example/data', {
@@ -473,4 +473,312 @@ test('authenticateDevice via /data stamps last_seen_at with the router\'s real c
   assert.match(row.last_seen_at, ISO_INSTANT);
   assert.ok(Math.abs(Date.parse(row.last_seen_at) - before) < 5000,
     `last_seen_at not close to now: ${row.last_seen_at}`);
+});
+
+// --- Task 3: per-account routing ---------------------------------------
+
+test('a token reads only its own account row', async () => {
+  const DB = makeD1();
+  await DB.prepare("INSERT INTO accounts (id, email, created_at) VALUES (2, 'b@x.de', 't')").run();
+  await DB.prepare("INSERT INTO data (id, version, blob, updated_at) VALUES (2, 3, 'B', 't')").run();
+  const env = { ...ENV, DB };
+  const token = await mintDevice(env, 2, 'phone', 't');
+  const res = await worker.fetch(new Request('https://w/data', { headers: { authorization: `Bearer ${token}` } }), env);
+  assert.deepEqual(await res.json(), { version: 3, blob: 'B' });
+});
+
+test('a PUT through the router moves only the token\'s account version', async () => {
+  const DB = makeD1();
+  await DB.prepare("INSERT INTO accounts (id, email, created_at) VALUES (2, 'b@x.de', 't')").run();
+  await DB.prepare("INSERT INTO data (id, version, blob, updated_at) VALUES (2, 3, 'B', 't')").run();
+  const env = { ...ENV, DB };
+  const token = await mintDevice(env, 2, 'phone', 't');
+  const res = await worker.fetch(new Request('https://w/data', {
+    method: 'PUT',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ version: 3, blob: 'B2' }),
+  }), env);
+  assert.deepEqual(await res.json(), { version: 4 });
+  assert.equal((await DB.prepare('SELECT version FROM data WHERE id = 1').first()).version, 0);
+});
+
+test('/data with a disabled account\'s token is 401', async () => {
+  const DB = makeD1();
+  await DB.prepare("INSERT INTO accounts (id, email, created_at, disabled_at) VALUES (2, 'b@x.de', 't', 't')").run();
+  const env = { ...ENV, DB };
+  const token = await mintDevice(env, 2, 'phone', 't');
+  const res = await worker.fetch(new Request('https://w/data', { headers: { authorization: `Bearer ${token}` } }), env);
+  assert.equal(res.status, 401);
+});
+
+test('POST /admin/device without accountId returns 400 bad_request', async () => {
+  const env = { ...ENV, DB: makeD1(), ADMIN_SECRET: 'adm1n' };
+  for (const body of [{ name: 'phone' }, { name: 'phone', accountId: '1' }, { name: 'phone', accountId: 0 }]) {
+    const res = await worker.fetch(new Request('https://worker.example/admin/device', {
+      method: 'POST',
+      headers: { authorization: 'Bearer adm1n', 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }), env);
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).error, 'bad_request');
+  }
+});
+
+// --- Task 7: smart-add cap, session gating, /feed auth ---------------------
+
+const NOON = '2026-11-11T12:00:00.000Z';
+const claudeOk = (usage = { input_tokens: 900, output_tokens: 120 }) => new Response(JSON.stringify({
+  stop_reason: 'end_turn',
+  content: [{ type: 'text', text: JSON.stringify({ items: [{ title: 'x', date: '2026-11-12', type: 'task' }], needsReview: false }) }],
+  usage,
+}), { status: 200 });
+
+async function withAnthropic(handler, fn) {
+  const original = globalThis.fetch;
+  const stub = { calls: 0 };
+  globalThis.fetch = async (...a) => { stub.calls += 1; return handler(...a); };
+  try { return await fn(stub); } finally { globalThis.fetch = original; }
+}
+const smart = (env, token, body = { text: 'call mom tomorrow' }) => worker.fetch(new Request('https://worker.example/', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+  body: JSON.stringify(body),
+}), env);
+async function smartEnv(extra = {}) {
+  const env = { ...ENV, DB: makeD1(), NOW: () => NOON, ...extra };
+  const token = await mintDevice(env, 1, 'laptop', NOON);
+  return { env, token };
+}
+const usageRows = (env) => env.DB.prepare('SELECT * FROM usage ORDER BY account_id, day').all().then((r) => r.results);
+
+test('REQUIRE_SESSION=true: smart-add without a token is 401 and never reaches Anthropic', async () => {
+  const { env } = await smartEnv({ REQUIRE_SESSION: 'true' });
+  await withAnthropic(() => claudeOk(), async (stub) => {
+    const res = await smart(env, null);
+    assert.equal(res.status, 401);
+    assert.equal((await res.json()).error, 'unauthorized');
+    assert.equal(stub.calls, 0);
+  });
+});
+
+test('smart-add cap: 50 calls are 200, the 51st is 429 daily_limit with resetsAt; Anthropic called 50 times', async () => {
+  const { env, token } = await smartEnv({ REQUIRE_SESSION: 'true' });
+  await withAnthropic(() => claudeOk(), async (stub) => {
+    for (let i = 1; i <= 50; i += 1) assert.equal((await smart(env, token)).status, 200, `call ${i}`);
+    const res = await smart(env, token);
+    assert.equal(res.status, 429);
+    assert.deepEqual(await res.json(), { error: 'daily_limit', resetsAt: '2026-11-12T00:00:00.000Z' });
+    assert.equal(res.headers.get('Access-Control-Allow-Origin'), ALLOWED_ORIGIN);
+    assert.equal(stub.calls, 50);
+  });
+});
+
+test('55 parallel smart-adds: exactly 50 x 200 and 5 x 429', async () => {
+  const { env, token } = await smartEnv({ DB: makeD1({ yieldPerStatement: true }) });
+  await withAnthropic(() => claudeOk(), async (stub) => {
+    const res = await Promise.all(Array.from({ length: 55 }, () => smart(env, token)));
+    const codes = res.map((r) => r.status);
+    assert.equal(codes.filter((c) => c === 200).length, 50);
+    assert.equal(codes.filter((c) => c === 429).length, 5);
+    assert.equal(stub.calls, 50);
+  });
+});
+
+test('the UTC day rolls over: capped at 23:59Z, open again at 00:00Z', async () => {
+  let now = '2026-11-11T23:59:00.000Z';
+  const { env, token } = await smartEnv({ NOW: () => now });
+  await withAnthropic(() => claudeOk(), async () => {
+    for (let i = 0; i < 50; i += 1) await smart(env, token);
+    assert.equal((await smart(env, token)).status, 429);
+    now = '2026-11-12T00:00:00.000Z';
+    assert.equal((await smart(env, token)).status, 200);
+  });
+});
+
+test('a call straddling midnight records tokens on the request day', async () => {
+  let now = '2026-11-11T23:59:59.000Z';
+  const { env, token } = await smartEnv({ NOW: () => now });
+  await withAnthropic(() => { now = '2026-11-12T00:00:01.000Z'; return claudeOk({ input_tokens: 900, output_tokens: 120 }); }, async () => {
+    assert.equal((await smart(env, token)).status, 200);
+  });
+  assert.deepEqual(await usageRows(env), [{ account_id: 1, day: '2026-11-11', calls: 1, in_tok: 900, out_tok: 120 }]);
+});
+
+test('a Claude failure (500) still consumes a slot', async () => {
+  const { env, token } = await smartEnv();
+  await withAnthropic(() => new Response('boom', { status: 500 }), async () => {
+    assert.equal((await smart(env, token)).status, 502);
+  });
+  assert.equal((await usageRows(env))[0].calls, 1);
+});
+
+test('tolerant mode: no token goes through and writes no usage row; a token is still counted', async () => {
+  const { env, token } = await smartEnv();
+  await withAnthropic(() => claudeOk(), async () => {
+    assert.equal((await smart(env, null)).status, 200);
+    assert.deepEqual(await usageRows(env), []);
+    assert.equal((await smart(env, token)).status, 200);
+  });
+  assert.deepEqual(await usageRows(env), [{ account_id: 1, day: '2026-11-11', calls: 1, in_tok: 900, out_tok: 120 }]);
+});
+
+test('tokens are recorded on the refusal and max_tokens paths too', async () => {
+  for (const [stop, status] of [['refusal', 422], ['max_tokens', 413]]) {
+    const { env, token } = await smartEnv();
+    await withAnthropic(() => new Response(JSON.stringify({ stop_reason: stop, content: [], usage: { input_tokens: 7, output_tokens: 3 } })), async () => {
+      assert.equal((await smart(env, token)).status, status);
+    });
+    assert.deepEqual(await usageRows(env), [{ account_id: 1, day: '2026-11-11', calls: 1, in_tok: 7, out_tok: 3 }]);
+  }
+});
+
+test('a client bug (empty text, bad json) does not burn a slot', async () => {
+  const { env, token } = await smartEnv();
+  await withAnthropic(() => claudeOk(), async () => {
+    assert.equal((await smart(env, token, { text: '  ' })).status, 400);
+    const badJson = await worker.fetch(new Request('https://worker.example/', {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: '{not json',
+    }), env);
+    assert.equal(badJson.status, 400);
+    assert.equal((await badJson.json()).error, 'bad_json');
+  });
+  assert.deepEqual(await usageRows(env), []);
+});
+
+test('a disabled account token is 401 on smart-add under REQUIRE_SESSION and never reaches Anthropic', async () => {
+  const { env, token } = await smartEnv({ REQUIRE_SESSION: 'true' });
+  await env.DB.prepare("UPDATE accounts SET disabled_at = 't' WHERE id = 1").run();
+  await withAnthropic(() => claudeOk(), async (stub) => {
+    assert.equal((await smart(env, token)).status, 401);
+    assert.equal(stub.calls, 0);
+  });
+});
+
+test('the smart-add log line carries counts only', async () => {
+  const { env, token } = await smartEnv();
+  const lines = [];
+  const orig = console.log;
+  console.log = (...a) => lines.push(a.join(' '));
+  try {
+    await withAnthropic(() => claudeOk(), async () => { await smart(env, token, { text: 'SECRET-TEXT' }); });
+  } finally { console.log = orig; }
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^smart-add claude_ms=\d+ status=200 in=900 out=120$/);
+  assert.ok(!lines[0].includes('SECRET'));
+  assert.ok(!lines[0].includes(token));
+});
+
+// /feed through the router: auth is wired with the real authenticateDevice.
+function withCache(fn) {
+  const original = globalThis.caches;
+  const spy = { matches: 0, match: async () => { spy.matches += 1; return undefined; }, put: async () => {} };
+  globalThis.caches = { default: spy };
+  return Promise.resolve(fn(spy)).finally(() => { globalThis.caches = original; });
+}
+const feedReq = (token) => new Request('https://worker.example/feed?url=' + encodeURIComponent('https://cal.example/a.ics'), {
+  headers: { origin: ALLOWED_ORIGIN, ...(token ? { authorization: `Bearer ${token}` } : {}) },
+});
+
+test('/feed via the router: REQUIRE_SESSION and no token is 401 before the cache; a disabled account too', async () => {
+  const { env, token } = await smartEnv({ REQUIRE_SESSION: 'true' });
+  await withCache(async (spy) => {
+    assert.equal((await worker.fetch(feedReq(null), env)).status, 401);
+    await env.DB.prepare("UPDATE accounts SET disabled_at = 't' WHERE id = 1").run();
+    assert.equal((await worker.fetch(feedReq(token), env)).status, 401);
+    assert.equal(spy.matches, 0);
+  });
+});
+
+test('/feed via the router: a valid token reaches the cache', async () => {
+  const { env, token } = await smartEnv({ REQUIRE_SESSION: 'true' });
+  await withCache(async (spy) => {
+    await withAnthropic(() => new Response('BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n', { status: 200 }), async () => {
+      await worker.fetch(feedReq(token), env);
+    });
+    assert.equal(spy.matches, 1);
+  });
+});
+
+// --- sweep W1-C2: REQUIRE_SESSION parses strictly, fails closed on garbage ---
+
+test('REQUIRE_SESSION: "true" and true require a session on smart add and /feed', async () => {
+  for (const flag of ['true', true]) {
+    const { env } = await smartEnv({ REQUIRE_SESSION: flag });
+    await withAnthropic(() => claudeOk(), async (stub) => {
+      const res = await smart(env, null);
+      assert.equal(res.status, 401, String(flag));
+      assert.equal(stub.calls, 0);
+    });
+    await withCache(async (spy) => {
+      assert.equal((await worker.fetch(feedReq(null), env)).status, 401, String(flag));
+      assert.equal(spy.matches, 0);
+    });
+  }
+});
+
+test('REQUIRE_SESSION: "false", false and unset are tolerant', async () => {
+  for (const flag of ['false', false, undefined]) {
+    const { env } = await smartEnv(flag === undefined ? {} : { REQUIRE_SESSION: flag });
+    await withAnthropic(() => claudeOk(), async () => {
+      assert.equal((await smart(env, null)).status, 200, String(flag));
+    });
+    await withCache(async (spy) => {
+      await withAnthropic(() => new Response('BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n', { status: 200 }), async () => {
+        assert.equal((await worker.fetch(feedReq(null), env)).status, 200, String(flag));
+      });
+      assert.equal(spy.matches, 1);
+    });
+  }
+});
+
+test('REQUIRE_SESSION: any other value is 500 bad_config on smart add and /feed (zero fallback)', async () => {
+  for (const flag of ['1', 'TRUE', 'True', 'yes', '', 1, 'false ']) {
+    const { env, token } = await smartEnv({ REQUIRE_SESSION: flag });
+    await withAnthropic(() => claudeOk(), async (stub) => {
+      for (const t of [null, token]) {
+        const res = await smart(env, t);
+        assert.equal(res.status, 500, JSON.stringify(flag));
+        assert.equal((await res.json()).error, 'bad_config');
+        assert.equal(res.headers.get('Access-Control-Allow-Origin'), ALLOWED_ORIGIN);
+      }
+      assert.equal(stub.calls, 0);
+    });
+    await withCache(async (spy) => {
+      const res = await worker.fetch(feedReq(token), env);
+      assert.equal(res.status, 500, JSON.stringify(flag));
+      assert.equal((await res.json()).error, 'bad_config');
+      assert.equal(spy.matches, 0);
+    });
+    assert.deepEqual(await usageRows(env), []);
+  }
+});
+
+// Sweep W2 (carried from W1's re-review): the bad_config check ran in the
+// router before feed.js's own checks, so a misconfigured flag answered 500 to
+// a preflight and to a foreign Origin. OPTIONS, the Origin allowlist and the
+// method check answer exactly as they do with a valid flag; only the real GET
+// is 500 bad_config — still before the cache and before any upstream fetch.
+test('REQUIRE_SESSION garbage: /feed OPTIONS, Origin and method checks are unaffected; only the GET is 500 bad_config', async () => {
+  const url = 'https://worker.example/feed?url=' + encodeURIComponent('https://cal.example/a.ics');
+  for (const flag of ['1', 'TRUE', '']) {
+    const { env, token } = await smartEnv({ REQUIRE_SESSION: flag });
+    await withCache(async (spy) => {
+      const pre = await worker.fetch(new Request(url, { method: 'OPTIONS', headers: { origin: ALLOWED_ORIGIN } }), env);
+      assert.equal(pre.status, 200, `OPTIONS ${JSON.stringify(flag)}`);
+      assert.equal(pre.headers.get('Access-Control-Allow-Methods'), 'GET, OPTIONS');
+      const foreign = await worker.fetch(new Request(url, { headers: { origin: 'https://evil.example' } }), env);
+      assert.equal(foreign.status, 403);
+      assert.equal((await foreign.json()).error, 'forbidden');
+      const post = await worker.fetch(new Request(url, { method: 'POST', headers: { origin: ALLOWED_ORIGIN } }), env);
+      assert.equal(post.status, 405);
+      assert.equal((await post.json()).error, 'method_not_allowed');
+      for (const t of [null, token]) {
+        const res = await worker.fetch(feedReq(t), env);
+        assert.equal(res.status, 500);
+        assert.equal((await res.json()).error, 'bad_config');
+        assert.equal(res.headers.get('Access-Control-Allow-Origin'), ALLOWED_ORIGIN);
+      }
+      assert.equal(spy.matches, 0, 'never reaches the cache');
+    });
+  }
 });

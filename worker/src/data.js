@@ -15,13 +15,13 @@ import { json } from './cors.js';
 // let a 3 MB blob through to an unhandled D1 rejection instead of a clean 413.
 export const MAX_BLOB_BYTES = 1_000_000;
 
-export async function handleGetData(env) {
-  const row = await env.DB.prepare('SELECT version, blob FROM data WHERE id = 1').first();
+export async function handleGetData(env, accountId) {
+  const row = await env.DB.prepare('SELECT version, blob FROM data WHERE id = ?').bind(accountId).first();
   if (!row) return json({ error: 'not_initialised' }, 500);
   return json({ version: row.version, blob: row.blob });
 }
 
-export async function handlePutData(request, env, now) {
+export async function handlePutData(request, env, now, accountId) {
   let payload;
   try {
     payload = await request.json();
@@ -37,8 +37,8 @@ export async function handlePutData(request, env, now) {
   }
 
   const res = await env.DB.prepare(
-    'UPDATE data SET blob = ?, version = version + 1, updated_at = ? WHERE id = 1 AND version = ?',
-  ).bind(blob, now, version).run();
+    'UPDATE data SET blob = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?',
+  ).bind(blob, now, accountId, version).run();
 
   // Written to fail CLOSED: anything other than a positive `changes` count —
   // undefined, null, a string — is treated as "the write did not land". No
@@ -48,7 +48,7 @@ export async function handlePutData(request, env, now) {
   if (!(res.meta?.changes > 0)) {
     // Someone else wrote first. Hand back current state so the client can
     // merge and retry rather than guessing.
-    const cur = await env.DB.prepare('SELECT version, blob FROM data WHERE id = 1').first();
+    const cur = await env.DB.prepare('SELECT version, blob FROM data WHERE id = ?').bind(accountId).first();
     if (!cur) return json({ error: 'not_initialised' }, 500);
     return json({ error: 'version_conflict', version: cur.version, blob: cur.blob }, 409);
   }

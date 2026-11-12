@@ -287,8 +287,21 @@ export function clearAuth() { localStorage.removeItem(AUTH_KEY); }
 // tests/auth.test.js asserts loadSyncState() deep-equals this object after
 // unlink, so a field added here without being cleared, or without being added
 // to loadSyncState's projection below, fails rather than drifting.
+//
+// plainAdoption (sweep W2-C3): set by linkWithCode, in the same write that
+// raises the gate, when the link is a sign-in back to the account that owns
+// this device's data. The adoption's Merge then unions WITHOUT dedupe —
+// dedupe is for a device joining an account for the first time. Fails toward
+// today's behaviour: anything but an explicit true reads false.
+//
+// linkOwner (sweep W2 re-review): the account id this LINK has been shown to
+// belong to — by the sign-in that made it, by the account check before a
+// legacy paste, or by a GET /account answer for this session. An owned
+// device's pending adoption is previewed and adopted only while it equals
+// plaenicke.localOwner. Anything but a positive safe integer reads null.
 export const ZERO_SYNC_STATE = {
-  version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false,
+  version: 0, tokenHash: null, lastSyncedAt: null, lastError: null, adoptionPending: false, plainAdoption: false,
+  linkOwner: null,
 };
 
 export function loadSyncState() {
@@ -312,6 +325,8 @@ export function loadSyncState() {
     // that omits the key would then read as lifted, which is the exact
     // fail-open this guard exists to prevent.
     adoptionPending: parsed.adoptionPending !== false,
+    plainAdoption: parsed.plainAdoption === true,
+    linkOwner: isOwnerId(parsed.linkOwner) ? parsed.linkOwner : null,
   };
 }
 
@@ -441,3 +456,72 @@ export function recordLaunch(iso) {
     }
   }
 }
+
+// --- local owner (spec D16) ---
+// plaenicke.localOwner — DEVICE-LOCAL, NEVER SYNCED. Not part of the sync blob
+// and not one of app.js's cross-tab sync keys. The numeric account id whose
+// planner this device's items/feeds belong to (spec D16): it guards against
+// merging one person's planner into another account when someone signs in on a
+// shared device. Sign-out must NOT clear it — clearing it would let the next
+// account to sign in adopt and merge the previous person's data. Only an
+// explicit clearLocalOwner() (after the local planner is discarded) removes it.
+// A stored value that is not a positive safe integer reads as null; the writer
+// throws instead of storing one.
+export const LOCAL_OWNER_KEY = 'plaenicke.localOwner';
+
+const isOwnerId = (n) => Number.isSafeInteger(n) && n > 0;
+
+export function loadLocalOwner() {
+  const v = localStorage.getItem(LOCAL_OWNER_KEY);
+  if (typeof v !== 'string' || !/^[1-9][0-9]*$/.test(v)) return null;
+  const n = Number(v);
+  return isOwnerId(n) ? n : null;
+}
+
+export function saveLocalOwner(id) {
+  if (!isOwnerId(id)) throw new TypeError('localOwner must be a positive safe integer');
+  try {
+    localStorage.setItem(LOCAL_OWNER_KEY, String(id));
+  } catch (err) {
+    if (err && err.name === 'QuotaExceededError') throw new QuotaError('Local owner exceeded storage quota');
+    throw err;
+  }
+}
+
+export function clearLocalOwner() { localStorage.removeItem(LOCAL_OWNER_KEY); }
+
+// --- legacy owner (sweep W2-C1) ---
+// plaenicke.legacyOwner — DEVICE-LOCAL, NEVER SYNCED. The account id that the
+// last validated GET /account said has NO LOGIN yet (email null: Alex's
+// account 1 before its upgrade). It carries the UI mode only; plaenicke.
+// localOwner carries the D16 guard. They used to be one key: a legacy device
+// recorded no owner so it would keep the legacy UI, and an unlinked legacy
+// device then let the next account to sign in adopt its planner (sweep
+// W2-C1). Now every validated GET /account records the owner, and the
+// device is a LEGACY device while localOwner is unset or equals this key —
+// an account device otherwise. Written by accountui.js from GET /account;
+// cleared there when the account is seen with a login (an email answer, a
+// completed upgrade) and by linkui.js when a sign-in links the device (only
+// an account with a login can be signed in to). A stored value that is not a
+// positive safe integer reads as null; the writer throws instead of storing
+// one.
+export const LEGACY_OWNER_KEY = 'plaenicke.legacyOwner';
+
+export function loadLegacyOwner() {
+  const v = localStorage.getItem(LEGACY_OWNER_KEY);
+  if (typeof v !== 'string' || !/^[1-9][0-9]*$/.test(v)) return null;
+  const n = Number(v);
+  return isOwnerId(n) ? n : null;
+}
+
+export function saveLegacyOwner(id) {
+  if (!isOwnerId(id)) throw new TypeError('legacyOwner must be a positive safe integer');
+  try {
+    localStorage.setItem(LEGACY_OWNER_KEY, String(id));
+  } catch (err) {
+    if (err && err.name === 'QuotaExceededError') throw new QuotaError('Legacy owner exceeded storage quota');
+    throw err;
+  }
+}
+
+export function clearLegacyOwner() { localStorage.removeItem(LEGACY_OWNER_KEY); }

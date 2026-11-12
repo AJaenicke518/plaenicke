@@ -172,6 +172,13 @@ export function makeFakeWindow() {
   const listeners = {};
   return {
     matchMedia: () => ({ matches: false, addEventListener() {} }),
+    // app.js reads boot intents (#invite= / #recover=) from these at load
+    // (js/fragment.js). replaceState is recorded, never applied.
+    location: { hash: '', pathname: '/plaenicke/', search: '' },
+    history: {
+      calls: [],
+      replaceState(...args) { this.calls.push(args); },
+    },
     addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
     removeEventListener(type, fn) {
       if (!listeners[type]) return;
