@@ -20,6 +20,10 @@ import {
 import { SCHEMA_VERSION, toWire } from '../js/merge.js';
 import { WORKER_URL } from '../js/config.js';
 import { fetchWithTimeout, FETCH_TIMEOUT_MS } from '../js/fetchtimeout.js';
+// Task 12 (accounts) reaches the new exports through the namespace, so a
+// missing export fails the tests that use it rather than the whole file.
+import * as linkuiNs from '../js/linkui.js';
+import { saveLocalOwner, loadLocalOwner, clearLocalOwner, loadAuth, AUTH_KEY } from '../js/storage.js';
 
 // --- fake DOM: tests/fake-dom.js ---------------------------------------------
 //
@@ -2400,4 +2404,467 @@ test('an adoption behind an in-flight ordinary sync waits for it, then completes
   assert.equal(loadSyncState().adoptionPending, false, 'the queued adoption ran and lifted the gate');
   assert.equal(requests.length, 3, 'the adoption read once, after the ordinary sync settled');
   assert.ok(linkedCalls.length >= 1, 'onLinked fired');
+});
+
+// =========================================================================
+// Task 12 — accounts: linkAndAdopt, the D16 owner guard, account-mode copy
+// and sign-out (spec D15, D16, D17, D27, § 6.10, § 6.11)
+// =========================================================================
+//
+// THE ADOPTION ENTRY POINT. Every account login ends in linkAndAdopt, which
+// runs doLink through runAdoption, so the cross-mount exclusion and the
+// preview/dialog are the SAME ones the paste field uses. The owner guard sits
+// at the top of doLink, so no link path — paste, Re-link or linkAndAdopt —
+// can copy one account's planner into another (D16; plan review I5).
+
+const SIGNED_OUT_COPY = 'This device was signed out. Sign in again.';
+
+function freshLinkCode() {
+  const encKey = generateEncKey();
+  return { encKey, code: composeLinkCode(bytesToBase64url(generateEncKey()), encKey) };
+}
+
+// An account row that the REAL syncOnce can bootstrap. Each call records
+// whether the adoption gate was raised when it arrived.
+function emptyAccountServer() {
+  const row = { version: 0, blob: '' };
+  const calls = [];
+  const fetchImpl = async (url, opts = {}) => {
+    const method = opts.method || 'GET';
+    calls.push({ method, gateRaised: loadSyncState().adoptionPending === true });
+    if (method === 'GET') return { ok: true, status: 200, json: async () => ({ ...row }) };
+    const body = JSON.parse(opts.body);
+    if (body.version !== row.version) return { ok: false, status: 409, json: async () => ({ ...row }) };
+    row.version += 1;
+    row.blob = body.blob;
+    return { ok: true, status: 200, json: async () => ({ version: row.version }) };
+  };
+  return { row, calls, fetchImpl };
+}
+
+const noNetwork = (calls) => async (url, opts) => {
+  calls.push({ url: String(url), method: (opts && opts.method) || 'GET' });
+  throw new Error('no network call was expected here');
+};
+
+function mountPanel(doc, o = {}) {
+  const host = doc.createElement('div');
+  doc.body.appendChild(host);
+  const ui = initLinkUI({
+    host,
+    applyState: (s) => s,
+    apiBase: 'https://w.example',
+    now: () => NOW,
+    ...o,
+  });
+  return { host, ui };
+}
+
+test('acct 1: linkAndAdopt on an empty device links, raises adoption, bootstraps the empty account and records the owner', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  const server = emptyAccountServer();
+  const { ui } = mountPanel(doc, { fetchImpl: server.fetchImpl, readFetchImpl: server.fetchImpl });
+  await ui.settled();
+  assert.deepEqual(server.calls, [], 'fixture check: an unlinked device fires nothing on mount');
+
+  const { code } = freshLinkCode();
+  const outcome = await ui.linkAndAdopt(code, { accountId: 7 });
+
+  assert.equal(outcome, 'linked');
+  assert.equal(loadAuth(), code, 'the code is stored');
+  assert.equal(server.calls[0].method, 'GET', 'the preview reads first');
+  assert.equal(server.calls[0].gateRaised, true, 'linking raised the adoption gate before anything was read');
+  // The preview's read, then syncOnce's own read. Both sides empty, so the
+  // real syncOnce has nothing to push (js/sync.js's `pushed` comparison) and
+  // the bootstrap completes without a PUT.
+  assert.deepEqual(server.calls.map((c) => c.method), ['GET', 'GET'], 'preview read, sync read; nothing to push');
+  assert.equal(loadSyncState().adoptionPending, false, 'the completed bootstrap lifted the gate');
+  assert.equal(loadSyncState().lastError, null);
+  assert.ok(loadSyncState().lastSyncedAt, 'the bootstrap recorded a sync');
+  assert.equal(loadLocalOwner(), 7, 'the device records whose planner it now holds');
+});
+
+test("acct 2: the owner guard blocks linkAndAdopt into a different account while this device holds another account's data", async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  saveLocalOwner(5);
+  saveItems([it('mine')]);
+  const itemsBefore = JSON.stringify(loadItems());
+  const calls = [];
+  const { host, ui } = mountPanel(doc, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls) });
+  await ui.settled();
+
+  const outcome = await ui.linkAndAdopt(freshLinkCode().code, { accountId: 6 });
+
+  assert.equal(outcome, 'blocked');
+  assert.equal(loadAuth(), null, 'nothing may be linked');
+  assert.equal(JSON.stringify(loadItems()), itemsBefore, 'local items are untouched');
+  assert.deepEqual(calls, [], 'a blocked link touches no network');
+  assert.equal(loadLocalOwner(), 5, 'the owner tag is not rewritten');
+  assert.equal(linkuiNs.ACCOUNT_COPY.other_account_data,
+    "This device holds another account's planner. Signing in here would copy it into that account.");
+  assert.ok(allText(host).includes(linkuiNs.ACCOUNT_COPY.other_account_data), 'the panel says why');
+});
+
+test('acct 3: the paste path is guarded too — the field is hidden, and the handler itself refuses', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  saveLocalOwner(5);
+  saveItems([it('mine')]);
+  const calls = [];
+  const { host, ui } = mountPanel(doc, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls) });
+  await ui.settled();
+  assert.equal(findInput(host, 'Link code'), null, 'an owned, unlinked device offers no paste field');
+  assert.equal(findButton(host, 'Link this device'), null);
+
+  // The paste handler's own call shape: runAdoption((g) => doLink(code, g)),
+  // no account id. Reached through the R3 test seam.
+  const outcome = await ui._linkForTest(freshLinkCode().code);
+  assert.equal(outcome, 'blocked');
+  assert.equal(loadAuth(), null, 'a pasted code must not bypass D16');
+  assert.deepEqual(calls, []);
+  assert.ok(allText(host).includes(linkuiNs.ACCOUNT_COPY.other_account_data));
+
+  // The field stays hidden on an owned device with NO data as well: a pasted
+  // code carries no account id, so it would be a control for nothing useful.
+  installFakeLocalStorage();
+  const doc2 = installDom();
+  saveLocalOwner(5);
+  const empty = mountPanel(doc2, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls) });
+  await empty.ui.settled();
+  assert.equal(findInput(empty.host, 'Link code'), null);
+});
+
+test('acct 4: an owned device with no items or feeds may join a different account', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  saveLocalOwner(5);
+  // Tombstones are ignored by the guard: they are not a planner.
+  saveTombstones([{ id: 'gone', kind: 'item', deletedAt: '2026-08-04T00:00:00.000Z' }]);
+  const server = emptyAccountServer();
+  const { ui } = mountPanel(doc, { fetchImpl: server.fetchImpl, readFetchImpl: server.fetchImpl });
+  await ui.settled();
+
+  const { code } = freshLinkCode();
+  assert.equal(await ui.linkAndAdopt(code, { accountId: 6 }), 'linked');
+  assert.equal(loadAuth(), code);
+  assert.equal(loadLocalOwner(), 6);
+});
+
+test('acct 5: signing back in to the SAME account with local data reaches the Merge dialog and does not auto-merge', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  saveLocalOwner(5);
+  saveItems([it('mine')]);
+  const { code, encKey } = freshLinkCode();
+  const blob = await encryptBlob(encKey, st({ items: [it('theirs')] }));
+  const read = async () => ({ ok: true, status: 200, json: async () => ({ version: 3, blob }) });
+  const syncCalls = [];
+  const { host, ui } = mountPanel(doc, {
+    fetchImpl: read,
+    readFetchImpl: read,
+    syncOnceImpl: async (d) => { syncCalls.push(d.adoptChoice); return { status: 'ok', pushed: true, applied: true }; },
+  });
+  await ui.settled();
+
+  assert.equal(await ui.linkAndAdopt(code, { accountId: 5 }), 'linked');
+  assert.ok(findButton(host, 'Merge'), 'the existing Merge dialog is offered');
+  assert.ok(findButton(host, 'Cancel'));
+  assert.deepEqual(syncCalls, [], 'nothing is merged before the user chooses');
+});
+
+test('acct 6: adoptionBlocker table', () => {
+  const { adoptionBlocker } = linkuiNs;
+  installFakeLocalStorage();
+  // Linked (D17) — whatever the owner and target.
+  saveAuth(freshLinkCode().code);
+  assert.equal(adoptionBlocker(null), 'already_linked');
+  saveLocalOwner(5);
+  assert.equal(adoptionBlocker(5), 'already_linked');
+
+  installFakeLocalStorage();
+  saveLocalOwner(5);
+  saveItems([it('mine')]);
+  assert.equal(adoptionBlocker(null), 'other_account_data', 'a null target always differs');
+  assert.equal(adoptionBlocker(6), 'other_account_data');
+  assert.equal(adoptionBlocker(5), null, 'the same account is not blocked');
+
+  installFakeLocalStorage();
+  saveItems([it('mine')]);
+  assert.equal(adoptionBlocker(null), null, 'no owner, no guard (legacy and first sign-up)');
+  assert.equal(adoptionBlocker(6), null);
+
+  installFakeLocalStorage();
+  saveLocalOwner(5);
+  saveFeeds([fd('cal')]);
+  assert.equal(adoptionBlocker(6), 'other_account_data', 'feeds count — a feed URL is a capability');
+
+  installFakeLocalStorage();
+  saveLocalOwner(5);
+  saveTombstones([{ id: 'gone', kind: 'item', deletedAt: '2026-08-04T00:00:00.000Z' }]);
+  assert.equal(adoptionBlocker(6), null, 'tombstones alone are not a planner');
+  assert.equal(adoptionBlocker(null), null);
+});
+
+test('accountModeFromStorage: unlinked, account, legacy — read at call time', async () => {
+  const { accountModeFromStorage } = linkuiNs;
+  installFakeLocalStorage();
+  assert.equal(accountModeFromStorage(), 'unlinked');
+  saveLocalOwner(5);
+  assert.equal(accountModeFromStorage(), 'unlinked', 'an owner on an unlinked device is still unlinked');
+  await linkWithCode(freshLinkCode().code);
+  assert.equal(accountModeFromStorage(), 'account');
+  clearLocalOwner();
+  assert.equal(accountModeFromStorage(), 'legacy');
+});
+
+async function signedOutAccountDevice() {
+  installFakeLocalStorage();
+  const doc = installDom();
+  await linkWithCode(freshLinkCode().code);
+  saveSyncState({ adoptionPending: false, lastError: 'unauthorized' });
+  saveLocalOwner(5);
+  return doc;
+}
+
+test('acct 7: an account device rejected with 401 reads "signed out", on the panel line and the shell indicator', async () => {
+  const doc = await signedOutAccountDevice();
+  const line = doc.createElement('div');
+  line.id = SYNC_STATUS_ID;
+  const shell = doc.createElement('div');
+  shell.id = SHELL_SYNC_STATUS_ID;
+  doc.body.append(line, shell);
+
+  renderSyncStatus(); // the no-argument call app.js makes
+  for (const [name, node] of [['#sync-status', line], ['#sync-indicator', shell]]) {
+    assert.ok(node.textContent.includes(SIGNED_OUT_COPY), `${name} must say "${SIGNED_OUT_COPY}", got "${node.textContent}"`);
+    assert.ok(!node.textContent.includes('86-character'), `${name} must not offer a link code`);
+  }
+  assert.equal(shell.hidden, false, 'the shell indicator is lit');
+  assert.ok(linkuiNs.failureText('unauthorized').includes(SIGNED_OUT_COPY));
+  assert.ok(!linkuiNs.failureText('unauthorized').includes('86-character'));
+
+  // Mode is read at call time: the same storage without an owner is legacy.
+  clearLocalOwner();
+  renderSyncStatus();
+  assert.ok(!line.textContent.includes(SIGNED_OUT_COPY) && !shell.textContent.includes(SIGNED_OUT_COPY));
+  assert.match(line.textContent, /rejected/, 'legacy status line unchanged');
+  saveLocalOwner(5);
+
+  // The open panel, too (its own status line carries the id, so the shell
+  // line above is detached first).
+  line.id = '';
+  const calls = [];
+  const { host } = mountPanel(doc, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls) });
+  assert.ok(allText(host).includes(SIGNED_OUT_COPY));
+  assert.ok(!allText(host).includes('86-character'));
+  clearLocalOwner();
+  assert.ok(linkuiNs.failureText('unauthorized').includes('86-character'), 'legacy copy unchanged');
+});
+
+test('acct 8: clicking #link-signin calls onSignIn', async () => {
+  const doc = await signedOutAccountDevice();
+  const signIns = [];
+  const calls = [];
+  const { ui } = mountPanel(doc, {
+    fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls), onSignIn: () => { signIns.push(true); },
+  });
+  const btn = doc.getElementById('link-signin');
+  assert.ok(btn, 'an account device rejected with 401 offers Sign in');
+  btn.click();
+  await ui.settled();
+  assert.equal(signIns.length, 1);
+
+  // Without an onSignIn there is no dead button.
+  installDom();
+  const doc2 = globalThis.document;
+  mountPanel(doc2, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls) });
+  assert.equal(doc2.getElementById('link-signin'), null);
+
+  // A legacy device in the same state keeps today's UI: no Sign in.
+  clearLocalOwner();
+  installDom();
+  const doc3 = globalThis.document;
+  mountPanel(doc3, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls), onSignIn: () => {} });
+  assert.equal(doc3.getElementById('link-signin'), null);
+});
+
+test('acct 8b: an account device whose preview is rejected offers Sign in, not a paste field', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  await linkWithCode(freshLinkCode().code); // gate raised: mount previews
+  saveLocalOwner(5);
+  const r401 = async () => ({ ok: false, status: 401, json: async () => ({}) });
+  const signIns = [];
+  const signOuts = [];
+  const { host, ui } = mountPanel(doc, {
+    fetchImpl: r401, readFetchImpl: r401,
+    onSignIn: () => { signIns.push(true); }, onSignOut: () => { signOuts.push(true); },
+  });
+  await ui.settled();
+  assert.ok(allText(host).includes(SIGNED_OUT_COPY));
+  assert.ok(!allText(host).includes('86-character'));
+  assert.equal(findInput(host, 'Link code'), null, 'no paste field on an account device');
+  assert.equal(findButton(host, 'Re-link'), null);
+  assert.equal(findButton(host, 'Unlink'), null);
+  assert.ok(findButton(host, 'Sign out'));
+  doc.getElementById('link-signin').click();
+  await ui.settled();
+  assert.equal(signIns.length, 1);
+});
+
+test('acct 9: an account device hides the paste field and Link another device, and Sign out calls onSignOut', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  await linkWithCode(freshLinkCode().code);
+  clearAdoptionPending();
+  saveLocalOwner(5);
+  const signOuts = [];
+  const calls = [];
+  const { host, ui } = mountPanel(doc, {
+    fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls), onSignOut: () => { signOuts.push(true); },
+  });
+  assert.equal(findInput(host, 'Link code'), null);
+  assert.equal(findInput(host, 'New device token'), null);
+  assert.ok(!allText(host).includes('Link another device'));
+  assert.ok(!allText(host).includes('86-character'));
+  assert.equal(findButton(host, 'Unlink'), null, 'Unlink is labelled Sign out');
+  const signOut = findButton(host, 'Sign out');
+  assert.ok(signOut);
+  signOut.click();
+  await ui.settled();
+  assert.equal(signOuts.length, 1);
+  assert.deepEqual(calls, []);
+
+  // Without an onSignOut there is no dead button.
+  installDom();
+  const bare = mountPanel(globalThis.document, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls) });
+  assert.equal(findButton(bare.host, 'Sign out'), null);
+});
+
+test('acct 10: signOutLocal refuses while an adoption write is in flight, and otherwise unlinks keeping the owner and data', async (t) => {
+  const f = await concurrencyFixture();
+  t.after(() => f.releaseAll());
+  saveLocalOwner(5);
+  const a = f.mount();
+  f.releaseGet(0);
+  await a.ui.settled();
+  assert.ok(findButton(a.host, 'Merge'), 'fixture check: the dialog is up');
+  f.holdNextWrite();
+  findButton(a.host, 'Merge').click();
+  await settleUntil(() => f.syncCalls.length > 0);
+  assert.equal(f.syncCalls.length, 1, 'fixture check: the write is in flight');
+
+  const authBefore = loadAuth();
+  assert.ok(authBefore);
+  assert.equal(linkuiNs.signOutLocal(), 'refused_write_in_flight');
+  assert.equal(loadAuth(), authBefore, 'the in-flight write keeps its credential');
+
+  f.letWriteFinish();
+  await a.ui.settled();
+
+  const shell = f.doc.createElement('div');
+  shell.id = SHELL_SYNC_STATUS_ID;
+  f.doc.body.appendChild(shell);
+  saveSyncState({ lastError: 'offline' });
+  renderSyncStatus();
+  assert.equal(shell.hidden, false, 'fixture check: the indicator is lit before sign-out');
+
+  assert.equal(linkuiNs.signOutLocal(), 'signed_out');
+  assert.equal(loadAuth(), null);
+  assert.equal(loadLocalOwner(), 5, 'D27/D16: the owner tag survives sign-out');
+  assert.deepEqual(loadItems().map((i) => i.id), ['local'], 'local data stays');
+  assert.equal(shell.hidden, true, 'the shell indicator is repainted');
+});
+
+test('acct 11: a preview that throws after a successful link still leaves the owner recorded', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  const calls = [];
+  // A readFetchImpl that is not a function makes previewRemote throw
+  // (js/sync.js requireReadFetch) — after linkWithCode has succeeded.
+  const { ui } = mountPanel(doc, { fetchImpl: noNetwork(calls), readFetchImpl: 'not a function' });
+  await ui.settled();
+  const { code } = freshLinkCode();
+  await assert.rejects(ui.linkAndAdopt(code, { accountId: 9 }), /readFetchImpl/,
+    'a throw is surfaced, never reported as one of the four outcomes');
+  assert.equal(loadAuth(), code, 'fixture check: the link itself succeeded');
+  assert.equal(loadLocalOwner(), 9, 'an unrecorded owner would reopen the D16 cross-account merge');
+});
+
+test('acct 12: two linkAndAdopt calls in the same tick link once; the second joins', async () => {
+  const ls = installFakeLocalStorage();
+  const doc = installDom();
+  let authWrites = 0;
+  const real = ls.setItem.bind(ls);
+  ls.setItem = (k, v) => { if (k === AUTH_KEY) authWrites += 1; return real(k, v); };
+  const server = emptyAccountServer();
+  const { ui } = mountPanel(doc, { fetchImpl: server.fetchImpl, readFetchImpl: server.fetchImpl });
+  await ui.settled();
+  const first = freshLinkCode().code;
+  const second = freshLinkCode().code;
+  const [r1, r2] = await Promise.all([
+    ui.linkAndAdopt(first, { accountId: 3 }),
+    ui.linkAndAdopt(second, { accountId: 3 }),
+  ]);
+  assert.equal(r1, 'linked');
+  assert.equal(r2, 'joined_other');
+  assert.equal(authWrites, 1, 'linkWithCode ran once');
+  assert.equal(loadAuth(), first);
+});
+
+test('acct: a linkAndAdopt with an invalid account id fails before anything is linked', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  const calls = [];
+  const { ui } = mountPanel(doc, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls) });
+  await ui.settled();
+  for (const bad of ['5', 0, -1, 1.5]) {
+    await assert.rejects(ui.linkAndAdopt(freshLinkCode().code, { accountId: bad }), TypeError);
+    assert.equal(loadAuth(), null, `accountId ${JSON.stringify(bad)}: a linked device with no owner reopens D16`);
+  }
+});
+
+// Legacy mode is unchanged (brief test 13, controller ruling): a LINKED legacy
+// device whose code the account rejects can still re-link from the paste field.
+// The D17 'already_linked' rule is about account sign-in, not this path.
+test('legacy: a rejected legacy device can still re-link from the paste field', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  await linkWithCode(freshLinkCode().code); // legacy: no owner; gate raised, so mount previews
+  const r401 = async () => ({ ok: false, status: 401, json: async () => ({}) });
+  const { host, ui } = mountPanel(doc, { fetchImpl: r401, readFetchImpl: r401 });
+  await ui.settled();
+  const input = findInput(host, 'Link code');
+  assert.ok(input, 'fixture check: the legacy re-link field is offered');
+  const next = freshLinkCode().code;
+  input.value = next;
+  findButton(host, 'Re-link this device').click();
+  await ui.settled();
+  assert.equal(loadAuth(), next, 'the legacy re-link replaced the rejected code');
+  assert.equal(loadLocalOwner(), null, 'a pasted code records no owner');
+});
+
+// The boundaries of the legacy carve-out in doLink: it covers ONLY a pasted
+// code on a linked LEGACY device. D17 still refuses a linkAndAdopt on any
+// linked device, and a pasted code on a linked ACCOUNT device.
+test("acct: D17 'already_linked' still refuses linkAndAdopt on a linked device and a paste on a linked account device", async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  const existing = freshLinkCode().code;
+  await linkWithCode(existing);
+  clearAdoptionPending();
+  const calls = [];
+  const legacy = mountPanel(doc, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls) });
+  assert.equal(await legacy.ui.linkAndAdopt(freshLinkCode().code, { accountId: 4 }), 'blocked');
+  assert.equal(loadAuth(), existing, 'the live link is not overwritten');
+  assert.equal(loadLocalOwner(), null);
+  assert.ok(allText(legacy.host).includes(linkuiNs.ACCOUNT_COPY.already_linked));
+
+  saveLocalOwner(4);
+  const account = mountPanel(doc, { fetchImpl: noNetwork(calls), readFetchImpl: noNetwork(calls) });
+  assert.equal(await account.ui._linkForTest(freshLinkCode().code), 'blocked');
+  assert.equal(loadAuth(), existing);
+  assert.deepEqual(calls, []);
 });
