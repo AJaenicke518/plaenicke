@@ -16,7 +16,7 @@ const ASSETS = [
   'js/app.js', 'js/storage.js', 'js/items.js', 'js/dateparse.js', 'js/calendar.js',
   'js/config.js', 'js/smartadd.js', 'js/preview.js', 'js/voice.js',
   'js/timegrid.js', 'js/theme.js', 'js/settings.js', 'js/dayview.js', 'js/weekview.js',
-  'js/ics.js', 'js/deadlines.js', 'js/tzmap.js', 'js/feeds.js', 'js/uid.js', 'js/crypto.js', 'js/merge.js', 'js/auth.js', 'js/sync.js',
+  'js/ics.js', 'js/deadlines.js', 'js/tzmap.js', 'js/feeds.js', 'js/uid.js', 'js/crypto.js', 'js/keys.js', 'js/merge.js', 'js/auth.js', 'js/sync.js',
   'js/linkui.js', 'js/ideas.js', 'js/todoview.js', 'js/ideasview.js', 'js/freshness.js', 'js/edit.js', 'js/toast.js', 'js/itemsheet.js',
   'js/scrolllock.js', 'js/fetchtimeout.js', 'js/palette.js', 'js/press.js', 'js/today.js', 'js/todayview.js', 'js/weeklist.js',
   'js/visibility.js', 'js/threedayview.js', 'js/viewport.js', 'js/capture.js',
