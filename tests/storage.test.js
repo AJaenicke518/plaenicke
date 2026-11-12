@@ -607,3 +607,33 @@ test('deadline baseline: a quota failure is a QuotaError', () => {
   localStorage.setItem = () => { const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; };
   assert.throws(() => saveDeadlineBaseline({}), QuotaError);
 });
+
+// --- plaenicke.localOwner (spec D16) ---
+import { LOCAL_OWNER_KEY, loadLocalOwner, saveLocalOwner, clearLocalOwner } from '../js/storage.js';
+
+test('localOwner round trips and clears', () => {
+  installFakeLocalStorage();
+  assert.equal(LOCAL_OWNER_KEY, 'plaenicke.localOwner');
+  assert.equal(loadLocalOwner(), null);
+  saveLocalOwner(42);
+  assert.equal(loadLocalOwner(), 42);
+  clearLocalOwner();
+  assert.equal(loadLocalOwner(), null);
+  assert.equal(localStorage.getItem(LOCAL_OWNER_KEY), null);
+});
+
+test('localOwner: anything stored that is not a positive safe integer reads as null', () => {
+  installFakeLocalStorage();
+  for (const bad of ['abc', '0', '-3', '1.5', '', '1e3', ' 7', '9007199254740993', 'null', '{}']) {
+    localStorage.setItem(LOCAL_OWNER_KEY, bad);
+    assert.equal(loadLocalOwner(), null, `stored ${JSON.stringify(bad)}`);
+  }
+});
+
+test('saveLocalOwner throws TypeError for anything but a positive safe integer and stores nothing', () => {
+  installFakeLocalStorage();
+  for (const bad of [0, -1, 1.5, NaN, Infinity, 2 ** 53, '5', null, undefined, {}]) {
+    assert.throws(() => saveLocalOwner(bad), TypeError, String(bad));
+  }
+  assert.equal(localStorage.getItem(LOCAL_OWNER_KEY), null);
+});

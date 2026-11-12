@@ -441,3 +441,36 @@ export function recordLaunch(iso) {
     }
   }
 }
+
+// --- local owner (spec D16) ---
+// plaenicke.localOwner — DEVICE-LOCAL, NEVER SYNCED. Not part of the sync blob
+// and not one of app.js's cross-tab sync keys. The numeric account id whose
+// planner this device's items/feeds belong to (spec D16): it guards against
+// merging one person's planner into another account when someone signs in on a
+// shared device. Sign-out must NOT clear it — clearing it would let the next
+// account to sign in adopt and merge the previous person's data. Only an
+// explicit clearLocalOwner() (after the local planner is discarded) removes it.
+// A stored value that is not a positive safe integer reads as null; the writer
+// throws instead of storing one.
+export const LOCAL_OWNER_KEY = 'plaenicke.localOwner';
+
+const isOwnerId = (n) => Number.isSafeInteger(n) && n > 0;
+
+export function loadLocalOwner() {
+  const v = localStorage.getItem(LOCAL_OWNER_KEY);
+  if (typeof v !== 'string' || !/^[1-9][0-9]*$/.test(v)) return null;
+  const n = Number(v);
+  return isOwnerId(n) ? n : null;
+}
+
+export function saveLocalOwner(id) {
+  if (!isOwnerId(id)) throw new TypeError('localOwner must be a positive safe integer');
+  try {
+    localStorage.setItem(LOCAL_OWNER_KEY, String(id));
+  } catch (err) {
+    if (err && err.name === 'QuotaExceededError') throw new QuotaError('Local owner exceeded storage quota');
+    throw err;
+  }
+}
+
+export function clearLocalOwner() { localStorage.removeItem(LOCAL_OWNER_KEY); }
