@@ -9,7 +9,7 @@ import {
   classifySyncState, shellNeedsAttention, panelShowsProblem,
   SYNC_OK, SYNC_NOT_LINKED, SYNC_CORRUPT, SYNC_ADOPTION_PENDING, SYNC_ERROR,
 } from '../js/linkui.js';
-import { linkWithCode, clearAdoptionPending, isLinked } from '../js/auth.js';
+import { linkWithCode, clearAdoptionPending, isLinked, unlink } from '../js/auth.js';
 import { syncOnce as realSyncOnce } from '../js/sync.js';
 import {
   bytesToBase64url, generateEncKey, composeLinkCode, encryptBlob, parseLinkCode,
@@ -3273,4 +3273,174 @@ test('W2-C3: the dialog does not promise to fold duplicates on a plain merge', a
   assert.equal(allText(plain.first.host).includes('folds together'), false, allText(plain.first.host));
   const dedupe = await signInWithDialog({ owner: null, accountId: 5 });
   assert.ok(allText(dedupe.first.host).includes('folds together'));
+});
+
+// Sweep W2-I4: a sign-out while an adoption is only PREVIEWING (allowed —
+// signOutBlocked refuses only during a write) left that episode active, so
+// the sign-in that followed JOINED it instead of linking: 'joined_other',
+// the new code never stored. signOutLocal now supersedes the episode, and
+// the old preview, answering late, shows nothing about the old account.
+test('W2-I4: sign-out during a preview, then sign-in, links the new code; the old preview answers into nothing', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  const old = freshLinkCode();
+  await linkWithCode(old.code);           // adoption pending: the mount previews
+  saveLocalOwner(5);
+  saveItems([it('mine')]);
+  const oldBlob = await encryptBlob(old.encKey, st({ items: [it('old-account')] }));
+  const held = [];
+  const readFetchImpl = async (url, opts) => {
+    const auth = opts && opts.headers && opts.headers.authorization;
+    if (auth === `Bearer ${parseLinkCode(old.code).authToken}`) {
+      await new Promise((r) => held.push(r));
+      return { ok: true, status: 200, json: async () => ({ version: 4, blob: oldBlob }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) };
+  };
+  const choices = [];
+  const syncOnceImpl = async (d) => { choices.push(d.adoptChoice); return { status: 'ok', pushed: false }; };
+  const { host, ui } = mountPanel(doc, { fetchImpl: noNetwork([]), readFetchImpl, syncOnceImpl });
+  try {
+    await settleUntil(() => held.length === 1);
+    assert.equal(held.length, 1, 'fixture check: the old account\'s preview is out');
+    assert.equal(linkuiNs.signOutBlocked(), false, 'a preview does not block sign-out');
+    assert.equal(linkuiNs.signOutLocal(), 'signed_out');
+    const next = freshLinkCode();
+    // Raced against a bounded poll: joining the old episode would wait on
+    // the held preview, which only this test releases.
+    const linking = ui.linkAndAdopt(next.code, { accountId: 5 });
+    let outcome = null;
+    linking.then((v) => { outcome = v; }, (e) => { outcome = e; });
+    await settleUntil(() => outcome !== null);
+    assert.equal(outcome, 'linked', 'not joined to the signed-out episode');
+    assert.equal(loadAuth(), next.code, 'the new code is stored');
+    assert.deepEqual(choices, ['adopt-bootstrap'], 'the new link adopted (empty account)');
+    held.shift()();
+    // A negative check: the poll waits for the forbidden dialog.
+    await settleUntil(() => findButton(host, 'Merge') !== null);
+    assert.equal(findButton(host, 'Merge'), null, 'the old account\'s dialog never appears');
+    assert.equal(allText(host).includes('The account holds 1 item'), false);
+    assert.deepEqual(choices, ['adopt-bootstrap'], 'nothing more was written');
+  } finally {
+    for (const r of held) r();
+  }
+});
+
+test('W2-I4: a mount left previewing by a sign-out re-renders from storage when the old preview answers', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  const old = freshLinkCode();
+  await linkWithCode(old.code);
+  saveLocalOwner(5);
+  saveItems([it('mine')]);
+  const oldBlob = await encryptBlob(old.encKey, st({ items: [it('old-account')] }));
+  const held = [];
+  const readFetchImpl = async () => {
+    await new Promise((r) => held.push(r));
+    return { ok: true, status: 200, json: async () => ({ version: 4, blob: oldBlob }) };
+  };
+  const { host } = mountPanel(doc, { fetchImpl: noNetwork([]), readFetchImpl, syncOnceImpl: async () => assert.fail('no write') });
+  try {
+    await settleUntil(() => held.length === 1);
+    assert.ok(allText(host).includes('Checking the account'), 'fixture check: previewing');
+    assert.equal(linkuiNs.signOutLocal(), 'signed_out');
+    held.shift()();
+    await settleUntil(() => !allText(host).includes('Checking the account'));
+    assert.equal(allText(host).includes('Checking the account'), false, 'not left on a spinner');
+    assert.equal(findButton(host, 'Merge'), null);
+    assert.ok(allText(host).includes(linkuiNs.ACCOUNT_COPY.signed_out_unlinked), allText(host));
+  } finally {
+    for (const r of held) r();
+  }
+});
+
+test('W2-I4: the old preview answering late does not replace the new sign-in\'s own dialog', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  const old = freshLinkCode();
+  await linkWithCode(old.code);
+  saveLocalOwner(5);
+  saveItems([it('mine')]);
+  const oldBlob = await encryptBlob(old.encKey, st({ items: [it('o1'), it('o2')] }));
+  const next = freshLinkCode();
+  const newBlob = await encryptBlob(next.encKey, st({ items: [it('n1')] }));
+  const held = [];
+  const readFetchImpl = async (url, opts) => {
+    const auth = opts && opts.headers && opts.headers.authorization;
+    if (auth === `Bearer ${parseLinkCode(old.code).authToken}`) {
+      await new Promise((r) => held.push(r));
+      return { ok: true, status: 200, json: async () => ({ version: 4, blob: oldBlob }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ version: 2, blob: newBlob }) };
+  };
+  const { host, ui } = mountPanel(doc, { fetchImpl: noNetwork([]), readFetchImpl, syncOnceImpl: async () => assert.fail('no write') });
+  try {
+    await settleUntil(() => held.length === 1);
+    assert.equal(linkuiNs.signOutLocal(), 'signed_out');
+    let outcome = null;
+    ui.linkAndAdopt(next.code, { accountId: 5 }).then((v) => { outcome = v; }, (e) => { outcome = e; });
+    await settleUntil(() => outcome !== null);
+    assert.equal(outcome, 'linked');
+    assert.ok(allText(host).includes('The account holds 1 item'), 'the new account\'s dialog');
+    held.shift()();
+    await settleUntil(() => !allText(host).includes('The account holds 1 item'));
+    assert.ok(allText(host).includes('The account holds 1 item'), 'still the new account\'s dialog');
+    assert.ok(findButton(host, 'Merge'));
+  } finally {
+    for (const r of held) r();
+  }
+});
+
+test('W2-I4: a dialog left open across a sign-in elsewhere asks again instead of acting on the old counts', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  const old = freshLinkCode();
+  await linkWithCode(old.code);
+  saveLocalOwner(5);
+  saveItems([it('mine')]);
+  const oldBlob = await encryptBlob(old.encKey, st({ items: [it('o1'), it('o2')] }));
+  const next = freshLinkCode();
+  const newBlob = await encryptBlob(next.encKey, st({ items: [it('n1')] }));
+  const readFetchImpl = async (url, opts) => {
+    const auth = opts && opts.headers && opts.headers.authorization;
+    // The SAME version on both accounts: the version pin alone cannot tell.
+    if (auth === `Bearer ${parseLinkCode(old.code).authToken}`) return { ok: true, status: 200, json: async () => ({ version: 4, blob: oldBlob }) };
+    return { ok: true, status: 200, json: async () => ({ version: 4, blob: newBlob }) };
+  };
+  const writes = [];
+  const { host, ui } = mountPanel(doc, { fetchImpl: noNetwork([]), readFetchImpl, syncOnceImpl: async (d) => { writes.push(d); return { status: 'ok', pushed: false }; } });
+  await ui.settled();
+  assert.ok(allText(host).includes('The account holds 2 items'), 'fixture check: the old account\'s dialog');
+  // Another tab signs out and in again (no linkui call in this tab).
+  await linkWithCode(next.code);
+  findButton(host, 'Merge').click();
+  await ui.settled();
+  assert.deepEqual(writes, [], 'nothing written on counts the user saw for another account');
+  assert.ok(allText(host).includes('The account holds 1 item'), allText(host));
+});
+
+test('W2-I4: a dialog left open across a sign-out elsewhere writes nothing and shows the unlinked view', async () => {
+  installFakeLocalStorage();
+  const doc = installDom();
+  const old = freshLinkCode();
+  await linkWithCode(old.code);
+  saveLocalOwner(5);
+  saveItems([it('mine')]);
+  const oldBlob = await encryptBlob(old.encKey, st({ items: [it('o1')] }));
+  const calls = [];
+  const readFetchImpl = async (url) => {
+    calls.push(String(url));
+    return { ok: true, status: 200, json: async () => ({ version: 4, blob: oldBlob }) };
+  };
+  const writes = [];
+  const { host, ui } = mountPanel(doc, { fetchImpl: noNetwork([]), readFetchImpl, syncOnceImpl: async (d) => { writes.push(d); return { status: 'ok', pushed: false }; } });
+  await ui.settled();
+  assert.ok(findButton(host, 'Merge'), 'fixture check: the dialog is up');
+  unlink(); // another tab signed out
+  findButton(host, 'Merge').click();
+  await ui.settled();
+  assert.deepEqual(writes, []);
+  assert.equal(calls.length, 1, 'no second preview without a session');
+  assert.ok(allText(host).includes(linkuiNs.ACCOUNT_COPY.signed_out_unlinked), allText(host));
+  assert.equal(allText(host).includes('signed in again'), false, 'no claim of a new sign-in');
 });

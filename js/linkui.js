@@ -571,8 +571,15 @@ export function signOutBlocked() {
   return Boolean(activeAdoption && writeInFlight) || syncHoldsTurn();
 }
 
+// IT ENDS THE ADOPTION EPISODE (sweep W2-I4). Sign-out is allowed while an
+// episode is only previewing, and that episode used to stay the active one:
+// the sign-in that followed JOINED it ('joined_other') instead of linking.
+// The old episode cannot act afterwards: doPreview drops a preview answered
+// for a session this device no longer holds, and a dialog left open from
+// one re-checks the session at the click (adoptAgainstFreshCounts).
 export function signOutLocal() {
   if (signOutBlocked()) return 'refused_write_in_flight';
+  activeAdoption = null;
   unlink();
   renderSyncStatus();
   return 'signed_out';
@@ -1001,7 +1008,20 @@ export function initLinkUI(options = {}) {
     stage = 'busy';
     stageData = { text: 'Checking the account…' };
     render();
-    await handlePreview(await previewRemote({ readFetchImpl, apiBase }), attempt, generation);
+    const asked = getLink();
+    const askedOnEpisode = mountEpisode;
+    const preview = await previewRemote({ readFetchImpl, apiBase });
+    // Signed out (and perhaps in again) while the read was out (sweep
+    // W2-I4): the answer describes an account this device has left. Nothing
+    // about it is shown and nothing is decided on it. This mount's view is
+    // re-derived from storage — unless this mount has since started an
+    // episode of its own, which owns the view now (see joinActive).
+    const nowLink = getLink();
+    if (asked && (!nowLink || nowLink.authToken !== asked.authToken)) {
+      if (mountEpisode === askedOnEpisode) { stage = null; stageData = {}; render(); }
+      return;
+    }
+    await handlePreview(preview, attempt, generation);
   }
 
   // True while a write is in flight and has been for at least the threshold.
@@ -1067,7 +1087,9 @@ export function initLinkUI(options = {}) {
     const local = localState();
     if (chooseAdoption(local, remote) === 'ask') {
       stage = 'ask';
-      stageData = { version, remote, ...adoptionCounts(local, remote) };
+      // The session the dialog describes (sweep W2-I4), re-checked at the click.
+      const shownFor = getLink();
+      stageData = { version, remote, token: shownFor && shownFor.authToken, ...adoptionCounts(local, remote) };
       render();
       return;
     }
@@ -1098,6 +1120,19 @@ export function initLinkUI(options = {}) {
   // the dialog described. So re-read at CLICK time and re-ask if it moved.
   async function adoptAgainstFreshCounts(adoptChoice, generation) {
     const shown = stageData;
+    // Signed out, or into another session, since the dialog was shown (sweep
+    // W2-I4 — another tab, say): it describes an account this device no
+    // longer holds, and its version pin could match the new account's by
+    // coincidence. Ask again about the session held now.
+    const current = getLink();
+    if (!current || current.authToken !== shown.token) {
+      stage = null;
+      stageData = {};
+      if (!current) { render(); return; }
+      notice = 'This device signed in again while the dialog was open. Here is what the account holds now — please choose again.';
+      await doPreview(1, generation);
+      return;
+    }
     const fresh = adoptionCounts(localState(), shown.remote);
     // Every count the dialog DESCRIBED, including remoteDeletesLocal, which
     // is a function of local records too.
