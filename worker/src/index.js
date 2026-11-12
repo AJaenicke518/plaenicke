@@ -2,11 +2,19 @@
 //
 // Env it depends on:
 //   env.ANTHROPIC_API_KEY — Worker secret, smart-add (POST /)
-//   env.ADMIN_SECRET      — Worker secret, mint/revoke device tokens
-//   env.DB                — D1 binding, the sync store and the device table
+//   env.ADMIN_SECRET      — Worker secret, the /admin/* routes (admin.js)
+//   env.AT_REST_KEY       — Worker secret, 32 bytes base64url; MACs and seals
+//                           account columns (seal.js). Missing → 500 not_configured
+//                           on the account routes only.
+//   env.REQUIRE_SESSION   — var, phased-release flag for POST / and /feed:
+//                           true / "true" → a device session is required;
+//                           false / "false" / unset → tolerant (a session is
+//                           counted when present); anything else → 500 bad_config.
+//   env.DB                — D1 binding: accounts, devices, data, usage, invites
 //
-// There is no passphrase: POST / is deliberately public (see handleSmartAdd).
-// GET /version is public too: a static deploy marker, no env, no Claude, no D1.
+// POST / and /feed are public only while REQUIRE_SESSION is tolerant; a
+// session's smart adds are capped per account per UTC day either way (usage.js).
+// GET /version is always public: a static deploy marker, no env, no Claude, no D1.
 import { buildRequestBody } from './prompt.js';
 import { normalizeClaudeJson } from './normalize.js';
 import { handleFeed } from './feed.js';
@@ -37,11 +45,21 @@ function logClaudeLatency(ms, status, inTok, outTok) {
   console.log(`smart-add claude_ms=${ms} status=${status}${tokens}`);
 }
 
-// Phased release: anything but the exact string 'true' is tolerant.
-const requireSession = (env) => env.REQUIRE_SESSION === 'true';
+// Phased release. Returns true (required), false (tolerant) or null for a
+// value that is neither — the caller answers 500 bad_config rather than guess
+// (a typo such as '1' or 'TRUE' must not silently leave the endpoints open).
+function requireSession(env) {
+  const v = env.REQUIRE_SESSION;
+  if (v === true || v === 'true') return true;
+  if (v === false || v === 'false' || v === undefined) return false;
+  return null;
+}
+const badConfig = () => json({ error: 'bad_config' }, 500);
 
 async function handleSmartAdd(request, env) {
   if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+  const required = requireSession(env);
+  if (required === null) return badConfig();
 
   let payload;
   try {
@@ -50,14 +68,14 @@ async function handleSmartAdd(request, env) {
     return json({ error: 'bad_json' }, 400);
   }
 
-  // No passphrase (personal use). Abuse of this public endpoint is bounded
-  // by the monthly spend cap set in the Anthropic Console.
+  // Tolerant mode leaves this endpoint public; abuse is then bounded by the
+  // monthly spend cap set in the Anthropic Console.
   const text = payload && typeof payload.text === 'string' ? payload.text.trim() : '';
   if (!text) return json({ error: 'empty_text' }, 400);
 
   // Auth and the slot come after validation so a client bug cannot burn the cap.
   const device = await authenticateDevice(request, env, nowISO(env));
-  if (!device && requireSession(env)) return json({ error: 'unauthorized' }, 401);
+  if (!device && required) return json({ error: 'unauthorized' }, 401);
   const day = utcDay(nowISO(env)); // captured once: a call straddling midnight bills the request's day
   if (device) {
     const slot = await takeSmartAddSlot(env, device.accountId, day);
@@ -144,10 +162,12 @@ export default {
     // and enforces its own origin allowlist, so the shared preflight below
     // must not intercept it — dispatch here first, unconditionally.
     if (pathname === '/feed') {
+      const required = requireSession(env);
+      if (required === null) return badConfig();
       return handleFeed(request, {
         fetchImpl: fetch,
         cache: caches.default,
-        requireSession: requireSession(env),
+        requireSession: required,
         authenticate: (req) => authenticateDevice(req, env, nowISO(env)),
       });
     }

@@ -636,6 +636,11 @@ test('a client bug (empty text, bad json) does not burn a slot', async () => {
   const { env, token } = await smartEnv();
   await withAnthropic(() => claudeOk(), async () => {
     assert.equal((await smart(env, token, { text: '  ' })).status, 400);
+    const badJson = await worker.fetch(new Request('https://worker.example/', {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: '{not json',
+    }), env);
+    assert.equal(badJson.status, 400);
+    assert.equal((await badJson.json()).error, 'bad_json');
   });
   assert.deepEqual(await usageRows(env), []);
 });
@@ -692,4 +697,58 @@ test('/feed via the router: a valid token reaches the cache', async () => {
     });
     assert.equal(spy.matches, 1);
   });
+});
+
+// --- sweep W1-C2: REQUIRE_SESSION parses strictly, fails closed on garbage ---
+
+test('REQUIRE_SESSION: "true" and true require a session on smart add and /feed', async () => {
+  for (const flag of ['true', true]) {
+    const { env } = await smartEnv({ REQUIRE_SESSION: flag });
+    await withAnthropic(() => claudeOk(), async (stub) => {
+      const res = await smart(env, null);
+      assert.equal(res.status, 401, String(flag));
+      assert.equal(stub.calls, 0);
+    });
+    await withCache(async (spy) => {
+      assert.equal((await worker.fetch(feedReq(null), env)).status, 401, String(flag));
+      assert.equal(spy.matches, 0);
+    });
+  }
+});
+
+test('REQUIRE_SESSION: "false", false and unset are tolerant', async () => {
+  for (const flag of ['false', false, undefined]) {
+    const { env } = await smartEnv(flag === undefined ? {} : { REQUIRE_SESSION: flag });
+    await withAnthropic(() => claudeOk(), async () => {
+      assert.equal((await smart(env, null)).status, 200, String(flag));
+    });
+    await withCache(async (spy) => {
+      await withAnthropic(() => new Response('BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n', { status: 200 }), async () => {
+        assert.equal((await worker.fetch(feedReq(null), env)).status, 200, String(flag));
+      });
+      assert.equal(spy.matches, 1);
+    });
+  }
+});
+
+test('REQUIRE_SESSION: any other value is 500 bad_config on smart add and /feed (zero fallback)', async () => {
+  for (const flag of ['1', 'TRUE', 'True', 'yes', '', 1, 'false ']) {
+    const { env, token } = await smartEnv({ REQUIRE_SESSION: flag });
+    await withAnthropic(() => claudeOk(), async (stub) => {
+      for (const t of [null, token]) {
+        const res = await smart(env, t);
+        assert.equal(res.status, 500, JSON.stringify(flag));
+        assert.equal((await res.json()).error, 'bad_config');
+        assert.equal(res.headers.get('Access-Control-Allow-Origin'), ALLOWED_ORIGIN);
+      }
+      assert.equal(stub.calls, 0);
+    });
+    await withCache(async (spy) => {
+      const res = await worker.fetch(feedReq(token), env);
+      assert.equal(res.status, 500, JSON.stringify(flag));
+      assert.equal((await res.json()).error, 'bad_config');
+      assert.equal(spy.matches, 0);
+    });
+    assert.deepEqual(await usageRows(env), []);
+  }
 });
