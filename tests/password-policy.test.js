@@ -9,8 +9,9 @@ const SYM = 'At least one symbol (like ! ? # or a space)';
 const COM = 'Too common — pick something less guessable';
 const EML = "Don't use your email name in it";
 
-test('short1! fails length only', () => {
-  assert.deepEqual(checkPassword('short1!', 'a@x.de').problems, [LEN]);
+// 'short1!' was this fixture until R19: 'short' is a common base word now.
+test('a 7-character password fails length only', () => {
+  assert.deepEqual(checkPassword('kwzq1!x', 'a@x.de').problems, [LEN]);
 });
 test('longpassword! has no number', () => {
   assert.deepEqual(checkPassword('longpassword!', 'a@x.de').problems, [NUM]);
@@ -74,4 +75,50 @@ test('W2: the blocklist and the email check see the NFKC form (fullwidth charact
 
 test('W2: the blocklist is not accidentally emptied (size floor)', () => {
   assert.ok(COMMON.size >= 3600, `COMMON has ${COMMON.size} entries`);
+});
+
+// --- sweep W3, controller ruling R19 (SEC #3): base words -------------------
+//
+// The exact-match blocklist stops 'Password1!' but not 'Summer2024!': a
+// common word dressed with a number and a symbol. checkPassword reduces the
+// password to its base (baseWord) and refuses one on js/common-bases.js.
+
+const BASE = 'Too close to a common password — add something unusual';
+
+test('R19: a common word dressed with digits and a symbol is refused', async () => {
+  for (const pw of ['Summer2024!', 'Football1!', 'Monkey123!', 'Abcd1234!', 'Plaenicke1!']) {
+    assert.deepEqual(checkPassword(pw, 'a@x.de').problems, [BASE], pw);
+  }
+});
+
+test('R19: simple leetspeak inside the word is undone (p@ssw0rd-style)', async () => {
+  const { baseWord } = await import('../js/password-policy.js');
+  assert.equal(baseWord('M0nk3y123!'), 'monkey');
+  assert.equal(baseWord('$umm3r2024!'), 'ummer', 'a leading non-letter run is dropped whole, as at the end');
+  assert.equal(baseWord('Fo0tb@ll!7'), 'football');
+  assert.equal(baseWord('correct horse 7'), 'correcthorse');
+  assert.deepEqual(checkPassword('M0nk3y123!', 'a@x.de').problems, [BASE]);
+});
+
+test('R19: passphrases and random passwords still pass', () => {
+  assert.deepEqual(checkPassword('correct horse 7', 'a@x.de'), { ok: true, problems: [] });
+  assert.deepEqual(checkPassword('vT8#qLm2!xRw', 'a@x.de'), { ok: true, problems: [] });
+});
+
+test('R19: an exact blocklist hit says Too common once, not both', () => {
+  assert.deepEqual(checkPassword('Password1!', 'a@x.de').problems, [COM]);
+});
+
+test('R19: the base list is lowercase letters only, at least 4 long, includes plaenicke and lmu, and is not emptied', async () => {
+  const { COMMON_BASES } = await import('../js/common-bases.js');
+  assert.ok(COMMON_BASES.size >= 5000, `COMMON_BASES has ${COMMON_BASES.size}`);
+  assert.ok(COMMON_BASES.has('plaenicke') && COMMON_BASES.has('lmu'));
+  for (const b of COMMON_BASES) {
+    if (b === 'lmu') continue; // supplementary, by ruling
+    assert.match(b, /^\p{Ll}{4,}$/u, b);
+  }
+});
+
+test('R19: a 3-letter base (lmu, supplementary) is refused too', () => {
+  assert.deepEqual(checkPassword('Lmu2026!!', 'a@x.de').problems, [BASE]);
 });
