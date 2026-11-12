@@ -208,8 +208,8 @@ Password required. D18 decrypt-check. `POST /account/recovery {currentAuthKey, r
 
 Settings → Account shows **Create your login** when `GET /account` returns `{email: null}`.
 
-1. Email + password. D18 decrypt-check of the live blob with the device's `encKey`.
-2. `POST /account/upgrade {email, kdfSalt, kdfIters, authKey, recAuthKey, wrappedDekPw, wrappedDekRec, dekCheck}` (bearer = existing token): `UPDATE accounts SET … WHERE id = ? AND email IS NULL` (0 changes ⇒ 409 `already_upgraded`).
+1. Upgrade code from Alex (minted with `POST /admin/upgrade-code {accountId: 1}`; single use, 24 h), email + password. D18 decrypt-check of the live blob with the device's `encKey`.
+2. `POST /account/upgrade {upgradeCode, email, kdfSalt, kdfIters, authKey, recAuthKey, wrappedDekPw, wrappedDekRec, dekCheck}` (bearer = existing token). One batch: consume the code (`upgrade_codes.used_at`, only while unused, unexpired, for this account, and the account still has no email), then `UPDATE accounts SET … WHERE id = ? AND email IS NULL AND <this request consumed the code>`. No row ⇒ 409 `already_upgraded` if the account has an email, else 403 `invalid_upgrade_code`. The code requirement is sweep W1-C1: without it any account-1 bearer (a smoke token, say) could set account 1's login.
 3. Device writes `plaenicke.localOwner = 1`; recovery screen; confirm.
 4. Same token, same DEK, same blob: `resetSyncStateIfDeviceChanged` keys on the token hash (`js/auth.js:82-86`), so adoption is **not** re-raised. The second phone keeps syncing; it gets `localOwner = 1` on its next `GET /account`.
 
@@ -222,7 +222,7 @@ Settings → Account shows **Create your login** when `GET /account` returns `{e
 
 ### 6.9 Admin (`docs/admin.md` curl recipes)
 
-`POST /admin/invite {note}` → `{invite}` once · `DELETE /admin/invite {hashPrefix}` · `GET /admin/accounts` → `[{id, email, createdAt, lastSeenAt, devices, smartAddToday, recoveryConfirmed, disabled}]` · `POST /admin/account/disable {id, disabled}` (disabling deletes device rows in the same batch) · `POST /admin/account/email {id, email}` · `DELETE /admin/account {id, confirm: email}` (one batch: usage, devices, data, account). `POST/DELETE /admin/device` stay as legacy and take an explicit `accountId`.
+`POST /admin/invite {note}` → `{invite}` once · `DELETE /admin/invite {hashPrefix}` · `GET /admin/accounts` → `[{id, email, createdAt, lastSeenAt, devices, smartAddToday, recoveryConfirmed, disabled}]` · `POST /admin/account/disable {id, disabled}` (disabling deletes device rows in the same batch) · `POST /admin/account/email {id, email}` · `DELETE /admin/account {id, confirm: email}` (one batch: usage, devices, data, account). `POST /admin/upgrade-code {accountId}` → `{upgradeCode}` once (single use, 24 h; 409 `already_upgraded` once the account has an email). `POST/DELETE /admin/device` stay as legacy and take an explicit `accountId`.
 
 ### 6.10 Revoked and switching devices
 
@@ -263,24 +263,43 @@ Typed `{error}` per failure, each mapped to a specific client message; unwrap or
 
 ## 10. Release (Alex-run; none of it done by the autonomous run)
 
-**Phase 1 — tolerant Worker** (`REQUIRE_SESSION=false`):
+`docs/admin.md` § Release checklist is the runnable version (exact commands, expected output, stop conditions); this section states the order and why. Revised 2026-11-12 after the end-of-branch review sweep (W1–W4).
+
+**Phase 0 — prepare:** branch `accounts` clean, `npm test` green (`# fail 0`, `# cancelled 0`), `worker/src/version.js` = `worker-2026-11-12.1`, `worker/wrangler.toml` has no `[vars]`.
+
+**Phase 1 — tolerant Worker** (`REQUIRE_SESSION` unset):
 1. Close plaenicke on both devices.
-2. `wrangler d1 export plaenicke --remote --output backup-<date>.sql` and note a Time Travel bookmark (`wrangler d1 time-travel info plaenicke`).
-3. `wrangler secret put AT_REST_KEY`; store a second copy in the password manager.
-4. `wrangler d1 migrations apply plaenicke --remote` (`worker/README.md:74-79`).
-5. Deploy the Worker (new routes; bearer accepted, not required; feed allow-headers include `authorization`); bump `version.js`; `curl /version`. Reopen both devices; confirm sync.
+2. D1 export to `~/plaenicke-backups/` and a Time Travel bookmark, immediately before the migration.
+3. `AT_REST_KEY` via `wrangler secret put` (piped), second copy in the password manager.
+4. `d1 migrations list` (expect only `0002_accounts.sql`), then `d1 migrations apply --remote`.
+5. `wrangler deploy` from `worker/`; `GET /version` must answer `worker-2026-11-12.1`.
+6. Free probes: tokenless `/feed?url=x` with the app's Origin → 400 `bad_url` (tolerant); `POST /auth/prelogin` unknown email → 404 (key set and of record).
+7. Reopen both devices; confirm sync. Phase-1 checks on real D1: sign-up and login `RETURNING` inside `batch()`, duplicate-email 409 with rollback, seal round trip; throwaway account deleted, unused invite revoked.
 
-**Phase 2 — client** (merge to `main`): sends bearer, Account UI. Wait until both devices show the new `CACHE`.
+**Phase 2 — client** (merge to `main`): sends the bearer, Account UI. Confirm Pages serves `CACHE = 'plaenicke-v7-0'` and each device shows the Account section. From here a device without a session makes no smart-add or `/feed` request (D21). One smart add per device must raise account 1's `smartAddToday` by one each — proof every device sends its token.
 
-**Phase 3 — require sessions:** `REQUIRE_SESSION=true`, bump `version.js`, deploy, `npm run smoke:worker` (updated to send a token).
+**Phase 2b — upgrade account 1:** audit account 1's device rows; `POST /admin/upgrade-code {accountId:1}` (single use, 24 h); *Create your login* on one device with that code (§ 6.7); save the recovery link; the other device still syncs. Only after this may any other account-1 token be minted (sweep W1-C1: before the code requirement, any account-1 bearer could set account 1's login).
 
-**Then:** list account-1 devices (`GET /admin/accounts`), revoke any unrecognised; upgrade (§ 6.7) on one device; confirm the other still syncs; mint invites. Tester instructions: install to the home screen first, paste the invite in the app, save the recovery link; lost password **and** recovery link = data gone; don't sign in on shared computers.
+**Phase 3 — require sessions:** a commit on `main` adds `[vars] REQUIRE_SESSION = "true"` to `worker/wrangler.toml` and bumps `version.js`; deploy; `/feed?url=x` → 401; mint the smoke token, `npm run smoke:worker`, revoke the token. The flag is never set in the dashboard or with `--var`: `wrangler deploy` overwrites dashboard variables unless `keep_vars = true` (Cloudflare configuration reference, "Source of truth", fetched 2026-11-12). Then the iPhone device checks (`docs/admin.md`), then invites. Tester instructions: install to the home screen first, paste the invite in the app, save the recovery link; lost password **and** recovery link = data gone; don't sign in on shared computers.
 
-**Rollback:** safe to roll the Worker back to the pre-V7 version only **before the first invite** (the old `authenticateDevice` serves `data WHERE id = 1` to any token). After that, roll forward.
+**Rollback:**
+- The Worker may go back to the pre-V7 version only **before the first invite is used** (the old `authenticateDevice` serves `data WHERE id = 1` to any token). After that, roll forward.
+- After Phase 2, a Worker rollback needs the client reverted first: the V7 client sends `authorization` on `/feed` and the pre-V7 feed preflight does not allow it.
+- After Phase 3, a client rollback needs the flag off first (a commit removing `[vars]`, deployed): the pre-V7 client sends no bearer.
+- D1 restore: roll the Worker back first, then Time Travel restore (the V7 Worker cannot run on the pre-migration schema; the old `data.js` queries run on the migrated one, § 9).
+- Whether `wrangler rollback` restores a version's `[vars]` is unverified; turning the flag off is a roll-forward commit.
 
 ## 11. Open risks
 
-PBKDF2 time on iPhone Safari (SPECULATIVE; WebKit bug 277601) · Safe Links may carry the full recovery URL to Microsoft (SPECULATIVE; mitigated by D9) · shared `github.io` origin until the domain (D25) · a signed-out device keeps downloaded data (only DEK rotation cuts it off) · lost password **and** recovery link ⇒ unrecoverable · Workers Free's 100k requests/day is shared by every route; unauthenticated `/auth/*` can be spammed (pre-existing exposure via public smart add today) · D1 migration atomicity (SPECULATIVE; mitigated by closing the app).
+- **PBKDF2 time on iPhone Safari** (SPECULATIVE; WebKit bug 277601). Measured by Alex in the device checks (`docs/admin.md`); not yet measured.
+- **Safari tab vs Home Screen storage** (D24; to verify on device). The app warns in a Safari tab on sign-up and recovery; the separation itself is a device check.
+- **Lockout is 50 failures then 1 h, not escalating** (sweep SEC #2; Alex's decision, ruling R16). An attacker who knows an email gets at most 50 guesses per hour, about 1,200 per day per account (computed: 50 × 24), indefinitely. Against the D10 policy and blocklist that is slow, but it is a ceiling, not a stop. The same attacker can keep the owner's *login* locked; a signed-in owner's password change and new recovery link use the per-device counter instead (10 / 1 h, sweep W1-I7), and recovery is exempt (D11).
+- **Lost responses are not idempotent** (sweep CONC S7). If a sign-up or login response is lost after the server committed, the invite is used / a device row exists that no device holds. Sign-up then needs a new invite (or the user logs in with the password they chose); a lost login leaves an orphan device row, visible in the device list and removable with *Sign out other devices*. Fixing it needs client-generated idempotency keys; not done.
+- **Shared `github.io` origin until the domain** (D25). Every `*.github.io` site of the account shares `localStorage` with plaenicke, DEK included (D26).
+- **Phase 1–2 cap bypass** (sweep SEC #12, by design). In tolerant mode an anonymous smart add is served and not counted; only the Anthropic Console spend cap bounds it until Phase 3. An unknown or revoked bearer is treated as anonymous, not 401, on `POST /` and `/feed` in that window.
+- **Real-D1 behaviour the fake cannot show** (SPECULATIVE until the Phase-1 checks pass): per-statement `RETURNING` results inside `batch()`, the `UNIQUE constraint failed: accounts.email` message text, batch atomicity, D1 migration atomicity (mitigated by closing the app and the Time Travel bookmark).
+- **Sign-out revoke-then-refuse window** (ruling R13): an adoption write that starts during the logout round trip yields a refused sign-out after the session is already revoked; the user retries.
+- Safe Links may carry the full recovery URL to Microsoft (SPECULATIVE; mitigated by D9) · a signed-out device keeps downloaded data (only DEK rotation cuts it off; no DEK rotation exists) · lost password **and** recovery link ⇒ unrecoverable · Workers Free's 100k requests/day is shared by every route; unauthenticated `/auth/*` can be spammed.
 
 ## 12. Changes from draft `fd48fea`
 

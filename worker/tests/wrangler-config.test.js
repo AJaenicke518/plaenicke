@@ -34,3 +34,20 @@ test('invocation logs are off, so no request URL (and no feed token) is stored',
 test('Workers Logs stays enabled for console output (smart-add latency, D1 errors)', () => {
   assert.equal(sections(TOML).observability?.enabled, 'true');
 });
+
+// REQUIRE_SESSION (docs/admin.md, release Phase 3): the flag lives in this
+// file's [vars], because `wrangler deploy` overwrites variables set in the
+// dashboard unless keep_vars is true (developers.cloudflare.com/workers/
+// wrangler/configuration/, "Source of truth", checked 2026-11-12). So:
+// keep_vars must stay off — with it on, a dashboard value could outlive the
+// file — and a declared flag must be a value index.js's requireSession()
+// accepts, or every GET /feed and smart add answers 500 bad_config.
+test('keep_vars is not enabled: wrangler.toml stays the only source of REQUIRE_SESSION', () => {
+  assert.notEqual(sections(TOML)['']?.keep_vars, 'true');
+});
+
+test('a declared REQUIRE_SESSION is one requireSession() accepts', () => {
+  const v = sections(TOML).vars?.REQUIRE_SESSION;
+  if (v === undefined) return; // Phase 1 and 2: unset = tolerant
+  assert.ok(['"true"', '"false"', 'true', 'false'].includes(v), `REQUIRE_SESSION = ${v}`);
+});
