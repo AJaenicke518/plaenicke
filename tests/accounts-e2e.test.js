@@ -38,7 +38,7 @@ import * as account from '../js/account.js';
 import { initLinkUI, renderSyncStatus, signOutLocal, adoptionBlocker, ACCOUNT_COPY, SYNC_STATUS_ID } from '../js/linkui.js';
 import { initAccountUI, refreshAccount } from '../js/accountui.js';
 import { syncOnce, localState } from '../js/sync.js';
-import { getLink } from '../js/auth.js';
+import { getLink, unlink } from '../js/auth.js';
 import { composeForNewDevice, decryptBlob, parseLinkCode } from '../js/crypto.js';
 import { merge } from '../js/merge.js';
 import { applyEdit, nextStamp } from '../js/edit.js';
@@ -547,4 +547,90 @@ test('e2e 5: smart add through worker.fetch — tolerant tokenless is 200, requi
   } finally {
     globalThis.fetch = original;
   }
+});
+
+// Sweep W2-C2 (reproduced first by the data-integrity review, scen/s3b.mjs):
+// D holds account X and an ordinary sync is reading when D signs out and
+// signs in to account Y. The old sync used to finish after the switch —
+// apply X's records on D, push with X's credential — and Y's adoption then
+// merged X's private item into Y.
+test('e2e 6: a sync in flight across a sign-out and a sign-in to another account carries nothing into the new account', async () => {
+  const w = world();
+  const A = device('A');
+  const D = device('D');
+  const E = device('E');
+  await invite(w.env, 'INVITE-X');
+  await invite(w.env, 'INVITE-Y');
+
+  // Reads of /data with one chosen token can be held open.
+  let holdToken = null;
+  const gates = [];
+  const holding = {
+    fetchImpl: async (u, o = {}) => {
+      const isRead = String(u).endsWith('/data') && (o.method || 'GET') === 'GET';
+      if (holdToken && isRead && o.headers && o.headers.authorization === `Bearer ${holdToken}`) {
+        const res = await w.fetchImpl(u, o);
+        await new Promise((r) => gates.push(r));
+        return res;
+      }
+      return w.fetchImpl(u, o);
+    },
+  };
+
+  await use(A);
+  mountLinkUI(A, w);
+  const upX = await account.signUp({ invite: 'INVITE-X', email: EMAIL, password: PW, deviceName: 'A', ...w.api });
+  assert.equal(await linkAndAdopt(A, upX.code, upX.accountId), 'linked');
+
+  await use(D);
+  mountLinkUI(D, holding);
+  const lx = await account.logIn({ email: EMAIL, password: PW, deviceName: 'D', ...w.api });
+  assert.equal(await linkAndAdopt(D, lx.code, lx.accountId), 'linked');
+
+  await use(A);
+  const secret = newItem('X private item');
+  addLocal(secret);
+  assert.equal((await sync(A, w)).status, 'ok');
+  const xRow = await w.row(upX.accountId);
+
+  await use(E);
+  mountLinkUI(E, w);
+  addLocal(newItem('Y own task'));
+  const upY = await account.signUp({ invite: 'INVITE-Y', email: OTHER_EMAIL, password: OTHER_PW, deviceName: 'E', ...w.api });
+  assert.equal(await linkAndAdopt(E, upY.code, upY.accountId), 'linked');
+  const yItemsBefore = ids((await serverState(w, upY.accountId, getLink().encKey)).items);
+
+  await use(D);
+  holdToken = getLink().authToken;
+  const ordinary = sync(D, holding);
+  try {
+    await pollUntil(() => gates.length === 1, 'D\'s ordinary sync to read X');
+    // In this tab, sign-out waits for the sync (W2-C2's second half).
+    assert.equal(signOutLocal(), 'refused_write_in_flight');
+    assert.ok(getLink(), 'fixture check: still linked to X');
+    // Another tab signs out (it does not share this tab's signOutBlocked),
+    // and this tab signs in to Y while X's sync is still reading.
+    unlink();
+    const ly = await account.logIn({ email: OTHER_EMAIL, password: OTHER_PW, deviceName: 'D', ...w.api });
+    assert.equal(adoptionBlocker(ly.accountId), null, 'fixture check: D holds no planner, so Y is allowed');
+    const adoption = linkAndAdopt(D, ly.code, ly.accountId);
+    await pollUntil(() => getLink() && getLink().authToken !== holdToken, 'D to hold Y\'s credential');
+    gates.shift()();
+    const res = await ordinary;
+    assert.equal(res.status, 'skipped', 'X\'s sync saw the link change and stopped');
+    assert.equal(res.applied, false);
+    assert.equal(await adoption, 'linked');
+  } finally {
+    holdToken = null;
+    for (const g of gates) g();
+  }
+  await pollUntil(() => loadSyncState().adoptionPending === false, 'D\'s adoption into Y to finish');
+
+  assert.ok(!ids(loadItems()).includes(secret.id), 'X\'s item was never applied on D');
+  const yState = await serverState(w, upY.accountId, getLink().encKey);
+  assert.ok(!ids(yState.items).includes(secret.id), 'X\'s private item is not in Y\'s account');
+  assert.deepEqual(ids(yState.items), yItemsBefore, 'Y\'s account holds exactly its own items');
+  const xAfter = await w.row(upX.accountId);
+  assert.equal(xAfter.version, xRow.version, 'nothing was pushed to X with the old credential');
+  assert.equal(loadLocalOwner(), upY.accountId);
 });

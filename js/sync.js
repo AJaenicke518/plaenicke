@@ -156,6 +156,14 @@ const ADOPT_CHOICES = ['adopt-merge', 'adopt-bootstrap'];
 // a call that fails or rejects never wedges the ones behind it.
 let turn = Promise.resolve();
 
+// TRUE WHILE A syncOnce HOLDS THE TURN — past the queue and running, not
+// merely waiting in it (sweep W2-C2). linkui's signOutBlocked() asks this:
+// a sign-out under a running sync would leave it holding a credential this
+// device no longer has. A queued call is not counted: it reads the link only
+// once it holds the turn, so a sign-out before then is simply seen.
+let holding = false;
+export function syncHoldsTurn() { return holding; }
+
 export async function syncOnce(deps) {
   // Refused at once, never queued: a malformed call must not wait behind a
   // sync in flight to be told it was malformed.
@@ -172,8 +180,10 @@ export async function syncOnce(deps) {
   turn = new Promise((resolve) => { release = resolve; });
   try {
     await prior;
+    holding = true;
     return await syncOnceExclusive(deps);
   } finally {
+    holding = false;
     release();
   }
 }
@@ -212,12 +222,37 @@ async function syncOnceExclusive(deps) {
   const link = getLink();
   if (!link) return done('skipped');
 
+  // IS THIS STILL THE DEVICE'S LINK? (sweep W2-C2.) `link` was read once,
+  // above, and is held across the read and the write. A sign-out in that
+  // window — here, or in another tab sharing this localStorage — followed
+  // by a sign-in to a DIFFERENT account used to let this call apply the old
+  // account's records to the device and push with the old credential; the
+  // new account's adoption then merged those records in (reproduced against
+  // the real Worker). So before every applyState, every record() and the
+  // PUT, the stored link must still carry the token this call started with,
+  // and on any change the call stops with 'skipped': nothing applied from
+  // then on, nothing recorded onto the new link's cursor (its adoption gate
+  // included), nothing pushed. Each check sits with no await between it and
+  // the effect it guards.
+  const relinked = () => {
+    const nowLink = getLink();
+    return !nowLink || nowLink.authToken !== link.authToken;
+  };
+  // record(), only while the link is unchanged. Returns false when it
+  // refused, so a caller returns 'skipped' instead of its own status.
+  const recordIfSame = (patch) => {
+    if (relinked()) return false;
+    record(patch);
+    return true;
+  };
+
   // A freshly linked device must not pull-merge-push before the user has been
   // offered Merge / Cancel. Only the linking flow passes adoptChoice
   // (spec 5.7 — never union silently).
   if (isAdoptionPending() && !adoptChoice) return done('adoption-required');
 
-  await resetSyncStateIfDeviceChanged(link.authToken);
+  await resetSyncStateIfDeviceChanged(link.authToken, { stillCurrent: () => !relinked() });
+  if (relinked()) return done('skipped');
   if (isAdoptionPending() && !adoptChoice) return done('adoption-required');
 
   let pulled;
@@ -227,12 +262,12 @@ async function syncOnceExclusive(deps) {
     // Undecryptable or unparseable. Apply NOTHING: a record silently dropped
     // by a deserializer looks like a local deletion and would propagate a
     // tombstone to every device (spec 6.6).
-    record({ lastError: err.name || 'DecryptError' });
+    if (!recordIfSame({ lastError: err.name || 'DecryptError' })) return done('skipped');
     return done('undecryptable');
   }
-  if (pulled.networkError) { record({ lastError: 'offline' }); return done('offline'); }
-  if (pulled.unauthorized) { record({ lastError: 'unauthorized' }); return done('unauthorized'); }
-  if (pulled.failed) { record({ lastError: `http_${pulled.failed}` }); return done('error'); }
+  if (pulled.networkError) return recordIfSame({ lastError: 'offline' }) ? done('offline') : done('skipped');
+  if (pulled.unauthorized) return recordIfSame({ lastError: 'unauthorized' }) ? done('unauthorized') : done('skipped');
+  if (pulled.failed) return recordIfSame({ lastError: `http_${pulled.failed}` }) ? done('error') : done('skipped');
 
   // The account can move between the linking UI's previewRemote and this
   // call. A user who chose against data they SAW would otherwise have that
@@ -272,6 +307,9 @@ async function syncOnceExclusive(deps) {
     // loadSyncState().version — so "apply before advancing the cursor"
     // guards a write-only field. The real non-atomicity is inside applyState
     // itself (app.js's applySyncedState makes three separate writes).
+    // The read is back. If the link changed while it was out, these records
+    // belong to an account this device has left: apply none of them.
+    if (relinked()) return done('skipped');
     merged = applyState(merged, now()) || merged;
     // From here the local write HAS happened, so everything below reports a
     // device that has already changed.
@@ -282,12 +320,11 @@ async function syncOnceExclusive(deps) {
     // resolve to the same status, not reject syncOnce's promise.
     pushed = JSON.stringify(toWire(merged)) !== JSON.stringify(toWire(remote));
   } catch (err) {
-    record({ lastError: err.name || 'ApplyError' });
-    return done('error');
+    return recordIfSame({ lastError: err.name || 'ApplyError' }) ? done('error') : done('skipped');
   }
 
   if (!pushed) {
-    record({ version, lastSyncedAt: now().toISOString(), lastError: null });
+    if (!recordIfSame({ version, lastSyncedAt: now().toISOString(), lastError: null })) return done('skipped');
     if (adoptChoice) clearAdoptionPending();
     return done('ok', { pushed: false });
   }
@@ -300,9 +337,10 @@ async function syncOnceExclusive(deps) {
     try {
       blob = await encryptBlob(link.encKey, toWire(merged));
     } catch (err) {
-      record({ lastError: err.name || 'EncryptError' });
-      return done('error');
+      return recordIfSame({ lastError: err.name || 'EncryptError' }) ? done('error') : done('skipped');
     }
+    // encryptBlob awaited: the link may have changed since the apply.
+    if (relinked()) return done('skipped');
     let res;
     try {
       res = await fetchImpl(`${apiBase}/data`, {
@@ -313,10 +351,9 @@ async function syncOnceExclusive(deps) {
     } catch (err) {
       // Offline, or a CORS rejection — indistinguishable here; see fetchRemote.
       console.error('plaenicke: sync write failed', err && err.name);
-      record({ lastError: 'offline' });
-      return done('offline');
+      return recordIfSame({ lastError: 'offline' }) ? done('offline') : done('skipped');
     }
-    if (res.status === 401) { record({ lastError: 'unauthorized' }); return done('unauthorized'); }
+    if (res.status === 401) return recordIfSame({ lastError: 'unauthorized' }) ? done('unauthorized') : done('skipped');
     if (res.ok) {
       let body;
       try {
@@ -326,21 +363,22 @@ async function syncOnceExclusive(deps) {
         // failed. Report offline rather than reject syncOnce's promise —
         // the caller (Task 7's runSync) treats a resolved status as the
         // contract, not a thrown error it happens to catch.
-        record({ lastError: 'offline' });
-        return done('offline');
+        return recordIfSame({ lastError: 'offline' }) ? done('offline') : done('skipped');
       }
-      record({ version: body.version, lastSyncedAt: now().toISOString(), lastError: null });
+      // The old account's write landed; if the link changed while it was
+      // out, its version and above all its cleared adoption gate must not
+      // land on the new link's cursor.
+      if (!recordIfSame({ version: body.version, lastSyncedAt: now().toISOString(), lastError: null })) return done('skipped');
       if (adoptChoice) clearAdoptionPending();
       return done('ok', { pushed: true });
     }
-    if (res.status !== 409) { record({ lastError: `http_${res.status}` }); return done('error'); }
+    if (res.status !== 409) return recordIfSame({ lastError: `http_${res.status}` }) ? done('error') : done('skipped');
 
     let conflict;
     try {
       conflict = await res.json();
     } catch {
-      record({ lastError: 'offline' });
-      return done('offline');
+      return recordIfSame({ lastError: 'offline' }) ? done('offline') : done('skipped');
     }
     version = conflict.version;
 
@@ -351,9 +389,9 @@ async function syncOnceExclusive(deps) {
     try {
       remote = conflict.blob ? await decryptBlob(link.encKey, conflict.blob) : emptyState();
     } catch (err) {
-      record({ lastError: err.name || 'DecryptError' });
-      return done('undecryptable');
+      return recordIfSame({ lastError: err.name || 'DecryptError' }) ? done('undecryptable') : done('skipped');
     }
+    if (relinked()) return done('skipped');
     try {
       // Through merge() — see the main path for why a bare `merged = remote`
       // here would strip every feed's color.
@@ -367,13 +405,11 @@ async function syncOnceExclusive(deps) {
     } catch (err) {
       // A local apply failure is NOT 'undecryptable' — the remote data was
       // read fine. Same condition as the main path gets the same label.
-      record({ lastError: err.name || 'ApplyError' });
-      return done('error');
+      return recordIfSame({ lastError: err.name || 'ApplyError' }) ? done('error') : done('skipped');
     }
   }
 
   // Bounded, because the Worker's CAS check fails closed: an unexpected
   // meta.changes shape from D1 makes every PUT 409 forever.
-  record({ lastError: 'version_conflict' });
-  return done('conflict');
+  return recordIfSame({ lastError: 'version_conflict' }) ? done('conflict') : done('skipped');
 }

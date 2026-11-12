@@ -21,7 +21,7 @@
 
 import { getLink, linkWithCode, unlink, isAdoptionPending } from './auth.js';
 import { composeForNewDevice, base64urlToBytes, TOKEN_BYTES, KEY_BYTES } from './crypto.js';
-import { previewRemote, syncOnce, localState } from './sync.js';
+import { previewRemote, syncOnce, localState, syncHoldsTurn } from './sync.js';
 import { applyTombstones } from './merge.js';
 import { loadAuth, loadSyncState, loadLocalOwner, saveLocalOwner } from './storage.js';
 import { WORKER_URL } from './config.js';
@@ -541,8 +541,16 @@ let activeStartedAt = 0;
 // the session (account.logOut), as signOutButton below checks before
 // onSignOut: revoking and then being refused would leave this device linked
 // on a dead session while the write goes on pushing with it.
+//
+// AND while ANY syncOnce holds the turn — an ordinary sync from app.js's
+// runSync included (sweep W2-C2). That sync captured the link at entry too:
+// signed out under it, it used to go on to apply the old account's records
+// here and push them with the old credential. syncOnce now re-checks the
+// link itself before every effect; refusing here keeps the in-tab sign-out
+// from racing it at all. The wait is bounded by the read's deadline; a PUT
+// has none, and while one is out "it's safe to reload" applies.
 export function signOutBlocked() {
-  return Boolean(activeAdoption && writeInFlight);
+  return Boolean(activeAdoption && writeInFlight) || syncHoldsTurn();
 }
 
 export function signOutLocal() {

@@ -3064,3 +3064,35 @@ test('fix minor: the account copy linkui renders comes from ACCOUNT_COPY', async
   assert.equal(loadAuth(), null);
   assert.ok(allText(m.host).includes(linkuiNs.ACCOUNT_COPY.signed_out_notice));
 });
+
+// Sweep W2-C2: an ORDINARY sync (app.js's runSync) captured the link at entry
+// too. signOutBlocked() used to see only an adoption write, so a sign-out
+// under a running ordinary sync went through and the sync went on with the
+// old credential. It now also refuses while any syncOnce holds the turn.
+test('W2-C2: signOutBlocked() is true while an ordinary sync holds the turn, and signOutLocal refuses until it settles', async () => {
+  installFakeLocalStorage();
+  await linkWithCode(composeLinkCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(32))), generateEncKey()));
+  clearAdoptionPending();
+  saveLocalOwner(5);
+  const held = [];
+  const fetchImpl = async (url, opts = {}) => {
+    if ((opts.method || 'GET') === 'GET') await new Promise((r) => held.push(r));
+    return { ok: true, status: 200, json: async () => ({ version: 0, blob: '' }) };
+  };
+  assert.equal(linkuiNs.signOutBlocked(), false, 'nothing running');
+  const running = realSyncOnce({ fetchImpl, readFetchImpl: fetchImpl, now: () => NOW, apiBase: 'https://w.example', applyState: (s) => s });
+  try {
+    await settleUntil(() => held.length === 1);
+    assert.equal(held.length, 1, 'fixture check: the ordinary sync is reading');
+    assert.equal(linkuiNs.signOutBlocked(), true);
+    const authBefore = loadAuth();
+    assert.equal(linkuiNs.signOutLocal(), 'refused_write_in_flight');
+    assert.equal(loadAuth(), authBefore, 'the running sync keeps its credential');
+  } finally {
+    for (const r of held) r();
+    await running;
+  }
+  assert.equal(linkuiNs.signOutBlocked(), false);
+  assert.equal(linkuiNs.signOutLocal(), 'signed_out');
+  assert.equal(loadAuth(), null);
+});

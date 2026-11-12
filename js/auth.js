@@ -79,8 +79,12 @@ export function unlink() {
   saveSyncState({ ...ZERO_SYNC_STATE });
 }
 
-export async function resetSyncStateIfDeviceChanged(authToken) {
+// `stillCurrent` (optional): asked after the hash's await and before any
+// write, so a caller holding a link it read earlier (syncOnce, sweep W2-C2)
+// never resets the cursor of a link that replaced it in the meantime.
+export async function resetSyncStateIfDeviceChanged(authToken, { stillCurrent = () => true } = {}) {
   const hash = await tokenHash(authToken);
+  if (!stillCurrent()) return;
   const state = loadSyncState();
   if (state.tokenHash !== hash) saveSyncState({ ...ZERO_SYNC_STATE, tokenHash: hash, adoptionPending: true });
 }

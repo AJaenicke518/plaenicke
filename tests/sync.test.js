@@ -2,9 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { installFakeLocalStorage } from './fake-localstorage.js';
-import { syncOnce as realSyncOnce, previewRemote as realPreviewRemote, MAX_ATTEMPTS, recordSyncFailure, localState } from '../js/sync.js';
+import { syncOnce as realSyncOnce, previewRemote as realPreviewRemote, MAX_ATTEMPTS, recordSyncFailure, localState, syncHoldsTurn } from '../js/sync.js';
 import { fetchWithTimeout, FETCH_TIMEOUT_MS } from '../js/fetchtimeout.js';
-import { linkWithCode, clearAdoptionPending, tokenHash } from '../js/auth.js';
+import { linkWithCode, clearAdoptionPending, tokenHash, unlink, getLink } from '../js/auth.js';
 import { encryptBlob, decryptBlob, generateEncKey, bytesToBase64url, composeLinkCode } from '../js/crypto.js';
 import { SCHEMA_VERSION, toWire } from '../js/merge.js';
 import { saveItems, loadItems, loadFeeds, saveFeeds, saveAuth, loadSyncState, saveSyncState, saveDeadlineBaseline } from '../js/storage.js';
@@ -71,8 +71,10 @@ function codeOnly(src) {
     .split('\n').map((line) => line.replace(/(^|\s)\/\/.*$/, '$1')).join('\n');
 }
 
-test('neither orchestrator (sync.js, linkui.js) calls a storage writer for synced data or tombstones', () => {
-  for (const file of ['sync.js', 'linkui.js']) {
+// Sweep W2-I8: accountui.js and account.js (V7) sit on the same sign-in /
+// adoption path and are held to the same rule.
+test('no orchestrator (sync.js, linkui.js, accountui.js, account.js) calls a storage writer for synced data or tombstones', () => {
+  for (const file of ['sync.js', 'linkui.js', 'accountui.js', 'account.js']) {
     const code = codeOnly(readFileSync(new URL(`../js/${file}`, import.meta.url), 'utf8'));
     for (const forbidden of ['saveItems', 'saveFeeds', 'saveFeedCache', 'saveTombstones', 'addTombstone']) {
       assert.doesNotMatch(code, new RegExp(`\\b${forbidden}\\b`),
@@ -1179,4 +1181,201 @@ test('a malformed syncOnce call is refused immediately, without waiting for one 
   await assert.rejects(syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo, adoptChoice: 'adopt-replace' }), /unknown adoptChoice/);
   server.held.shift()();
   await inFlight;
+});
+
+// =========================================================================
+// Sweep W2-C2: the link can change under a sync in flight
+// =========================================================================
+//
+// syncOnce captures the link at entry and holds it across two awaits (the
+// read, the write). A sign-out — in this tab, or another tab writing the same
+// localStorage — followed by a sign-in to a DIFFERENT account in that window
+// used to let the old sync apply the old account's records here and push
+// them with the old credential; the new account's adoption then merged them
+// in (reproduced end to end: scen/s3b.mjs). syncOnce now re-checks that the
+// stored link still carries the token it started with before every
+// applyState, every record() and the PUT, and returns 'skipped' otherwise.
+
+const otherCode = () => composeLinkCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(32))), generateEncKey());
+
+// The new link as another tab would leave it: a fresh credential with its
+// own adoption gate raised (js/auth.js's linkWithCode).
+async function swapLink() {
+  const next = await linkWithCode(otherCode());
+  return next;
+}
+
+function freshCursor(link) {
+  return tokenHash(link.authToken).then((hash) => ({
+    version: 0, tokenHash: hash, lastSyncedAt: null, lastError: null, adoptionPending: true,
+  }));
+}
+// The five cursor fields the protocol writes (js/storage.js ZERO_SYNC_STATE).
+const cursor = () => {
+  const { version, tokenHash: th, lastSyncedAt, lastError, adoptionPending } = loadSyncState();
+  return { version, tokenHash: th, lastSyncedAt, lastError, adoptionPending };
+};
+
+test('W2-C2: a sign-out and a new sign-in while the read is out — nothing applied, recorded or pushed', async () => {
+  const link = await linked();
+  saveItems([item('mine', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer({ version: 4, blob: await encryptBlob(link.encKey, state({ items: [item('old-account', '2026-08-01T00:00:00.000Z')] })) });
+  let next;
+  const fetchImpl = async (url, opts = {}) => {
+    if ((opts.method || 'GET') === 'GET') next = await swapLink();
+    return server.fetchImpl(url, opts);
+  };
+  let applies = 0;
+  const res = await syncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: (s) => { applies += 1; return s; } });
+  assert.equal(res.status, 'skipped');
+  assert.equal(res.applied, false);
+  assert.equal(applies, 0, 'the old account\'s records were not applied here');
+  assert.deepEqual(server.calls.map((c) => c.method), ['GET'], 'nothing was pushed with the old credential');
+  assert.deepEqual(loadItems().map((i) => i.id), ['mine']);
+  assert.deepEqual(cursor(), await freshCursor(next), 'the new link\'s cursor and adoption gate are untouched');
+});
+
+test('W2-C2: a read that FAILS after the link changed records nothing on the new link', async () => {
+  await linked();
+  for (const answer of ['offline', 401, 500, 'undecryptable']) {
+    let next;
+    const fetchImpl = async () => {
+      next = await swapLink();
+      if (answer === 'offline') throw new TypeError('Failed to fetch');
+      if (answer === 'undecryptable') return { ok: true, status: 200, json: async () => ({ version: 1, blob: 'not-a-blob' }) };
+      return { ok: false, status: answer, json: async () => ({ error: 'x' }) };
+    };
+    const res = await syncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo });
+    assert.equal(res.status, 'skipped', `${answer}: skipped`);
+    assert.deepEqual(cursor(), await freshCursor(next), `${answer}: no lastError written on the new link`);
+    clearAdoptionPending();
+  }
+});
+
+test('W2-C2: signed out (no new link) while the read is out — skipped, nothing applied or pushed', async () => {
+  const link = await linked();
+  const server = fakeServer({ version: 1, blob: await encryptBlob(link.encKey, state({ items: [item('old-account', '2026-08-01T00:00:00.000Z')] })) });
+  const fetchImpl = async (url, opts = {}) => {
+    if ((opts.method || 'GET') === 'GET') unlink();
+    return server.fetchImpl(url, opts);
+  };
+  let applies = 0;
+  const res = await syncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: (s) => { applies += 1; return s; } });
+  assert.equal(res.status, 'skipped');
+  assert.equal(applies, 0);
+  assert.equal(getLink(), null);
+  assert.deepEqual(server.calls.map((c) => c.method), ['GET']);
+  assert.deepEqual(loadItems(), []);
+});
+
+test('W2-C2: the link changed between the apply and the PUT — nothing is pushed with the old credential', async () => {
+  await linked();
+  saveItems([item('mine', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer();
+  let next;
+  // applyState is synchronous; the swap lands on storage the way another
+  // tab's write would, between this apply and the encrypt/PUT that follow.
+  const swapStorage = () => {
+    const code = otherCode();
+    saveSyncState({ version: 0, tokenHash: 'other-tab', lastSyncedAt: null, lastError: null, adoptionPending: true });
+    saveAuth(code);
+    next = getLink();
+  };
+  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: (s) => { swapStorage(); return s; } });
+  assert.equal(res.status, 'skipped');
+  assert.equal(res.applied, true, 'stated truthfully: the apply had already happened');
+  assert.deepEqual(server.calls.map((c) => c.method), ['GET'], 'no PUT');
+  assert.equal(server.row.version, 0);
+  assert.equal(getLink().authToken, next.authToken);
+  assert.deepEqual(cursor(), {
+    version: 0, tokenHash: 'other-tab', lastSyncedAt: null, lastError: null, adoptionPending: true,
+  }, 'nothing recorded on the new link');
+});
+
+test('W2-C2: the link changed while the PUT was out — the new link\'s cursor and adoption gate are untouched', async () => {
+  await linked();
+  saveSyncState({ adoptionPending: true });
+  saveItems([item('mine', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer();
+  let next;
+  const fetchImpl = async (url, opts = {}) => {
+    if (opts.method === 'PUT') next = await swapLink();
+    return server.fetchImpl(url, opts);
+  };
+  const res = await syncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo, adoptChoice: 'adopt-bootstrap' });
+  assert.equal(res.status, 'skipped');
+  assert.equal(server.row.version, 1, 'fixture check: the old account\'s PUT landed');
+  assert.deepEqual(cursor(), await freshCursor(next),
+    'no version, lastSyncedAt or cleared adoption gate recorded on the new link');
+});
+
+test('W2-C2: the link changed while a 409 was out — the retry neither re-applies nor pushes', async () => {
+  const link = await linked();
+  saveItems([item('mine', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer({ version: 2, blob: await encryptBlob(link.encKey, state()) });
+  let puts = 0;
+  let next;
+  const fetchImpl = async (url, opts = {}) => {
+    if (opts.method === 'PUT') {
+      puts += 1;
+      next = await swapLink();
+      return { ok: false, status: 409, json: async () => ({ error: 'version_conflict', version: 3, blob: await encryptBlob(link.encKey, state({ items: [item('old-account', '2026-08-01T00:00:00.000Z')] })) }) };
+    }
+    return server.fetchImpl(url, opts);
+  };
+  let applies = 0;
+  const res = await syncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: (s) => { applies += 1; return s; } });
+  assert.equal(res.status, 'skipped');
+  assert.equal(applies, 1, 'only the first apply ran');
+  assert.equal(puts, 1, 'no second PUT');
+  assert.deepEqual(loadItems().map((i) => i.id), ['mine']);
+  assert.deepEqual(cursor(), await freshCursor(next));
+});
+
+test('W2-C2: syncHoldsTurn is true exactly while a syncOnce holds the queue', async () => {
+  await linked();
+  const server = heldServer();
+  assert.equal(syncHoldsTurn(), false);
+  const running = syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo });
+  await settleUntil(() => server.held.length === 1);
+  assert.equal(syncHoldsTurn(), true, 'a sync is past the queue and holding it');
+  server.held.shift()();
+  await running;
+  assert.equal(syncHoldsTurn(), false, 'released when it settles');
+  const failing = syncOnce({ fetchImpl: async () => { throw new TypeError('x'); }, now: NOW, apiBase: 'https://w.example', applyState: echo });
+  await failing;
+  assert.equal(syncHoldsTurn(), false, 'released after a failure too');
+});
+
+test('W2-C2: the link changed while the token was being hashed — the new link\'s cursor is not reset, nothing is read', async () => {
+  await linked();
+  // Another tab's sign-in lands while syncOnce awaits the token hash
+  // (WebCrypto): the first digest call swaps the stored link.
+  const subtle = globalThis.crypto.subtle;
+  const realDigest = subtle.digest.bind(subtle);
+  let next;
+  let swapped = false;
+  subtle.digest = async (...a) => {
+    const out = await realDigest(...a);
+    if (!swapped) {
+      swapped = true;
+      saveSyncState({ version: 7, tokenHash: 'other-tab', lastSyncedAt: '2026-08-01T00:00:00.000Z', lastError: null, adoptionPending: false });
+      saveAuth(otherCode());
+      next = getLink();
+    }
+    return out;
+  };
+  const server = fakeServer();
+  try {
+    const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo });
+    assert.equal(res.status, 'skipped');
+    assert.deepEqual(server.calls, [], 'nothing was read with the old credential');
+  } finally {
+    subtle.digest = realDigest;
+  }
+  assert.ok(next);
+  assert.deepEqual(cursor(), {
+    version: 7, tokenHash: 'other-tab', lastSyncedAt: '2026-08-01T00:00:00.000Z', lastError: null, adoptionPending: false,
+  }, 'the new link\'s cursor was not reset to the old token');
 });
