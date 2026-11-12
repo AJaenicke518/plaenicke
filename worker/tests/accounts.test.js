@@ -152,6 +152,19 @@ test('10. lockout at exactly 50, expires after an hour', async () => {
   assert.equal((await one(env, 'SELECT failed_logins FROM accounts WHERE email IS NOT NULL')).failed_logins, 0);
 });
 
+test('10b. after an expired lock a WRONG key restarts the window at 1', async () => {
+  const { env } = await signedUp();
+  env.NOW = () => T0;
+  const bad = { authKey: b64u(32, 9) };
+  for (let i = 1; i <= 50; i += 1) await login(env, bad);
+  assert.equal((await login(env, bad)).status, 429);
+  env.NOW = () => '2026-11-11T13:01:00.000Z';
+  assert.equal((await login(env, bad)).status, 401);
+  const row = await one(env, 'SELECT failed_logins, locked_until FROM accounts WHERE email IS NOT NULL');
+  assert.equal(row.failed_logins, 1);
+  assert.equal(row.locked_until, null);
+});
+
 test('11 + 20. 60 concurrent wrong logins: exactly 50 x 401, 10 x 429, all with retryAt', async () => {
   const { env } = await signedUp();
   env.NOW = () => T0;
@@ -269,6 +282,7 @@ test('19. validation failures are 400 and consume no invite', async () => {
   for (const over of [
     { kdfIters: 599999 }, { email: '' }, { email: 'no-at-sign' }, { deviceName: 'x'.repeat(101) },
     { deviceName: '' }, { authKey: b64u(31, 2) }, { recAuthKey: 'not base64!' }, { kdfSalt: b64u(15, 1) },
+    { dekCheck: 'a'.repeat(63) }, { dekCheck: 'A'.repeat(64) }, { dekCheck: 'g'.repeat(64) }, { dekCheck: 'a'.repeat(65) },
     { wrappedDekPw: b64(59, 4) }, { wrappedDekRec: b64(61, 5) }, { kdfIters: 600000.5 },
   ]) {
     const res = await post(env, '/auth/signup', body(over));

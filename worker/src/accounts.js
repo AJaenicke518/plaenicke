@@ -67,7 +67,7 @@ async function handleSignup(request, env, A) {
     || !isB64u(b.kdfSalt, 16) || !Number.isInteger(b.kdfIters) || b.kdfIters < MIN_ITERS
     || !isB64u(b.authKey, 32) || !isB64u(b.recAuthKey, 32)
     || !isB64(b.wrappedDekPw, 60) || !isB64(b.wrappedDekRec, 60)
-    || typeof b.dekCheck !== 'string' || b.dekCheck.length < 1 || b.dekCheck.length > 128
+    || typeof b.dekCheck !== 'string' || !/^[0-9a-f]{64}$/.test(b.dekCheck)
     || !validName(b.deviceName)) {
     return json({ error: 'bad_request' }, 400);
   }
