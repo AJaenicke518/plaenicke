@@ -47,3 +47,18 @@ test('55 parallel slot takers (each statement yields a macrotask) get exactly 50
   assert.equal(res.filter((r) => r.ok).length, 50);
   assert.equal(res.filter((r) => !r.ok).length, 5);
 });
+
+test('recordTokens touches only its own (account, day) row: two days and two accounts in one test', async () => {
+  const env = { DB: makeD1() };
+  await env.DB.prepare("INSERT INTO accounts (id, email, created_at) VALUES (2, 'b@x.de', 't')").run();
+  await takeSmartAddSlot(env, 1, '2026-11-11');
+  await takeSmartAddSlot(env, 1, '2026-11-12');
+  await takeSmartAddSlot(env, 2, '2026-11-12');
+  await recordTokens(env, 1, '2026-11-12', 40, 4);
+  const rows = (await env.DB.prepare('SELECT account_id, day, in_tok, out_tok FROM usage ORDER BY account_id, day').all()).results;
+  assert.deepEqual(rows, [
+    { account_id: 1, day: '2026-11-11', in_tok: 0, out_tok: 0 },
+    { account_id: 1, day: '2026-11-12', in_tok: 40, out_tok: 4 },
+    { account_id: 2, day: '2026-11-12', in_tok: 0, out_tok: 0 },
+  ]);
+});
