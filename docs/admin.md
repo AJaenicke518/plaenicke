@@ -392,7 +392,7 @@ Result log:
 
 | Item | Value |
 |---|---|
-| Wrangler version used for the V7 release | 4.161.0 (fetched by `npx`; now pinned in `worker/package.json`) |
+| Wrangler version used for the V7 release | 4.161.0 — every Phase 1–3 command printed `wrangler 4.161.0` in its banner, and the npx cache entry for 4.161.0 was last written 2026-11-12 16:39 PST. Now pinned in `worker/package.json` |
 | Phase 1 Time Travel bookmark | `00000096-00000002-00005121-3566d88ae37927ffa43006833fd2e082` (2026-11-12 15:39 PT; export `~/plaenicke-backups/backup-2026-11-12-1539.sql`, 25,327 B) |
 | Phase 1 `/version` | `worker-2026-11-12.1` (2026-11-12, Version ID 5a367de6-917e-4e48-808a-15658c1291ee; probes: feed 400 bad_url, prelogin 404 no_account, accounts 1 row id 1 email null devices 3) |
 | Phase-1 checks 1–4 | All pass 2026-11-12: signup token 43 chars; duplicate 409 email_taken + second invite revoked (rollback ok); login sealRoundTrip true, devices 2; cleanup deleted, accounts length 1. Step 7 (legacy two-device sync) pass. |

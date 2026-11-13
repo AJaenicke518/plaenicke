@@ -145,7 +145,7 @@ applied. Check state with:
 (cd worker && npm run wrangler -- d1 migrations list plaenicke --remote)   # unapplied migrations only
 ```
 
-Verified against wrangler 4.118.0: `migrations list` picks up
+Verified against wrangler 4.118.0 (before the version pin; the pin is now 4.161.0): `migrations list` picks up
 `migrations/0001_init.sql` with no `migrations_dir` set, and after `apply` the
 file is recorded in `d1_migrations`.
 
