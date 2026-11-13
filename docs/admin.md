@@ -396,5 +396,5 @@ Result log:
 | Phase 1 `/version` | `worker-2026-11-12.1` (2026-11-12, Version ID 5a367de6-917e-4e48-808a-15658c1291ee; probes: feed 400 bad_url, prelogin 404 no_account, accounts 1 row id 1 email null devices 3) |
 | Phase-1 checks 1–4 | All pass 2026-11-12: signup token 43 chars; duplicate 409 email_taken + second invite revoked (rollback ok); login sealRoundTrip true, devices 2; cleanup deleted, accounts length 1. Step 7 (legacy two-device sync) pass. |
 | Phase 2 step 5 smartAddToday before / after | 0 / 2 (2026-11-13 00:06:41Z / 00:08:37Z UTC; push 05d7b42, Pages v7-0 live ~20 s after push) |
-| Phase 3 `/version` | |
-| Phase 3 smoke result | |
+| Phase 3 `/version` | `worker-2026-11-12.2` (2026-11-13 UTC, Version ID b85fa7b2-9d44-4f8c-b2f5-ec046788d394, commit cd53035; `/feed?url=x` 401 unauthorized) |
+| Phase 3 smoke result | 6/6 passed; smoke token revoked, file removed. Step 6 (both devices: smart add works, no signed-out stamp on calendars) pass. Phase 2b: unused "spare" device revoked; account 1 upgraded, recoveryConfirmed true, phone legacy link still syncs. |
