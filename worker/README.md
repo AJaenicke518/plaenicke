@@ -42,7 +42,7 @@ shapes for every admin route are in `docs/admin.md`.
 |---|---|---|
 | `ADMIN_SECRET` | secret | Bearer for every `/admin/*` route: devices, invites, accounts, disable, email, delete, upgrade codes. |
 | `ANTHROPIC_API_KEY` | secret | Smart add's key for the Claude API (`POST /`). |
-| `AT_REST_KEY` | secret | 32 bytes base64url (43 characters). Seals the stored password and recovery wraps and MACs the stored auth keys (`src/seal.js`). Missing or not 32 bytes: the account routes (`/auth/*`, `/account/*`) answer 500 `not_configured`. A different key from the one that first ran: they answer 500 `at_rest_key_mismatch` (a `config` row holds the key check). `/data` sync, smart add and `/feed` never read it. Keep a second copy in a password manager; sealed values cannot be read without it. Set with `printf '%s' "$K" \| npx wrangler secret put AT_REST_KEY` (`docs/admin.md`, Phase 1). |
+| `AT_REST_KEY` | secret | 32 bytes base64url (43 characters). Seals the stored password and recovery wraps and MACs the stored auth keys (`src/seal.js`). Missing or not 32 bytes: the account routes (`/auth/*`, `/account/*`) answer 500 `not_configured`. A different key from the one that first ran: they answer 500 `at_rest_key_mismatch` (a `config` row holds the key check). `/data` sync, smart add and `/feed` never read it. Keep a second copy in a password manager; sealed values cannot be read without it. Set with `printf '%s' "$K" \| npm run wrangler -- secret put AT_REST_KEY` (`docs/admin.md`, Phase 1). |
 | `REQUIRE_SESSION` | var, in `wrangler.toml` `[vars]` only | `true` or `"true"`: `GET /feed` and smart add (`POST /`) require a device token (401 `unauthorized` without one). `false`, `"false"` or unset: tolerant, a valid bearer is counted when sent but not required, and an unknown one is served as anonymous. Any other value (`"1"`, `"TRUE"`, …): the real `GET /feed` and `POST /` answer 500 `bad_config`; OPTIONS and the Origin check are unaffected. Never set it in the dashboard or with `--var`: `wrangler deploy` overwrites dashboard variables unless `keep_vars = true` (developers.cloudflare.com/workers/wrangler/configuration/, "Source of truth", fetched 2026-11-12), so it would silently vanish on the next deploy. `tests/wrangler-config.test.js` pins both. |
 
 Smart add is capped at 50 calls per account per UTC day (429 `daily_limit` with `resetsAt`).
@@ -126,12 +126,12 @@ first command creates the database, and its returned id replaces the one in
 
 ```bash
 cd worker
-npx wrangler d1 create plaenicke        # put the returned database_id in wrangler.toml
-npx wrangler d1 migrations apply plaenicke --remote
-npx wrangler secret put ADMIN_SECRET       # paste a generated secret at the prompt — see below
-npx wrangler secret put ANTHROPIC_API_KEY  # paste the key from the Anthropic Console
-npx wrangler secret put AT_REST_KEY        # 32 random bytes, base64url; generate it like ADMIN_SECRET below, keep a second copy
-npx wrangler deploy
+npm run wrangler -- d1 create plaenicke        # put the returned database_id in wrangler.toml
+npm run wrangler -- d1 migrations apply plaenicke --remote
+npm run wrangler -- secret put ADMIN_SECRET       # paste a generated secret at the prompt — see below
+npm run wrangler -- secret put ANTHROPIC_API_KEY  # paste the key from the Anthropic Console
+npm run wrangler -- secret put AT_REST_KEY        # 32 random bytes, base64url; generate it like ADMIN_SECRET below, keep a second copy
+npm run wrangler -- deploy
 ```
 
 `migrations apply` rather than `d1 execute --file=`: `migrations/` is already
@@ -142,7 +142,7 @@ would leave later migrations with no record of what production has already
 applied. Check state with:
 
 ```bash
-(cd worker && npx wrangler d1 migrations list plaenicke --remote)   # unapplied migrations only
+(cd worker && npm run wrangler -- d1 migrations list plaenicke --remote)   # unapplied migrations only
 ```
 
 Verified against wrangler 4.118.0: `migrations list` picks up
@@ -217,7 +217,7 @@ There is no HTTP route that lists devices or looks up a token's hash
   `name`, `created_at`, and `last_seen_at` alongside `token_hash`
   (`migrations/0002_accounts.sql`):
   ```bash
-  (cd worker && npx wrangler d1 execute plaenicke --remote \
+  (cd worker && npm run wrangler -- d1 execute plaenicke --remote \
     --command "SELECT account_id, name, token_hash, last_seen_at FROM devices")
   ```
 

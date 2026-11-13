@@ -3,5 +3,8 @@
   "version": "0.1.0",
   "type": "module",
   "private": true,
-  "scripts": { "test": "node --test" }
+  "scripts": {
+    "test": "node --test",
+    "wrangler": "npx --yes wrangler@4.161.0"
+  }
 }
