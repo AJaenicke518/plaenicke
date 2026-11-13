@@ -17,13 +17,13 @@
   --today: #8a5a3b;
   --grid-line: #e9e2d4;
   /* item type colors (warm-tuned) */
-  --type-due: #b04a3a;
-  --type-start: #3d6b9e;
-  --type-milestone: #a97a28;
-  --type-event: #4a7a54;
+  --type-due: #ac4737;
+  --type-start: #3c6a9d;
+  --type-milestone: #8c5e00;
+  --type-event: #42724c;
   --type-general: #6f6558;
-  --type-task: #7a5aa0;
-  --type-idea: #4a7f8a;
+  --type-task: #79599e;
+  --type-idea: #3a6f7a;
   --on-type: #fffdf8;               /* text on type-colored blocks */
   --shade: rgba(0, 0, 0, 0.25);     /* subtle overlay accents */
   --scrim: rgba(0, 0, 0, 0.35);     /* modal backdrop */
@@ -34,11 +34,11 @@
      from / cycle through. Kept distinct from the item-type palette above so
      an external (feed-colored) block never reads as a same-hued own item. */
   --feed-palette-1: #5b5aa3;  /* violet */
-  --feed-palette-2: #2f7f7a;  /* teal */
+  --feed-palette-2: #1f726d;  /* teal */
   --feed-palette-3: #a3436f;  /* rose */
   --feed-palette-4: #4f6070;  /* slate */
-  --feed-palette-5: #8a7a2e;  /* olive */
-  --feed-palette-6: #b3654a;  /* terracotta */
+  --feed-palette-5: #776717;  /* olive */
+  --feed-palette-6: #9d5237;  /* terracotta */
   /* Spacing and radii (home-screen spec § 5). Theme-independent: defined
      here only, never in [data-theme="dark"], so the two cannot drift. */
   --space-1: 4px;
@@ -83,7 +83,7 @@
   --type-start: #7c9ec9;
   --type-milestone: #e0b356;
   --type-event: #63b57e;
-  --type-general: #7d828c;
+  --type-general: #898f99;
   --type-task: #a98fd0;
   --type-idea: #6fb3c0;
   --on-type: #14161a;
