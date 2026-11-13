@@ -8,7 +8,7 @@
 // deletes entries from plaenicke.feedCache. `removeFeed` is likewise the only
 // sanctioned way to delete a feed — settings.js (Task 7) calls it rather than
 // touching storage.js directly. `applyRemoteFeeds` is the sync-side mirror of
-// that same rule: js/sync.js hands merged state to applyState(state, opts)
+// that same rule: js/sync.js hands merged state to applyState(state, now, progress)
 // and never writes storage itself (spec 5.5) — this file is what actually
 // persists the feeds half of it.
 
@@ -856,7 +856,7 @@ export function removeFeed(id, { userWrite = false } = {}) {
 // FEED_PALETTE (js/palette.js), the same cycle settings.js offers on Add.
 
 // applyRemoteFeeds: the feeds half of the "single writer" fix — js/sync.js
-// hands merged state to applyState(state, opts) and never writes storage
+// hands merged state to applyState(state, now, progress) and never writes storage
 // itself (spec 5.5); this IS that write, for plaenicke.feeds.
 //
 // - A local feed absent from `mergedFeeds` is gone remotely (another
