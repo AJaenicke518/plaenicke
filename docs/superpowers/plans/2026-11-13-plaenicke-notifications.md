@@ -1,9 +1,9 @@
 # Plan — V8 notifications
 
-Spec: `docs/superpowers/specs/2026-11-13-plaenicke-notifications-design.md`. **Not started. Needs Alex's approval of the spec (revision 2), rulings N1–N20 and answers to spec § 8 first. Revision 3 was not reviewed: run a devil's advocate on it before T1.** Every task test-first; gate on `npm test` `# fail 0` and `# cancelled 0`; a fresh reviewer per task that runs the code.
+Spec: `docs/superpowers/specs/2026-11-13-plaenicke-notifications-design.md`. **Not started. Needs Alex's approval of the spec (revision 2), rulings N1–N20 and the last open question in spec § 8 first. Revision 3 was not reviewed: run a devil's advocate on it before T1.** Every task test-first; gate on `npm test` `# fail 0` and `# cancelled 0`; a fresh reviewer per task that runs the code.
 
 ## Phase 0 — before any code (Alex + Claude, ~no code)
-- **P0.1** Alex: iOS version on the iPhone (Settings → General → About). Stop if < 16.4.
+- **P0.1** Done 2026-11-13: Alex is on the latest iOS (declarative Web Push available).
 - **P0.2** Alex: Cloudflare dashboard → Workers → each Worker's Triggers — how many of the 5 account Cron Triggers are used (wrangler 4.161.0 has `triggers deploy` only, no list).
 - **P0.4** One remote check: on a scratch table, `INSERT … ON CONFLICT DO NOTHING RETURNING` returns zero rows on a conflict on production D1 (`npm run wrangler -- d1 execute plaenicke --remote --command …`, then drop the table).
 - **P0.3** Real-device spike (also check: `subscribe` after an awaited `requestPermission` still works in standalone mode; a declarative push is not shown twice when a SW `push` handler exists; a forced 410 after unsubscribing): Alex generates a VAPID key pair (script from `docs/superpowers/reports/spike-webpush/`), a throwaway page on the Pages origin subscribes the home-screen app, and a local Node script using the spike library sends one declarative push through `web.push.apple.com`. Success = the notification appears on the lock screen and tapping it opens plaenicke. If it fails, the design stops here.

@@ -4,6 +4,8 @@ Date: 2026-11-13. Status: **draft for Alex's approval** (written autonomously; r
 
 **Revision 2 (same day), after a devil's-advocate review** (1 Critical, 11 Important; `.superpowers/sdd/2026-11-13-autonomous/da-spec-findings.md`). The pre-built queue was replaced by send-time composition with a natural-key claim (§ 4–5). **Revision 3 (same day), after a review sweep of revision 2** (6 findings consolidated as Critical, 11 Important; `.superpowers/sdd/2026-11-13-autonomous/sweep-findings.md`): `next_fire_at` can only move earlier from an upload, claims are budgeted and released on retryable failures, the server holds the items hash, dead accounts are cleaned at once, and feed instances need a real-start contract from `js/ics.js` (new plan task). **Revision 3 has not been reviewed** — review it again before building.
 
+**Alex's answers (2026-11-13):** weekly series repeat, monthly/yearly do not (N10 confirmed); notifications on the phone only (N17 tightened); iOS is the latest version (declarative push available); midnight deadlines follow the standard behaviour (N20 replaced). Q3 (the two added push types) still open.
+
 Labels: **concrete** = verified in this repo, a cited source, or a measurement; **speculative** = needs a check, which is named.
 
 Inputs:
@@ -40,7 +42,7 @@ Inputs:
 | D4 | Scheduler | One minutely Cron Trigger on the existing Worker. **No pre-built queue:** each run picks accounts whose `next_fire_at` has arrived, composes due messages from the current snapshot, and claims each by a natural key `(account, kind, slot)` with `INSERT OR IGNORE … RETURNING` | A rebuilt queue double-sent or dropped messages on every upload (DA C1) and cost ~160 D1 row writes per upload (DA I2). A natural key makes a slot impossible to send twice and impossible to lose to a concurrent upload; uploads become one row write. |
 | D5 | Message format | Declarative Web Push JSON (`web_push: 8030`, `notification.title`, `body`, `navigate` = `APP_URL`), RFC 8291 aes128gcm, VAPID ES256 | Shows without SW code on 18.4+; the SW also gets a `push` handler that shows the same JSON for 16.4–18.3 and desktop browsers. |
 | D6 | Time zone | Stored per account, sent by the subscribing device on subscribe and on every open | Item times are zone-less wall-clock strings; the phone's zone is the one that matters for a phone-only feature. |
-| D7 | Who subscribes | **One subscription per account; turning reminders on from a device replaces the previous device's subscription** (N17 — Alex to confirm) | Matches "phone only" without browser sniffing, and removes feeds-half flip-flops between devices with different series visibility, per-account time-zone fights, subrequest multiplication and mixed VAPID audiences (DA I8–I10). |
+| D7 | Who subscribes | **The phone only** (Alex, 2026-11-13): the Reminders switch appears only in the iPhone home-screen app (`navigator.standalone === true`, a WebKit-only property that is true exactly there), and the server keeps one subscription per account (N17) | Matches "phone only" without browser sniffing, and removes feeds-half flip-flops between devices with different series visibility, per-account time-zone fights, subrequest multiplication and mixed VAPID audiences (DA I8–I10). |
 | D8 | Cleanup | Every send joins `devices`, so a deleted device row stops its pushes at once; explicit deletes on reminders-off, sign-out, account delete/disable | V7 deletes device rows on 7 paths (sign-out, sign out others, password change, recovery, admin disable, admin delete, revoke); a join covers all of them without touching each. |
 
 ## 4. Data model (migration `0003_notifications.sql`)
@@ -101,7 +103,7 @@ Each entry is one **occurrence** with its real start (`startDate`, `startTime`).
 For local day D in `prefs.tz` (horizon: today + 7):
 - **summary** — slot `D`, fires at D `morning_at`, window 2 h. Lines: D's non-repeating events, timed and all-day, own `EVENT_TYPES` and feed (continuations listed once as "continues"), in time order; D's undone to-dos (`due`/`start`/`milestone`/`task`), deadlines first; up to 2 upcoming items within the data the snapshot holds. Title "Today: N events, M due"; the first 4 body lines carry the most important items (the lock screen shows few), then up to 8, then "+K more". Empty day → "Nothing scheduled today" (N8).
 - **event** — slot `startDate|key` (the event's start date, not the fire date — they differ for events before 00:30), fires at real start − 30 min, window 15 min; timed, non-repeating occurrences only.
-- **nudge** — slot `D`, fires at D−1 `nudge_at`, window 1 h, listing undone `due` items on D. A deadline before 06:00 (Brightspace often exports 00:00) is nudged the evening before the previous day, and the morning summary of its own day does not list it as due (it has passed) — ruling N20.
+- **nudge** — slot `D`, fires at D−1 `nudge_at`, window 1 h, listing undone `due` items on D. Deadlines are taken literally by date and time (N20): the nudge goes the evening before the deadline's date; the summary lists only deadlines still ahead at send time.
 - **stale-items / stale-feeds** — once, the morning after that half's data runs out (items: "Open plaenicke to keep reminders coming"; feeds: "Open plaenicke on the phone to refresh calendar events"), window 12 h (N7).
 - A message whose window has passed is never sent. DST: wall-clock times converted per day with `Intl`; a non-existent time (spring forward) fires at the next valid minute; an ambiguous time (fall back 01:30) fires at the first occurrence.
 
@@ -148,24 +150,23 @@ The V7 promise ("the server cannot read your planner") stays true for every acco
 - **N7** — When a half's data runs out, one "open plaenicke" push per half replaces silence. **This is a notification type Alex did not ask for.** Cost: at most one push per half per week.
 - **N8** — The morning summary always sends, even on an empty day (the daily canary that pushes still work). **An addition to Alex's scope** — he may prefer silence on empty days. Cost: a daily push that may say "nothing scheduled".
 - **N9** — "Timed event" = own items of `EVENT_TYPES` (`event`, `general`; imported from `js/today.js`, not copied) with a `time`, and feed instances with a time. To-dos with a time get no 30-min reminder; deadlines are covered by the nudge.
-- **N10** — "Repeating" = the app's existing meaning (`recurring: true`): DAILY/WEEKLY series plus series the heuristic guessed (same title, weekday and time on ≥ 3 weeks, `js/feeds.js:454-460`). MONTHLY/YEARLY series count as one-offs, so a monthly meeting **does** get a 30-min reminder. **Alex to confirm (§ 8, Q2).**
+- **N10** — **Confirmed by Alex 2026-11-13:** weekly series repeat (no 30-min reminder); monthly and yearly series do not (they get one). This is the app's existing `recurring` meaning (`js/feeds.js:454-460`): DAILY and WEEKLY series, plus series the heuristic guessed from the same title, weekday and time on ≥ 3 weeks. Daily series stay "repeating" too — Alex named weekly; daily repeats more often than weekly, so it follows.
 - **N11** — Defaults: morning 07:30, nudge 20:00, editable in Settings. Cost: none.
 - **N12** — No acknowledgement from the service worker in v1: an ack needs the session token readable by the SW, i.e. a new IndexedDB copy of a credential. Health is "last sent" from the server plus the daily summary as canary.
 - **N13** — `scheduled()` lives in the existing Worker (one deploy unit). Invocation logs stay off (they would record `/feed` capability URLs). Production CPU is checked via the dashboard's aggregate CPU metrics; if those are not available on Free, a one-off measurement Worker is the fallback (spike § 6). Cost: CPU headroom only estimated until then.
 - **N14** — VAPID `sub` is the app URL, not an email (Apple accepts a URL or `mailto:`), so no contact address is published.
 - **N15** — A user-visible failure mode: on 404/410 the subscription is deleted and Settings says reminders stopped. No silent retry loop.
 - **N16** — Notifications are V8, a separate release after V7's iPhone device checks; release order Worker (migration, routes, cron) → client → turn on.
-- **N17** — One subscription per account; the newest device to turn reminders on replaces the previous one. **Alex to confirm (§ 8, Q1).**
+- **N17** — **Phone only (Alex, 2026-11-13).** The switch is shown only when `navigator.standalone === true`; the server still keeps at most one subscription per account (a re-installed home-screen app replaces the old one).
 - **N18** — Feed entry key = SHA-256 of feedId + uid + start date + start time, truncated to 16 hex (unique across feeds and same-day duplicate UIDs, DA O3).
-- **N20** — A deadline before 06:00 is nudged the evening before the previous day, and is not listed as due in its own day's summary. **This changes "the evening before" for such deadlines — Alex to confirm.**
+- **N20** — **Alex, 2026-11-13: follow the standard.** A deadline is taken literally by its date and time, with no special case: the nudge fires the evening before its *date*, so a 00:00 deadline on Friday is nudged Thursday at `nudge_at` (a few hours before it is due). The morning summary lists only deadlines that are still ahead at send time, so a deadline that passed overnight is not shown as "due today".
 - **N19** — `PUT /notify/sub` accepts only endpoints on known push services (`*.push.apple.com`, `fcm.googleapis.com`, `updates.push.services.mozilla.com`, `*.notify.windows.com`), so the cron cannot be pointed at arbitrary hosts (DA O8).
 
 ## 8. Questions only Alex can answer
-1. **One device or several?** N17 sends to one device per account (the latest to turn reminders on). Several devices would duplicate every reminder.
-2. **What counts as "repeating"?** Today's rule treats monthly/yearly series as one-offs (N10), so they get 30-min reminders. Is that what "except repeating ones" meant?
-3. **Two additions:** an empty-day "nothing scheduled" summary (N8) and an "open plaenicke" push when reminders are about to run dry (N7). Keep, or drop?
-4. **Deadlines before 06:00** (Brightspace often uses 00:00): nudge them the evening before the *previous* day (N20)?
-5. iOS version on the phone (Phase 0).
+Answered 2026-11-13: one device (the phone only, N17); weekly repeats, monthly/yearly do not (N10); iOS is the latest version; midnight deadlines follow the standard (N20).
+
+Still open:
+1. **The two notification types Alex did not ask for** — (a) N8: on a day with nothing scheduled, send the morning summary anyway ("Nothing scheduled today"), which also proves reminders still work; or send nothing on empty days. (b) N7: if the phone has not opened plaenicke for about a week, the server's copy of upcoming items runs out; send one "Open plaenicke to keep reminders coming", or let reminders stop silently.
 
 ## 9. Out of scope
 Per-item "remind me" fields (would change `makeItem`'s 13-key whitelist and the four-copy type list); reminders for repeating events; email or SMS; Apple Calendar export; a Durable Object scheduler; badges.
