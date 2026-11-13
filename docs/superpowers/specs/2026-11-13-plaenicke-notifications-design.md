@@ -4,7 +4,7 @@ Date: 2026-11-13. Status: **draft for Alex's approval** (written autonomously; r
 
 **Revision 2 (same day), after a devil's-advocate review** (1 Critical, 11 Important; `.superpowers/sdd/2026-11-13-autonomous/da-spec-findings.md`). The pre-built queue was replaced by send-time composition with a natural-key claim (§ 4–5). **Revision 3 (same day), after a review sweep of revision 2** (6 findings consolidated as Critical, 11 Important; `.superpowers/sdd/2026-11-13-autonomous/sweep-findings.md`): `next_fire_at` can only move earlier from an upload, claims are budgeted and released on retryable failures, the server holds the items hash, dead accounts are cleaned at once, and feed instances need a real-start contract from `js/ics.js` (new plan task). **Revision 3 has not been reviewed** — review it again before building.
 
-**Alex's answers (2026-11-13):** weekly series repeat, monthly/yearly do not (N10 confirmed); notifications on the phone only (N17 tightened); iOS is the latest version (declarative push available); midnight deadlines follow the standard behaviour (N20 replaced). Q3 (the two added push types) still open.
+**Alex's answers (2026-11-13):** weekly series repeat, monthly/yearly do not (N10 confirmed); notifications on the phone only (N17 tightened); iOS is the latest version (declarative push available); midnight deadlines follow the standard behaviour (N20 replaced). Q3: empty days get a friendly "nothing on the agenda" summary; reminders stop quietly when the app is not opened.
 
 Labels: **concrete** = verified in this repo, a cited source, or a measurement; **speculative** = needs a check, which is named.
 
@@ -69,7 +69,7 @@ CREATE TABLE notify_prefs (
 );
 CREATE TABLE notify_sent (                 -- natural-key claim; a slot can be sent at most once
   account_id INTEGER NOT NULL,
-  kind       TEXT NOT NULL,                -- 'summary' | 'event' | 'nudge' | 'stale-items' | 'stale-feeds'
+  kind       TEXT NOT NULL,                -- 'summary' | 'event' | 'nudge'
   slot       TEXT NOT NULL,                -- local date, plus the entry key for 'event'
   claimed_at INTEGER NOT NULL,
   PRIMARY KEY (account_id, kind, slot)
@@ -101,10 +101,9 @@ Parameters are positional `?` in every statement (D1 binds `?`/`?NNN`; named `:x
 Each entry is one **occurrence** with its real start (`startDate`, `startTime`). Today `js/ics.js` `emitOccurrence` emits display segments `{uid, title, date, time, endTime}` only: a midnight-crossing event becomes two segments (`:1209-1212`, the second at `00:00`), a 3+-day timed event becomes untimed per-day instances (`:1214`), and `js/feeds.js` `instancesForRange` adds no start field. **So the instance contract must change first** (plan T7c: segments carry `occurrenceStart` and `segment: 'whole'|'first'|'continuation'|'day'`), and `js/notifysnapshot.js` keeps one entry per occurrence (DA I7, sweep B1).
 
 For local day D in `prefs.tz` (horizon: today + 7):
-- **summary** — slot `D`, fires at D `morning_at`, window 2 h. Lines: D's non-repeating events, timed and all-day, own `EVENT_TYPES` and feed (continuations listed once as "continues"), in time order; D's undone to-dos (`due`/`start`/`milestone`/`task`), deadlines first; up to 2 upcoming items within the data the snapshot holds. Title "Today: N events, M due"; the first 4 body lines carry the most important items (the lock screen shows few), then up to 8, then "+K more". Empty day → "Nothing scheduled today" (N8).
+- **summary** — slot `D`, fires at D `morning_at`, window 2 h. Lines: D's non-repeating events, timed and all-day, own `EVENT_TYPES` and feed (continuations listed once as "continues"), in time order; D's undone to-dos (`due`/`start`/`milestone`/`task`), deadlines first; up to 2 upcoming items within the data the snapshot holds. Title "Today: N events, M due"; the first 4 body lines carry the most important items (the lock screen shows few), then up to 8, then "+K more". Empty day (no events, nothing due, nothing upcoming) → title "Nothing on the agenda today", body one friendly line picked by the local date from a short fixed list, e.g. "Make the most of it." (N8).
 - **event** — slot `startDate|key` (the event's start date, not the fire date — they differ for events before 00:30), fires at real start − 30 min, window 15 min; timed, non-repeating occurrences only.
 - **nudge** — slot `D`, fires at D−1 `nudge_at`, window 1 h, listing undone `due` items on D. Deadlines are taken literally by date and time (N20): the nudge goes the evening before the deadline's date; the summary lists only deadlines still ahead at send time.
-- **stale-items / stale-feeds** — once, the morning after that half's data runs out (items: "Open plaenicke to keep reminders coming"; feeds: "Open plaenicke on the phone to refresh calendar events"), window 12 h (N7).
 - A message whose window has passed is never sent. DST: wall-clock times converted per day with `Intl`; a non-existent time (spring forward) fires at the next valid minute; an ambiguous time (fall back 01:30) fires at the first occurrence.
 
 ### 5.4 Sending (cron, every minute)
@@ -147,8 +146,8 @@ The V7 promise ("the server cannot read your planner") stays true for every acco
 - **N4** — Two-half snapshot in separate columns: items from any device gated atomically on `data.version`; feeds only from the subscribed device, filtered by its own visibility, uploaded on any feed/visibility change. Cost: a laptop edit reaches reminders after the laptop's next sync; a feed change only via the phone.
 - **N5** — Both snapshot halves are sealed with `AT_REST_KEY` (`worker/src/seal.js`). The Worker can still read them; this keeps titles out of plain D1 exports and backups. Messages are composed at send time, so nothing else holds titles.
 - **N6** — Horizon 9 local days (yesterday through today + 7) in the account's zone. Cost: up to 9 days of titles on the server.
-- **N7** — When a half's data runs out, one "open plaenicke" push per half replaces silence. **This is a notification type Alex did not ask for.** Cost: at most one push per half per week.
-- **N8** — The morning summary always sends, even on an empty day (the daily canary that pushes still work). **An addition to Alex's scope** — he may prefer silence on empty days. Cost: a daily push that may say "nothing scheduled".
+- **N7** — **Alex, 2026-11-13: stop quietly.** When the phone has not opened plaenicke for long enough that the server's copy runs past its last day, reminders simply stop; no "open plaenicke" push. Settings still shows "Last reminder sent: …", so the gap is visible when he next opens the app.
+- **N8** — **Alex, 2026-11-13:** on an empty day the morning summary still goes out: "Nothing on the agenda today" with a short friendly line ("Make the most of it." or similar, from a small fixed list chosen by date so it varies but is testable).
 - **N9** — "Timed event" = own items of `EVENT_TYPES` (`event`, `general`; imported from `js/today.js`, not copied) with a `time`, and feed instances with a time. To-dos with a time get no 30-min reminder; deadlines are covered by the nudge.
 - **N10** — **Confirmed by Alex 2026-11-13:** weekly series repeat (no 30-min reminder); monthly and yearly series do not (they get one). This is the app's existing `recurring` meaning (`js/feeds.js:454-460`): DAILY and WEEKLY series, plus series the heuristic guessed from the same title, weekday and time on ≥ 3 weeks. Daily series stay "repeating" too — Alex named weekly; daily repeats more often than weekly, so it follows.
 - **N11** — Defaults: morning 07:30, nudge 20:00, editable in Settings. Cost: none.
@@ -165,8 +164,9 @@ The V7 promise ("the server cannot read your planner") stays true for every acco
 ## 8. Questions only Alex can answer
 Answered 2026-11-13: one device (the phone only, N17); weekly repeats, monthly/yearly do not (N10); iOS is the latest version; midnight deadlines follow the standard (N20).
 
-Still open:
-1. **The two notification types Alex did not ask for** — (a) N8: on a day with nothing scheduled, send the morning summary anyway ("Nothing scheduled today"), which also proves reminders still work; or send nothing on empty days. (b) N7: if the phone has not opened plaenicke for about a week, the server's copy of upcoming items runs out; send one "Open plaenicke to keep reminders coming", or let reminders stop silently.
+Answered the same day: an empty day still gets a summary — "Nothing on the agenda today" plus a friendly line (N8); when the app has not been opened for a week, reminders stop quietly (N7).
+
+No questions left open.
 
 ## 9. Out of scope
 Per-item "remind me" fields (would change `makeItem`'s 13-key whitelist and the four-copy type list); reminders for repeating events; email or SMS; Apple Calendar export; a Durable Object scheduler; badges.

@@ -1,6 +1,6 @@
 # Plan — V8 notifications
 
-Spec: `docs/superpowers/specs/2026-11-13-plaenicke-notifications-design.md`. **Not started. Needs Alex's approval of the spec (revision 2), rulings N1–N20 and the last open question in spec § 8 first. Revision 3 was not reviewed: run a devil's advocate on it before T1.** Every task test-first; gate on `npm test` `# fail 0` and `# cancelled 0`; a fresh reviewer per task that runs the code.
+Spec: `docs/superpowers/specs/2026-11-13-plaenicke-notifications-design.md`. **Not started. Needs Alex's approval of the spec (revision 2), rulings N1–N20 first (all spec § 8 questions answered 2026-11-13). Revision 3 was not reviewed: run a devil's advocate on it before T1.** Every task test-first; gate on `npm test` `# fail 0` and `# cancelled 0`; a fresh reviewer per task that runs the code.
 
 ## Phase 0 — before any code (Alex + Claude, ~no code)
 - **P0.1** Done 2026-11-13: Alex is on the latest iOS (declarative Web Push available).
