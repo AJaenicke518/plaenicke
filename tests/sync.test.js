@@ -586,6 +586,152 @@ test('a successful sync also reports applied, and a version mismatch does not', 
   assert.ok(link.encKey.length === 32); // fixture sanity
 });
 
+// --- a PARTIAL apply: the owner wrote, then threw (sync-safety report gap) --
+//
+// applyState is app.js's applySyncedState, which makes three separate writes
+// (items, then feeds, then tombstones). A throw after the first one used to
+// come back as applied:false, so linkui.js said "Nothing has been combined
+// yet" while the page showed the merged items. The contract: applyState gets
+// a third argument, `progress`, and calls progress.wrote() the moment its
+// first local write has landed. syncOnce then reports applied:true and
+// partial:true. `local` marks every failure that happened on this device, so
+// no caller reads it as a server refusal.
+
+const writingThenThrowing = (s, _now, progress) => {
+  saveItems(s.items);
+  progress.wrote();
+  const e = new Error('full'); e.name = 'QuotaError'; throw e;
+};
+
+// A server whose first PUT meets a 409: another device wrote `other` first.
+async function conflictOnceServer(link) {
+  const server = fakeServer({ version: 1, blob: await encryptBlob(link.encKey, state()) });
+  const fetchImpl = async (url, opts = {}) => {
+    if ((opts.method || 'GET') === 'PUT' && server.row.version === 1) {
+      server.row.version = 2;
+      server.row.blob = await encryptBlob(link.encKey, state({ items: [item('other', '2026-08-01T00:00:00.000Z')] }));
+    }
+    return server.fetchImpl(url, opts);
+  };
+  return { ...server, fetchImpl };
+}
+
+test('partial: an applyState that wrote and then threw reports applied, partial and local', async () => {
+  const link = await linked();
+  saveItems([item('mine', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer({ version: 2, blob: await encryptBlob(link.encKey, state({ items: [item('theirs', '2026-08-01T00:00:00.000Z')] })) });
+  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: writingThenThrowing });
+  assert.deepEqual([res.status, res.applied, res.partial, res.local], ['error', true, true, true]);
+  assert.deepEqual(loadItems().map((i) => i.id).sort(), ['mine', 'theirs'], 'fixture check: the write really landed');
+  assert.equal(loadSyncState().lastError, 'QuotaError');
+  assert.equal(server.row.version, 2, 'nothing is pushed after a failed apply');
+});
+
+test('partial: an applyState that threw before writing stays not-applied, and is still local', async () => {
+  const link = await linked();
+  const server = fakeServer({ version: 2, blob: await encryptBlob(link.encKey, state()) });
+  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: () => { throw new TypeError('applySyncedState needs a valid Date for now'); } });
+  assert.deepEqual([res.status, res.applied, res.partial, res.local], ['error', false, false, true]);
+});
+
+test('partial: a complete apply whose result cannot be sent is applied and local, not partial', async () => {
+  await linked();
+  saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
+  // It reports a write, then RETURNS: the throw comes from toWire after it.
+  const res = await syncOnce({ fetchImpl: fakeServer().fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: (_s, _now, progress) => { progress.wrote(); return { schemaVersion: SCHEMA_VERSION }; } });
+  assert.deepEqual([res.status, res.applied, res.partial, res.local], ['error', true, false, true]);
+});
+
+test('partial: an encrypt failure is local', async () => {
+  await linked();
+  saveItems([item('a', '2026-08-01T00:00:00.000Z')]);
+  const originalEncrypt = crypto.subtle.encrypt;
+  crypto.subtle.encrypt = async () => { throw new Error('encrypt failed'); };
+  try {
+    const res = await syncOnce({ fetchImpl: fakeServer().fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo });
+    assert.deepEqual([res.status, res.applied, res.partial, res.local], ['error', true, false, true]);
+  } finally {
+    crypto.subtle.encrypt = originalEncrypt;
+  }
+});
+
+test('partial: a server error is NOT local, before or after the apply', async () => {
+  await linked();
+  const getErr = await syncOnce({ fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) }),
+    now: NOW, apiBase: 'https://w.example', applyState: echo });
+  assert.deepEqual([getErr.status, getErr.applied, getErr.local], ['error', false, false]);
+
+  const link = await linked();
+  saveItems([item('mine', '2026-08-01T00:00:00.000Z')]);
+  const fetchImpl = async (url, opts = {}) => {
+    if ((opts.method || 'GET') === 'PUT') return { ok: false, status: 500, json: async () => ({}) };
+    return { ok: true, status: 200, json: async () => ({ version: 3, blob: await encryptBlob(link.encKey, state()) }) };
+  };
+  const putErr = await syncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: echo });
+  assert.deepEqual([putErr.status, putErr.applied, putErr.partial, putErr.local], ['error', true, false, false]);
+});
+
+test("partial: the CAS retry's apply that wrote and then threw is partial", async () => {
+  const link = await linked();
+  saveItems([item('mine', '2026-08-01T00:00:00.000Z')]);
+  const server = await conflictOnceServer(link);
+  let applies = 0;
+  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: (s, now, progress) => { applies += 1; return applies === 2 ? writingThenThrowing(s, now, progress) : s; } });
+  assert.equal(applies, 2, 'fixture check: the retry applied');
+  assert.deepEqual([res.status, res.applied, res.partial, res.local], ['error', true, true, true]);
+});
+
+test("partial: the CAS retry's apply that threw before writing is applied (by the first apply), not partial", async () => {
+  const link = await linked();
+  saveItems([item('mine', '2026-08-01T00:00:00.000Z')]);
+  const server = await conflictOnceServer(link);
+  let applies = 0;
+  const res = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    // The FIRST apply reports its write, so a flag left over from it would
+    // misreport the retry as partial.
+    applyState: (s, _now, progress) => { applies += 1; if (applies === 2) throw new Error('before any write'); progress.wrote(); return s; } });
+  assert.equal(applies, 2, 'fixture check: the retry applied');
+  assert.deepEqual([res.status, res.applied, res.partial, res.local], ['error', true, false, true]);
+});
+
+test("partial: the CAS retry's merge that throws is not partial, even though the first apply wrote", async () => {
+  const link = await linked();
+  saveItems([item('mine', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer({ version: 1, blob: await encryptBlob(link.encKey, state()) });
+  // The 409 carries a blob from a newer schema: merge() throws on it.
+  const fetchImpl = async (url, opts = {}) => {
+    if ((opts.method || 'GET') === 'PUT' && server.row.version === 1) {
+      server.row.version = 2;
+      server.row.blob = await encryptBlob(link.encKey, state({ schemaVersion: SCHEMA_VERSION + 1 }));
+    }
+    return server.fetchImpl(url, opts);
+  };
+  let applies = 0;
+  const res = await syncOnce({ fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: (s, _now, progress) => { applies += 1; progress.wrote(); return s; } });
+  assert.equal(applies, 1, 'fixture check: the retry never reached applyState');
+  assert.deepEqual([res.status, res.applied, res.partial, res.local], ['error', true, false, true]);
+});
+
+test('partial: an ok sync after a partial one converges and clears the error', async () => {
+  const link = await linked();
+  saveItems([item('mine', '2026-08-01T00:00:00.000Z')]);
+  const server = fakeServer({ version: 2, blob: await encryptBlob(link.encKey, state({ items: [item('theirs', '2026-08-01T00:00:00.000Z')] })) });
+  const first = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example', applyState: writingThenThrowing });
+  assert.equal(first.partial, true, 'fixture check');
+  assert.equal(loadSyncState().lastError, 'QuotaError', 'fixture check');
+  const second = await syncOnce({ fetchImpl: server.fetchImpl, now: NOW, apiBase: 'https://w.example',
+    applyState: (s, _now, progress) => { saveItems(s.items); progress.wrote(); return s; } });
+  assert.deepEqual([second.status, second.applied, second.partial, second.local], ['ok', true, undefined, undefined]);
+  assert.equal(loadSyncState().lastError, null);
+  const pushed = await decryptBlob(link.encKey, server.row.blob);
+  assert.deepEqual(pushed.items.map((i) => i.id).sort(), ['mine', 'theirs']);
+  assert.deepEqual(loadItems().map((i) => i.id).sort(), ['mine', 'theirs']);
+});
+
 // The whole wire for a device that fills up while applying calendars:
 // saveFeeds -> QuotaError -> syncOnce's apply catch records err.name, which
 // linkui.js labels "this device has run out of storage".

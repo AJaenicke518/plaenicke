@@ -479,7 +479,12 @@ test('applySyncedState always re-merges live storage, whatever options it is pas
   };
   saveItems([item('live-only', '2026-08-01T00:00:00.000Z')]);
   saveFeeds([feedX]);
-  const written = applySyncedState(state({ items: [item('remote-only', '2026-08-01T00:00:00.000Z')] }), new Date(), { replace: true });
+  // The third argument is now sync.js's `progress`. A stale options object
+  // without wrote() is refused before anything is read or written…
+  assert.throws(() => applySyncedState(state({ items: [item('remote-only', '2026-08-01T00:00:00.000Z')] }), new Date(), { replace: true }), TypeError);
+  assert.deepEqual(loadItems().map((i) => i.id), ['live-only'], 'a refused call wrote nothing');
+  // …and one that carries wrote() alongside replace is still re-merged.
+  const written = applySyncedState(state({ items: [item('remote-only', '2026-08-01T00:00:00.000Z')] }), new Date(), { replace: true, wrote: () => {} });
   assert.deepEqual(written.items.map((i) => i.id).sort(), ['live-only', 'remote-only']);
   assert.deepEqual(loadItems().map((i) => i.id).sort(), ['live-only', 'remote-only']);
   assert.deepEqual(loadFeeds().map((f) => f.id), ['feedX'], 'a local calendar is never discarded');
@@ -1791,6 +1796,140 @@ test('an apply whose items write runs out of storage writes no feeds and no tomb
   assert.deepEqual(loadTombstones(), tombstonesBefore, 'a failed items save must not have written a tombstone');
   saveFeeds([]);
   saveTombstones([]);
+  seed([]);
+});
+
+// --- the progress contract: applySyncedState says when it has written ------
+//
+// sync-safety report, "Known gaps": a throw after the items write reached
+// syncOnce as applied:false, and linkui.js said "Nothing has been combined
+// yet" while this page showed the merged items. applySyncedState now calls
+// progress.wrote() the moment its first write (items) has landed, and
+// syncOnce reports applied:true, partial:true.
+
+// Refuses every write to one key with a QuotaExceededError.
+function refuseKey(key) {
+  const realSet = localStorage.setItem.bind(localStorage);
+  let refused = 0;
+  localStorage.setItem = (k, v) => {
+    if (k === key) { refused += 1; const e = new Error('full'); e.name = 'QuotaExceededError'; throw e; }
+    return realSet(k, v);
+  };
+  return { refused: () => refused, restore: () => { localStorage.setItem = realSet; } };
+}
+
+test('progress: applySyncedState reports its write once, after the items are saved', async () => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  seed([]);
+  const seen = [];
+  applySyncedState(state({ items: [record({ id: 'pg-1', title: 'Pulled' })] }), new Date(),
+    { wrote: () => { seen.push(loadItems().map((i) => i.id)); } });
+  assert.deepEqual(seen, [['pg-1']], 'wrote() fires once, with the items already in storage');
+  seed([]);
+});
+
+test('progress: an items write that fails reports no write', async () => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  seed([]);
+  let wrote = 0;
+  const q = refuseKey('plaenicke.items');
+  try {
+    assert.throws(() => applySyncedState(state({ items: [record({ id: 'pg-2', title: 'Pulled' })] }), new Date(),
+      { wrote: () => { wrote += 1; } }), { name: 'QuotaError' });
+  } finally {
+    q.restore();
+  }
+  assert.ok(q.refused() > 0, 'fixture check');
+  assert.equal(wrote, 0);
+  seed([]);
+});
+
+test('progress: a malformed progress is refused before any write', async () => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  seed([]);
+  for (const bad of [{}, { wrote: true }, 'yes']) {
+    assert.throws(() => applySyncedState(state({ items: [record({ id: 'pg-3', title: 'Pulled' })] }), new Date(), bad),
+      TypeError);
+    assert.deepEqual(loadItems(), [], `${JSON.stringify(bad)}: nothing written`);
+  }
+  seed([]);
+});
+
+// Real syncOnce, real applySyncedState: the tombstones write (the LAST of the
+// three) fails, then the device frees up and the next sync converges.
+test('progress: a sync whose tombstones write fails is partial; the next sync converges and clears the error', async () => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  const { syncOnce } = await import('../js/sync.js');
+  const { decryptBlob } = await import('../js/crypto.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  seed([record({ id: 'pg-mine', title: 'Mine' })]);
+  saveTombstones([]);
+  const row = {
+    version: 3,
+    blob: await encryptBlob(getLink().encKey, state({
+      items: [record({ id: 'pg-theirs', title: 'Theirs' })],
+      tombstones: [{ id: 'pg-gone', kind: 'item', deletedAt: new Date().toISOString() }],
+    })),
+  };
+  const puts = [];
+  const server = async (url, opts = {}) => {
+    if ((opts.method || 'GET') === 'GET') return { ok: true, status: 200, json: async () => ({ ...row }) };
+    const body = JSON.parse(opts.body);
+    puts.push(body);
+    if (body.version !== row.version) return { ok: false, status: 409, json: async () => ({ error: 'version_conflict', ...row }) };
+    row.version += 1; row.blob = body.blob;
+    return { ok: true, status: 200, json: async () => ({ version: row.version }) };
+  };
+  const deps = { readFetchImpl: server, fetchImpl: server, now: () => new Date(), apiBase: 'https://example.invalid', applyState: applySyncedState };
+
+  const q = refuseKey('plaenicke.syncTombstones');
+  let first;
+  try {
+    first = await syncOnce(deps);
+  } finally {
+    q.restore();
+  }
+  assert.ok(q.refused() > 0, 'fixture check: the tombstones write was reached');
+  assert.deepEqual([first.status, first.applied, first.partial, first.local], ['error', true, true, true]);
+  assert.deepEqual(loadItems().map((i) => i.id).sort(), ['pg-mine', 'pg-theirs'], 'fixture check: the items write landed');
+  assert.deepEqual(loadTombstones(), [], 'fixture check: the tombstones did not');
+  assert.equal(loadSyncState().lastError, 'QuotaError');
+  assert.deepEqual(puts, [], 'nothing pushed');
+
+  const second = await syncOnce(deps);
+  assert.deepEqual([second.status, second.applied], ['ok', true]);
+  assert.equal(loadSyncState().lastError, null, 'the error clears');
+  assert.deepEqual(loadTombstones().map((t) => t.id), ['pg-gone'], 'the tombstone now landed');
+  const pushed = await decryptBlob(getLink().encKey, row.blob);
+  assert.deepEqual(pushed.items.map((i) => i.id).sort(), ['pg-mine', 'pg-theirs']);
+  assert.deepEqual(pushed.tombstones.map((t) => t.id), ['pg-gone']);
+  saveTombstones([]);
+  seed([]);
+});
+
+test('progress: a sync whose items write fails is not applied and is local', async () => {
+  installFakeLocalStorage();
+  const { applySyncedState } = await import('../js/app.js');
+  const { syncOnce } = await import('../js/sync.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  seed([record({ id: 'pg-mine2', title: 'Mine' })]);
+  const blob = await encryptBlob(getLink().encKey, state({ items: [record({ id: 'pg-theirs2', title: 'Theirs' })] }));
+  const server = async () => ({ ok: true, status: 200, json: async () => ({ version: 3, blob }) });
+  const q = refuseKey('plaenicke.items');
+  let res;
+  try {
+    res = await syncOnce({ readFetchImpl: server, fetchImpl: server, now: () => new Date(), apiBase: 'https://example.invalid', applyState: applySyncedState });
+  } finally {
+    q.restore();
+  }
+  assert.deepEqual([res.status, res.applied, res.partial, res.local], ['error', false, false, true]);
+  assert.deepEqual(loadItems().map((i) => i.id), ['pg-mine2']);
   seed([]);
 });
 

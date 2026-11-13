@@ -219,6 +219,30 @@ async function syncOnceExclusive(deps) {
   let applied = false;
   const done = (status, extra) => ({ status, applied, ...extra });
 
+  // A PARTIAL APPLY IS STILL AN APPLY (sync-safety report, "Known gaps").
+  // applyState is not atomic: app.js's applySyncedState makes three separate
+  // writes, and a throw after the first (a full device) leaves this device
+  // changed. A throw alone cannot say which side of that line it came from,
+  // so the owner says it: applyState(state, now, progress) calls
+  // progress.wrote() the moment its first local write has landed, and
+  // `applied` becomes true there and then. An applyState that never calls it
+  // and then throws is reported as having written nothing (as before), so an
+  // owner that writes must call it.
+  //
+  // `wroteThisApply` is per call: on the CAS retry, `applied` is already true
+  // from the main path's apply, and `partial` must describe the retry's own
+  // apply — did it write and then stop?
+  let wroteThisApply = false;
+  const progress = { wrote: () => { wroteThisApply = true; applied = true; } };
+  // Every failure that happened ON THIS DEVICE (the apply, preparing the
+  // push, encrypting it) carries `local: true`, so no caller reads 'error' as
+  // a server refusal. `partial: true` when the apply wrote and then threw.
+  const localFailure = (err, fallbackName, partial) => (
+    recordIfSame({ lastError: err.name || fallbackName })
+      ? done('error', { local: true, partial })
+      : done('skipped')
+  );
+
   const link = getLink();
   if (!link) return done('skipped');
 
@@ -267,7 +291,7 @@ async function syncOnceExclusive(deps) {
   }
   if (pulled.networkError) return recordIfSame({ lastError: 'offline' }) ? done('offline') : done('skipped');
   if (pulled.unauthorized) return recordIfSame({ lastError: 'unauthorized' }) ? done('unauthorized') : done('skipped');
-  if (pulled.failed) return recordIfSame({ lastError: `http_${pulled.failed}` }) ? done('error') : done('skipped');
+  if (pulled.failed) return recordIfSame({ lastError: `http_${pulled.failed}` }) ? done('error', { local: false, partial: false }) : done('skipped');
 
   // The account can move between the linking UI's previewRemote and this
   // call. A user who chose against data they SAW would otherwise have that
@@ -285,6 +309,9 @@ async function syncOnceExclusive(deps) {
   let remote = pulled.state || emptyState();
   let merged;
   let pushed;
+  // Did applyState RETURN? A throw after it returned (toWire, below) comes
+  // from a complete apply, so it is local but not partial.
+  let applyReturned = false;
   try {
     // Every remote feed passes through merge()'s pickFeed. Handing applyState
     // raw wire-form feeds instead — as a bare `merged = remote` would — strips
@@ -306,13 +333,16 @@ async function syncOnceExclusive(deps) {
     // carries the version from THIS sync's GET (or from a 409's body), never
     // loadSyncState().version — so "apply before advancing the cursor"
     // guards a write-only field. The real non-atomicity is inside applyState
-    // itself (app.js's applySyncedState makes three separate writes).
+    // itself (app.js's applySyncedState makes three separate writes); the
+    // `progress` argument is how it says the first of them has landed.
     // The read is back. If the link changed while it was out, these records
     // belong to an account this device has left: apply none of them.
     if (relinked()) return done('skipped');
-    merged = applyState(merged, now()) || merged;
+    merged = applyState(merged, now(), progress) || merged;
+    applyReturned = true;
     // From here the local write HAS happened, so everything below reports a
-    // device that has already changed.
+    // device that has already changed. (An applyState that returned without
+    // calling progress.wrote() is still counted: returning means it finished.)
     applied = true;
     // toWire can throw on a structurally incomplete state — e.g. applyState
     // returning `{schemaVersion}` with no items/feeds/tombstones. That is
@@ -320,7 +350,7 @@ async function syncOnceExclusive(deps) {
     // resolve to the same status, not reject syncOnce's promise.
     pushed = JSON.stringify(toWire(merged)) !== JSON.stringify(toWire(remote));
   } catch (err) {
-    return recordIfSame({ lastError: err.name || 'ApplyError' }) ? done('error') : done('skipped');
+    return localFailure(err, 'ApplyError', wroteThisApply && !applyReturned);
   }
 
   if (!pushed) {
@@ -337,7 +367,7 @@ async function syncOnceExclusive(deps) {
     try {
       blob = await encryptBlob(link.encKey, toWire(merged));
     } catch (err) {
-      return recordIfSame({ lastError: err.name || 'EncryptError' }) ? done('error') : done('skipped');
+      return localFailure(err, 'EncryptError', false);
     }
     // encryptBlob awaited: the link may have changed since the apply.
     if (relinked()) return done('skipped');
@@ -372,7 +402,7 @@ async function syncOnceExclusive(deps) {
       if (adoptChoice) clearAdoptionPending();
       return done('ok', { pushed: true });
     }
-    if (res.status !== 409) return recordIfSame({ lastError: `http_${res.status}` }) ? done('error') : done('skipped');
+    if (res.status !== 409) return recordIfSame({ lastError: `http_${res.status}` }) ? done('error', { local: false, partial: false }) : done('skipped');
 
     let conflict;
     try {
@@ -392,6 +422,10 @@ async function syncOnceExclusive(deps) {
       return recordIfSame({ lastError: err.name || 'DecryptError' }) ? done('undecryptable') : done('skipped');
     }
     if (relinked()) return done('skipped');
+    // Reset BEFORE the merge: the main path's apply may have set it, and a
+    // merge() that throws here must not be reported as this retry's partial
+    // write.
+    wroteThisApply = false;
     try {
       // Through merge() — see the main path for why a bare `merged = remote`
       // here would strip every feed's color.
@@ -401,11 +435,12 @@ async function syncOnceExclusive(deps) {
       // already true. A second assignment would be dead — and dead code that
       // no mutant can reach is exactly what makes a flag look tested when it
       // is not.
-      merged = applyState(merged, now()) || merged;
+      merged = applyState(merged, now(), progress) || merged;
     } catch (err) {
       // A local apply failure is NOT 'undecryptable' — the remote data was
       // read fine. Same condition as the main path gets the same label.
-      return recordIfSame({ lastError: err.name || 'ApplyError' }) ? done('error') : done('skipped');
+      // partial: this retry's apply wrote and then threw.
+      return localFailure(err, 'ApplyError', wroteThisApply);
     }
   }
 

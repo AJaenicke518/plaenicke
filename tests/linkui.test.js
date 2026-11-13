@@ -5,14 +5,14 @@ import { installFakeLocalStorage } from './fake-localstorage.js';
 import { makeFakeDocument, allText, findAll, fire } from './fake-dom.js';
 import {
   describeSyncStatus, classifyPastedCode, chooseAdoption, renderSyncStatus, SLOW_WRITE_MS,
-  initLinkUI, failureText, SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID,
+  initLinkUI, failureText, adoptionFailureStatus, SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID,
   classifySyncState, shellNeedsAttention, panelShowsProblem,
   SYNC_OK, SYNC_NOT_LINKED, SYNC_CORRUPT, SYNC_ADOPTION_PENDING, SYNC_ERROR,
 } from '../js/linkui.js';
 import { linkWithCode, clearAdoptionPending, isLinked, unlink } from '../js/auth.js';
 import { syncOnce as realSyncOnce } from '../js/sync.js';
 import {
-  bytesToBase64url, generateEncKey, composeLinkCode, encryptBlob, parseLinkCode,
+  bytesToBase64url, generateEncKey, composeLinkCode, encryptBlob, decryptBlob, parseLinkCode,
 } from '../js/crypto.js';
 import {
   saveItems, saveFeeds, saveAuth, saveTombstones, loadItems, loadFeeds, loadTombstones, loadSyncState, saveSyncState,
@@ -381,6 +381,7 @@ async function setup(o = {}) {
     now: () => NOW,
     syncOnceImpl: async (deps) => {
       syncCalls.push(deps);
+      if (o.syncOnceImpl) return o.syncOnceImpl(deps);
       return syncResults.length ? syncResults.shift() : { status: 'ok', pushed: false };
     },
   });
@@ -1901,6 +1902,129 @@ test('no failure message reachable after the write claims nothing was combined',
   assert.match(failureText('offline', false), /nothing has been combined/i);
 });
 
+// --- a PARTIAL apply through the adoption dialog (sync-safety report gap) ---
+//
+// app.js's applySyncedState writes items, then feeds, then tombstones. A throw
+// after the items write used to reach the panel as applied:false, so it said
+// "Nothing has been combined yet … the server returned an error" while the
+// page showed the merged items. Driven through the REAL syncOnce, with an
+// applyState that reports its write through the progress contract and then
+// throws, the way applySyncedState does on a full device.
+
+// A one-row account with the real compare-and-swap rule.
+function accountRow(version, blobPromise) {
+  const row = { version, blob: null };
+  const ready = blobPromise.then((b) => { row.blob = b; });
+  const puts = [];
+  const fetchImpl = async (url, opts = {}) => {
+    await ready;
+    if ((opts.method || 'GET') === 'GET') return { ok: true, status: 200, json: async () => ({ version: row.version, blob: row.blob }) };
+    const body = JSON.parse(opts.body);
+    puts.push(body);
+    if (body.version !== row.version) return { ok: false, status: 409, json: async () => ({ error: 'version_conflict', ...row }) };
+    row.version += 1;
+    row.blob = body.blob;
+    return { ok: true, status: 200, json: async () => ({ version: row.version }) };
+  };
+  return { row, puts, fetchImpl };
+}
+
+const quota = () => { const e = new Error('full'); e.name = 'QuotaError'; return e; };
+const SERVER_CLAIM = /server (refused|returned)|refused the result/i;
+
+test('partial adoption: an apply that wrote then threw says it saved part way and that the account was not updated', async () => {
+  let account;
+  const { host, linkedCalls } = await setup({
+    seed: (link) => { saveItems([it('local')]); account = accountRow(4, encryptBlob(link.encKey, st({ items: [it('r')] }))); },
+    fetchImpl: (u, o) => account.fetchImpl(u, o),
+    applyState: (s, _now, progress) => { saveItems(s.items); progress.wrote(); throw quota(); },
+    syncOnceImpl: realSyncOnce,
+  });
+  findButton(host, 'Merge').click();
+  await settleUntil(() => /Try again/.test(allText(host)));
+  const text = allText(host);
+  assert.deepEqual(loadItems().map((i) => i.id).sort(), ['local', 'r'], 'fixture check: the items write landed');
+  assert.deepEqual(account.puts, [], 'fixture check: nothing was pushed');
+  assert.doesNotMatch(text, /nothing (has been|was) combined/i, 'the merged items are on this device');
+  assert.doesNotMatch(text, SERVER_CLAIM, 'a local failure is not a server refusal');
+  assert.match(text, /part ?way/i, 'it says the save stopped part way');
+  assert.match(text, /account (was not|has not been) updated/i, 'and that the account was not updated');
+  assert.ok(findButton(host, 'Try again'), 'and offers to try again');
+  assert.deepEqual(linkedCalls, [], 'the adoption did not complete');
+});
+
+test('partial adoption: an apply that threw BEFORE writing still says nothing was combined, and blames this device, not the server', async () => {
+  let account;
+  const { host } = await setup({
+    seed: (link) => { saveItems([it('local')]); account = accountRow(4, encryptBlob(link.encKey, st({ items: [it('r')] }))); },
+    fetchImpl: (u, o) => account.fetchImpl(u, o),
+    applyState: () => { throw quota(); },
+    syncOnceImpl: realSyncOnce,
+  });
+  findButton(host, 'Merge').click();
+  await settleUntil(() => /Try again/.test(allText(host)));
+  const text = allText(host);
+  assert.deepEqual(loadItems().map((i) => i.id), ['local'], 'fixture check: nothing was written');
+  assert.match(text, /nothing has been combined/i);
+  assert.doesNotMatch(text, SERVER_CLAIM, 'a local failure is not a server error');
+  assert.ok(findButton(host, 'Try again'), 'a local failure is retryable');
+  assert.equal(findButton(host, 'Re-link this device'), null, 'a different code cannot help');
+});
+
+test('partial adoption: Try again after a partial apply completes the adoption and pushes the union', async () => {
+  let account;
+  let failNext = true;
+  const { host, linkedCalls } = await setup({
+    seed: (link) => { saveItems([it('local')]); account = accountRow(4, encryptBlob(link.encKey, st({ items: [it('r')] }))); },
+    fetchImpl: (u, o) => account.fetchImpl(u, o),
+    applyState: (s, _now, progress) => {
+      saveItems(s.items);
+      progress.wrote();
+      if (failNext) { failNext = false; throw quota(); }
+      return s;
+    },
+    syncOnceImpl: realSyncOnce,
+  });
+  findButton(host, 'Merge').click();
+  await settleUntil(() => /Try again/.test(allText(host)));
+  assert.equal(loadSyncState().lastError, 'QuotaError', 'fixture check: the failure was recorded');
+  findButton(host, 'Try again').click();
+  // The device now holds the union, so the classifier asks again.
+  await settleUntil(() => findButton(host, 'Merge') || linkedCalls.length > 0);
+  if (findButton(host, 'Merge')) findButton(host, 'Merge').click();
+  await settleUntil(() => linkedCalls.length > 0);
+  assert.equal(loadSyncState().lastError, null, 'the error is cleared');
+  assert.equal(loadSyncState().adoptionPending, false, 'the gate is lowered');
+  assert.equal(account.puts.length, 1, 'one push');
+  const pushed = await decryptBlob(currentKey, account.row.blob);
+  assert.deepEqual(pushed.items.map((i) => i.id).sort(), ['local', 'r']);
+  assert.doesNotMatch(allText(host), /Try again/);
+});
+
+test('no failure message for a local failure claims a server refusal, and the partial one never claims nothing was combined', () => {
+  for (const applied of [false, true]) {
+    assert.doesNotMatch(failureText('local-error', applied), SERVER_CLAIM, `local-error, applied=${applied}`);
+    assert.doesNotMatch(failureText('apply-partial', applied), SERVER_CLAIM, `apply-partial, applied=${applied}`);
+    assert.doesNotMatch(failureText('local-error', applied), /Something went wrong \(/, 'it has its own text');
+  }
+  assert.doesNotMatch(failureText('apply-partial', true), /nothing (has been|was) combined/i);
+  assert.doesNotMatch(failureText('local-error', true), /nothing (has been|was) combined/i);
+  assert.match(failureText('local-error', false), /nothing has been combined/i);
+  // A genuine server refusal after the write still says so.
+  assert.match(failureText('error', true), /server refused/i);
+});
+
+test('adoptionFailureStatus keys local failures apart from server errors', () => {
+  assert.equal(adoptionFailureStatus({ status: 'error', applied: true, local: true, partial: true }), 'apply-partial');
+  assert.equal(adoptionFailureStatus({ status: 'error', applied: true, local: true, partial: false }), 'local-error');
+  assert.equal(adoptionFailureStatus({ status: 'error', applied: false, local: true, partial: false }), 'local-error');
+  assert.equal(adoptionFailureStatus({ status: 'error', applied: true, local: false, partial: false }), 'error');
+  assert.equal(adoptionFailureStatus({ status: 'error', applied: false }), 'error', 'an old-shape result is a server error');
+  for (const status of ['offline', 'conflict', 'unauthorized', 'undecryptable', 'skipped']) {
+    assert.equal(adoptionFailureStatus({ status, applied: true, local: true, partial: true }), status, `${status} passes through`);
+  }
+});
+
 test('mounting a linked, settled device makes no network call', async () => {
   const { fetchCalls, host } = await setup({ clearGate: true });
   assert.deepEqual(fetchCalls, [], 'mounting the settings panel must not fire a request');
@@ -2148,7 +2272,6 @@ test('a bootstrap adoption drives the real syncOnce, pushes local state and lift
   await ui.settled();
   assert.equal(row.version, 1, 'the bootstrap must push local state to the empty account');
   assert.equal(loadSyncState().adoptionPending, false, 'a completed adoption lifts the gate');
-  const { decryptBlob } = await import('../js/crypto.js');
   const pushed = await decryptBlob(link.encKey, row.blob);
   assert.deepEqual(pushed.items.map((i) => i.id), ['local']);
   assert.deepEqual(pushed, toWire(pushed), 'the pushed blob must be canonical wire form');

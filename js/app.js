@@ -1654,9 +1654,20 @@ backgroundSyncFeeds(feeds);
 // `now` is sync.js's clock, passed in (sync-safety, 2026-10-27). It must be a
 // valid Date; anything else throws before any read or write. There is no
 // `new Date()` default: a caller that forgot the clock fails loudly.
-export function applySyncedState(state, now) {
+//
+// `progress` is sync.js's write report (sync-safety report, "Known gaps").
+// These three writes are not atomic, so a throw after the first leaves the
+// device changed; progress.wrote() is called the moment the items write has
+// landed, and sync.js then reports applied:true, partial:true instead of
+// "nothing has been combined". Omitted by direct callers that do not need the
+// report; when passed it must carry a wrote function, checked before any
+// write.
+export function applySyncedState(state, now, progress) {
   if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
     throw new TypeError('applySyncedState needs a valid Date for now');
+  }
+  if (progress !== undefined && !(progress && typeof progress.wrote === 'function')) {
+    throw new TypeError('applySyncedState: progress must have a wrote() function');
   }
   const live = localState();
   // keepRemoteTombstones: `state` is already pruned, and every tombstone in it
@@ -1669,6 +1680,8 @@ export function applySyncedState(state, now) {
   // records storage does not hold and have the next save of ANY item persist
   // them outside the sync path.
   saveItems(written.items);
+  // The first write has landed: from here a throw leaves the device changed.
+  if (progress) progress.wrote();
   items = written.items;
   // applyRemoteFeeds requires the COMPLETE merged feed list (written.feeds,
   // never a delta) — it deletes+tombstones every local feed absent from its
