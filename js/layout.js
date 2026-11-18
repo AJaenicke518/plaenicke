@@ -31,3 +31,10 @@ export function paneViews({ layout, main, lastCalendar, isDesktop, isWide }) {
   const big = main !== 'today' ? main : lastCalendar;
   return { visible: ['today', big], calendar: CALENDAR_VIEWS.includes(big) ? big : null };
 }
+
+// A `change` listener on a MediaQueryList. Older Safari has only the
+// deprecated addListener, so addEventListener is used when it is a function.
+export function onMediaChange(mql, fn) {
+  if (typeof mql.addEventListener === 'function') mql.addEventListener('change', fn);
+  else mql.addListener(fn);
+}

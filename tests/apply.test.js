@@ -33,6 +33,7 @@ import { SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID, SLOW_WRITE_MS } from '../js/linku
 import { addDays, startOfWeek, weekLabel } from '../js/timegrid.js';
 import { formatDayLabel } from '../js/freshness.js';
 import { parseICS } from '../js/ics.js';
+import { DESKTOP_QUERY, WIDE_QUERY } from '../js/layout.js';
 
 // INTERVALS ARE RECORDED, NEVER SCHEDULED, in this file. app.js's Today tick
 // is a 60 s setInterval (home-screen spec § 2.3), armed while Today is shown,
@@ -268,6 +269,47 @@ globalThis.window = makeFakeWindow();
 globalThis.document = makeFakeDocument();
 mountIds(globalThis.document, indexHtmlIds(readFileSync(new URL('../index.html', import.meta.url), 'utf8')));
 
+// THE matchMedia STUB (Release 3, Task 2). Installed on window BEFORE app.js's
+// first import, because app.js asks which panes to show at load. It replaces
+// window.matchMedia (never a bare global), hands back the SAME
+// MediaQueryList-like object for a query string every time (as a browser does,
+// and settings.js and app.js each hold the one they asked for), answers the
+// dark-scheme query settings.js reads, and dispatches `change` to whoever
+// registered. Default: nothing matches, which is the phone and the default
+// every test but the desktop ones relies on. setMedia() flips it and fires
+// `change` on each query whose answer moved; a test that flips it restores it
+// in `finally` (setMedia(false, false)), and sets its layout back to planner.
+const mediaState = { desktop: false, wide: false, dark: false };
+const mediaLists = new Map();
+const mediaMatches = (q) => (q === DESKTOP_QUERY ? mediaState.desktop : q === WIDE_QUERY ? mediaState.wide
+  : q === '(prefers-color-scheme: dark)' ? mediaState.dark : false);
+function mediaList(query) {
+  if (!mediaLists.has(query)) {
+    const fns = [];
+    mediaLists.set(query, {
+      media: query,
+      get matches() { return mediaMatches(query); },
+      addEventListener(type, fn) { if (type === 'change') fns.push({ fn, via: 'addEventListener' }); },
+      removeEventListener(type, fn) { const i = fns.findIndex((f) => f.fn === fn); if (i >= 0) fns.splice(i, 1); },
+      addListener(fn) { fns.push({ fn, via: 'addListener' }); },
+      removeListener(fn) { const i = fns.findIndex((f) => f.fn === fn); if (i >= 0) fns.splice(i, 1); },
+      _fns: fns,
+    });
+  }
+  return mediaLists.get(query);
+}
+globalThis.window.matchMedia = (query) => mediaList(query);
+function setMedia(desktop, wide = false) {
+  const before = { [DESKTOP_QUERY]: mediaState.desktop, [WIDE_QUERY]: mediaState.wide };
+  mediaState.desktop = desktop;
+  mediaState.wide = wide;
+  for (const q of [DESKTOP_QUERY, WIDE_QUERY]) {
+    if (before[q] === mediaMatches(q)) continue;
+    const mql = mediaList(q);
+    for (const { fn } of [...mql._fns]) fn({ matches: mql.matches, media: q });
+  }
+}
+
 // EVERY TEST ENDS WITH NO REAL SYNC TIMER ARMED. app.js's scheduleSync arms a
 // real setTimeout(runSync, 2000) whenever a test writes under real timers (a
 // tick, a capture, an add). Left pending, it fires 2 s later inside whatever
@@ -338,11 +380,46 @@ test('app.js paints the shell sync indicator at load, so a stuck adoption is vis
   const loadRequests = [];
   const offline = globalThis.fetch;
   globalThis.fetch = (url, opts) => { loadRequests.push(String(url)); return offline(url, opts); };
+  // Release 3: this first load runs ON A COMPUTER with the planner layout (the
+  // stub is installed above, before this import), and the test flips to a
+  // phone further down. The shell never sets a layout here: the default is
+  // planner.
+  setMedia(true, false);
   try {
     await import('../js/app.js');
   } finally {
     globalThis.fetch = offline;
   }
+  const docLoad = globalThis.document;
+  const shown = () => ['today-view', 'calendar-view', 'week-view', 'three-day-view', 'day-view', 'todo-view', 'ideas-view']
+    .filter((id) => !docLoad.getElementById(id).hidden);
+  assert.deepEqual(shown(), ['today-view', 'week-view'], 'first load on a computer shows Today and the week planner [C1]');
+  assert.equal(docLoad.getElementById('pane-left').hidden, false);
+  assert.equal(docLoad.getElementById('pane-main').hidden, false);
+  assert.equal(docLoad.getElementById('pane-right').hidden, true, 'no list is showing, so its wrapper is hidden');
+  assert.equal(docLoad.getElementById('cal-switch').hidden, false, 'a calendar pane is showing');
+  assert.equal(docLoad.getElementById('tab-calendar').getAttribute('aria-current'), 'page',
+    'the rail marks the big pane (the week, so Calendar)');
+  assert.equal(liveAligns().length, 1, 'the Today tick is armed while Today is a side pane');
+  // Nothing has been picked by hand yet, so the calendar follows the layout:
+  // a layout change to Month overview moves the big pane to the month grid.
+  localStorage.setItem('plaenicke.layout', 'month');
+  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.layout' });
+  assert.deepEqual(shown(), ['today-view', 'calendar-view'], 'month layout seeds the month grid when no calendar was chosen');
+  localStorage.setItem('plaenicke.layout', 'planner');
+  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.layout' });
+  assert.deepEqual(shown(), ['today-view', 'week-view'], 'and the planner seeds the week again');
+  // Both queries were listened to, through addEventListener (a function here).
+  for (const q of [DESKTOP_QUERY, WIDE_QUERY]) {
+    assert.ok(mediaList(q)._fns.some((f) => f.via === 'addEventListener'), `app.js listens for ${q}`);
+  }
+  // Now the phone: a change event on the gate leaves only Today, and the
+  // assertions below carry on exactly as before.
+  setMedia(false, false);
+  assert.deepEqual(shown(), ['today-view'], 'leaving the gate leaves one page');
+  assert.equal(docLoad.getElementById('pane-main').hidden, true);
+  assert.equal(docLoad.getElementById('cal-switch').hidden, true);
+  assert.equal(liveAligns().length, 1, 'still one tick');
   assert.equal(shell.hidden, false,
     'a device sitting at adoptionPending syncs nothing at all — the app shell must say so without opening Settings');
   assert.match(shell.textContent, /\S/);
@@ -10694,5 +10771,245 @@ test('prefs: another tab changing a display pref repaints an open Settings panel
     localStorage.removeItem('plaenicke.timeFormat');
     localStorage.setItem('plaenicke.weekStart', 'sun');
     reloadFromStorage('plaenicke.weekStart');
+  }
+});
+
+// =========================================================================
+// Release 3, Task 2 — app.js applies the template's panes everywhere
+// =========================================================================
+//
+// Ids are prefixed `r3-`. Every test ends with the matchMedia stub back at
+// "nothing matches" (the phone), the layout back at planner, and the phone's
+// Today page showing: leaveDesktop().
+
+const VIEW_IDS = ['today-view', 'calendar-view', 'week-view', 'three-day-view', 'day-view', 'todo-view', 'ideas-view'];
+const shownViews = () => VIEW_IDS.filter((id) => !globalThis.document.getElementById(id).hidden);
+const byId = (id) => globalThis.document.getElementById(id);
+function setStoredLayout(layout) {
+  localStorage.setItem('plaenicke.layout', layout);
+  storageEvent('plaenicke.layout');
+}
+function leaveDesktop() {
+  setMedia(false, false);
+  localStorage.setItem('plaenicke.layout', 'planner');
+  storageEvent('plaenicke.layout');
+  click(byId('tab-today'));
+}
+
+test('r3: in planner a To-do tap shows Today and To-do, hides the calendar pane; a phone change leaves one page', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, false);
+  try {
+    click(byId('tab-todo'));
+    assert.deepEqual(shownViews(), ['today-view', 'todo-view']);
+    assert.equal(byId('pane-left').hidden, false);
+    assert.equal(byId('pane-main').hidden, true, 'no calendar view is showing: its wrapper is hidden');
+    assert.equal(byId('pane-right').hidden, false);
+    assert.equal(byId('cal-switch').hidden, true, 'the switcher is hidden with no calendar pane');
+    assert.equal(byId('tab-todo').getAttribute('aria-current'), 'page');
+    assert.equal(byId('tab-calendar').getAttribute('aria-current'), null);
+    assert.equal(byId('tab-today').getAttribute('aria-current'), null);
+    click(byId('tab-calendar'));
+    assert.equal(byId('cal-switch').hidden, false, 'the switcher shows with a calendar pane');
+    assert.equal(byId('pane-main').hidden, false);
+    assert.equal(byId('pane-right').hidden, true);
+    click(byId('tab-todo'));
+    setMedia(false, false);
+    assert.deepEqual(shownViews(), ['todo-view'], 'a phone shows the one page, whatever was beside it');
+    assert.equal(byId('pane-left').hidden, true);
+    assert.equal(byId('pane-main').hidden, true);
+    assert.equal(byId('pane-right').hidden, false);
+  } finally {
+    leaveDesktop();
+  }
+  assert.deepEqual(shownViews(), ['today-view']);
+});
+
+test('r3: the rail marks the big pane, and a pane gets its name on a computer only', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, false);
+  try {
+    click(byId('show-week'));
+    assert.deepEqual(shownViews(), ['today-view', 'week-view']);
+    assert.equal(byId('tab-calendar').getAttribute('aria-current'), 'page');
+    assert.equal(byId('tab-today').getAttribute('aria-current'), null, 'Today is a side pane, not the big one');
+    assert.equal(byId('today-view').getAttribute('aria-label'), 'Today');
+    assert.equal(byId('week-view').getAttribute('aria-label'), 'Calendar');
+    assert.equal(byId('calendar-view').getAttribute('aria-label'), null, 'a hidden pane carries no name');
+    click(byId('tab-todo'));
+    assert.equal(byId('todo-view').getAttribute('aria-label'), 'To-do');
+    assert.equal(byId('week-view').getAttribute('aria-label'), null, 'the week left the screen with its name');
+    click(byId('tab-ideas'));
+    assert.equal(byId('ideas-view').getAttribute('aria-label'), 'Ideas');
+    // Today's own tab on a computer: the big pane is still the calendar.
+    click(byId('tab-today'));
+    assert.deepEqual(shownViews().length, 2);
+    assert.equal(byId('tab-calendar').getAttribute('aria-current'), 'page', 'the big pane is the calendar again');
+    // The page title stays for assistive tech and is visually hidden here.
+    assert.ok(byId('tab-title')._classes.has('visually-hidden'), 'hidden on a computer');
+    click(byId('tab-todo'));
+    assert.ok(byId('tab-title')._classes.has('visually-hidden'), 'even on a list');
+    setMedia(false, false);
+    assert.equal(byId('todo-view').getAttribute('aria-label'), null, 'no names off the computer layout');
+    assert.equal(byId('today-view').getAttribute('aria-label'), null);
+    assert.equal(byId('tab-title')._classes.has('visually-hidden'), false, 'a phone shows the title on a list page');
+    assert.equal(byId('tab-title').textContent, 'To-do');
+  } finally {
+    leaveDesktop();
+  }
+});
+
+test('r3: Today on a computer focuses its pane, and in wide Everything the lists focus theirs with no view change', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, false);
+  try {
+    click(byId('show-week'));
+    click(byId('tab-today'));
+    assert.equal(globalThis.document.activeElement, byId('today-view'), 'Today moves focus to its pane');
+    assert.equal(byId('today-view').getAttribute('tabindex'), '-1', 'focusable by script, not a tab stop');
+    setStoredLayout('all');
+    assert.deepEqual(shownViews(), ['today-view', 'week-view'], 'Everything narrower than wide behaves as planner');
+    click(byId('tab-todo'));
+    assert.deepEqual(shownViews(), ['today-view', 'todo-view'], 'below wide, To-do is a view change');
+    click(byId('show-week'));
+    setMedia(true, true);
+    assert.deepEqual(shownViews(), ['today-view', 'week-view', 'todo-view', 'ideas-view'], 'wide adds both lists');
+    assert.equal(byId('pane-right').hidden, false);
+    byId('today-view').focus();
+    click(byId('tab-todo'));
+    assert.equal(globalThis.document.activeElement, byId('todo-view'), 'To-do focuses its pane');
+    assert.deepEqual(shownViews(), ['today-view', 'week-view', 'todo-view', 'ideas-view'], 'and nothing else changed');
+    click(byId('tab-ideas'));
+    assert.equal(globalThis.document.activeElement, byId('ideas-view'), 'Ideas focuses its pane');
+    assert.equal(byId('tab-calendar').getAttribute('aria-current'), 'page', 'the rail still marks the calendar');
+    setMedia(true, false);
+    assert.deepEqual(shownViews(), ['today-view', 'week-view'], 'wide off: back to the planner');
+  } finally {
+    leaveDesktop();
+  }
+});
+
+test('r3: Settings\' layout buttons change the panes and data-layout together', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, true);
+  const panel = settingsPanel();
+  try {
+    const tap = (label) => click(panel.host.querySelectorAll('button').find((b) => b.textContent === label));
+    assert.deepEqual(shownViews(), ['today-view', 'week-view'], 'fixture check: planner');
+    tap('Everything');
+    assert.equal(globalThis.document.documentElement.dataset.layout, 'all');
+    assert.deepEqual(shownViews(), ['today-view', 'week-view', 'todo-view', 'ideas-view'], 'the panes followed the tap [C2]');
+    tap('Week planner');
+    assert.equal(globalThis.document.documentElement.dataset.layout, 'planner');
+    assert.deepEqual(shownViews(), ['today-view', 'week-view']);
+  } finally {
+    panel.close();
+    leaveDesktop();
+  }
+  assert.equal(globalThis.document.documentElement.dataset.layout, 'planner');
+});
+
+test('r3: another tab changing the layout applies it, repaints Settings, and schedules no sync', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, true);
+  const panel = settingsPanel();
+  try {
+    assert.deepEqual(shownViews(), ['today-view', 'week-view'], 'fixture check: planner');
+    assert.equal(pendingRealSyncTimers().length, 0, 'fixture check: no sync pending');
+    setStoredLayout('all');
+    assert.equal(globalThis.document.documentElement.dataset.layout, 'all', 'data-layout follows [C3]');
+    assert.deepEqual(shownViews(), ['today-view', 'week-view', 'todo-view', 'ideas-view'], 'and the panes');
+    assert.equal(pendingRealSyncTimers().length, 0, 'the layout is device-local: no sync');
+    const active = panel.host.querySelectorAll('button').filter((b) => b._classes.has('active')).map((b) => b.textContent);
+    assert.ok(active.includes('Everything'), `the open panel repainted: ${active}`);
+  } finally {
+    panel.close();
+    leaveDesktop();
+  }
+});
+
+test('r3: a calendar picked by hand survives a layout change; one never picked follows the layout', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, false);
+  try {
+    click(byId('show-day'));
+    click(byId('tab-today')); // Today is the main view now: the calendar beside it is lastCalendarView
+    assert.deepEqual(shownViews(), ['today-view', 'day-view'], 'fixture check: the Day the user picked');
+    setStoredLayout('month');
+    assert.deepEqual(shownViews(), ['today-view', 'day-view'], 'a layout change keeps the Day the user picked');
+    setMedia(false, false);
+    setMedia(true, false);
+    assert.deepEqual(shownViews(), ['today-view', 'day-view'], 'so does re-entering the gate');
+  } finally {
+    leaveDesktop();
+  }
+});
+
+test('r3: a to-do due today, opened from the To-do list, returns focus to that list; from Today, to Today', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const today = localISO(new Date());
+  seed([record({ id: 'r3-focus', type: 'task', title: 'r3 focus task', date: today })]);
+  // Control: the phone has Today alone, then the tick is off while Calendar shows.
+  click(byId('tab-calendar'));
+  assert.equal(todayTicks(), 0, 'fixture check: no tick off the Today page');
+  enableMockTimers(t, { apis: ['setTimeout'] });
+  setMedia(true, false);
+  try {
+    assert.equal(todayTicks(), 1, 'the tick is armed while Today is a side pane, whatever the main view is');
+    click(byId('tab-todo'));
+    assert.deepEqual(shownViews(), ['today-view', 'todo-view'], 'fixture check: the item is in two panes');
+    const fromTodo = openControlFor(todoList(), 'r3 focus task');
+    assert.ok(fromTodo, 'fixture check: the To-do list holds it');
+    click(fromTodo);
+    closeSheet();
+    assert.ok(isUnder(todoList(), globalThis.document.activeElement), 'focus returns to the To-do list');
+    assert.equal(globalThis.document.activeElement.getAttribute('data-item-id'), 'r3-focus');
+    const fromToday = openControlFor(todayBody(), 'r3 focus task');
+    assert.ok(fromToday, 'fixture check: Today holds it too');
+    click(fromToday);
+    closeSheet();
+    assert.ok(isUnder(todayBody(), globalThis.document.activeElement), 'focus returns to Today when opened there');
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    await resetMockTimers(t);
+    leaveDesktop();
+    seed([]);
+  }
+});
+
+test('r3: Month overview on a computer opens Coming up; "Show less" keeps it closed through a re-render', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const today = localISO(new Date());
+  const soon = record({ id: 'r3-far', type: 'event', title: 'r3 Far event', date: addDays(today, 13), time: '09:00' });
+  const dueToday = record({ id: 'r3-due', type: 'due', title: 'r3 Due today', date: today });
+  seed([soon, dueToday]);
+  setMedia(true, false);
+  try {
+    click(byId('tab-today'));
+    assert.equal(moreButton().textContent, 'Show the next 30 days', 'fixture check: planner starts closed');
+    setStoredLayout('month');
+    assert.equal(moreButton().textContent, 'Show less', 'Month overview opens Coming up');
+    click(moreButton());
+    assert.equal(moreButton().textContent, 'Show the next 30 days', '"Show less" closes it');
+    seed([soon, dueToday, record({ id: 'r3-more', type: 'event', title: 'r3 Another', date: addDays(today, 14) })]);
+    assert.equal(moreButton().textContent, 'Show the next 30 days', 'and a re-render keeps it closed');
+    setStoredLayout('planner');
+    assert.equal(moreButton().textContent, 'Show the next 30 days', 'planner closes it by default');
+    // Off a computer, Month overview does not open it.
+    setMedia(false, false);
+    setStoredLayout('month');
+    assert.equal(moreButton().textContent, 'Show the next 30 days', 'a phone is unchanged by the layout');
+  } finally {
+    leaveDesktop();
+    seed([]);
   }
 });

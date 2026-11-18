@@ -16,7 +16,8 @@ import { renderIdeasView } from './ideasview.js';
 import { toISO, nowISO, localStamp } from './dateparse.js';
 import { buildMonthGrid, groupItemsByDate, monthCellSummary, chronoFirst, itemTypeClass } from './calendar.js';
 import { startOfWeek, addDays, formatTime, weekLabel, weekdayNames } from './timegrid.js';
-import { getTimeFormat, getWeekStart, TIME_FORMAT_KEY, WEEK_START_KEY } from './prefs.js';
+import { getTimeFormat, getWeekStart, getLayout, applyLayout, TIME_FORMAT_KEY, WEEK_START_KEY, LAYOUT_KEY } from './prefs.js';
+import { DESKTOP_QUERY, WIDE_QUERY, defaultMain, paneViews, onMediaChange } from './layout.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
 import { renderDayView } from './dayview.js';
 import { renderThreeDayView } from './threedayview.js';
@@ -106,6 +107,10 @@ const els = {
   tabIdeas: document.getElementById('tab-ideas'),
   tabTitle: document.getElementById('tab-title'),
   calSwitch: document.getElementById('cal-switch'),
+  // Release 3 — the three pane wrappers (index.html), hidden when empty.
+  paneLeft: document.getElementById('pane-left'),
+  paneMain: document.getElementById('pane-main'),
+  paneRight: document.getElementById('pane-right'),
   // Home-screen stage 4 — the capture button and its box.
   captureBtn: document.getElementById('capture-btn'),
   captureBox: document.getElementById('capture-box'),
@@ -314,8 +319,8 @@ const settings = initSettings({
   button: els.settingsBtn,
   host: els.settingsHost,
   onDisplayPrefsChanged,
-  // Placeholder: Release 3 Task 2 wires the real handler. Needed now only to satisfy initSettings' guard.
-  onLayoutChanged: () => {},
+  // A layout tap: seed the calendar the layout starts on, then show its panes.
+  onLayoutChanged: () => onLayoutApplied(),
   // The stamp is repainted too (sweep F, O5): adding, removing or hiding a
   // calendar changes what is on screen, and so what the stamp is about.
   onFeedsChanged: () => {
@@ -967,7 +972,7 @@ function commitDelete(id) {
 // feed's URL: that URL is a capability token that is never re-displayed
 // (CLAUDE.md, "Feed URLs are unrecoverable"). isGoogleHost reads the URL here,
 // in app.js, and only its yes/no verdict crosses into the sheet.
-function openItem(item) {
+function openItem(item, origin = null) {
   // Only the latest action can be undone, and an Undo left sitting over the
   // sheet's own buttons is a mis-tap waiting to happen. Dismissing settles
   // the toast (for a delete, that commits it).
@@ -1005,7 +1010,7 @@ function openItem(item) {
       googleDayUrl,
       onSave: (p) => editItem(item.id, p, { openedType: item.type }),
       onDelete: () => requestDelete(item.id),
-      onClose: () => focusOpener(item.id),
+      onClose: () => focusOpener(item.id, origin),
       visibility: vis,
       onVisibilityChange: (surface, shown) => changeSeriesVisibility(item, surface, shown),
     });
@@ -1079,21 +1084,26 @@ function isGoogleHost(url) {
 // Month has no openers; Week's openers are in its list (the grid has none). An item that is no longer listed — deleted,
 // or moved off the Day being shown — has none to return to, and focus is left
 // where the browser puts it.
-function focusOpener(id) {
+function focusOpener(id, origin = null) {
   const pages = [
     [els.todayView, els.todayBody], [els.dayView, els.dayBody], [els.threeDayView, els.threeDayBody],
     [els.weekView, els.weekList],
     [els.todoView, els.todoList], [els.ideasView, els.ideaList],
   ];
-  const shown = pages.find(([section]) => !section.hidden);
-  if (!shown) return;
-  // A NodeList has no .find; spread it into an array first.
-  const opener = [...shown[1].querySelectorAll('button')]
-    .find((b) => b.classList.contains('item-open') && b.getAttribute('data-item-id') === id);
-  // preventScroll (sweep F, I1): the opener is where the user just was, and
-  // the browser's own scroll-into-view can jump the page under the closing
-  // sheet.
-  if (opener) opener.focus({ preventScroll: true });
+  // The pane the item was opened from goes first (Release 3): a to-do due
+  // today is listed in Today and in To-do, and focus belongs where the user
+  // was. Then the other visible panes in document order.
+  const ordered = [...pages.filter(([, body]) => body === origin), ...pages.filter(([, body]) => body !== origin)];
+  for (const [section, body] of ordered) {
+    if (section.hidden) continue;
+    // A NodeList has no .find; spread it into an array first.
+    const opener = [...body.querySelectorAll('button')]
+      .find((b) => b.classList.contains('item-open') && b.getAttribute('data-item-id') === id);
+    // preventScroll (sweep F, I1): the opener is where the user just was, and
+    // the browser's own scroll-into-view can jump the page under the closing
+    // sheet.
+    if (opener) { opener.focus({ preventScroll: true }); return; }
+  }
 }
 
 // A tick keeps keyboard focus (final fixes 2, C4), on Today and, since a
@@ -1261,7 +1271,7 @@ function renderWeek() {
   const list = buildWeekList(liveItems(),
     (from, to) => listInsts.filter((i) => i.date >= from && i.date <= to), viewWeekStart, todayISO);
   renderWeekList(els.weekList, list, {
-    onOpen: openItem, onSelectDay: openDay,
+    onOpen: (it) => openItem(it, els.weekList), onSelectDay: openDay,
     onToggleDone: toggleDoneKeepingFocus(els.weekList, 'today-row'), justTicked,
   });
 }
@@ -1277,7 +1287,7 @@ function renderThreeDay() {
   const visible = !els.threeDayView.hidden;
   renderThreeDayView(els.threeDayBody, viewThreeDayStart,
     groupItemsByDate(sortItemsByDate(visibleItems(viewThreeDayStart, end))), toISO(new Date()), {
-      onOpen: openItem,
+      onOpen: (it) => openItem(it, els.threeDayBody),
       onSelectDay: openDay,
       // Scroll to 07:00 when the window changed or the page has just come
       // back into view; otherwise keep the grid where the user left it. A
@@ -1299,7 +1309,7 @@ function renderDay() {
   const byDate = groupItemsByDate(sortItemsByDate(visibleItems(viewDay, viewDay)));
   const visible = !els.dayView.hidden;
   renderDayView(els.dayBody, viewDay, byDate[viewDay] || [], {
-    onOpen: openItem,
+    onOpen: (it) => openItem(it, els.dayBody),
     onDelete: requestDelete,
     // Auto-scroll to 07:00 only on a genuine day change while visible; otherwise
     // dayview.js restores the grid's own prior scrollTop (see its `prev` capture).
@@ -1315,13 +1325,13 @@ function renderDay() {
 function renderTodos() {
   const todayISO = toISO(new Date());
   renderTodoView(els.todoList, todoItems(todayISO), {
-    todayISO, onOpen: openItem, onDelete: requestDelete,
+    todayISO, onOpen: (it) => openItem(it, els.todoList), onDelete: requestDelete,
     onToggleDone: toggleDoneKeepingFocus(els.todoList, 'todo-row'), justTicked,
   });
 }
 
 function renderIdeas() {
-  renderIdeasView(els.ideaList, ideaItems(), { onOpen: openItem, onDelete: requestDelete });
+  renderIdeasView(els.ideaList, ideaItems(), { onOpen: (it) => openItem(it, els.ideaList), onDelete: requestDelete });
 }
 
 // The Today page (home-screen spec § 2.3). Own items come from liveItems(),
@@ -1336,10 +1346,13 @@ function renderIdeas() {
 // laterOpen is whether Coming up ("Show the next 30 days", A2, Alex
 // 2026-10-22) is open. Module state, never stored: closed on each app load,
 // kept across re-renders (the 60 s tick's new-day render, syncs, taps), and
-// closed again when a render is for a new day.
+// reset when a render is for a new day. Its default is closed, except on a
+// computer in the Month overview layout (defaultLaterOpen), which applies at
+// load, on a new day and on a layout change; a tap (toggleLater) is the
+// authority after that.
 let todayRelative = null;
 let todayRenderedFor = null;
-let laterOpen = false;
+let laterOpen = defaultLaterOpen();
 const minutesNow = (d) => d.getHours() * 60 + d.getMinutes();
 
 function renderToday() {
@@ -1360,10 +1373,10 @@ function renderToday() {
   );
   // The head's "N DONE · M LEFT" (rewards concept 2), from the same rows.
   renderTally(els.todayTally, tally(today));
-  if (todayISO !== todayRenderedFor) laterOpen = false;
+  if (todayISO !== todayRenderedFor) laterOpen = defaultLaterOpen();
   todayRenderedFor = todayISO;
   todayRelative = renderTodayView(els.todayBody, today, {
-    onOpen: openItem, onToggleDone: toggleDoneKeepingFocus(els.todayBody, 'today-row'),
+    onOpen: (it) => openItem(it, els.todayBody), onToggleDone: toggleDoneKeepingFocus(els.todayBody, 'today-row'),
     laterOpen, onToggleLater: toggleLater, justTicked,
   }).relative;
 }
@@ -1454,7 +1467,28 @@ function render() {
 // view").
 const CALENDAR_VIEWS = ['day', '3day', 'week', 'month'];
 const TAB_TITLES = { today: 'Today', calendar: 'Calendar', todo: 'To-do', ideas: 'Ideas' };
+const PANE_NAMES = { today: 'Today', todo: 'To-do', ideas: 'Ideas' };
+
+// THE PANES (Release 3, js/layout.js). Being visible is only the `hidden`
+// attribute, and every view re-renders on every change, so showView is the one
+// place that decides which views are visible together. It runs at load, on a
+// tab or segment tap, on a change across either media query, on a Settings
+// layout tap and on another tab's layout change. `mainView` is the view the
+// user last asked for; paneViews decides what shows beside it.
+//
+// window.matchMedia, not a bare global: tests/apply.test.js replaces it.
+function isDesktop() { return window.matchMedia(DESKTOP_QUERY).matches; }
+function isWide() { return window.matchMedia(WIDE_QUERY).matches; }
+function defaultLaterOpen() { return getLayout() === 'month' && isDesktop(); }
+
+let mainView = 'today';
 let lastCalendarView = 'day';
+// A calendar view picked by hand (a segment or the Calendar tab) is kept
+// across layout changes; until then the calendar follows the layout's default.
+let calendarChosenByUser = false;
+function seedCalendar() {
+  if (!calendarChosenByUser && isDesktop()) lastCalendarView = defaultMain(getLayout());
+}
 
 function showView(which) {
   const views = {
@@ -1463,9 +1497,29 @@ function showView(which) {
   };
   const tabs = { today: els.tabToday, calendar: els.tabCalendar, todo: els.tabTodo, ideas: els.tabIdeas };
   const segments = { day: els.showDay, '3day': els.show3day, week: els.showWeek, month: els.showMonth };
-  const tab = CALENDAR_VIEWS.includes(which) ? 'calendar' : which;
-  if (tab === 'calendar') lastCalendarView = which;
-  for (const [name, el] of Object.entries(views)) el.hidden = name !== which;
+  mainView = which;
+  if (CALENDAR_VIEWS.includes(which)) lastCalendarView = which;
+  const desktop = isDesktop();
+  const layout = getLayout();
+  const { visible, calendar } = paneViews({
+    layout, main: which, lastCalendar: lastCalendarView, isDesktop: desktop, isWide: isWide(),
+  });
+  for (const [name, el] of Object.entries(views)) {
+    el.hidden = !visible.includes(name);
+    // A pane is named for assistive tech on a computer only; the phone shows
+    // one page under its own heading.
+    if (desktop && !el.hidden) el.setAttribute('aria-label', CALENDAR_VIEWS.includes(name) ? 'Calendar' : PANE_NAMES[name]);
+    else el.removeAttribute('aria-label');
+  }
+  // A wrapper with nothing visible in it is hidden, so an empty column takes
+  // no grid cell (index.html's wrappers are display: contents off a computer).
+  els.paneLeft.hidden = !visible.includes('today');
+  els.paneMain.hidden = calendar === null;
+  els.paneRight.hidden = !(visible.includes('todo') || visible.includes('ideas'));
+  // The rail marks the BIG pane's view: the calendar in wide Everything, else
+  // the one beside Today. Off a computer it is the page showing.
+  const big = !desktop ? which : (layout === 'all' && isWide() ? calendar : visible[1]);
+  const tab = CALENDAR_VIEWS.includes(big) ? 'calendar' : big;
   // The markup says which page is showing to assistive tech, which does not
   // read the class; index.html carries the load-time values. A tab is
   // navigation: the showing one is aria-current="page" and the others carry
@@ -1476,16 +1530,34 @@ function showView(which) {
     else b.removeAttribute('aria-current');
   }
   for (const [name, b] of Object.entries(segments)) {
-    b.classList.toggle('active', name === which);
-    b.setAttribute('aria-pressed', String(name === which));
+    b.classList.toggle('active', name === calendar);
+    b.setAttribute('aria-pressed', String(name === calendar));
   }
-  els.calSwitch.hidden = tab !== 'calendar';
+  els.calSwitch.hidden = calendar === null;
   // Out of sight on Today, never out of the accessibility tree (final review
-  // B3); the header keeps its height either way (styles.css).
+  // B3); the header keeps its height either way (styles.css). On a computer
+  // the rail and the panes say where you are, so it is always visually hidden
+  // there (CSS for the rule: the same class).
   els.tabTitle.textContent = TAB_TITLES[tab];
-  els.tabTitle.classList.toggle('visually-hidden', tab === 'today');
+  els.tabTitle.classList.toggle('visually-hidden', tab === 'today' || desktop);
   render();
   syncTodayTick();
+}
+
+// The layout changed (Settings tap, or another tab): the calendar a layout
+// starts on is seeded, Coming up takes the layout's default, and the panes
+// follow. data-layout is applied by whoever changed the layout.
+function onLayoutApplied() {
+  seedCalendar();
+  laterOpen = defaultLaterOpen();
+  showView(mainView);
+}
+
+// Moves keyboard focus into a pane. The sections are not tab stops, so one is
+// made focusable by script (tabindex -1) first.
+function focusPane(section) {
+  section.setAttribute('tabindex', '-1');
+  section.focus({ preventScroll: true });
 }
 
 // A SPECIFIC day was chosen, so catch up with the clock BEFORE setting the
@@ -1507,14 +1579,24 @@ window.addEventListener('pageshow', syncTypeRow);
 // A tab switch clears the status line (Q4, 2026-10-27): a message belongs to
 // the page it was said on. No timer.
 function switchTab(view) { setMessage(''); showView(view); }
-els.tabToday.addEventListener('click', () => switchTab('today'));
-els.tabCalendar.addEventListener('click', () => switchTab(lastCalendarView));
-els.tabTodo.addEventListener('click', () => switchTab('todo'));
-els.tabIdeas.addEventListener('click', () => switchTab('ideas'));
-els.showMonth.addEventListener('click', () => showView('month'));
-els.showWeek.addEventListener('click', () => showView('week'));
-els.showDay.addEventListener('click', () => showView('day'));
-els.show3day.addEventListener('click', () => showView('3day'));
+els.tabToday.addEventListener('click', () => {
+  switchTab('today');
+  if (isDesktop()) focusPane(els.todayView);
+});
+els.tabCalendar.addEventListener('click', () => { calendarChosenByUser = true; switchTab(lastCalendarView); });
+// In wide Everything the lists are already on screen: the tap takes you to
+// the pane, and changes no view.
+function listTab(view, section) {
+  if (getLayout() === 'all' && isDesktop() && isWide()) { setMessage(''); focusPane(section); return; }
+  switchTab(view);
+}
+els.tabTodo.addEventListener('click', () => listTab('todo', els.todoView));
+els.tabIdeas.addEventListener('click', () => listTab('ideas', els.ideasView));
+function chooseCalendar(view) { calendarChosenByUser = true; showView(view); }
+els.showMonth.addEventListener('click', () => chooseCalendar('month'));
+els.showWeek.addEventListener('click', () => chooseCalendar('week'));
+els.showDay.addEventListener('click', () => chooseCalendar('day'));
+els.show3day.addEventListener('click', () => chooseCalendar('3day'));
 els.ideaAdd.addEventListener('click', handleIdeaAdd);
 
 // The capture button and its box (home-screen spec § 3, js/capture.js). It
@@ -1559,8 +1641,17 @@ els.nextWeek.addEventListener('click', () => stepFrom(viewWeekStart, (v) => { vi
 els.prev3day.addEventListener('click', () => stepFrom(viewThreeDayStart, (v) => { viewThreeDayStart = addDays(v, -3); }));
 els.next3day.addEventListener('click', () => stepFrom(viewThreeDayStart, (v) => { viewThreeDayStart = addDays(v, 3); }));
 
-render();
-syncTodayTick();
+// First paint: the template's panes on a computer, one page on a phone
+// (showView renders and arms the Today tick).
+seedCalendar();
+showView(mainView);
+// Crossing either gate (resize, rotate, a keyboard or mouse appearing) shows
+// the panes of the new situation. Entering the gate re-seeds the calendar.
+onMediaChange(window.matchMedia(DESKTOP_QUERY), () => {
+  seedCalendar();
+  showView(mainView);
+});
+onMediaChange(window.matchMedia(WIDE_QUERY), () => showView(mainView));
 noteLaunch();
 stampUpdated();
 
@@ -1853,6 +1944,14 @@ window.addEventListener('storage', (e) => {
   // Series visibility is device-local, not synced data: another tab's hide is
   // shown here (render() re-reads it) and NO sync is scheduled.
   if (e.key === SERIES_VISIBILITY_KEY) { render(); return; }
+  // The layout is device-local too: data-layout, the seed and the panes
+  // follow, and no sync is scheduled. Before the CROSS_TAB_KEYS return below.
+  if (e.key === LAYOUT_KEY) {
+    applyLayout(getLayout());
+    settings.refreshDisplayPrefs(); // an open panel shows this tab's old choice otherwise
+    onLayoutApplied();
+    return;
+  }
   // Display preferences are device-local too: no sync.
   if (e.key === TIME_FORMAT_KEY || e.key === WEEK_START_KEY) {
     settings.refreshDisplayPrefs(); // an open panel shows this tab's old choice otherwise

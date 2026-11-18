@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  DESKTOP_QUERY, WIDE_QUERY, CALENDAR_VIEWS, defaultMain, paneViews,
+  DESKTOP_QUERY, WIDE_QUERY, CALENDAR_VIEWS, defaultMain, paneViews, onMediaChange,
 } from '../js/layout.js';
 
 test('the gate and wide queries are the documented strings', () => {
@@ -137,4 +137,14 @@ test('index.html: the hosts, capture box and capture button stay body-level, aft
 test('index.html: the tab bar is outside .panes', () => {
   const nav = els.find((e) => e.cls.includes('tab-bar'));
   assert.equal(nav.parent.tag, 'body');
+});
+
+test('onMediaChange listens with addEventListener when it is a function, else addListener', () => {
+  const calls = [];
+  const modern = { addEventListener(type, fn) { calls.push(['addEventListener', type, fn]); }, addListener() { calls.push(['addListener']); } };
+  const old = { addListener(fn) { calls.push(['addListener', fn]); } };
+  const fn = () => {};
+  onMediaChange(modern, fn);
+  onMediaChange(old, fn);
+  assert.deepEqual(calls, [['addEventListener', 'change', fn], ['addListener', fn]]);
 });
