@@ -1687,6 +1687,13 @@ test('the gate restates [hidden] for the two pane wrappers it may later give a d
   assert.equal(desktopOf('#pane-left[hidden]', 'display'), 'none');
 });
 
+// The Computer layout row means nothing on a phone: hidden outside the gate,
+// shown (restated, not removed) inside it.
+test('the Computer layout row is hidden outside the gate and shown inside it', () => {
+  assert.equal(declOf('.settings-row-desktop-only', 'display'), 'none');
+  assert.equal(desktopOf('.settings-row-desktop-only', 'display'), 'block');
+});
+
 // --- pane wrappers (Release 3, Task 1) ------------------------------------------
 const WRAPPERS = ['.panes', '.pane-left', '.pane-main', '.pane-right'];
 test('outside the gate the pane wrappers are display: contents', () => {
@@ -1759,6 +1766,7 @@ const PHONE_AT_DESKTOP_A = {
   '#cal-switch button': '', '#today-view': '', '#day-view': '', '#three-day-view': '',
   '#todo-view': '', '#ideas-view': '', '#pane-left': '', '#pane-main': '', '#pane-right': '',
   '.wlist': 'margin-top:var(--space-5)',
+  '.settings-row-desktop-only': 'display:none',
   // Pane wrappers and the Day/3-day scroll containers (Task 3).
   '.panes': 'display:contents', '.pane-left': 'display:contents', '.pane-main': 'display:contents', '.pane-right': 'display:contents',
   '#day-body': '', '#three-day-body': '',

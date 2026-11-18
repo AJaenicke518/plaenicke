@@ -390,64 +390,70 @@ test('app.js paints the shell sync indicator at load, so a stuck adoption is vis
   } finally {
     globalThis.fetch = offline;
   }
-  const docLoad = globalThis.document;
-  const shown = () => ['today-view', 'calendar-view', 'week-view', 'three-day-view', 'day-view', 'todo-view', 'ideas-view']
-    .filter((id) => !docLoad.getElementById(id).hidden);
-  assert.deepEqual(shown(), ['today-view', 'week-view'], 'first load on a computer shows Today and the week planner [C1]');
-  assert.equal(docLoad.getElementById('pane-left').hidden, false);
-  assert.equal(docLoad.getElementById('pane-main').hidden, false);
-  assert.equal(docLoad.getElementById('pane-right').hidden, true, 'no list is showing, so its wrapper is hidden');
-  assert.equal(docLoad.getElementById('cal-switch').hidden, false, 'a calendar pane is showing');
-  assert.equal(docLoad.getElementById('tab-calendar').getAttribute('aria-current'), 'page',
-    'the rail marks the big pane (the week, so Calendar)');
-  assert.equal(liveAligns().length, 1, 'the Today tick is armed while Today is a side pane');
-  // Nothing has been picked by hand yet, so the calendar follows the layout:
-  // a layout change to Month overview moves the big pane to the month grid.
-  localStorage.setItem('plaenicke.layout', 'month');
-  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.layout' });
-  assert.deepEqual(shown(), ['today-view', 'calendar-view'], 'month layout seeds the month grid when no calendar was chosen');
-  localStorage.setItem('plaenicke.layout', 'planner');
-  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.layout' });
-  assert.deepEqual(shown(), ['today-view', 'week-view'], 'and the planner seeds the week again');
-  // Both queries were listened to, through addEventListener (a function here).
-  for (const q of [DESKTOP_QUERY, WIDE_QUERY]) {
-    assert.ok(mediaList(q)._fns.some((f) => f.via === 'addEventListener'), `app.js listens for ${q}`);
+  // A failing assertion below must not leave the stub on a computer for the
+  // tests after this one: the phone is the default every other test relies on.
+  try {
+    const docLoad = globalThis.document;
+    const shown = () => ['today-view', 'calendar-view', 'week-view', 'three-day-view', 'day-view', 'todo-view', 'ideas-view']
+      .filter((id) => !docLoad.getElementById(id).hidden);
+    assert.deepEqual(shown(), ['today-view', 'week-view'], 'first load on a computer shows Today and the week planner [C1]');
+    assert.equal(docLoad.getElementById('pane-left').hidden, false);
+    assert.equal(docLoad.getElementById('pane-main').hidden, false);
+    assert.equal(docLoad.getElementById('pane-right').hidden, true, 'no list is showing, so its wrapper is hidden');
+    assert.equal(docLoad.getElementById('cal-switch').hidden, false, 'a calendar pane is showing');
+    assert.equal(docLoad.getElementById('tab-calendar').getAttribute('aria-current'), 'page',
+      'the rail marks the big pane (the week, so Calendar)');
+    assert.equal(liveAligns().length, 1, 'the Today tick is armed while Today is a side pane');
+    // Nothing has been picked by hand yet, so the calendar follows the layout:
+    // a layout change to Month overview moves the big pane to the month grid.
+    localStorage.setItem('plaenicke.layout', 'month');
+    for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.layout' });
+    assert.deepEqual(shown(), ['today-view', 'calendar-view'], 'month layout seeds the month grid when no calendar was chosen');
+    localStorage.setItem('plaenicke.layout', 'planner');
+    for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.layout' });
+    assert.deepEqual(shown(), ['today-view', 'week-view'], 'and the planner seeds the week again');
+    // Both queries were listened to, through addEventListener (a function here).
+    for (const q of [DESKTOP_QUERY, WIDE_QUERY]) {
+      assert.ok(mediaList(q)._fns.some((f) => f.via === 'addEventListener'), `app.js listens for ${q}`);
+    }
+    // Now the phone: a change event on the gate leaves only Today, and the
+    // assertions below carry on exactly as before.
+    setMedia(false, false);
+    assert.deepEqual(shown(), ['today-view'], 'leaving the gate leaves one page');
+    assert.equal(docLoad.getElementById('pane-main').hidden, true);
+    assert.equal(docLoad.getElementById('cal-switch').hidden, true);
+    assert.equal(liveAligns().length, 1, 'still one tick');
+    assert.equal(shell.hidden, false,
+      'a device sitting at adoptionPending syncs nothing at all — the app shell must say so without opening Settings');
+    assert.match(shell.textContent, /\S/);
+    // The load-time syncTodayTick() (final review A11c): the app opens on Today,
+    // so the tick is armed before anything is clicked — in its first phase, a
+    // timeout to the next minute boundary.
+    assert.equal(liveAligns().length, 1, 'the Today tick is armed at load');
+    assert.ok(liveAligns()[0].ms > 0 && liveAligns()[0].ms <= 60000, `to the next minute: ${liveAligns()[0].ms} ms`);
+    assert.equal(liveIntervals(60000).length, 0, 'not yet the interval');
+    // Phase 0 baseline: a cold load is an open, and it is logged. Asserted here
+    // because this is the only test that sees app.js's module-scope code run.
+    assert.equal(loadLaunches().length, 1, 'loading the app must record one launch');
+    // The boot fragment: stripped at once, and Settings opened on it. This device
+    // is a linked LEGACY device (sweep W3 #19): the reset form keeps the code
+    // and says to unlink in Sync first; its submit stays refused (D17).
+    assert.deepEqual(globalThis.window.history.calls, [[null, '', '/plaenicke/']], 'the fragment is stripped');
+    const settingsHost = globalThis.document.getElementById('settings-host');
+    assert.ok(settingsHost.childElementCount > 0, 'Settings opened for the boot link');
+    assert.match(allText(settingsHost), /This device is linked to Alex's legacy account — unlink it in Sync first\./);
+    // The load-time GET /account (an offline one, here): asked, and on failure
+    // the banner keeps its last painted state — hidden.
+    assert.ok(loadRequests.some((u) => u.endsWith('/account')), 'the load asks the account for its recovery state');
+    assert.ok(!loadRequests.some((u) => u.includes('/auth/')), 'and never anything that changes the account');
+    assert.equal(globalThis.document.getElementById('account-banner').hidden, true);
+    // Close the panel: every later test opens Settings from closed.
+    for (const fn of globalThis.document._listeners.keydown || []) fn({ key: 'Escape' });
+    assert.equal(settingsHost.childElementCount, 0, 'fixture check: Settings closed');
+    globalThis.window.location.hash = '';
+  } finally {
+    setMedia(false, false);
   }
-  // Now the phone: a change event on the gate leaves only Today, and the
-  // assertions below carry on exactly as before.
-  setMedia(false, false);
-  assert.deepEqual(shown(), ['today-view'], 'leaving the gate leaves one page');
-  assert.equal(docLoad.getElementById('pane-main').hidden, true);
-  assert.equal(docLoad.getElementById('cal-switch').hidden, true);
-  assert.equal(liveAligns().length, 1, 'still one tick');
-  assert.equal(shell.hidden, false,
-    'a device sitting at adoptionPending syncs nothing at all — the app shell must say so without opening Settings');
-  assert.match(shell.textContent, /\S/);
-  // The load-time syncTodayTick() (final review A11c): the app opens on Today,
-  // so the tick is armed before anything is clicked — in its first phase, a
-  // timeout to the next minute boundary.
-  assert.equal(liveAligns().length, 1, 'the Today tick is armed at load');
-  assert.ok(liveAligns()[0].ms > 0 && liveAligns()[0].ms <= 60000, `to the next minute: ${liveAligns()[0].ms} ms`);
-  assert.equal(liveIntervals(60000).length, 0, 'not yet the interval');
-  // Phase 0 baseline: a cold load is an open, and it is logged. Asserted here
-  // because this is the only test that sees app.js's module-scope code run.
-  assert.equal(loadLaunches().length, 1, 'loading the app must record one launch');
-  // The boot fragment: stripped at once, and Settings opened on it. This device
-  // is a linked LEGACY device (sweep W3 #19): the reset form keeps the code
-  // and says to unlink in Sync first; its submit stays refused (D17).
-  assert.deepEqual(globalThis.window.history.calls, [[null, '', '/plaenicke/']], 'the fragment is stripped');
-  const settingsHost = globalThis.document.getElementById('settings-host');
-  assert.ok(settingsHost.childElementCount > 0, 'Settings opened for the boot link');
-  assert.match(allText(settingsHost), /This device is linked to Alex's legacy account — unlink it in Sync first\./);
-  // The load-time GET /account (an offline one, here): asked, and on failure
-  // the banner keeps its last painted state — hidden.
-  assert.ok(loadRequests.some((u) => u.endsWith('/account')), 'the load asks the account for its recovery state');
-  assert.ok(!loadRequests.some((u) => u.includes('/auth/')), 'and never anything that changes the account');
-  assert.equal(globalThis.document.getElementById('account-banner').hidden, true);
-  // Close the panel: every later test opens Settings from closed.
-  for (const fn of globalThis.document._listeners.keydown || []) fn({ key: 'Escape' });
-  assert.equal(settingsHost.childElementCount, 0, 'fixture check: Settings closed');
-  globalThis.window.location.hash = '';
 });
 
 // applySyncedState must re-merge against live storage. Between the merge that
@@ -11153,7 +11159,7 @@ test('r3: another tab changing the layout applies it, repaints Settings, and sch
   }
 });
 
-test('r3: a calendar picked by hand survives a layout change; one never picked follows the layout', async () => {
+test('r3: a calendar picked by hand survives a layout change and re-entering the gate', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
   setMedia(true, false);
@@ -11229,6 +11235,32 @@ test('r3: Month overview on a computer opens Coming up; "Show less" keeps it clo
     setStoredLayout('month');
     assert.equal(moreButton().textContent, 'Show the next 30 days', 'a phone is unchanged by the layout');
   } finally {
+    leaveDesktop();
+    seed([]);
+  }
+});
+
+// =========================================================================
+// Release 3 review fixes (plan 2026-11-18-desktop-templates, findings A-E)
+// =========================================================================
+
+test('r3: on a phone a layout change (Settings or another tab) leaves an open Coming up open', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const today = localISO(new Date());
+  seed([record({ id: 'r3-ph-far', type: 'event', title: 'r3 phone far', date: addDays(today, 13), time: '09:00' })]);
+  setMedia(false, false);
+  const panel = settingsPanel();
+  try {
+    click(byId('tab-today'));
+    click(moreButton());
+    assert.equal(moreButton().textContent, 'Show less', 'fixture check: Coming up is open');
+    click(panel.host.querySelectorAll('button').find((b) => b.textContent === 'Everything'));
+    assert.equal(moreButton().textContent, 'Show less', 'a Settings layout tap on a phone keeps it open');
+    setStoredLayout('month');
+    assert.equal(moreButton().textContent, 'Show less', 'another tab\'s layout change keeps it open');
+  } finally {
+    panel.close();
     leaveDesktop();
     seed([]);
   }

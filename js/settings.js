@@ -392,6 +392,7 @@ export function initSettings({
     // the layout for this session and says it will reset; the app is told
     // either way, because data-layout has changed and the panes must follow.
     const layoutRow = labelledRow('Computer layout', 'layout');
+    layoutRow.classList.add('settings-row-desktop-only'); // styles.css: hidden off a computer
     const layoutSeg = document.createElement('div');
     layoutSeg.className = 'seg';
     const layoutNote = document.createElement('p');

@@ -762,6 +762,8 @@ button[data-press].pressed { opacity: 1; }
 .settings-row { margin-top: 10px; }
 .settings-row-label { display: block; margin-bottom: 4px; }
 .settings-row .note { margin-top: 4px; }
+/* The Computer layout row means nothing on a phone; the gate shows it. */
+.settings-row-desktop-only { display: none; }
 .settings-section .usage-note { margin-top: 12px; }
 .seg button {
   flex: 1;
@@ -1508,6 +1510,7 @@ button[data-press].pressed { opacity: 1; }
    since an author display beats the UA's hidden rule. */
 @media (min-width: 46rem) and (hover: hover) and (pointer: fine) {
   #pane-left[hidden], #pane-main[hidden], #pane-right[hidden] { display: none; }
+  .settings-row-desktop-only { display: block; }
 
   /* The docked capture line replaces the round button. Its box opens under
      it: js/app.js places the box inline (top, left, width, max-height) and the

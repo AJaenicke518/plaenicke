@@ -1552,11 +1552,12 @@ function showView(which) {
 }
 
 // The layout changed (Settings tap, or another tab): the calendar a layout
-// starts on is seeded, Coming up takes the layout's default, and the panes
-// follow. data-layout is applied by whoever changed the layout.
+// starts on is seeded, Coming up takes the layout's default (on a computer
+// only: a phone's layout row is hidden and its Coming up is the user's), and
+// the panes follow. data-layout is applied by whoever changed the layout.
 function onLayoutApplied() {
   seedCalendar();
-  laterOpen = defaultLaterOpen();
+  if (isDesktop()) laterOpen = defaultLaterOpen();
   showView(mainView);
 }
 

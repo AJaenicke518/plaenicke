@@ -1841,6 +1841,15 @@ test('layout row: follows Colours, is a labelled group with three buttons, Week 
   assert.equal(new Set(ids).size, 5, 'ids are unique');
 });
 
+test('layout row: carries settings-row-desktop-only so the phone\'s Settings can hide it', () => {
+  const { host } = openPanel([]);
+  assert.ok(layoutRow(host)._classes.has('settings-row-desktop-only'));
+  assert.ok(layoutRow(host)._classes.has('settings-row'), 'and stays a settings row');
+  for (const l of ['Theme', 'Time', 'Week starts', 'Colours']) {
+    assert.equal(prefRow(host, l)._classes.has('settings-row-desktop-only'), false, l);
+  }
+});
+
 test('layout row: the stored layout is the active button', () => {
   const { host } = openPanel([], () => { localStorage.setItem('plaenicke.layout', 'all'); });
   assert.deepEqual(activeLabels(layoutRow(host)), ['Everything']);
