@@ -18,7 +18,7 @@ A personal calendar/to-do PWA. Vanilla ES modules — **no framework, no build s
 ## Deploying
 
 - **There is no CI workflow. GitHub Pages serves `main` directly, so merging to `main` IS the deploy.** Treat a merge as a production release.
-- The Worker deploys separately via `wrangler`, **run from `worker/`** (`(cd worker && npx wrangler deploy)`): wrangler reads `worker/wrangler.toml` from its working directory. Expect **~20s of edge propagation**. **Bump `worker/src/version.js` by hand on every Worker deploy**, then confirm with `curl -s <WORKER_URL>/version` (free). `npm run smoke:worker` checks `/version` first and makes no paid calls on a mismatch, so it can no longer pass against the old deploy — unless the bump was forgotten.
+- The Worker deploys separately via `wrangler`, **run from `worker/`** (`(cd worker && npm run wrangler -- deploy)`): wrangler reads `worker/wrangler.toml` from its working directory. **The wrangler version is pinned in one place: the `wrangler` script in `worker/package.json`** (`npx --yes wrangler@4.161.0`, the version that ran the V7 release). Bump it there; docs call `npm run wrangler -- <args>`. The project has no dependencies and no lockfile on purpose. Expect **~20s of edge propagation**. **Bump `worker/src/version.js` by hand on every Worker deploy**, then confirm with `curl -s <WORKER_URL>/version` (free). `npm run smoke:worker` checks `/version` first and makes no paid calls on a mismatch, so it can no longer pass against the old deploy — unless the bump was forgotten.
 
 ## Before you touch sync
 

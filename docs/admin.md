@@ -14,7 +14,7 @@ ADMIN=$(cat ~/.plaenicke-admin-secret)
 
 `WORKER_URL` is `js/config.js`'s; `ORIGIN` is `worker/src/cors.js`'s `ALLOWED_ORIGIN`.
 
-- Phases 0 and 1 run in the `accounts` worktree, `~/projects/plaenicke/.claude/worktrees/accounts` (branch `accounts` is checked out there, so `git switch accounts` in the main checkout would be refused). Phases 2 and 3 run in the main checkout, `~/projects/plaenicke`, which has `main` checked out. Run every command from the root of that checkout. Wrangler commands are written `(cd worker && npx wrangler …)`: wrangler reads `worker/wrangler.toml` from the directory it runs in, and the subshell leaves your terminal at the repo root. `npm run smoke:worker` and `npm test` run from the repo root.
+- Phases 0 and 1 run in the `accounts` worktree, `~/projects/plaenicke/.claude/worktrees/accounts` (branch `accounts` is checked out there, so `git switch accounts` in the main checkout would be refused). Phases 2 and 3 run in the main checkout, `~/projects/plaenicke`, which has `main` checked out. Run every command from the root of that checkout. Wrangler commands are written `(cd worker && npm run wrangler -- …)`: wrangler reads `worker/wrangler.toml` from the directory it runs in, and the subshell leaves your terminal at the repo root. `npm run smoke:worker` and `npm test` run from the repo root.
 - `jq` and `openssl` are used below; both ship with macOS (`/usr/bin/jq`, `/usr/bin/openssl`).
 - Backups go to `~/plaenicke-backups/`, never inside the repo. Secrets and tokens go to chmod-600 files in `~`, never into the repo or a commit.
 
@@ -131,25 +131,25 @@ The order is fixed: **Worker (tolerant), then client, then account 1's upgrade, 
    K=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')
    echo ${#K}                                  # expect 43
    (umask 077; printf '%s\n' "$K" > ~/.plaenicke-at-rest-key)
-   printf '%s' "$K" | (cd worker && npx wrangler secret put AT_REST_KEY)
+   printf '%s' "$K" | (cd worker && npm run wrangler -- secret put AT_REST_KEY)
    ```
    Then put the same value (`cat ~/.plaenicke-at-rest-key`) in the password manager, and `unset K`. Two copies, laptop and password manager. If it is missing or not 32 bytes the account routes answer 500 `not_configured`; if it is changed after first use they answer 500 `at_rest_key_mismatch`. `/data` sync, smart add and `/feed` never read it. `wrangler secret put` creates and deploys a new version of the *currently deployed* (old) Worker at once (Cloudflare, Secrets page); the old code ignores the secret.
 3. **Back up D1. Required.**
    ```
    D=$(date +%Y-%m-%d-%H%M)
-   (cd worker && npx wrangler d1 export plaenicke --remote --output ~/plaenicke-backups/backup-$D.sql)
-   (cd worker && npx wrangler d1 time-travel info plaenicke --timestamp=$(date +%s))
+   (cd worker && npm run wrangler -- d1 export plaenicke --remote --output ~/plaenicke-backups/backup-$D.sql)
+   (cd worker && npm run wrangler -- d1 time-travel info plaenicke --timestamp=$(date +%s))
    ```
    Write the bookmark that `time-travel info` prints into the results table at the end of this file. Take both after steps 1 and 2 and immediately before step 4: with the apps closed nothing writes to D1 in between, and a restore discards everything written after the bookmark.
 4. **Migrate.**
    ```
-   (cd worker && npx wrangler d1 migrations list plaenicke --remote)    # expect exactly 0002_accounts.sql
-   (cd worker && npx wrangler d1 migrations apply plaenicke --remote)
+   (cd worker && npm run wrangler -- d1 migrations list plaenicke --remote)    # expect exactly 0002_accounts.sql
+   (cd worker && npm run wrangler -- d1 migrations apply plaenicke --remote)
    ```
    If `migrations list` shows anything else, stop. From here until step 5 is done, **do not mint devices** (release-window rule 1).
 5. **Deploy and confirm the version.**
    ```
-   (cd worker && npx wrangler deploy)
+   (cd worker && npm run wrangler -- deploy)
    sleep 20
    curl -s "$WORKER_URL/version"
    # -> {"version":"worker-2026-11-12.1"}
@@ -199,13 +199,13 @@ The order is fixed: **Worker (tolerant), then client, then account 1's upgrade, 
    ```
    curl -s "$WORKER_URL/admin/accounts" -H "authorization: Bearer $ADMIN" | jq '.[] | select(.id == 1)'
    ```
-   Expect `smartAddToday` to have risen by exactly one per device since the first read (the count is per UTC day: do both reads and the smart adds on the same UTC day) and `lastSeenAt` to be a minute ago. In tolerant mode a tokenless smart add is still served but is not counted (`worker/src/index.js` takes a slot only for an authenticated device), so a count that did not rise means a device is not sending its token: stop. This also exercises the smart-add counter's `RETURNING` upsert on real D1.
+   Expect `smartAddToday` to have risen by exactly one per device since the first read (the count is per UTC day: do both reads and the smart adds on the same UTC day — the UTC day turns over at 16:00 PST / 17:00 PDT, so an afternoon release can straddle it) and `lastSeenAt` to be a minute ago. In tolerant mode a tokenless smart add is still served but is not counted (`worker/src/index.js` takes a slot only for an authenticated device), so a count that did not rise means a device is not sending its token: stop. This also exercises the smart-add counter's `RETURNING` upsert on real D1.
 
 ### Phase 2b: upgrade account 1 (before minting any other account-1 token)
 
 1. **Audit account 1's devices.** `GET /admin/accounts` gives only a count, so read the rows directly (read-only):
    ```
-   (cd worker && npx wrangler d1 execute plaenicke --remote \
+   (cd worker && npm run wrangler -- d1 execute plaenicke --remote \
      --command "SELECT name, token_hash, created_at, last_seen_at FROM devices WHERE account_id = 1")
    ```
    Revoke any row you do not recognise with `DELETE /admin/device` and its `token_hash`.
@@ -260,7 +260,7 @@ The order is fixed: **Worker (tolerant), then client, then account 1's upgrade, 
    `worker/tests/wrangler-config.test.js` fails if the value is anything `requireSession()` would answer with 500 `bad_config` (for example `"TRUE"` or `"1"`), or if `keep_vars = true` appears. The push redeploys Pages with an unchanged client.
 3. **Deploy and confirm.**
    ```
-   (cd worker && npx wrangler deploy)
+   (cd worker && npm run wrangler -- deploy)
    sleep 20
    curl -s "$WORKER_URL/version"                                     # -> the new string
    curl -s -w ' %{http_code}\n' -H "Origin: $ORIGIN" "$WORKER_URL/feed?url=x"
@@ -286,7 +286,7 @@ The order is fixed: **Worker (tolerant), then client, then account 1's upgrade, 
 
 ### Why the flag lives in wrangler.toml
 
-Cloudflare's configuration reference, section "Source of truth" (https://developers.cloudflare.com/workers/wrangler/configuration/, fetched 2026-11-12): "If you change your environment variables in the Cloudflare dashboard, Wrangler will override them" on the next deploy, unless `keep_vars = true` is set. The `wrangler deploy` reference (https://developers.cloudflare.com/workers/wrangler/commands/workers/, fetched 2026-11-12) says the same of `--keep-vars` (default false) and that a `--var` value applies to that deploy only, as a string. So a flag set in the dashboard or with `--var` disappears on the next plain `npx wrangler deploy`, and Phase 3 would silently revert to tolerant. `worker/wrangler.toml` is the only supported place for `REQUIRE_SESSION`; `keep_vars` stays unset. Secrets (`AT_REST_KEY`, `ADMIN_SECRET`, `ANTHROPIC_API_KEY`) are never deleted by a deploy (same reference).
+Cloudflare's configuration reference, section "Source of truth" (https://developers.cloudflare.com/workers/wrangler/configuration/, fetched 2026-11-12): "If you change your environment variables in the Cloudflare dashboard, Wrangler will override them" on the next deploy, unless `keep_vars = true` is set. The `wrangler deploy` reference (https://developers.cloudflare.com/workers/wrangler/commands/workers/, fetched 2026-11-12) says the same of `--keep-vars` (default false) and that a `--var` value applies to that deploy only, as a string. So a flag set in the dashboard or with `--var` disappears on the next plain `npm run wrangler -- deploy`, and Phase 3 would silently revert to tolerant. `worker/wrangler.toml` is the only supported place for `REQUIRE_SESSION`; `keep_vars` stays unset. Secrets (`AT_REST_KEY`, `ADMIN_SECRET`, `ANTHROPIC_API_KEY`) are never deleted by a deploy (same reference).
 
 ### Release-window rules
 
@@ -298,16 +298,16 @@ Cloudflare's configuration reference, section "Source of truth" (https://develop
 
 ### Rollback
 
-- **Commands.** List versions with `(cd worker && npx wrangler versions list)` and roll back with `(cd worker && npx wrangler rollback <VERSION_ID> --message "<why>")` (Cloudflare, `wrangler rollback` reference, fetched 2026-11-12). A rollback creates a new deployment of that version; it does not change connected resources such as D1 (Cloudflare, Rollbacks page). Whether a rollback restores that version's `[vars]` is **unverified** (the pages do not say). To turn the flag off, roll forward instead: a commit that deletes the `[vars]` block, a version bump, `npx wrangler deploy`, and the `/feed?url=x` probe expecting 400.
+- **Commands.** List versions with `(cd worker && npm run wrangler -- versions list)` and roll back with `(cd worker && npm run wrangler -- rollback <VERSION_ID> --message "<why>")` (Cloudflare, `wrangler rollback` reference, fetched 2026-11-12). A rollback creates a new deployment of that version; it does not change connected resources such as D1 (Cloudflare, Rollbacks page). Whether a rollback restores that version's `[vars]` is **unverified** (the pages do not say). To turn the flag off, roll forward instead: a commit that deletes the `[vars]` block, a version bump, `npm run wrangler -- deploy`, and the `/feed?url=x` probe expecting 400.
 - **Worker back to the pre-V7 version:** safe only while no account other than 1 has device rows. The pre-V7 `authenticateDevice` accepts any token in `devices` and the pre-V7 `data.js` always serves `data WHERE id = 1` (`git show dcc17ac:worker/src/auth.js`, `…:worker/src/data.js`), so any other account's device would read and write Alex's planner. The Phase-1 check account is deleted in its cleanup (step 4), so the rollback stays safe after the checks. Check before rolling back:
   ```
-  (cd worker && npx wrangler d1 execute plaenicke --remote \
+  (cd worker && npm run wrangler -- d1 execute plaenicke --remote \
     --command "SELECT COUNT(*) AS n FROM devices WHERE account_id != 1")
   ```
   `n` must be 0. Otherwise disable or delete those accounts first (both delete their device rows), or roll forward.
 - **After Phase 2, a Worker rollback needs the client reverted too.** The V7 client sends `authorization` on every `/feed` request (`js/feeds.js`), and the pre-V7 Worker's feed preflight allows only `content-type, cache-control` (`git show dcc17ac:worker/src/feed.js`, the pre-V7 `main`), so calendars stop refreshing. Revert the merge on `main` (`git revert -m 1 <merge commit>`, push), then roll the Worker back.
 - **After Phase 3, a client rollback needs the flag off first.** The pre-V7 client sends no bearer on smart add or `/feed`, so with the flag on both answer 401. Roll the flag forward to off (above), then revert the client.
-- **D1 restore order: roll the Worker back first, then restore D1.** The V7 Worker cannot run against the pre-migration schema (no `accounts` table); the pre-V7 Worker can run against the migrated one (spec § 9 tests the old `data.js` queries on it). Then: `(cd worker && npx wrangler d1 time-travel restore plaenicke --bookmark=<bookmark from Phase 1 step 3>)`. A restore discards every write after the bookmark, syncs included.
+- **D1 restore order: roll the Worker back first, then restore D1.** The V7 Worker cannot run against the pre-migration schema (no `accounts` table); the pre-V7 Worker can run against the migrated one (spec § 9 tests the old `data.js` queries on it). Then: `(cd worker && npm run wrangler -- d1 time-travel restore plaenicke --bookmark=<bookmark from Phase 1 step 3>)`. A restore discards every write after the bookmark, syncs included.
 
 ### D1 migration atomicity (spec § 5, checked 2026-11-11)
 
@@ -392,6 +392,7 @@ Result log:
 
 | Item | Value |
 |---|---|
+| Wrangler version used for the V7 release | 4.161.0 — every Phase 1–3 command printed `wrangler 4.161.0` in its banner, and the npx cache entry for 4.161.0 was last written 2026-11-12 16:39 PST. Now pinned in `worker/package.json` |
 | Phase 1 Time Travel bookmark | `00000096-00000002-00005121-3566d88ae37927ffa43006833fd2e082` (2026-11-12 15:39 PT; export `~/plaenicke-backups/backup-2026-11-12-1539.sql`, 25,327 B) |
 | Phase 1 `/version` | `worker-2026-11-12.1` (2026-11-12, Version ID 5a367de6-917e-4e48-808a-15658c1291ee; probes: feed 400 bad_url, prelogin 404 no_account, accounts 1 row id 1 email null devices 3) |
 | Phase-1 checks 1–4 | All pass 2026-11-12: signup token 43 chars; duplicate 409 email_taken + second invite revoked (rollback ok); login sealRoundTrip true, devices 2; cleanup deleted, accounts length 1. Step 7 (legacy two-device sync) pass. |
