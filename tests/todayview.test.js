@@ -529,18 +529,26 @@ test('the count: a re-render replaces the text, and null hides it again', () => 
 
 test('Today: a timed row follows the time format, read at each render', () => {
   const ls = installFakeLocalStorage();
-  const items = [own('t', { type: 'event', time: '13:30', endTime: '14:00', title: 'Lunch' })];
-  const timeOf = () => byClass(rowOf(draw(items).host, 'Lunch'), 'today-time')[0].textContent;
-  assert.equal(timeOf(), '1:30–2:00 PM');
-  ls.setItem('plaenicke.timeFormat', '24h');
-  assert.equal(timeOf(), '13:30–14:00');
-  ls.setItem('plaenicke.timeFormat', '12h');
-  assert.equal(timeOf(), '1:30–2:00 PM');
+  try {
+    const items = [own('t', { type: 'event', time: '13:30', endTime: '14:00', title: 'Lunch' })];
+    const timeOf = () => byClass(rowOf(draw(items).host, 'Lunch'), 'today-time')[0].textContent;
+    assert.equal(timeOf(), '1:30–2:00 PM');
+    ls.setItem('plaenicke.timeFormat', '24h');
+    assert.equal(timeOf(), '13:30–14:00');
+    ls.setItem('plaenicke.timeFormat', '12h');
+    assert.equal(timeOf(), '1:30–2:00 PM');
+  } finally {
+    ls.removeItem('plaenicke.timeFormat');
+  }
 });
 
 test('Today: a timed row with no end time follows the time format', () => {
   const ls = installFakeLocalStorage();
-  ls.setItem('plaenicke.timeFormat', '24h');
-  const items = [own('t', { type: 'event', time: '13:30', title: 'Lunch' })];
-  assert.equal(byClass(rowOf(draw(items).host, 'Lunch'), 'today-time')[0].textContent, '13:30');
+  try {
+    ls.setItem('plaenicke.timeFormat', '24h');
+    const items = [own('t', { type: 'event', time: '13:30', title: 'Lunch' })];
+    assert.equal(byClass(rowOf(draw(items).host, 'Lunch'), 'today-time')[0].textContent, '13:30');
+  } finally {
+    ls.removeItem('plaenicke.timeFormat');
+  }
 });

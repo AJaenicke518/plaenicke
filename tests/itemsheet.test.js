@@ -1232,11 +1232,15 @@ test('vis: an own item never draws the switches, even if given them', () => {
 
 test('the sheet\'s "when" line follows the time format, read at each open', () => {
   const ls = installFakeLocalStorage();
-  const when = (item) => allText(open(item).host);
-  assert.match(when(external({ time: '13:30', endTime: '14:00' })), /Today · 1:30–2:00 PM/);
-  ls.setItem('plaenicke.timeFormat', '24h');
-  assert.match(when(external({ time: '13:30', endTime: '14:00' })), /Today · 13:30–14:00/);
-  assert.match(when(external({ time: '13:30', endTime: null })), /Today · 13:30/);
-  ls.setItem('plaenicke.timeFormat', '12h');
-  assert.match(when(external({ time: '13:30', endTime: '14:00' })), /Today · 1:30–2:00 PM/);
+  try {
+    const when = (item) => allText(open(item).host);
+    assert.match(when(external({ time: '13:30', endTime: '14:00' })), /Today · 1:30–2:00 PM/);
+    ls.setItem('plaenicke.timeFormat', '24h');
+    assert.match(when(external({ time: '13:30', endTime: '14:00' })), /Today · 13:30–14:00/);
+    assert.match(when(external({ time: '13:30', endTime: null })), /Today · 13:30/);
+    ls.setItem('plaenicke.timeFormat', '12h');
+    assert.match(when(external({ time: '13:30', endTime: '14:00' })), /Today · 1:30–2:00 PM/);
+  } finally {
+    ls.removeItem('plaenicke.timeFormat');
+  }
 });

@@ -1502,11 +1502,16 @@ test('settings: a successful time-format write repaints the usage line in the ne
 test('settings: a storage write that throws does not throw out of the click, says so, and leaves the old button active', () => {
   const { host, displayPrefs } = openPanel([]);
   const themeBefore = activeLabels(host.querySelectorAll('div').find((d) => d._classes.has('seg') && findButtonByText(d, 'Light')));
+  const realSet = localStorage.setItem;
   localStorage.setItem = () => { throw new Error('QuotaExceededError'); };
   const time = prefRow(host, 'Time');
   const week = prefRow(host, 'Week starts');
-  assert.doesNotThrow(() => findButtonByText(time, '24-hour').click());
-  assert.doesNotThrow(() => findButtonByText(week, 'Monday').click());
+  try {
+    assert.doesNotThrow(() => findButtonByText(time, '24-hour').click());
+    assert.doesNotThrow(() => findButtonByText(week, 'Monday').click());
+  } finally {
+    localStorage.setItem = realSet;
+  }
   assert.equal(displayPrefs.length, 0, 'no callback on a failed write');
   assert.deepEqual(activeLabels(time), ['12-hour']);
   assert.deepEqual(activeLabels(week), ['Sunday']);
@@ -1578,4 +1583,76 @@ test('settings: a successful time or week click leaves the theme row\'s active b
   assert.deepEqual(activeLabels(themeSeg()), before, 'after a Time click');
   findButtonByText(prefRow(host, 'Week starts'), 'Monday').click();
   assert.deepEqual(activeLabels(themeSeg()), before, 'after a Week starts click');
+});
+
+// --- end-of-branch review: stored 24h, read-back, refresh, labels ---------------
+
+test('settings: with 24h stored, the Time row opens with 24-hour active and aria-pressed false/true', () => {
+  const { host } = openPanel([], () => { localStorage.setItem('plaenicke.timeFormat', '24h'); });
+  const time = prefRow(host, 'Time');
+  assert.deepEqual(activeLabels(time), ['24-hour']);
+  assert.deepEqual(rowButtons(time).map((b) => b.getAttribute('aria-pressed')), ['false', 'true']);
+});
+
+test('settings: a write that reports success but reads back differently is a failure: note shown, no callback, old button stays', () => {
+  const { host, displayPrefs } = openPanel([]);
+  const realSet = localStorage.setItem;
+  const realGet = localStorage.getItem;
+  // Accepts the write, keeps nothing for the pref keys.
+  localStorage.setItem = (k, v) => { if (!k.startsWith('plaenicke.timeFormat') && !k.startsWith('plaenicke.weekStart')) realSet.call(localStorage, k, v); };
+  localStorage.getItem = (k) => (k === 'plaenicke.timeFormat' || k === 'plaenicke.weekStart' ? null : realGet.call(localStorage, k));
+  const time = prefRow(host, 'Time');
+  const week = prefRow(host, 'Week starts');
+  try {
+    findButtonByText(time, '24-hour').click();
+    findButtonByText(week, 'Monday').click();
+  } finally {
+    localStorage.setItem = realSet;
+    localStorage.getItem = realGet;
+  }
+  assert.equal(displayPrefs.length, 0);
+  assert.deepEqual(activeLabels(time), ['12-hour']);
+  assert.deepEqual(activeLabels(week), ['Sunday']);
+  assert.equal(failureNote(time).hidden, false);
+  assert.match(failureNote(time).textContent, /Couldn't save this setting on this device\./);
+  assert.equal(failureNote(week).hidden, false);
+});
+
+test('settings: refreshDisplayPrefs repaints the open panel\'s rows and usage line from storage; closed, it does nothing', () => {
+  const { host, settings, button } = openPanel([], () => {
+    recordLaunch(new Date(2026, 10, 18, 15, 7).toISOString());
+  });
+  const time = prefRow(host, 'Time');
+  const week = prefRow(host, 'Week starts');
+  const usage = () => host.querySelectorAll('p').find((p) => p._classes.has('usage-note')).textContent;
+  assert.match(usage(), /3:07 PM/);
+  localStorage.setItem('plaenicke.timeFormat', '24h');
+  localStorage.setItem('plaenicke.weekStart', 'mon');
+  settings.refreshDisplayPrefs();
+  assert.deepEqual(activeLabels(time), ['24-hour']);
+  assert.deepEqual(rowButtons(time).map((b) => b.getAttribute('aria-pressed')), ['false', 'true']);
+  assert.deepEqual(activeLabels(week), ['Monday']);
+  assert.match(usage(), /15:07/);
+  button.click(); // close
+  assert.doesNotThrow(() => settings.refreshDisplayPrefs());
+});
+
+test('settings: the three rows are labelled groups: Theme, Time, Week starts', () => {
+  const { host } = openPanel([]);
+  for (const label of ['Theme', 'Time', 'Week starts']) {
+    const row = prefRow(host, label);
+    assert.ok(row, `${label} row exists`);
+    assert.equal(row.getAttribute('role'), 'group');
+    const id = row.getAttribute('aria-labelledby');
+    assert.ok(id, `${label}: aria-labelledby`);
+    const target = (function find(el) {
+      for (const c of el.children) { if (c.id === id) return c; const f = find(c); if (f) return f; }
+      return null;
+    }(host));
+    assert.ok(target, `${label}: the id resolves`);
+    assert.equal(target.textContent, label);
+    assert.ok(target._classes.has('settings-row-label'));
+  }
+  const ids = ['Theme', 'Time', 'Week starts'].map((l) => prefRow(host, l).getAttribute('aria-labelledby'));
+  assert.equal(new Set(ids).size, 3, 'ids are unique');
 });

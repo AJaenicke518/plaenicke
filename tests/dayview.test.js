@@ -282,27 +282,35 @@ test('tapping the second timed block opens the second item, not the first', () =
 
 test('the hour labels and block times follow the time format, read at each render', () => {
   const ls = installFakeLocalStorage();
-  const item = { ...timed('a', '13:30'), endTime: '14:00' };
-  const texts = (c) => ({
-    hour13: c.querySelector('.day-hours').children[13].textContent,
-    block: c.querySelector('.item-open').textContent,
-  });
-  const draw = () => {
-    const c = container();
-    renderDayView(c, '2026-08-20', [item], { onOpen() {}, onDelete() {} });
-    return texts(c);
-  };
-  assert.deepEqual(draw(), { hour13: '1:00 PM', block: '1:30–2:00 PM t-a' });
-  ls.setItem('plaenicke.timeFormat', '24h');
-  assert.deepEqual(draw(), { hour13: '13:00', block: '13:30–14:00 t-a' });
-  ls.setItem('plaenicke.timeFormat', '12h');
-  assert.deepEqual(draw(), { hour13: '1:00 PM', block: '1:30–2:00 PM t-a' });
+  try {
+    const item = { ...timed('a', '13:30'), endTime: '14:00' };
+    const texts = (c) => ({
+      hour13: c.querySelector('.day-hours').children[13].textContent,
+      block: c.querySelector('.item-open').textContent,
+    });
+    const draw = () => {
+      const c = container();
+      renderDayView(c, '2026-08-20', [item], { onOpen() {}, onDelete() {} });
+      return texts(c);
+    };
+    assert.deepEqual(draw(), { hour13: '1:00 PM', block: '1:30–2:00 PM t-a' });
+    ls.setItem('plaenicke.timeFormat', '24h');
+    assert.deepEqual(draw(), { hour13: '13:00', block: '13:30–14:00 t-a' });
+    ls.setItem('plaenicke.timeFormat', '12h');
+    assert.deepEqual(draw(), { hour13: '1:00 PM', block: '1:30–2:00 PM t-a' });
+  } finally {
+    ls.removeItem('plaenicke.timeFormat');
+  }
 });
 
 test('day view: a timed block with no end time follows the time format', () => {
   const ls = installFakeLocalStorage();
-  ls.setItem('plaenicke.timeFormat', '24h');
-  const c = container();
-  renderDayView(c, '2026-08-20', [timed('a', '13:30')], { onOpen() {}, onDelete() {} });
-  assert.equal(c.querySelector('.item-open').textContent, '13:30 t-a');
+  try {
+    ls.setItem('plaenicke.timeFormat', '24h');
+    const c = container();
+    renderDayView(c, '2026-08-20', [timed('a', '13:30')], { onOpen() {}, onDelete() {} });
+    assert.equal(c.querySelector('.item-open').textContent, '13:30 t-a');
+  } finally {
+    ls.removeItem('plaenicke.timeFormat');
+  }
 });

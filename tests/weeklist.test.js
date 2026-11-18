@@ -76,7 +76,7 @@ test('buildWeekList: a future week shows all seven days, headed "This week"', ()
   assert.deepEqual(titlesOf(list), ['Sun', 'Sat']);
 });
 
-test('buildWeekList: a Monday-start week is its Monday .. Sunday, and "current" includes the Sunday', () => {
+test('buildWeekList: pins date-agnostic behaviour: given a Monday start it lists Monday .. Sunday, and "current" includes the Sunday', () => {
   const feed = rangeFeed([]);
   const list = buildWeekList([
     own('mon', { date: '2026-10-19', title: 'Mon' }), own('sun', { date: '2026-10-25', title: 'Sun' }),
@@ -349,10 +349,14 @@ test('renderWeekList: justTicked marks that row tick-just and wraps its title in
 
 test('renderWeekList: row times follow the time format, read at each render', () => {
   const ls = installFakeLocalStorage();
-  const times = () => byClass(draw(fri()).host, 'wlist-time').map((n) => n.textContent);
-  assert.deepEqual(times(), ['All day', '9:25 AM', '5:00 PM']);
-  ls.setItem('plaenicke.timeFormat', '24h');
-  assert.deepEqual(times(), ['All day', '09:25', '17:00']);
-  ls.setItem('plaenicke.timeFormat', '12h');
-  assert.deepEqual(times(), ['All day', '9:25 AM', '5:00 PM']);
+  try {
+    const times = () => byClass(draw(fri()).host, 'wlist-time').map((n) => n.textContent);
+    assert.deepEqual(times(), ['All day', '9:25 AM', '5:00 PM']);
+    ls.setItem('plaenicke.timeFormat', '24h');
+    assert.deepEqual(times(), ['All day', '09:25', '17:00']);
+    ls.setItem('plaenicke.timeFormat', '12h');
+    assert.deepEqual(times(), ['All day', '9:25 AM', '5:00 PM']);
+  } finally {
+    ls.removeItem('plaenicke.timeFormat');
+  }
 });
