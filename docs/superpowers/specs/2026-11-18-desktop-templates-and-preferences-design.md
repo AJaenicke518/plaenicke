@@ -102,3 +102,5 @@ Alex also wants people to be able to fit the app to themselves: pick a desktop l
 - How each template behaves between the 46rem gate and a width where three panes no longer fit, for example by falling back from `all` to `planner` below a stated width. State the width and test it.
 - How the settings controls are laid out.
 - The test plan. It must include a phone-width check proving the phone layout is byte-for-byte unchanged in computed styles for every template and scheme value.
+
+**Known limit (R1):** native `<input type="time">` pickers follow the phone's locale, not this setting. Out of the app's control.

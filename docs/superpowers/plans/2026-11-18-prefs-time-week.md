@@ -169,3 +169,31 @@
 - Locale-driven formats.
 - Any `js/ics.js` change.
 - Colour schemes and templates (later releases).
+
+## Amendments from the plan review (2026-11-18, DA adjudication — these OVERRIDE the tasks above where they conflict)
+
+**Task 1**
+- Re-pin `CACHE_ON_MAIN` in `tests/serviceworker.test.js` to `'plaenicke-v7-1'` (main already ships v7-1). CACHE becomes `plaenicke-v7-2`.
+- `js/freshness.js` stays pure: `describeLaunches(launches, now, fmt = '12h')` and its `localClock` take the format as a parameter; settings.js passes `getTimeFormat()`.
+
+**Task 2**
+- Static check (b) is a parenthesis-balanced scan, not a regex: for each `formatTime(` / `formatTimeRange(` / `hourLabel(` outside `timegrid.js`, walk to the matching `)` (tracking nesting and template-literal `${}`), count top-level commas; `formatTime` and `hourLabel` need ≥1, `formatTimeRange` ≥2. Include a fixture assertion that the scanner flags ``formatTime(`${String(h).padStart(2, '0')}:00`)``.
+- Rendered 24h checks for BOTH stamps: `describeLaunches(..., '24h')` in `tests/freshness.test.js`, and `#updated-stamp` text in `tests/apply.test.js`.
+- `tests/threedayview.test.js`: under 24h, a 13:30–14:00 block's hidden span text is `'–14:00 '`.
+- Each rendered test renders twice in one test (12h then 24h, or the reverse) to prove no module caches the preference at load.
+
+**Task 3**
+- The callback (and the storage-listener handler below) is:
+  ```js
+  refreshForToday();
+  const t = toISO(new Date());
+  const pivot = (t >= viewWeekStart && t <= addDays(viewWeekStart, 6)) ? t : addDays(viewWeekStart, 3);
+  viewWeekStart = startOfWeek(pivot, getWeekStart());
+  render(); stampUpdated(); stampFromFeeds();
+  ```
+- Tests with the clock on a Sunday (mock Date) in both directions: today stays on screen. Non-current-week test uses dates computed relative to now (pattern: `far(3)` near `tests/apply.test.js:9847`), asserts a jump-to-today implementation would fail, and ends by restoring 'sun' + current week ("restored for later tests").
+- The `storage` listener (`js/app.js:1829-1839`) handles `TIME_FORMAT_KEY` and `WEEK_START_KEY` with the same handler and schedules NO sync; add both keys to the no-sync list in the test near `tests/apply.test.js:5830`.
+- `initSettings`: the `onDisplayPrefsChanged` guard goes AFTER the `onSignedIn` guard; add the callback to the existing `initSettings` calls in `tests/settings.test.js` (lines ~64, ~480, ~533); the new throw test supplies every other required option.
+- New rows go AFTER the theme row (Tab-trap tests expect 'Light' first), each in its own container; the throwing-write test asserts the theme row is unchanged. On a failed write, show a short inline note in the row ("Couldn't save this setting on this device.") — no silent no-op.
+- After a successful time-format write, Settings repaints the usage line (`js/settings.js:245-248`).
+- `renderCalendar` reads `getWeekStart()` once and passes it to both `weekdayNames` and `buildMonthGrid`. Line refs: `buildMonthGrid` call ~1164, header loop 1173, weekview `DOW[i]` at line 18.
