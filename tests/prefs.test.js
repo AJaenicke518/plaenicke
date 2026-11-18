@@ -67,7 +67,10 @@ test('a localStorage that throws: get gives defaults, set returns false', () => 
 
 test('a missing localStorage global also gives defaults', () => {
   delete globalThis.localStorage;
-  assert.equal(getTimeFormat(), '12h');
-  assert.equal(setWeekStart('mon'), false);
-  installFakeLocalStorage();
+  try {
+    assert.equal(getTimeFormat(), '12h');
+    assert.equal(setWeekStart('mon'), false);
+  } finally {
+    installFakeLocalStorage();
+  }
 });

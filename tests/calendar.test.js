@@ -191,6 +191,13 @@ test('Monday-start grid: a month whose 1st is a Sunday gets 6 leading blanks', (
   assert.equal(weeks[0][6].day, 1);
 });
 
+test('Monday-start grid: a month whose 1st is a Saturday gets 5 leading blanks', () => {
+  const w = buildMonthGrid(2026, 7, 'mon')[0]; // August 2026 starts on a Saturday
+  assert.deepEqual(w.slice(0, 5), [null, null, null, null, null]);
+  assert.equal(w[5].day, 1);
+  assert.equal(buildMonthGrid(2026, 7)[0][6].day, 1, 'Sunday start puts it last');
+});
+
 test('Monday-start grid: a month whose 1st is a Monday gets 0 leading blanks', () => {
   assert.equal(buildMonthGrid(2026, 5, 'mon')[0][0].day, 1); // June 2026
 });
