@@ -5,6 +5,7 @@
 
 export const TIME_FORMAT_KEY = 'plaenicke.timeFormat';
 export const WEEK_START_KEY = 'plaenicke.weekStart';
+export const SCHEMES = ['classic', 'sage', 'ocean', 'plum'];
 
 export function resolveTimeFormat(raw) {
   return raw === '24h' ? '24h' : '12h';

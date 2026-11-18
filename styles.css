@@ -100,6 +100,99 @@
   --feed-palette-6: #e0a389;
 }
 
+/* ---------- colour schemes (Release 2) ----------
+   Surface and accent tokens only; --type-* and --feed-palette-* carry meaning
+   and stay put. These blocks MUST stay after :root and [data-theme="dark"]:
+   equal-or-lower specificity loses to a later rule, and the dark pair's two
+   attributes beat [data-theme="dark"] alone. tests/styles.test.js pins all of it.
+   --line, --chip-bg and --grid-line keep --bg's hue and saturation and sit the
+   same lightness step from it as classic's do; --today is --accent;
+   --tick-glow is --accent at classic's alpha. */
+
+[data-scheme="sage"] {
+  --bg: #eef2ec;
+  --card: #fbfdf9;
+  --ink: #1f2a22;
+  --muted: #5c6b60;
+  --accent: #3f6b4f;
+  --accent-ink: #fbfdf9;
+  --line: #d1dccc;
+  --chip-bg: #e4eae1;
+  --today: #3f6b4f;
+  --grid-line: #dce5d8;
+  --tick-glow: rgba(63, 107, 79, 0.14);
+}
+
+[data-scheme="sage"][data-theme="dark"] {
+  --bg: #121714;
+  --card: #1b221d;
+  --ink: #e0e8e2;
+  --muted: #84928a;
+  --accent: #86b897;
+  --accent-ink: #121714;
+  --line: #303d35;
+  --chip-bg: #242e28;
+  --today: #86b897;
+  --grid-line: #212a25;
+  --tick-glow: rgba(134, 184, 151, 0.18);
+}
+
+[data-scheme="ocean"] {
+  --bg: #edf2f7;
+  --card: #fbfdff;
+  --ink: #1c2733;
+  --muted: #56677a;
+  --accent: #2f5f8f;
+  --accent-ink: #fbfdff;
+  --line: #c8d7e6;
+  --chip-bg: #e0e8f1;
+  --today: #2f5f8f;
+  --grid-line: #d6e1ed;
+  --tick-glow: rgba(47, 95, 143, 0.14);
+}
+
+[data-scheme="ocean"][data-theme="dark"] {
+  --bg: #0f1620;
+  --card: #18212d;
+  --ink: #dfe7f0;
+  --muted: #8193a8;
+  --accent: #7fb0e0;
+  --accent-ink: #0f1620;
+  --line: #25364e;
+  --chip-bg: #1c293c;
+  --today: #7fb0e0;
+  --grid-line: #1a2637;
+  --tick-glow: rgba(127, 176, 224, 0.18);
+}
+
+[data-scheme="plum"] {
+  --bg: #f5eff4;
+  --card: #fffbfe;
+  --ink: #2c2130;
+  --muted: #6e5f72;
+  --accent: #7a4a7e;
+  --accent-ink: #fffbfe;
+  --line: #e0cedd;
+  --chip-bg: #eee3ec;
+  --today: #7a4a7e;
+  --grid-line: #e8dbe6;
+  --tick-glow: rgba(122, 74, 126, 0.14);
+}
+
+[data-scheme="plum"][data-theme="dark"] {
+  --bg: #17121a;
+  --card: #211a25;
+  --ink: #ece2ef;
+  --muted: #97899c;
+  --accent: #c79ccc;
+  --accent-ink: #17121a;
+  --line: #3b2e42;
+  --chip-bg: #2c2332;
+  --today: #c79ccc;
+  --grid-line: #29202e;
+  --tick-glow: rgba(199, 156, 204, 0.18);
+}
+
 /* ---------- base ---------- */
 * { box-sizing: border-box; }
 
