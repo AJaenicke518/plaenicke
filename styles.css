@@ -1468,6 +1468,37 @@ button[data-press].pressed { opacity: 1; }
 .panes, .pane-left, .pane-main, .pane-right { display: contents; }
 /* The docked capture row is desktop-only; the gate shows it (a later task). */
 .capture-dock { display: none; }
+/* The dock's look is stated here, outside the gate, where the row is hidden;
+   the gate only turns it on and lays it out (the gate block carries no paint). */
+.capture-dock-type {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 var(--space-3);
+  text-align: left;
+  background: var(--card);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sheet);
+  font-family: var(--sans);
+  font-size: var(--text-row);
+}
+.capture-dock-mic {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-round);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.capture-dock-type:disabled, .capture-dock-mic:disabled { opacity: 0.5; }
+/* The headings that name the To-do and Ideas panes show on a computer only
+   (the phone's tab bar and page title name them). */
+.pane-heading { display: none; }
 
 /* ---------- desktop gate (Release 3) ----------
    Desktop A's centred 44rem column is gone; the panes replace it. The gate is
@@ -1477,6 +1508,21 @@ button[data-press].pressed { opacity: 1; }
    since an author display beats the UA's hidden rule. */
 @media (min-width: 46rem) and (hover: hover) and (pointer: fine) {
   #pane-left[hidden], #pane-main[hidden], #pane-right[hidden] { display: none; }
+
+  /* The docked capture line replaces the round button. Its box opens under
+     it: js/app.js places the box inline (top, left, width, max-height) and the
+     panel grows from the top-left. CSS sets no transform on the box. */
+  .capture-btn { display: none; }
+  .capture-dock {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: 0 0 auto;
+    margin-bottom: var(--space-3);
+  }
+  .capture-box { bottom: auto; right: auto; }
+  .capture-panel { transform-origin: top left; }
+  .pane-heading { display: block; }
 
   /* The page is one viewport tall and nothing scrolls but the panes: body is a
      100dvh flex column (header block, then .panes taking what is left), so no

@@ -38,7 +38,7 @@ function fakeVoice(order) {
   return v;
 }
 
-function setup({ standalone = false } = {}) {
+function setup({ standalone = false, openers } = {}) {
   globalThis.document.activeElement = null;
   const make = (tag) => new FakeElement(tag);
   const els = {
@@ -75,6 +75,7 @@ function setup({ standalone = false } = {}) {
     lockWhen: (on) => { fx.locks.push(on); },
     later: (fn, ms) => { const h = { fn, ms, cleared: false }; fx.timers.push(h); return h; },
     clearLater: (h) => { h.cleared = true; },
+    ...(openers ? { openers } : {}),
     follow: (target, opts) => {
       const f = { target, opts, stops: 0 };
       fx.follows.push(f);
@@ -779,4 +780,74 @@ test('date row: locked while an add is latched, unlocked on Cancel and when it s
   fx.settle('failed');
   await new Promise((r) => setImmediate(r));
   assert.deepEqual(fx.locks.slice(-1), [false], 'unlocked when the add settles');
+});
+
+// --- Release 3, Task 4: openers and openTyping -----------------------------------
+test('openTyping opens the box in typing mode, focuses the field, and never calls the recognizer even when voice is supported', () => {
+  const fx = setup();
+  assert.equal(fx.voice.supported, true, 'fixture check: voice is supported');
+  fx.capture.openTyping();
+  assert.equal(fx.els.box.hidden, false);
+  assert.equal(fx.follows.length, 1);
+  assert.equal(fx.voice.listens.length, 0, 'typing never starts voice');
+  assert.equal(fx.capture.state().mode, 'typing');
+  assert.equal(fx.els.field.readOnly, false);
+  assert.equal(globalThis.document.activeElement, fx.els.field);
+  assert.equal(fx.els.when.hidden, false, 'a typing tap shows the date row');
+});
+
+test('openTyping during a listen stops it (keeping the text) and types; during an add it does nothing', async () => {
+  const fx = setup();
+  listening(fx, 'half a thought');
+  fx.capture.openTyping();
+  assert.equal(fx.voice.current.stops, 1, 'the listen was stopped');
+  assert.equal(fx.capture.state().mode, 'typing');
+  assert.equal(fx.els.field.value, 'half a thought');
+  const add = tap(fx.els.add);
+  await tick();
+  assert.equal(fx.capture.state().adding, true, 'fixture check: an add is in flight');
+  const follows = fx.follows.length;
+  fx.capture.openTyping();
+  assert.equal(fx.capture.state().mode, 'typing');
+  assert.equal(fx.follows.length, follows);
+  assert.equal(fx.voice.listens.length, 1, 'still only the first listen');
+  fx.settle('done');
+  await tick();
+  void add;
+});
+
+test('openers mirror aria-expanded through open and close, and disabled through an add', async () => {
+  const a = new FakeElement('button');
+  const b = new FakeElement('button');
+  const fx = setup({ openers: [a, b] });
+  for (const o of [a, b]) assert.equal(o.getAttribute('aria-expanded'), 'false', 'closed at start');
+  fx.capture.openTyping();
+  for (const o of [a, b]) assert.equal(o.getAttribute('aria-expanded'), 'true');
+  fx.els.field.value = 'x';
+  tap(fx.els.add);
+  await tick();
+  for (const o of [a, b]) assert.equal(o.disabled, true, 'disabled while adding');
+  assert.equal(fx.els.button.disabled, true);
+  fx.settle('direct');
+  await tick();
+  for (const o of [a, b]) assert.equal(o.disabled, false, 'enabled when the add settles');
+  tap(fx.els.close);
+  for (const o of [a, b]) assert.equal(o.getAttribute('aria-expanded'), 'false');
+});
+
+test('the tap path (tap) is the round button\'s: it listens, and openers follow it', () => {
+  const a = new FakeElement('button');
+  const fx = setup({ openers: [a] });
+  fx.capture.tap();
+  assert.equal(fx.voice.listens.length, 1);
+  assert.equal(a.getAttribute('aria-expanded'), 'true');
+});
+
+test('with no openers, behaviour is the round button\'s alone', () => {
+  const fx = setup();
+  tap(fx.els.button);
+  assert.equal(fx.els.button.getAttribute('aria-expanded'), 'true');
+  assert.equal(fx.voice.listens.length, 1);
+  tap(fx.els.close);
+  assert.equal(fx.els.button.getAttribute('aria-expanded'), 'false');
 });

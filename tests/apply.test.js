@@ -9544,6 +9544,162 @@ test('capture: every landed add says "Added." on the status line, which outlives
   seed([]);
 });
 
+// Release 3, Task 4 — the docked capture line. Placed BEFORE the refusal test:
+// a refusal lasts the session and every later mic tap would go straight to typing.
+
+// A fake visualViewport (read as globalThis.visualViewport by js/viewport.js).
+function withVisualViewport() {
+  const fns = { resize: [], scroll: [] };
+  const vv = {
+    offsetTop: 0, height: 700,
+    addEventListener(type, fn) { fns[type].push(fn); },
+    removeEventListener(type, fn) { fns[type] = fns[type].filter((f) => f !== fn); },
+  };
+  globalThis.visualViewport = vv;
+  return { vv, restore: () => { delete globalThis.visualViewport; } };
+}
+
+test('r3: on a computer the dock opens capture typing, with no recognizer, no transform, placed under the dock', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const vvx = withVisualViewport();
+  const timers = installManualTimers();
+  const dock = capEl('capture-dock');
+  const box = capEl('capture-box');
+  dock._rect = { top: 80, left: 120, width: 300, height: 40 };
+  globalThis.window.innerHeight = 800;
+  setMedia(true, false);
+  try {
+    click(capEl('capture-dock-type'));
+    assert.equal(box.hidden, false, 'the box opens');
+    assert.equal(voice.count(), 0, 'typing: the recognizer is never created');
+    assert.ok(box.style.transform === undefined || box.style.transform === 'none' || box.style.transform === '',
+      `no viewport transform on a computer, got ${box.style.transform}`);
+    assert.equal(box.style.top, '128px', 'dock bottom (120) + 8');
+    assert.equal(box.style.left, '120px');
+    assert.equal(box.style.width, '300px');
+    assert.equal(box.style['max-height'], '656px', '800 - 128 - 16');
+    assert.equal(box.style.bottom, 'auto');
+    assert.equal(box.style.right, 'auto');
+    for (const id of ['capture-dock-type', 'capture-dock-mic', 'capture-btn']) {
+      assert.equal(capEl(id).getAttribute('aria-expanded'), 'true', `${id} mirrors the open box`);
+    }
+    assert.equal(globalThis.document.activeElement, capEl('capture-text'), 'the field has focus');
+    assert.equal(capEl('capture-when').hidden, false);
+    closeCapture(timers);
+    assert.equal(box.hidden, true);
+    assert.equal(box.style.top, undefined, 'the placement is cleared with the box');
+    assert.equal(box.style.left, undefined);
+    assert.equal(capEl('capture-dock-type').getAttribute('aria-expanded'), 'false');
+  } finally {
+    if (!box.hidden) closeCapture(timers);
+    timers.restore();
+    vvx.restore();
+    voice.restore();
+    leaveDesktop();
+  }
+});
+
+test('r3: the dock\'s typed text adds through the same flow as the phone', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const timers = installManualTimers();
+  const vvx = withVisualViewport();
+  setMedia(true, false);
+  try {
+    click(capEl('capture-dock-type'));
+    assert.equal(capEl('capture-box').hidden, false, 'the dock opened the box');
+    const field = capEl('capture-text');
+    field.value = 'r3 dock note';
+    fire(field, 'input');
+    pickDate('2099-06-02');
+    const net = smartAddFetch(async () => smartReply([{ title: 'r3 dock note', date: '2099-06-02', type: 'event' }]));
+    click(capEl('capture-add'));
+    await settle();
+    void net;
+    assert.ok(loadItems().some((it) => it.title === 'r3 dock note'), 'the add landed');
+  } finally {
+    if (!capEl('capture-box').hidden) closeCapture(timers);
+    timers.restore();
+    vvx.restore();
+    leaveDesktop();
+    seed([]);
+  }
+});
+
+test('r3: the dock\'s mic button takes the round button\'s path: it listens', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const vvx = withVisualViewport();
+  const timers = installManualTimers();
+  capEl('capture-dock')._rect = { top: 80, left: 120, width: 300, height: 40 };
+  globalThis.window.innerHeight = 800;
+  setMedia(true, false);
+  try {
+    click(capEl('capture-dock-mic'));
+    assert.equal(capEl('capture-box').hidden, false);
+    assert.equal(voice.count(), 1, 'the mic button starts the recognizer');
+    assert.equal(capEl('capture-box').style.top, '128px', 'and the box is under the dock');
+    assert.equal(capEl('capture-dock-mic').getAttribute('aria-expanded'), 'true');
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    vvx.restore();
+    voice.restore();
+    leaveDesktop();
+  }
+});
+
+test('r3: phone control: #capture-btn still follows the visual viewport with a non-empty transform', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const vvx = withVisualViewport();
+  const timers = installManualTimers();
+  try {
+    click(capEl('capture-btn'));
+    assert.equal(capEl('capture-box').hidden, false);
+    const tr = capEl('capture-box').style.transform;
+    assert.ok(typeof tr === 'string' && tr.length > 0 && tr !== 'none', `phone transform is set, got ${tr}`);
+    assert.equal(capEl('capture-box').style.top, `${vvx.vv.offsetTop + vvx.vv.height}px`);
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    vvx.restore();
+    voice.restore();
+  }
+});
+
+test('r3: a box opened on the phone layout closes when the window crosses into the desktop gate', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const vvx = withVisualViewport();
+  const timers = installManualTimers();
+  try {
+    click(capEl('capture-btn'));
+    assert.equal(capEl('capture-box').hidden, false, 'fixture check: open below the gate');
+    setMedia(true, false);
+    assert.ok(capEl('capture-box')._classes.has('closing'), 'crossing into the gate closes it');
+    timers.fire(250);
+    assert.equal(capEl('capture-box').hidden, true);
+    assert.equal(capEl('capture-box').style.transform, undefined, 'and its phone placement is gone');
+  } finally {
+    if (!capEl('capture-box').hidden) closeCapture(timers);
+    timers.restore();
+    vvx.restore();
+    voice.restore();
+    leaveDesktop();
+  }
+});
+
 // LAST of the capture tests: a refusal lasts the session (js/capture.js).
 test('capture: a refusal in the home-screen app points to Settings and offers Type instead', async () => {
   installFakeLocalStorage();

@@ -44,6 +44,7 @@ import { installPress } from './press.js';
 import { buildToday, relativeLabel, NEXT_DAYS, LOOKAHEAD_DAYS, doneStillShown, tally } from './today.js';
 import { renderTodayView, renderTally } from './todayview.js';
 import { createCapture } from './capture.js';
+import { followVisualViewport } from './viewport.js';
 import { createTypeChips, PRIMARY_TYPES, MORE_TYPES } from './typechips.js';
 
 // THE BOOT FRAGMENT IS READ FIRST (sweep W2-I7). #invite=<code> and
@@ -113,6 +114,9 @@ const els = {
   paneRight: document.getElementById('pane-right'),
   // Home-screen stage 4 — the capture button and its box.
   captureBtn: document.getElementById('capture-btn'),
+  captureDock: document.getElementById('capture-dock'),
+  captureDockType: document.getElementById('capture-dock-type'),
+  captureDockMic: document.getElementById('capture-dock-mic'),
   captureBox: document.getElementById('capture-box'),
   captureText: document.getElementById('capture-text'),
   captureAdd: document.getElementById('capture-add'),
@@ -1599,6 +1603,24 @@ els.showDay.addEventListener('click', () => chooseCalendar('day'));
 els.show3day.addEventListener('click', () => chooseCalendar('3day'));
 els.ideaAdd.addEventListener('click', handleIdeaAdd);
 
+// Desktop placement of the capture box (Release 3): under the docked capture
+// row, from the dock's own rectangle, in layout-viewport px (the box is
+// position: fixed). Inline styles, since the phone's follower writes inline
+// ones too; the returned cleanup clears them.
+const DESKTOP_PLACED = ['top', 'left', 'width', 'max-height', 'bottom', 'right', 'transform'];
+function desktopFollow(el) {
+  const r = els.captureDock.getBoundingClientRect();
+  const top = r.bottom + 8;
+  el.style.setProperty('top', `${top}px`);
+  el.style.setProperty('left', `${r.left}px`);
+  el.style.setProperty('width', `${r.width}px`);
+  el.style.setProperty('max-height', `${Math.max(0, window.innerHeight - top - 16)}px`);
+  el.style.setProperty('bottom', 'auto');
+  el.style.setProperty('right', 'auto');
+  el.style.setProperty('transform', 'none');
+  return () => { for (const prop of DESKTOP_PLACED) el.style.removeProperty(prop); };
+}
+
 // The capture button and its box (home-screen spec § 3, js/capture.js). It
 // adds through handleAdd with the capture box's own target, so its messages
 // go to #capture-message and its preview to #capture-preview.
@@ -1621,7 +1643,12 @@ const capture = createCapture({
   // picked time, so handleAdd refuses it for want of a date (review 2026-11-09).
   whenPicked: () => Boolean(els.captureDate.value || els.captureTime.value),
   lockWhen: (on) => { els.captureDate.disabled = on; els.captureTime.disabled = on; },
+  // The desktop dock's two buttons mirror the box's open and disabled state.
+  openers: [els.captureDockType, els.captureDockMic],
+  follow: (el, o) => (window.matchMedia(DESKTOP_QUERY).matches ? desktopFollow(el) : followVisualViewport(el, o)),
 });
+els.captureDockType.addEventListener('click', () => capture.openTyping());
+els.captureDockMic.addEventListener('click', () => capture.tap());
 // Opening Settings stops a listen and keeps its text (spec § 3 step 4).
 // settings.js's own listener on this button opens or closes the panel.
 els.settingsBtn.addEventListener('click', () => { capture.stopAndKeep(); });
@@ -1648,6 +1675,9 @@ showView(mainView);
 // Crossing either gate (resize, rotate, a keyboard or mouse appearing) shows
 // the panes of the new situation. Entering the gate re-seeds the calendar.
 onMediaChange(window.matchMedia(DESKTOP_QUERY), () => {
+  // An open box is placed for the layout it opened in (the phone's button, or
+  // the desktop's dock): close it rather than leave it misplaced.
+  capture.close();
   seedCalendar();
   showView(mainView);
 });

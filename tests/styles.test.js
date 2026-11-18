@@ -1670,7 +1670,7 @@ const wideOf = (selector, prop) => desktopOf(selector, prop, wideRules);
 test('the gate block no longer holds desktop A\'s centred-column rules', () => {
   // .sheet, .toast, .tab-bar and .tab-bar button now belong to the gate (Task 3, rail and chrome).
   for (const sel of ['#today-view', '#todo-view', '#ideas-view', '.wlist',
-    '.capture-box', '.capture-btn', '#cal-switch button']) {
+    '#cal-switch button']) {
     assert.deepEqual(desktopDecls(sel), [], `${sel} must not appear in the gate block`);
   }
   for (const { body } of desktopRules) assert.doesNotMatch(body, /44rem|22rem/);
@@ -1709,6 +1709,7 @@ test('no rule outside the gate mentions data-layout or .pane-/.panes except the 
   for (const { at, sel } of rulesInContext(css)) {
     if (sel === null || at === DESKTOP || at === WIDE) continue;
     if (/data-layout|\.pane|#pane-/.test(sel)) {
+      if (sel === '.pane-heading') continue; // hidden outside the gate (Task 4)
       assert.equal(sel.replace(/\s+/g, ' '), '.panes, .pane-left, .pane-main, .pane-right', sel);
     }
   }
@@ -1761,6 +1762,9 @@ const PHONE_AT_DESKTOP_A = {
   // Pane wrappers and the Day/3-day scroll containers (Task 3).
   '.panes': 'display:contents', '.pane-left': 'display:contents', '.pane-main': 'display:contents', '.pane-right': 'display:contents',
   '#day-body': '', '#three-day-body': '',
+  // The docked capture row and the pane headings are display: none on the phone (Task 4).
+  '.capture-dock': 'display:none', '.pane-heading': 'display:none',
+  '.capture-panel': 'min-height:0;overflow-y:auto;overscroll-behavior:contain;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:var(--radius-sheet);padding:var(--space-3) var(--space-3) 0;box-shadow:0 4px 16px var(--shade);transform-origin:bottom right',
   '.day-grid': 'display:flex;background:var(--card);border:1px solid var(--line);border-radius:6px;max-height:60vh;overflow-y:auto',
   '.tday-grid': 'display:grid;grid-template-columns:36px repeat(3, minmax(0, 1fr));background:var(--card);border:1px solid var(--line);border-top:none;border-radius:0 0 6px 6px;max-height:60vh;overflow-y:auto',
   '[data-layout="planner"] .panes': '', '[data-layout="month"] .panes': '', '[data-layout="all"] .panes': '', '[data-layout="all"] .pane-right': '',
@@ -1931,4 +1935,48 @@ test('the #tab-title class toggle: app.js hides it visually on desktop, and the 
 
 test('gate: the panes keep a gutter off the rail (found in the browser check: Today touched it)', () => {
   assert.equal(desktopOf('.panes', 'padding-left'), 'var(--space-4)');
+});
+
+// --- Task 4: the docked capture line (gate only) ---------------------------------
+test('gate: the round capture button is hidden and the dock is a visible row', () => {
+  assert.equal(desktopOf('.capture-btn', 'display'), 'none');
+  assert.equal(declOf('.capture-btn', 'display', phoneCss), 'flex', 'the phone button still shows');
+  assert.equal(declOf('.capture-dock', 'display', phoneCss), 'none', 'the dock is hidden on the phone');
+  assert.equal(desktopOf('.capture-dock', 'display'), 'flex');
+});
+
+test('the dock buttons: the typing button is a full-width input-like row, the mic a round icon button', () => {
+  assert.equal(declOf('.capture-dock-type', 'flex'), '1 1 auto');
+  assert.equal(declOf('.capture-dock-type', 'text-align'), 'left');
+  assert.match(declOf('.capture-dock-type', 'border'), /1px solid/);
+  assert.equal(declOf('.capture-dock-type', 'background'), 'var(--card)');
+  assert.equal(declOf('.capture-dock-mic', 'border-radius'), 'var(--radius-round)');
+  assert.equal(declOf('.capture-dock-mic', 'width'), '44px');
+  assert.equal(declOf('.capture-dock-mic', 'height'), '44px');
+  assert.equal(declOf('.capture-dock-mic', 'background'), 'var(--accent)');
+  assert.equal(declOf('.capture-dock-mic', 'color'), 'var(--accent-ink)');
+  assert.equal(declOf('.capture-dock-mic:disabled', 'opacity'), '0.5');
+  assert.equal(declOf('.capture-dock-type:disabled', 'opacity'), '0.5');
+});
+
+test('gate: the box is placed from the top-left, its panel grows from there, and CSS sets no transform on the box', () => {
+  assert.equal(desktopOf('.capture-box', 'bottom'), 'auto');
+  assert.equal(desktopOf('.capture-box', 'right'), 'auto');
+  assert.equal(desktopOf('.capture-panel', 'transform-origin'), 'top left');
+  assert.equal(desktopOf('.capture-box', 'transform'), null);
+  assert.equal(declOf('.capture-panel', 'transform-origin', phoneCss), 'bottom right', 'phone unchanged');
+  assert.equal(declOf('.capture-box', 'bottom', phoneCss), 'var(--capture-lift)');
+});
+
+test('the pane headings are hidden outside the gate and shown inside it', () => {
+  assert.equal(declOf('.pane-heading', 'display', phoneCss), 'none');
+  assert.notEqual(desktopOf('.pane-heading', 'display'), null);
+  assert.notEqual(desktopOf('.pane-heading', 'display'), 'none');
+});
+
+test('index.html: To-do and Ideas each carry a pane heading', () => {
+  for (const [id, text] of [['todo-view', 'To-do'], ['ideas-view', 'Ideas']]) {
+    const m = indexHtml.match(new RegExp(`<section id="${id}"[^>]*>\\s*(?:<!--[\\s\\S]*?-->\\s*)?<h2 class="pane-heading">${text}</h2>`));
+    assert.ok(m, `${id} opens with <h2 class="pane-heading">${text}</h2>`);
+  }
 });

@@ -64,6 +64,9 @@ export function createCapture({
   later = (fn, ms) => setTimeout(fn, ms),
   clearLater = (handle) => clearTimeout(handle),
   follow = followVisualViewport,
+  // Extra controls that open this box (the desktop dock's buttons). They
+  // mirror the round button's aria-expanded and disabled state; nothing else.
+  openers = [],
 } = {}) {
   // A missing wire would be a dead button, found only on the phone.
   for (const name of REQUIRED_ELS) {
@@ -94,6 +97,7 @@ export function createCapture({
     els.button.classList.toggle('listening', next === 'listening');
     els.button.setAttribute('aria-label', next === 'listening' ? 'Stop and add' : 'Capture by voice');
     els.button.setAttribute('aria-expanded', String(next !== 'closed'));
+    for (const o of openers) o.setAttribute('aria-expanded', String(next !== 'closed'));
     // Read-only while listening, so a tap on the text does not raise the
     // keyboard by itself; the tap's handler decides (spec § 3 step 3).
     els.field.readOnly = next === 'listening';
@@ -165,6 +169,7 @@ export function createCapture({
 
   function setAdding(on) {
     els.button.disabled = on;
+    for (const o of openers) o.disabled = on;
     els.add.disabled = on;
     els.add.hidden = on || previewOpen;
     els.cancel.hidden = !on;
@@ -298,6 +303,17 @@ export function createCapture({
     startListening();
   }
 
+  // The dock's typing button (desktop): open in typing mode and never start
+  // voice, so a keyboard user on a computer gets no microphone prompt. A listen
+  // already running is stopped and its text kept.
+  function openTyping() {
+    if (adding !== null) return;
+    stopListening();
+    open();
+    setMode('typing');
+    focusField();
+  }
+
   els.button.addEventListener('click', tapButton);
   els.add.addEventListener('click', () => { add().catch(logFailure); });
   els.cancel.addEventListener('click', cancel);
@@ -349,6 +365,11 @@ export function createCapture({
   setMode('closed');
 
   return {
+    openTyping,
+    // The layout changed under an open box (app.js): close it.
+    close,
+    // The round button's own tap, for the dock's mic button.
+    tap: tapButton,
     // Stop a listen and keep its text (page hidden, a sheet or Settings opening).
     stopAndKeep() { if (stopListening()) line.set(M.stopped); },
     // This box's preview closed without being confirmed: a newer Add, its

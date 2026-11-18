@@ -80,12 +80,18 @@
   <div class="panes">
   <div id="pane-left" class="pane-left">
     <!-- The docked capture row (desktop only, hidden outside the gate in
-         styles.css): a typing button and a mic button. Wired in a later task. -->
+         styles.css): a typing button and a mic button. -->
     <div id="capture-dock" class="capture-dock">
       <button id="capture-dock-type" class="capture-dock-type" type="button"
               aria-expanded="false" aria-controls="capture-box">Say or type something&hellip;</button>
       <button id="capture-dock-mic" class="capture-dock-mic" type="button"
-              aria-label="Capture by voice" aria-expanded="false" aria-controls="capture-box">Mic</button>
+              aria-label="Capture by voice" aria-expanded="false" aria-controls="capture-box">
+        <svg class="icon-mic" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"
+             fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="9" y="3" width="6" height="11" rx="3"></rect>
+          <path d="M5 11a7 7 0 0 0 14 0M12 18v3"></path>
+        </svg>
+      </button>
     </div>
     <!-- Today (home-screen spec § 2): js/today.js decides what is on it and
          js/todayview.js draws it into #today-body. The Settings gear is in
@@ -158,12 +164,14 @@
     <!-- To-do (V6 § 5). No add box: to-dos are captured through the capture
          box and classified by the model, or typed with a date and To-do. -->
     <section id="todo-view" hidden>
+      <h2 class="pane-heading">To-do</h2>
       <ul id="todo-list"></ul>
     </section>
 
     <!-- Ideas (V6 § 6). This box is the offline, deterministic capture path —
          it works with no Worker at all. -->
     <section id="ideas-view" hidden>
+      <h2 class="pane-heading">Ideas</h2>
       <div class="idea-add">
         <textarea id="idea-text" rows="3" placeholder="A thought to keep — no date needed"></textarea>
         <button id="idea-add" type="button">Keep</button>
