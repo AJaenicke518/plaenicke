@@ -921,3 +921,32 @@ test('openTyping while an add is pending changes nothing: no focus, no date row,
   fx.settle('direct');
   await tick();
 });
+
+// --- end-of-branch review: crossing the desktop gate keeps the text ----------
+test('replace() swaps the follower of an open box and keeps its text and mode', () => {
+  const fx = setup();
+  fx.capture.openTyping();
+  fx.els.field.value = 'keep me';
+  assert.equal(fx.follows.length, 1);
+  fx.capture.replace();
+  assert.equal(fx.follows[0].stops, 1, 'the old follower is stopped');
+  assert.equal(fx.follows.length, 2, 'a new one is attached');
+  assert.equal(fx.follows[1].target, fx.els.box);
+  assert.equal(fx.els.field.value, 'keep me');
+  assert.equal(fx.capture.state().mode, 'typing');
+  assert.equal(fx.els.box.hidden, false);
+  fx.capture.close();
+  fx.timers[fx.timers.length - 1].fn();
+  assert.equal(fx.follows[1].stops, 1, 'closing stops the new follower, once');
+  assert.equal(fx.follows[0].stops, 1, 'and not the old one again');
+});
+
+test('replace() on a closed box, or one that is closing, does nothing', () => {
+  const fx = setup();
+  fx.capture.replace();
+  assert.equal(fx.follows.length, 0);
+  fx.capture.openTyping();
+  fx.capture.close();
+  fx.capture.replace();
+  assert.equal(fx.follows.length, 1, 'a closing box keeps the follower it is closing with');
+});

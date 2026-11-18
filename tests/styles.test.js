@@ -1708,6 +1708,16 @@ test('the display: contents rule precedes the gate block in source order', () =>
   assert.ok(rule < gate, 'a later display: contents would override the desktop grid');
 });
 
+test('the docked capture row is sticky at the top of the left pane inside the gate only, opaque over the rows', () => {
+  assert.equal(desktopOf('.capture-dock', 'position'), 'sticky');
+  assert.equal(desktopOf('.capture-dock', 'top'), '0');
+  assert.ok(Number(desktopOf('.capture-dock', 'z-index')) >= 1, 'above the Today rows');
+  assert.equal(desktopOf('.capture-dock', 'background'), 'var(--bg)', 'rows do not show through');
+  assert.notEqual(desktopOf('.capture-dock', 'padding-bottom'), null, 'its gap is padding, so the background covers it');
+  assert.equal(desktopOf('.capture-dock', 'margin-bottom'), null, 'a margin would let rows show through the gap');
+  assert.notEqual(declOf('.capture-dock', 'position'), 'sticky', 'not outside the gate');
+});
+
 test('.capture-dock is display: none outside the gate', () => {
   assert.equal(declOf('.capture-dock', 'display'), 'none');
 });
@@ -1744,6 +1754,8 @@ test('desktop block: no colour, background, border, outline, shadow or custom-pr
       const prop = decl.slice(0, i).trim().toLowerCase();
       // The rail's one structural exception: its divider moves from the top edge to the right edge.
       if (sel === '.tab-bar' && (prop === 'border-top' || prop === 'border-right')) continue;
+      // The sticky dock's one exception: it needs the page background so the Today rows scrolling under it do not show through.
+      if (sel === '.capture-dock' && prop === 'background' && /^var\(--bg\)$/.test(decl.slice(decl.indexOf(':') + 1).trim())) continue;
       assert.doesNotMatch(prop, PAINT_PROP, `${sel}: ${prop}`);
     }
   }
