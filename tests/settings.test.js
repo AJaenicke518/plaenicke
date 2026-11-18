@@ -1540,3 +1540,42 @@ test('settings: the initial usage line follows a stored 24-hour format', () => {
   assert.match(text, /13:05/);
   assert.doesNotMatch(text, /PM/);
 });
+
+// The failure note's text is read by allText(), which ignores `hidden`: a note
+// that stayed visible after a good write, or never un-hid on a bad one, passed
+// the text-only test above.
+const failureNote = (row) => row.children.find((c) => c._classes.has('note'));
+
+test('settings: the failure note is shown after a failed write and hidden again after a later successful one', () => {
+  const { host } = openPanel([]);
+  for (const [label, choice] of [['Time', '24-hour'], ['Week starts', 'Monday']]) {
+    const row = prefRow(host, label);
+    const note = failureNote(row);
+    assert.ok(note, `fixture check: ${label} row has a note element`);
+    assert.equal(note.hidden, true, `${label}: hidden until a write fails`);
+    const realSet = localStorage.setItem;
+    localStorage.setItem = () => { throw new Error('QuotaExceededError'); };
+    try {
+      findButtonByText(row, choice).click();
+    } finally {
+      localStorage.setItem = realSet;
+    }
+    assert.equal(note.hidden, false, `${label}: shown after a failed write`);
+    assert.match(note.textContent, /Couldn't save this setting on this device\./);
+    findButtonByText(row, choice).click();
+    assert.equal(note.hidden, true, `${label}: hidden after a later successful write`);
+    assert.equal(note.textContent, '');
+  }
+});
+
+test('settings: a successful time or week click leaves the theme row\'s active button unchanged', () => {
+  const { host } = openPanel([]);
+  const themeSeg = () => host.querySelectorAll('div').find((d) => d._classes.has('seg') && findButtonByText(d, 'Light'));
+  findButtonByText(themeSeg(), 'Dark').click();
+  const before = activeLabels(themeSeg());
+  assert.deepEqual(before, ['Dark'], 'fixture check: the theme row has a non-default active button');
+  findButtonByText(prefRow(host, 'Time'), '24-hour').click();
+  assert.deepEqual(activeLabels(themeSeg()), before, 'after a Time click');
+  findButtonByText(prefRow(host, 'Week starts'), 'Monday').click();
+  assert.deepEqual(activeLabels(themeSeg()), before, 'after a Week starts click');
+});

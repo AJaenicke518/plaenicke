@@ -10512,3 +10512,115 @@ test('prefs: another tab changing week start or time format re-renders here and 
   assert.deepEqual(net.requests, [], 'no request went out');
   unlink();
 });
+
+// --- R1 Task 3 review: mutants that survived --------------------------------
+
+test('prefs: a Monday-start week on screen follows the clock across Sunday midnight, and one on Tuesday does not move', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  // Date only: no setTimeout is mocked, so the timer-id trap does not apply.
+  // 2026-11-22 is a Sunday.
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 10, 22, 23, 59).getTime() });
+  try {
+    resume();
+    assert.equal(labelText('week-label'), weekLabelFor('2026-11-22'), 'fixture check: the Sunday-start week on that Sunday');
+    localStorage.setItem('plaenicke.weekStart', 'mon');
+    reloadFromStorage('plaenicke.weekStart');
+    assert.equal(labelText('week-label'), weekLabelFor('2026-11-16'), 'fixture check: the Monday-start week holding Sunday 11/22');
+    t.mock.timers.tick(2 * 60 * 1000); // Monday 11/23, 00:01
+    resume();
+    assert.equal(labelText('week-label'), weekLabelFor('2026-11-23'),
+      'a Monday-start week that was showing today follows today into the new week');
+    t.mock.timers.tick(24 * 60 * 60 * 1000); // Tuesday 11/24
+    resume();
+    assert.equal(labelText('week-label'), weekLabelFor('2026-11-23'), 'Monday to Tuesday stays in the same week');
+  } finally {
+    localStorage.setItem('plaenicke.weekStart', 'sun');
+    reloadFromStorage('plaenicke.weekStart');
+    t.mock.timers.reset();
+    resume();
+  }
+  assert.equal(labelText('week-label'), weekLabelFor(startOfWeek(localISO(new Date()))), 'restored for later tests');
+});
+
+test('prefs: opening a day from the Month grid anchors the Week view to the chosen first day', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    localStorage.setItem('plaenicke.weekStart', 'mon');
+    reloadFromStorage('plaenicke.weekStart');
+    dayOf('2026-11-22'); // a Sunday: Monday-start week begins 11/16, Sunday-start 11/22
+    assert.equal(labelText('week-label'), weekLabelFor('2026-11-16'));
+  } finally {
+    localStorage.setItem('plaenicke.weekStart', 'sun');
+    reloadFromStorage('plaenicke.weekStart');
+  }
+});
+
+test('prefs: another tab switching time format repaints rendered times and the Updated stamp in 24-hour', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  unseedFeeds();
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(15, 7).getTime() });
+  try {
+    seed([record({ id: 'tf-evt', type: 'event', title: 'tf Seminar', date: localISO(localAt(15, 7)), time: '15:07' })]);
+    resume();
+    const body = dayOf(localISO(localAt(15, 7)));
+    assert.match(allText(body), /3:07 PM/, 'fixture check: 12-hour by default');
+    assert.equal(stampEl().textContent, 'Updated 3:07 PM', 'fixture check');
+    localStorage.setItem('plaenicke.timeFormat', '24h');
+    reloadFromStorage('plaenicke.timeFormat');
+    assert.match(allText(dayBody()), /15:07/, 'a rendered time is 24-hour');
+    assert.doesNotMatch(allText(dayBody()), /PM/);
+    assert.equal(stampEl().textContent, 'Updated 15:07', 'and so is the stamp');
+  } finally {
+    localStorage.removeItem('plaenicke.timeFormat');
+    reloadFromStorage('plaenicke.timeFormat');
+    t.mock.timers.reset();
+    seed([]);
+  }
+  resume();
+});
+
+test('prefs: switching time format in Settings repaints the Updated stamp with no calendars', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  unseedFeeds();
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(13, 5).getTime() });
+  let panel = null;
+  try {
+    resume();
+    assert.equal(stampEl().textContent, 'Updated 1:05 PM', 'fixture check');
+    panel = settingsPanel();
+    click(prefButton(panel.host, '24-hour'));
+    assert.equal(stampEl().textContent, 'Updated 13:05');
+  } finally {
+    if (panel) panel.close();
+    localStorage.removeItem('plaenicke.timeFormat');
+    t.mock.timers.reset();
+    resume();
+  }
+});
+
+test('prefs: switching time format in Settings repaints the Updated stamp from calendar fetch times', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  withSession();
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(13, 5).getTime() });
+  let panel = null;
+  try {
+    seedFeedsWithCache([sdFeed('tf-fb')], { 'tf-fb': cacheAt(localAt(13, 0)) });
+    resume();
+    await settle();
+    assert.equal(stampEl().textContent, 'Updated 1:00 PM', 'fixture check');
+    panel = settingsPanel();
+    click(prefButton(panel.host, '24-hour'));
+    assert.equal(stampEl().textContent, 'Updated 13:00');
+  } finally {
+    if (panel) panel.close();
+    localStorage.removeItem('plaenicke.timeFormat');
+    t.mock.timers.reset();
+    unseedFeeds();
+    resume();
+  }
+});
