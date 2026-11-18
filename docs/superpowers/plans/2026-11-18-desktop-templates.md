@@ -191,3 +191,37 @@ Serve the branch and seed items with the scratchpad seed page's item list (`/pri
 - New calendar views.
 - Syncing the layout.
 - Touch tablets.
+
+## Amendments from the v2 review (2026-11-18, DA adjudication — OVERRIDE the text above)
+
+**Task 1 / Task 3 — the big pane [C-1]**
+- Outside wide-`all`, `.pane-right` occupies the SAME grid cell as `.pane-main` (both `grid-column: 2; grid-row: 1`), so in `planner`/`month` and narrow `all` the To-do/Ideas tab shows its list in the big pane.
+- The wrappers get ids (`#pane-left`, `#pane-main`, `#pane-right`). `showView` sets `hidden` on a wrapper with no visible child; the gate restates `#pane-main[hidden], #pane-right[hidden] { display: none }`. Outside the gate nothing changes (`display: contents` already beats the UA `[hidden]` rule, and the children are hidden).
+- Tests: styles — both panes share a cell outside wide-`all`; apply — in planner `showView('todo')` hides `#pane-main` and shows `#pane-right`.
+- `display: contents` rule source order: the phone rule must precede the gate block (test it), or desktop loses its grid [O-6].
+
+**Task 2 — app.js**
+- `openedFrom` comes from the render site, not focus [I-1]: each `onOpen: openItem` (app.js ~1241, 1257, 1279, 1295, 1301, 1343) becomes `onOpen: (item) => openItem(item, <that list container>)`; `focusOpener` searches that `[section, body]` pair first.
+- No `tests/layout-load.test.js` [I-2]: apply.test.js's first test (the existing load test ~313-327) runs with the stub at desktop + `planner`, asserts the panes and the tick, then flips the stub to phone, fires `change`, and the existing assertions continue.
+- The stub replaces `window.matchMedia` (never bare `matchMedia`), returns the SAME MediaQueryList object per query string, answers `(prefers-color-scheme: dark)`, and is installed before app.js's first import [O-1].
+- `calendarChosenByUser` flag, set by the segment and Calendar-tab handlers; on entering the gate (load or `change`) and on a layout change, if false, seed `lastCalendarView = defaultMain(getLayout())` [I-8]. Drop the "record calendar if it differs" rule [O-9].
+- Desktop `aria-current="page"` goes on the rail item of the BIG pane's view (Calendar for a calendar view); clicking Today on desktop moves focus to `#today-view`. In wide `all`, clicking To-do/Ideas moves focus to that pane's section (no view change). Tests for each [I-7].
+- `#tab-title` is visually hidden on desktop (kept for assistive tech) [O-8].
+
+**Task 3 — CSS**
+- Desktop `body`: `height: 100dvh; display: flex; flex-direction: column; padding-left: <rail>; padding-bottom: 0`; `.panes { flex: 1; min-height: 0 }`. No `calc(100dvh - …)` [I-4].
+- Day and 3-day keep scrolling INSIDE their grids: in the gate the sections are flex columns filling the pane, and `.day-grid`, `.tday-grid` get `flex: 1 1 auto; min-height: 0; max-height: none` (tested in context) so `scrollTop` auto-scroll and the pinned 3-day heads still work [I-3].
+- Rail: buttons `flex: 0 0 auto` (not a quarter of the height each), `border-top` → `border-right`. Toast `right` no longer reserves the capture button's 88px. Desktop `.sheet` gets `max-width` AND `margin-inline: auto` [O-7].
+- Convert these existing phone pins to `rulesInContext(css).filter(r => r.at === null)` before adding gate rules [I-9]: `.tab-bar` (styles.test.js ~1023-1030), `body` padding-bottom (~273) and the computed toast-clearance test (~281-288), `.toast` (~1071-1073), `.capture-box` (~1213-1219), `.tday-grid`/`.day-grid` max-height (~1328), `.sheet` max-height (~208). Also put a non-type-scale rule first in the gate or switch the type-scale test (~636-645) to `rulesInContext` [O-10].
+
+**Task 4 — capture**
+- The dock is a row: the "Type something…" button (`openTyping`) AND a mic button (`#capture-dock-mic`) wired to the existing `tapButton` path; both are `openers` [I-6].
+- `openTyping`: `if (adding !== null) return; stopListening(); open(); setMode('typing'); focusField();` [O-3].
+- Desktop `follow` places the box from `els.captureDock.getBoundingClientRect()` (top = dock bottom + 8px, left = dock left, width = dock width, max-height = viewport − top − 16px), set as inline `top/left/width/max-height` with `bottom: auto; right: auto; transform: none`; the gate CSS also sets `.capture-box { bottom: auto; right: auto }` and `.capture-panel { transform-origin: top left }` [I-5, O-4]. If a box opened below the gate is still open when the window widens, the `change` handler closes it.
+- Dock buttons carry `aria-controls="capture-box"` [O-5].
+- Tests set `globalThis.visualViewport` (not `window.visualViewport`); the phone positive control asserts a NON-empty transform [O-2].
+
+**Task 5 — verification**
+- Add a scripted check: at 390×844 with touch emulation, `getComputedStyle` of every element in `index.html`'s id list, for each `plaenicke.layout` value, equals the values with no layout set [O-11].
+
+**Known limits (add):** no Escape-to-close or focus return after closing capture (pre-existing) [O-5]; iPadOS with a trackpad may match the desktop gate — unverified [O-12]; the gear stays in the header (spec said rail; CSS can't move it, and a second gear duplicates a control) — Alex's review list.
