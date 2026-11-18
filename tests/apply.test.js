@@ -412,6 +412,19 @@ test('app.js paints the shell sync indicator at load, so a stuck adoption is vis
     localStorage.setItem('plaenicke.layout', 'planner');
     for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.layout' });
     assert.deepEqual(shown(), ['today-view', 'week-view'], 'and the planner seeds the week again');
+  // Entering the gate seeds the calendar again while nothing was picked by hand:
+  // the layout changed to Month overview while off the gate (no seed there).
+  localStorage.setItem('plaenicke.layout', 'month');
+  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.layout' });
+  assert.deepEqual(shown(), ['today-view', 'calendar-view'], 'fixture check: month seeded');
+  setMedia(false, false);
+  localStorage.setItem('plaenicke.layout', 'planner');
+  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.layout' });
+  setMedia(true, false);
+  assert.deepEqual(shown(), ['today-view', 'week-view'], 're-entering the gate re-seeds the calendar for the layout');
+  // Coming up was opened by the Month layout above; settle it for later tests.
+  localStorage.setItem('plaenicke.layout', 'planner');
+  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.layout' });
     // Both queries were listened to, through addEventListener (a function here).
     for (const q of [DESKTOP_QUERY, WIDE_QUERY]) {
       assert.ok(mediaList(q)._fns.some((f) => f.via === 'addEventListener'), `app.js listens for ${q}`);
@@ -11016,9 +11029,11 @@ function setStoredLayout(layout) {
   storageEvent('plaenicke.layout');
 }
 function leaveDesktop() {
-  setMedia(false, false);
+  // The layout goes back first, while the gate still matches: a layout change
+  // on a phone leaves Coming up alone, so it would keep Month overview's open.
   localStorage.setItem('plaenicke.layout', 'planner');
   storageEvent('plaenicke.layout');
+  setMedia(false, false);
   click(byId('tab-today'));
 }
 
@@ -11261,6 +11276,202 @@ test('r3: on a phone a layout change (Settings or another tab) leaves an open Co
     assert.equal(moreButton().textContent, 'Show less', 'another tab\'s layout change keeps it open');
   } finally {
     panel.close();
+    leaveDesktop();
+    seed([]);
+  }
+});
+
+test('r3: on a computer, Ideas puts the right-hand pane on screen', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, false);
+  try {
+    assert.equal(byId('pane-right').hidden, true, 'fixture check: no list showing');
+    click(byId('tab-ideas'));
+    assert.deepEqual(shownViews(), ['today-view', 'ideas-view']);
+    assert.equal(byId('pane-right').hidden, false, 'Ideas alone makes #pane-right visible');
+  } finally {
+    leaveDesktop();
+  }
+});
+
+test('r3: the segments mark the calendar showing, even with Today as the main view', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, false);
+  try {
+    click(byId('show-week'));
+    click(byId('tab-today'));
+    assert.deepEqual(shownViews(), ['today-view', 'week-view'], 'fixture check');
+    assert.equal(byId('show-week').getAttribute('aria-pressed'), 'true');
+    assert.ok(byId('show-week')._classes.has('active'));
+    for (const id of ['show-day', 'show-3day', 'show-month']) {
+      assert.equal(byId(id).getAttribute('aria-pressed'), 'false', id);
+      assert.equal(byId(id)._classes.has('active'), false, id);
+    }
+  } finally {
+    leaveDesktop();
+  }
+});
+
+test('r3: in planner at wide width a To-do tap changes the view (only wide Everything just focuses)', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, true);
+  try {
+    click(byId('show-week'));
+    assert.deepEqual(shownViews(), ['today-view', 'week-view'], 'fixture check: planner, wide');
+    click(byId('tab-todo'));
+    assert.deepEqual(shownViews(), ['today-view', 'todo-view'], 'the view changed');
+    click(byId('tab-ideas'));
+    assert.deepEqual(shownViews(), ['today-view', 'ideas-view'], 'and again for Ideas');
+  } finally {
+    leaveDesktop();
+  }
+});
+
+test('r3: Everything narrower than wide with To-do: the rail and the title say To-do', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, false);
+  try {
+    setStoredLayout('all');
+    click(byId('tab-todo'));
+    assert.deepEqual(shownViews(), ['today-view', 'todo-view']);
+    assert.equal(byId('tab-todo').getAttribute('aria-current'), 'page');
+    assert.ok(byId('tab-todo')._classes.has('active'));
+    assert.equal(byId('tab-calendar').getAttribute('aria-current'), null);
+    assert.equal(byId('tab-title').textContent, 'To-do');
+  } finally {
+    leaveDesktop();
+  }
+});
+
+test('r3: on a phone the Today tap does not move focus', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(false, false);
+  try {
+    click(byId('tab-todo'));
+    byId('tab-todo').focus();
+    click(byId('tab-today'));
+    assert.deepEqual(shownViews(), ['today-view']);
+    assert.notEqual(globalThis.document.activeElement, byId('today-view'), 'focus stays put on a phone');
+    assert.equal(globalThis.document.activeElement, byId('tab-todo'));
+  } finally {
+    leaveDesktop();
+  }
+});
+
+test('r3: Month overview on a computer re-opens Coming up when a new day renders', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 23, 50).getTime() });
+  seed([record({ id: 'r3nd-far', type: 'event', title: 'r3nd far', date: '2026-11-03', time: '09:00' }),
+    record({ id: 'r3nd-due', type: 'due', title: 'r3nd form', date: '2026-10-21' })]);
+  setMedia(true, false);
+  try {
+    setStoredLayout('month');
+    assert.equal(moreButton().textContent, 'Show less', 'fixture check: Month overview opens it');
+    click(moreButton());
+    assert.equal(moreButton().textContent, 'Show the next 30 days', 'fixture check: closed by hand');
+    const tick = todayInterval();
+    t.mock.timers.tick(20 * 60 * 1000);
+    tick.fn();
+    assert.equal(labelText('today-date'), 'Thursday, October 22', 'fixture check: the new day rendered');
+    assert.equal(moreButton().textContent, 'Show less', 'a new day takes the layout\'s default: open');
+  } finally {
+    t.mock.timers.reset();
+    leaveDesktop();
+    seed([]);
+  }
+  resume();
+});
+
+test('r3: the calendar tab and a segment each mark a calendar as picked by hand', async () => {
+  installFakeLocalStorage();
+  const { resetCalendarChoiceForTests } = await import('../js/app.js');
+  setMedia(true, false);
+  try {
+    // A segment alone.
+    resetCalendarChoiceForTests();
+    setStoredLayout('planner');
+    click(byId('tab-today'));
+    click(byId('show-day'));
+    click(byId('tab-today'));
+    setStoredLayout('month');
+    assert.deepEqual(shownViews(), ['today-view', 'day-view'], 'a segment pick survives a layout change');
+    // The Calendar tab alone.
+    resetCalendarChoiceForTests();
+    setStoredLayout('planner');
+    click(byId('tab-today'));
+    click(byId('tab-calendar'));
+    assert.deepEqual(shownViews(), ['today-view', 'week-view'], 'fixture check: the tab opened the planner\'s week');
+    click(byId('tab-today'));
+    setStoredLayout('month');
+    assert.deepEqual(shownViews(), ['today-view', 'week-view'], 'a Calendar-tab pick survives a layout change');
+    // Control: with nothing picked the layout seeds.
+    resetCalendarChoiceForTests();
+    setStoredLayout('planner');
+    setStoredLayout('month');
+    assert.deepEqual(shownViews(), ['today-view', 'calendar-view'], 'control: no pick, the layout seeds');
+  } finally {
+    leaveDesktop();
+  }
+});
+
+// The pane an item was opened from gets focus back, not the first visible pane
+// that lists it (Today comes first in document order). Each render site passes
+// its own body as the origin.
+for (const [name, segment, body] of [
+  ['week list', 'show-week', weekList],
+  ['3-day', 'show-3day', threeDayBody],
+  ['day', 'show-day', dayBody],
+]) {
+  test(`r3: an item opened from the ${name} returns focus to the ${name}, not Today`, async () => {
+    installFakeLocalStorage();
+    await import('../js/app.js');
+    const today = localISO(new Date());
+    seed([record({ id: 'r3-origin', type: 'event', title: 'r3 origin item', date: today, time: '10:00' })]);
+    setMedia(true, false);
+    try {
+      click(byId(segment));
+      assert.ok(openControlFor(todayBody(), 'r3 origin item'), 'fixture check: Today lists it');
+      const opener = openControlFor(body(), 'r3 origin item');
+      assert.ok(opener, `fixture check: the ${name} lists it`);
+      click(opener);
+      closeSheet();
+      assert.ok(isUnder(body(), globalThis.document.activeElement), `focus is back in the ${name}`);
+      assert.equal(isUnder(todayBody(), globalThis.document.activeElement), false, 'not in Today');
+    } finally {
+      forceCloseSheet();
+      leaveDesktop();
+      seed([]);
+    }
+  });
+}
+
+test('r3: an idea opened from Ideas, and an item opened from Today, return focus to that pane', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const today = localISO(new Date());
+  seed([record({ id: 'r3-idea', type: 'idea', title: 'r3 origin idea', date: today }),
+    record({ id: 'r3-tday', type: 'event', title: 'r3 today item', date: today, time: '10:00' })]);
+  setMedia(true, true);
+  try {
+    setStoredLayout('all');
+    const fromIdeas = openControlFor(ideaList(), 'r3 origin idea');
+    assert.ok(fromIdeas, 'fixture check');
+    click(fromIdeas);
+    closeSheet();
+    assert.ok(isUnder(ideaList(), globalThis.document.activeElement), 'focus is back in Ideas');
+    const fromToday = openControlFor(todayBody(), 'r3 today item');
+    assert.ok(fromToday, 'fixture check');
+    click(fromToday);
+    closeSheet();
+    assert.ok(isUnder(todayBody(), globalThis.document.activeElement), 'focus is back in Today');
+  } finally {
+    forceCloseSheet();
     leaveDesktop();
     seed([]);
   }

@@ -1493,6 +1493,9 @@ let lastCalendarView = 'day';
 // A calendar view picked by hand (a segment or the Calendar tab) is kept
 // across layout changes; until then the calendar follows the layout's default.
 let calendarChosenByUser = false;
+// Test hook: tests/apply.test.js shares one module instance, and the flag is
+// otherwise never cleared, so the two places that set it cannot be told apart.
+export function resetCalendarChoiceForTests() { calendarChosenByUser = false; }
 function seedCalendar() {
   if (!calendarChosenByUser && isDesktop()) lastCalendarView = defaultMain(getLayout());
 }
