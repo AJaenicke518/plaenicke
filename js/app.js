@@ -1664,9 +1664,20 @@ const capture = createCapture({
   // The desktop dock's two buttons mirror the box's open and disabled state; the mic also its listening state.
   openers: [els.captureDockType, { el: els.captureDockMic, mic: true }],
   follow: (el, o) => (window.matchMedia(DESKTOP_QUERY).matches ? desktopFollow(el) : followVisualViewport(el, o)),
+  // On a computer focus goes back to the dock button that opened the box (the
+  // typing one if it was opened some other way); the phone's is unchanged.
+  restoreFocus: () => { if (isDesktop()) (dockOpener || els.captureDockType).focus(); },
 });
-els.captureDockType.addEventListener('click', () => capture.openTyping());
-els.captureDockMic.addEventListener('click', () => capture.tap());
+let dockOpener = null;
+els.captureDockType.addEventListener('click', () => { dockOpener = els.captureDockType; capture.openTyping(); });
+els.captureDockMic.addEventListener('click', () => { dockOpener = els.captureDockMic; capture.tap(); });
+// Escape closes the open box on a computer. On the box, so an item sheet or
+// Settings above it keeps its own Escape.
+els.captureBox.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !isDesktop()) return;
+  e.preventDefault();
+  capture.close();
+});
 // Opening Settings stops a listen and keeps its text (spec § 3 step 4).
 // settings.js's own listener on this button opens or closes the panel.
 els.settingsBtn.addEventListener('click', () => { capture.stopAndKeep(); });

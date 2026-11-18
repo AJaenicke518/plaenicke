@@ -64,6 +64,8 @@ export function createCapture({
   later = (fn, ms) => setTimeout(fn, ms),
   clearLater = (handle) => clearTimeout(handle),
   follow = followVisualViewport,
+  // Called as a box closes, after its field blurs (app.js returns focus to the desktop dock).
+  restoreFocus = () => {},
   // Extra controls that open this box (the desktop dock's buttons). Each is an
   // element or { el, mic: true }. They mirror the round button's aria-expanded
   // and disabled state; a mic one also mirrors its listening state (class and
@@ -271,6 +273,7 @@ export function createCapture({
     if (els.box.classList.contains('typing')) els.box.classList.add('fade');
     els.box.classList.add('closing');
     els.field.blur();
+    restoreFocus();
     els.field.value = '';
     els.field.style.height = '';
     line.set('');
