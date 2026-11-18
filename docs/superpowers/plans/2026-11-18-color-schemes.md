@@ -125,3 +125,17 @@ The implementer derives `--line`, `--chip-bg`, `--chip-ink`, `--grid-line` and `
 
 **Spec note:** `manifest.json` `theme_color`/`background_color` are classic light (`#f4f1ea`); dark mode already mismatches them; schemes don't change that. Known gap.
 **For Alex (taste):** each candidate accent sits near one item-type colour (sage≈event, ocean≈start, plum≈task); check Month view on review.
+
+## Post-review notes
+
+- **Pre-paint theme behaviour change.** index.html's pre-paint script now treats an unknown stored `plaenicke.theme` value as `auto` (system preference), mirroring `resolveTheme`; it previously treated it as `light`. A missing `window.matchMedia` resolves auto to light, and the scheme is still applied.
+- **Accents moved for distinctness.** The "For Alex (taste)" note above is resolved: every non-classic accent is now at least 40 (Euclidean RGB) from every `--type-*` colour of its variant (tests/styles.test.js). `--today` and `--tick-glow` follow. Sage dark is unchanged.
+
+| Scheme | Light accent (was) | Dark accent (was) |
+|---|---|---|
+| Sage | `#1f5149` (`#3f6b4f`) | `#86b897` (unchanged) |
+| Ocean | `#1d4b87` (`#2f5f8f`) | `#89c2e6` (`#7fb0e0`) |
+| Plum | `#7d4075` (`#7a4a7e`) | `#d69fcb` (`#c79ccc`) |
+
+- **Cross-tab and resume.** A `plaenicke.scheme` storage event (or `localStorage.clear()`, key null) and every return to visible re-apply the stored scheme; no sync is scheduled.
+- **Swatches** show the accent of the currently resolved theme and repaint when a Theme button is clicked.

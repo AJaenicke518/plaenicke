@@ -1665,13 +1665,16 @@ test('settings: the three rows are labelled groups: Theme, Time, Week starts', (
 // --- colour scheme row (R2 Task 2) -------------------------------------------
 
 const styleCss = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
-// Light --accent of a scheme block, read straight from styles.css.
-function lightAccent(scheme) {
-  const sel = scheme === 'classic' ? ':root' : `[data-scheme="${scheme}"]`;
+// --accent of a scheme block for a variant, read straight from styles.css.
+function accentOf(scheme, variant) {
+  const sel = scheme === 'classic'
+    ? (variant === 'dark' ? '[data-theme="dark"]' : ':root')
+    : `[data-scheme="${scheme}"]${variant === 'dark' ? '[data-theme="dark"]' : ''}`;
   const re = new RegExp(`(?:^|\\n)${sel.replace(/[[\]".:]/g, '\\$&')}\\s*\\{([^}]*)\\}`);
   const body = styleCss.match(re)[1];
   return body.match(/--accent:\s*([^;]+);/)[1].trim();
 }
+const lightAccent = (scheme) => accentOf(scheme, 'light');
 const coloursRow = (host) => prefRow(host, 'Colours');
 const swatchOf = (btn) => btn.children.find((c) => c._classes.has('swatch'));
 
@@ -1718,6 +1721,25 @@ test('colours: each swatch is a 14px circle with a currentColor border and its s
     assert.equal(sw.style.background, lightAccent(scheme), `${scheme} swatch literal equals its light --accent`);
   });
   assert.match(styleCss, /\.swatch\s*\{[^}]*width:\s*14px[^}]*height:\s*14px[^}]*border-radius:\s*50%[^}]*border:\s*1px solid currentColor/);
+});
+
+test('colours: when the resolved theme is dark at open, each swatch is its scheme\'s dark accent', () => {
+  const { host } = openPanel([], () => { localStorage.setItem('plaenicke.theme', 'dark'); });
+  assert.equal(document.documentElement.dataset.theme, 'dark');
+  const btns = rowButtons(coloursRow(host));
+  SCHEMES.forEach((scheme, i) => {
+    assert.equal(swatchOf(btns[i]).style.background, accentOf(scheme, 'dark'), `${scheme} dark swatch`);
+  });
+});
+
+test('colours: clicking a Theme button repaints the swatches for the resolved theme', () => {
+  const { host } = openPanel([]);
+  const row = coloursRow(host);
+  const swatches = () => rowButtons(row).map((b) => swatchOf(b).style.background);
+  findButtonByText(prefRow(host, 'Theme'), 'Dark').click();
+  assert.deepEqual(swatches(), SCHEMES.map((x) => accentOf(x, 'dark')));
+  findButtonByText(prefRow(host, 'Theme'), 'Light').click();
+  assert.deepEqual(swatches(), SCHEMES.map((x) => accentOf(x, 'light')));
 });
 
 test('colours: a failed write still applies for the session and says it will reset', () => {

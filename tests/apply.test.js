@@ -5951,6 +5951,70 @@ test('cross-tab sync: a storage event for a key that is not synced schedules not
   assert.deepEqual(net.requests, [], 'and nothing is pulled or pushed');
 });
 
+// The colour scheme is device-local and not in the synced blob: another tab's
+// change is applied here (and an open panel repainted), and nothing is synced.
+test('cross-tab scheme: a storage event for plaenicke.scheme applies it here and schedules no sync', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  const net = captureAccountRequests();
+  const timers = installManualTimers();
+  try {
+    setVisibility('visible');
+    assert.equal(globalThis.document.documentElement.dataset.scheme, undefined, 'fixture: classic');
+    localStorage.setItem('plaenicke.scheme', 'ocean');
+    storageEvent('plaenicke.scheme');
+    assert.equal(globalThis.document.documentElement.dataset.scheme, 'ocean');
+    localStorage.setItem('plaenicke.scheme', 'classic');
+    storageEvent('plaenicke.scheme');
+    assert.equal('scheme' in globalThis.document.documentElement.dataset, false, 'classic removes the attribute');
+    assert.equal(timers.live(2000), 0, 'no sync is scheduled');
+    timers.fire(2000);
+    await drain();
+  } finally {
+    delete globalThis.document.documentElement.dataset.scheme;
+    timers.restore();
+    net.restore();
+  }
+  assert.deepEqual(net.requests, []);
+});
+
+test('cross-tab scheme: localStorage.clear() in another tab (key null) re-applies the scheme, still with no sync', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  const net = captureAccountRequests();
+  const timers = installManualTimers();
+  try {
+    setVisibility('visible');
+    globalThis.document.documentElement.dataset.scheme = 'plum'; // what this tab showed
+    localStorage.removeItem('plaenicke.scheme'); // the other tab cleared storage
+    storageEvent(null);
+    assert.equal('scheme' in globalThis.document.documentElement.dataset, false, 'back to classic');
+    assert.equal(timers.live(2000), 0, 'no sync is scheduled');
+  } finally {
+    delete globalThis.document.documentElement.dataset.scheme;
+    timers.restore();
+    net.restore();
+  }
+});
+
+test('becoming visible re-applies the stored scheme', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    localStorage.setItem('plaenicke.scheme', 'sage'); // changed while this tab was away, no event seen
+    assert.equal(globalThis.document.documentElement.dataset.scheme, undefined, 'fixture: not applied yet');
+    resume();
+    assert.equal(globalThis.document.documentElement.dataset.scheme, 'sage');
+  } finally {
+    delete globalThis.document.documentElement.dataset.scheme;
+    localStorage.removeItem('plaenicke.scheme');
+  }
+});
+
 // The storage event reaches EVERY other tab, hidden ones included. A hidden
 // tab must still not sync: the gate in runSync decides, not the listener.
 test('cross-tab sync: a hidden tab that receives the storage event still makes no request', async () => {

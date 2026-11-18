@@ -37,9 +37,15 @@ import {
 
 const CHOICES = ['light', 'dark', 'auto'];
 
-// Each scheme's light --accent, as the swatch colour. tests/settings.test.js
+// Each scheme's --accent in the light and the dark theme, as the swatch colour
+// (the swatch shows what the scheme looks like NOW). tests/settings.test.js
 // ties every literal to styles.css; a new scheme needs an entry here.
-const SCHEME_SWATCH = { classic: '#8a5a3b', sage: '#3f6b4f', ocean: '#2f5f8f', plum: '#7a4a7e' };
+const SCHEME_SWATCH = {
+  classic: { light: '#8a5a3b', dark: '#8fa7c8' },
+  sage: { light: '#1f5149', dark: '#86b897' },
+  ocean: { light: '#1d4b87', dark: '#89c2e6' },
+  plum: { light: '#7d4075', dark: '#d69fcb' },
+};
 const LAYOUT_LABEL = { planner: 'Week planner', month: 'Month overview', all: 'Everything' };
 const SCHEME_LABEL = { classic: 'Classic', sage: 'Sage', ocean: 'Ocean', plum: 'Plum' };
 
@@ -279,6 +285,7 @@ export function initSettings({
       b.addEventListener('click', () => {
         try { localStorage.setItem(THEME_KEY, choice); } catch { /* private mode */ }
         applyTheme(choice);
+        paintSwatches();
         seg.querySelectorAll('button').forEach((x) => x.classList.remove('active'));
         b.classList.add('active');
       });
@@ -349,6 +356,10 @@ export function initSettings({
     coloursNote.className = 'note';
     coloursNote.hidden = true;
     const schemeButtons = [];
+    const paintSwatches = () => {
+      const variant = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+      for (const x of schemeButtons) x.swatch.style.background = SCHEME_SWATCH[x.value][variant];
+    };
     const paintScheme = (value) => {
       for (const x of schemeButtons) {
         const on = x.value === value;
@@ -363,9 +374,8 @@ export function initSettings({
       const swatch = document.createElement('span');
       swatch.className = 'swatch';
       swatch.setAttribute('aria-hidden', 'true');
-      swatch.style.background = SCHEME_SWATCH[scheme];
-      b.appendChild(swatch);
-      schemeButtons.push({ value: scheme, el: b });
+            b.appendChild(swatch);
+      schemeButtons.push({ value: scheme, el: b, swatch });
       b.addEventListener('click', () => {
         const saved = setScheme(scheme) && getScheme() === scheme;
         applyScheme(scheme);
@@ -376,6 +386,7 @@ export function initSettings({
       coloursSeg.appendChild(b);
     }
     paintScheme(getScheme());
+    paintSwatches();
     coloursRow.append(coloursSeg, coloursNote);
     // Computer layout: the Colours row's shape. A failed write still applies
     // the layout for this session and says it will reset; the app is told
@@ -411,7 +422,7 @@ export function initSettings({
     }
     paintLayout(getLayout());
     layoutRow.append(layoutSeg, layoutNote);
-    repaintPrefs = () => { time.repaint(); week.repaint(); paintScheme(getScheme()); paintLayout(getLayout()); paintUsage(); };
+    repaintPrefs = () => { time.repaint(); week.repaint(); paintScheme(getScheme()); paintSwatches(); paintLayout(getLayout()); paintUsage(); };
     appearance.append(ah, themeRow, time.row, week.row, coloursRow, layoutRow, usage);
 
     // --- Linked calendars ---------------------------------------------

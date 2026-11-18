@@ -57,9 +57,17 @@ test('pre-paint: the theme equals resolveTheme for every stored value, known or 
   }
 });
 
-test('pre-paint: the scheme is applied even when window.matchMedia is undefined', () => {
-  const { dataset } = run({ store: { 'plaenicke.scheme': 'plum' } });
-  assert.equal(dataset.scheme, 'plum');
+test('pre-paint: with window.matchMedia undefined nothing throws, the theme falls back to light and the scheme is still applied', () => {
+  for (const themeSetting of [null, 'auto', 'light', 'bogus']) {
+    const store = { 'plaenicke.scheme': 'plum' };
+    if (themeSetting !== null) store['plaenicke.theme'] = themeSetting;
+    const { dataset, thrown } = run({ store });
+    assert.equal(thrown, null, `theme ${themeSetting}: no throw`);
+    assert.equal(dataset.scheme, 'plum', `theme ${themeSetting}: scheme applied`);
+    assert.equal(dataset.theme, undefined, `theme ${themeSetting}: light`);
+  }
+  // An explicit dark still wins without matchMedia.
+  assert.equal(run({ store: { 'plaenicke.theme': 'dark' } }).dataset.theme, 'dark');
 });
 
 test('pre-paint: a throwing localStorage applies nothing and does not throw', () => {
