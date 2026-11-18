@@ -1569,3 +1569,24 @@ for (const s of OTHER_SCHEMES) {
     });
   }
 }
+
+// Hardening: derived tokens stay derived, and the surface tokens stay distinct.
+for (const s of OTHER_SCHEMES) {
+  for (const [variant, sel, alpha] of [['light', lightSel(s), '0.14'], ['dark', darkSel(s), '0.18']]) {
+    test(`scheme ${s} ${variant}: --tick-glow is --accent at alpha ${alpha}`, () => {
+      const hex = declOf(sel, '--accent');
+      const m = /^#([0-9a-f]{6})$/i.exec(hex || '');
+      assert.ok(m, `${sel} --accent is ${hex}`);
+      const [r, g, b] = [0, 2, 4].map((i) => parseInt(m[1].slice(i, i + 2), 16));
+      assert.equal(declOf(sel, '--tick-glow'), `rgba(${r}, ${g}, ${b}, ${alpha})`);
+    });
+    test(`scheme ${s} ${variant}: --ink >= 4.5 on --chip-bg; line, grid-line, chip-bg and card differ from bg`, () => {
+      const ratio = contrast(declOf(sel, '--ink'), declOf(sel, '--chip-bg'));
+      assert.ok(ratio >= 4.5, `${sel} --ink on --chip-bg: ${ratio.toFixed(2)} < 4.5`);
+      const bg = declOf(sel, '--bg').toLowerCase();
+      for (const t of ['--line', '--grid-line', '--chip-bg', '--card']) {
+        assert.notEqual(declOf(sel, t).toLowerCase(), bg, `${sel} ${t} equals --bg`);
+      }
+    });
+  }
+}

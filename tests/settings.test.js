@@ -1736,3 +1736,59 @@ test('colours: initSettings re-applies the stored scheme', () => {
   openPanel([], () => { localStorage.setItem('plaenicke.scheme', 'plum'); }, undefined, { open: false });
   assert.equal(document.documentElement.dataset.scheme, 'plum');
 });
+
+// --- colour scheme row: review hardening ---------------------------------------
+
+test('colours: a setItem that silently does nothing is a failed save (read-back), not stored', () => {
+  const { host } = openPanel([]);
+  const row = coloursRow(host);
+  const realSet = localStorage.setItem;
+  localStorage.setItem = () => {}; // no throw, no write: getItem keeps the old value
+  try {
+    findButtonByText(row, 'Sage').click();
+  } finally {
+    localStorage.setItem = realSet;
+  }
+  assert.match(allText(row), /Couldn't save this on this device; it will reset next time\./);
+  assert.equal(localStorage.getItem('plaenicke.scheme'), null, 'Sage was not stored');
+  assert.equal(document.documentElement.dataset.scheme, 'sage', 'still applied for the session');
+});
+
+test('colours: the note is shown after a failed click and hidden again after a later successful one', () => {
+  const { host } = openPanel([]);
+  const row = coloursRow(host);
+  const note = failureNote(row);
+  assert.equal(note.hidden, true, 'hidden initially');
+  const realSet = localStorage.setItem;
+  localStorage.setItem = () => { throw new Error('QuotaExceededError'); };
+  try {
+    findButtonByText(row, 'Ocean').click();
+  } finally {
+    localStorage.setItem = realSet;
+  }
+  assert.equal(note.hidden, false);
+  findButtonByText(row, 'Plum').click();
+  assert.equal(note.hidden, true);
+  assert.equal(note.textContent, '');
+  assert.equal(localStorage.getItem('plaenicke.scheme'), 'plum');
+});
+
+test('colours: refreshDisplayPrefs moves the active button to the stored scheme', () => {
+  const { host, settings } = openPanel([]);
+  const row = coloursRow(host);
+  assert.deepEqual(activeLabels(row), ['Classic']);
+  localStorage.setItem('plaenicke.scheme', 'ocean');
+  settings.refreshDisplayPrefs();
+  assert.deepEqual(activeLabels(row), ['Ocean']);
+  assert.deepEqual(rowButtons(row).map((b) => b.getAttribute('aria-pressed')), ['false', 'false', 'true', 'false']);
+});
+
+test('colours: every swatch is aria-hidden and every button is type=button', () => {
+  const { host } = openPanel([]);
+  const btns = rowButtons(coloursRow(host));
+  assert.equal(btns.length, SCHEMES.length);
+  for (const b of btns) {
+    assert.equal(b.type, 'button', `${b.textContent} type`);
+    assert.equal(swatchOf(b).getAttribute('aria-hidden'), 'true', `${b.textContent} swatch`);
+  }
+});
