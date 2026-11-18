@@ -6,16 +6,22 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <script>
-    // Apply the saved colour scheme and theme before first paint so neither
+    // Apply the saved colour scheme, layout and theme before first paint so neither
     // flashes. Mirrors resolveScheme() in js/prefs.js and resolveTheme() in
-    // js/theme.js — those modules are the spec; keep in sync (the scheme list
-    // below is tied to SCHEMES by tests/prepaint.test.js). ES5 only.
+    // js/theme.js — those modules are the spec; keep in sync (the scheme and layout lists
+    // below are tied to SCHEMES and LAYOUTS by tests/prepaint.test.js). ES5 only.
     (function () {
       // Scheme first, in its own try: a throw in the theme logic below (no
       // matchMedia) must not skip it.
       try {
         var s = localStorage.getItem('plaenicke.scheme');
         if (s === 'sage' || s === 'ocean' || s === 'plum') document.documentElement.dataset.scheme = s;
+      } catch (e) {}
+      // Layout next, in its own try. planner is written too (CSS keys on it).
+      try {
+        var l = null;
+        try { l = localStorage.getItem('plaenicke.layout'); } catch (e) {}
+        document.documentElement.dataset.layout = (l === 'month' || l === 'all') ? l : 'planner';
       } catch (e) {}
       var t = null;
       try { t = localStorage.getItem('plaenicke.theme'); } catch (e) {}
@@ -69,85 +75,103 @@
        when it fills. A tab switch clears it (js/app.js switchTab). -->
   <p id="status-line" class="status-line" role="status"></p>
 
-  <!-- Calendar's switcher (spec § 4), shown on the Calendar tab only. List
-       was removed in stage 3d (Alex, 2026-10-22); 3-day sits after Day,
-       beside Week (Alex, 2026-10-26). -->
-  <div id="cal-switch" class="cal-switch" role="group" aria-label="Calendar view" hidden>
-    <button id="show-day" type="button" aria-pressed="false">Day</button>
-    <button id="show-3day" type="button" aria-pressed="false">3-day</button>
-    <button id="show-week" type="button" aria-pressed="false">Week</button>
-    <button id="show-month" type="button" aria-pressed="false">Month</button>
+  <!-- Pane wrappers (Release 3). Inert on the phone (display: contents in
+       styles.css); the desktop gate lays them out as columns. -->
+  <div class="panes">
+  <div id="pane-left" class="pane-left">
+    <!-- The docked capture row (desktop only, hidden outside the gate in
+         styles.css): a typing button and a mic button. Wired in a later task. -->
+    <div id="capture-dock" class="capture-dock">
+      <button id="capture-dock-type" class="capture-dock-type" type="button"
+              aria-expanded="false" aria-controls="capture-box">Say or type something&hellip;</button>
+      <button id="capture-dock-mic" class="capture-dock-mic" type="button"
+              aria-label="Capture by voice" aria-expanded="false" aria-controls="capture-box">Mic</button>
+    </div>
+    <!-- Today (home-screen spec § 2): js/today.js decides what is on it and
+         js/todayview.js draws it into #today-body. The Settings gear is in
+         the shell header, not here (spec § 2.2, amended 2026-10-22). -->
+    <section id="today-view">
+      <div class="today-head">
+        <div>
+          <h2 class="today-title">Today</h2>
+          <p id="today-date" class="today-date"></p>
+        </div>
+        <!-- "N DONE · M LEFT" (rewards concept 2): hidden until the first tick. -->
+        <p id="today-tally" class="today-tally" hidden></p>
+      </div>
+      <div id="today-body"></div>
+    </section>
   </div>
 
-  <!-- Today (home-screen spec § 2): js/today.js decides what is on it and
-       js/todayview.js draws it into #today-body. The Settings gear is in
-       the shell header, not here (spec § 2.2, amended 2026-10-22). -->
-  <section id="today-view">
-    <div class="today-head">
-      <div>
-        <h2 class="today-title">Today</h2>
-        <p id="today-date" class="today-date"></p>
+  <div id="pane-main" class="pane-main">
+    <!-- Calendar's switcher (spec § 4), shown on the Calendar tab only. List
+         was removed in stage 3d (Alex, 2026-10-22); 3-day sits after Day,
+         beside Week (Alex, 2026-10-26). -->
+    <div id="cal-switch" class="cal-switch" role="group" aria-label="Calendar view" hidden>
+      <button id="show-day" type="button" aria-pressed="false">Day</button>
+      <button id="show-3day" type="button" aria-pressed="false">3-day</button>
+      <button id="show-week" type="button" aria-pressed="false">Week</button>
+      <button id="show-month" type="button" aria-pressed="false">Month</button>
+    </div>
+
+    <section id="calendar-view" hidden>
+      <div class="cal-controls">
+        <button id="prev-month" type="button">&larr;</button>
+        <span id="calendar-label"></span>
+        <button id="next-month" type="button">&rarr;</button>
       </div>
-      <!-- "N DONE · M LEFT" (rewards concept 2): hidden until the first tick. -->
-      <p id="today-tally" class="today-tally" hidden></p>
-    </div>
-    <div id="today-body"></div>
-  </section>
+      <div id="calendar-grid" class="calendar-grid"></div>
+    </section>
 
-  <section id="calendar-view" hidden>
-    <div class="cal-controls">
-      <button id="prev-month" type="button">&larr;</button>
-      <span id="calendar-label"></span>
-      <button id="next-month" type="button">&rarr;</button>
-    </div>
-    <div id="calendar-grid" class="calendar-grid"></div>
-  </section>
+    <section id="week-view" hidden>
+      <div class="cal-controls">
+        <button id="prev-week" type="button">&larr;</button>
+        <span id="week-label"></span>
+        <button id="next-week" type="button">&rarr;</button>
+      </div>
+      <div id="week-grid" class="week-grid"></div>
+      <section id="week-list" class="today-section wlist"></section>
+    </section>
 
-  <section id="week-view" hidden>
-    <div class="cal-controls">
-      <button id="prev-week" type="button">&larr;</button>
-      <span id="week-label"></span>
-      <button id="next-week" type="button">&rarr;</button>
-    </div>
-    <div id="week-grid" class="week-grid"></div>
-    <section id="week-list" class="today-section wlist"></section>
-  </section>
+    <!-- The 3-day view (option A, Alex 2026-10-26): js/threedayview.js draws
+         three columns of Day's hour grid into #three-day-body. -->
+    <section id="three-day-view" hidden>
+      <div class="cal-controls">
+        <button id="prev-3day" type="button" aria-label="Previous 3 days">&larr;</button>
+        <span id="three-day-label"></span>
+        <button id="next-3day" type="button" aria-label="Next 3 days">&rarr;</button>
+      </div>
+      <div id="three-day-body"></div>
+    </section>
 
-  <!-- The 3-day view (option A, Alex 2026-10-26): js/threedayview.js draws
-       three columns of Day's hour grid into #three-day-body. -->
-  <section id="three-day-view" hidden>
-    <div class="cal-controls">
-      <button id="prev-3day" type="button" aria-label="Previous 3 days">&larr;</button>
-      <span id="three-day-label"></span>
-      <button id="next-3day" type="button" aria-label="Next 3 days">&rarr;</button>
-    </div>
-    <div id="three-day-body"></div>
-  </section>
+    <section id="day-view" hidden>
+      <div class="cal-controls">
+        <button id="prev-day" type="button">&larr;</button>
+        <span id="day-label"></span>
+        <button id="next-day" type="button">&rarr;</button>
+      </div>
+      <div id="day-body"></div>
+    </section>
+  </div>
 
-  <section id="day-view" hidden>
-    <div class="cal-controls">
-      <button id="prev-day" type="button">&larr;</button>
-      <span id="day-label"></span>
-      <button id="next-day" type="button">&rarr;</button>
-    </div>
-    <div id="day-body"></div>
-  </section>
+  <div id="pane-right" class="pane-right">
+    <!-- To-do (V6 § 5). No add box: to-dos are captured through the capture
+         box and classified by the model, or typed with a date and To-do. -->
+    <section id="todo-view" hidden>
+      <ul id="todo-list"></ul>
+    </section>
 
-  <!-- To-do (V6 § 5). No add box: to-dos are captured through the capture
-       box and classified by the model, or typed with a date and To-do. -->
-  <section id="todo-view" hidden>
-    <ul id="todo-list"></ul>
-  </section>
-
-  <!-- Ideas (V6 § 6). This box is the offline, deterministic capture path —
-       it works with no Worker at all. -->
-  <section id="ideas-view" hidden>
-    <div class="idea-add">
-      <textarea id="idea-text" rows="3" placeholder="A thought to keep — no date needed"></textarea>
-      <button id="idea-add" type="button">Keep</button>
-    </div>
-    <ul id="idea-list"></ul>
-  </section>
+    <!-- Ideas (V6 § 6). This box is the offline, deterministic capture path —
+         it works with no Worker at all. -->
+    <section id="ideas-view" hidden>
+      <div class="idea-add">
+        <textarea id="idea-text" rows="3" placeholder="A thought to keep — no date needed"></textarea>
+        <button id="idea-add" type="button">Keep</button>
+      </div>
+      <ul id="idea-list"></ul>
+    </section>
+  </div>
+  </div>
 
   <!-- The tab bar (spec § 4), fixed at the bottom. -->
   <nav class="tab-bar" aria-label="Pages">

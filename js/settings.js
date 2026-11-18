@@ -18,6 +18,7 @@ import { describeLaunches } from './freshness.js';
 import {
   getTimeFormat, getWeekStart, setTimeFormat, setWeekStart,
   SCHEMES, getScheme, setScheme, applyScheme,
+  LAYOUTS, getLayout, setLayout, applyLayout,
 } from './prefs.js';
 import { initLinkUI } from './linkui.js';
 import { initAccountUI } from './accountui.js';
@@ -39,6 +40,7 @@ const CHOICES = ['light', 'dark', 'auto'];
 // Each scheme's light --accent, as the swatch colour. tests/settings.test.js
 // ties every literal to styles.css; a new scheme needs an entry here.
 const SCHEME_SWATCH = { classic: '#8a5a3b', sage: '#3f6b4f', ocean: '#2f5f8f', plum: '#7a4a7e' };
+const LAYOUT_LABEL = { planner: 'Week planner', month: 'Month overview', all: 'Everything' };
 const SCHEME_LABEL = { classic: 'Classic', sage: 'Sage', ocean: 'Ocean', plum: 'Plum' };
 
 // Calendars are auto-assigned from FEED_PALETTE (js/palette.js) and cycle
@@ -95,7 +97,7 @@ function tabStops(root) {
 // a server.
 export function initSettings({
   button, host, onFeedsChanged, onSyncedDataChanged, onFeedFetched, applyState, deadlines, onSignedIn,
-  onDisplayPrefsChanged,
+  onDisplayPrefsChanged, onLayoutChanged,
   accountApi = accountModule,
 }) {
   // A missing wire here is silent data loss, not a degraded feature: without
@@ -127,6 +129,12 @@ export function initSettings({
   // the choice and leave the screen stale until something else rendered.
   if (typeof onDisplayPrefsChanged !== 'function') {
     throw new Error('initSettings requires an onDisplayPrefsChanged callback');
+  }
+  // The computer layout decides which views are visible together; app.js
+  // re-applies the panes. Without it a tap would change data-layout and leave
+  // `hidden` disagreeing with it.
+  if (typeof onLayoutChanged !== 'function') {
+    throw new Error('initSettings requires an onLayoutChanged callback');
   }
 
   // Follow the phone while in auto.
@@ -369,8 +377,42 @@ export function initSettings({
     }
     paintScheme(getScheme());
     coloursRow.append(coloursSeg, coloursNote);
-    repaintPrefs = () => { time.repaint(); week.repaint(); paintScheme(getScheme()); paintUsage(); };
-    appearance.append(ah, themeRow, time.row, week.row, coloursRow, usage);
+    // Computer layout: the Colours row's shape. A failed write still applies
+    // the layout for this session and says it will reset; the app is told
+    // either way, because data-layout has changed and the panes must follow.
+    const layoutRow = labelledRow('Computer layout', 'layout');
+    const layoutSeg = document.createElement('div');
+    layoutSeg.className = 'seg';
+    const layoutNote = document.createElement('p');
+    layoutNote.className = 'note';
+    layoutNote.hidden = true;
+    const layoutButtons = [];
+    const paintLayout = (value) => {
+      for (const x of layoutButtons) {
+        const on = x.value === value;
+        x.el.classList.toggle('active', on);
+        x.el.setAttribute('aria-pressed', String(on));
+      }
+    };
+    for (const layout of LAYOUTS) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = LAYOUT_LABEL[layout];
+      layoutButtons.push({ value: layout, el: b });
+      b.addEventListener('click', () => {
+        const saved = setLayout(layout) && getLayout() === layout;
+        applyLayout(layout);
+        paintLayout(layout);
+        layoutNote.textContent = saved ? '' : "Couldn't save this on this device; it will reset next time.";
+        layoutNote.hidden = saved;
+        onLayoutChanged();
+      });
+      layoutSeg.appendChild(b);
+    }
+    paintLayout(getLayout());
+    layoutRow.append(layoutSeg, layoutNote);
+    repaintPrefs = () => { time.repaint(); week.repaint(); paintScheme(getScheme()); paintLayout(getLayout()); paintUsage(); };
+    appearance.append(ah, themeRow, time.row, week.row, coloursRow, layoutRow, usage);
 
     // --- Linked calendars ---------------------------------------------
     //
@@ -998,6 +1040,7 @@ export function initSettings({
   // logic; re-apply through resolveTheme() so js/theme.js is the source of truth.
   applyTheme(getSetting());
   applyScheme(getScheme());
+  applyLayout(getLayout());
 
   return {
     // Renders the panel (re-rendered if already open), then the intent's form.

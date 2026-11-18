@@ -1459,37 +1459,22 @@ button[data-press].pressed { opacity: 1; }
 @keyframes tick-pop { 0% { transform: scale(1); } 45% { transform: scale(1.28); } 100% { transform: scale(1); } }
 @keyframes tick-draw { from { background-size: 0 1.5px; } to { background-size: 100% 1.5px; } }
 
-/* ---------- desktop layout, option A (spec 2026-11-13-desktop-layout-options) ----------
-   A centred 44rem column. 46rem = that column plus the body's two 16px
-   gutters, so the column is already full width where the block begins and the
-   layout does not jump. hover/pointer keep a large iPhone in landscape
-   (~932px) on the phone layout. Week and Month (#week-view, #calendar-view)
-   stay full width; they need it, but Week's list (.wlist, a class, never
-   #week-list) is a column like the others. The sheet's backdrop stays full
-   width. Nothing outside this block changes. */
+/* ---------- pane wrappers (Release 3) ----------
+   index.html wraps the panes in .panes > #pane-left/#pane-main/#pane-right.
+   Outside the desktop gate they are inert: display: contents removes their
+   boxes, so the phone lays out exactly as it did without them. This rule MUST
+   come before the gate block below (equal specificity: a later copy would
+   override the desktop grid; tests/styles.test.js pins the order). */
+.panes, .pane-left, .pane-main, .pane-right { display: contents; }
+/* The docked capture row is desktop-only; the gate shows it (a later task). */
+.capture-dock { display: none; }
+
+/* ---------- desktop gate (Release 3) ----------
+   Desktop A's centred 44rem column is gone; the panes replace it. The gate is
+   (min-width: 46rem) and (hover: hover) and (pointer: fine), DESKTOP_QUERY in
+   js/layout.js; hover/pointer keep a large iPhone in landscape (~932px) on
+   the phone layout. A wrapper that gets a display here must restate [hidden],
+   since an author display beats the UA's hidden rule. */
 @media (min-width: 46rem) and (hover: hover) and (pointer: fine) {
-  /* Alone on purpose: a rule naming #today-view with anything else in its
-     selector list would trip the "no id styles Today" test. */
-  #today-view {
-    max-width: 44rem;
-    margin-inline: auto;
-  }
-  body > header, #sync-indicator, #account-banner, #status-line, #cal-switch,
-  #day-view, #three-day-view, #todo-view, #ideas-view, .wlist, .capture-box, .sheet {
-    max-width: 44rem;
-    margin-inline: auto;
-  }
-  /* Segmented control: buttons size to their content, not a quarter each. */
-  #cal-switch button { flex: 0 0 auto; padding: 8px 20px; }
-  /* The bar stays full width; its four buttons share the column (4 x 11rem). */
-  .tab-bar { justify-content: center; }
-  .tab-bar button { flex: 0 1 11rem; }
-  /* The capture button and toast follow the column's right and left edges
-     (the column is 44rem wide, centred; 16px is the phone gutter). The box's
-     right edge is the button's, so .capture-panel's origin is unchanged. */
-  .capture-btn { right: max(16px, calc(50% - 22rem)); }
-  .toast {
-    left: max(16px, calc(50% - 22rem));
-    right: calc(max(16px, calc(50% - 22rem)) + 72px);
-  }
+  #pane-left[hidden], #pane-main[hidden], #pane-right[hidden] { display: none; }
 }

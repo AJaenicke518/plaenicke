@@ -62,6 +62,7 @@ function openPanel(feeds, seed = () => {}, deadlineStatus = { note: null, held: 
   const removed = [];
   const signedIn = [];
   const displayPrefs = [];
+  const layoutChanged = [];
   const account = trapAccountApi(accountImpl);
   const settings = initSettings({
     button,
@@ -72,6 +73,7 @@ function openPanel(feeds, seed = () => {}, deadlineStatus = { note: null, held: 
     onFeedFetched: (id, ok) => fetched.push([id, ok]),
     onSignedIn: () => signedIn.push('in'),
     onDisplayPrefsChanged: () => displayPrefs.push('prefs'),
+    onLayoutChanged: () => layoutChanged.push(document.documentElement.dataset.layout),
     // Not exercised by any test that uses this helper — they drive the theme
     // and calendar controls — but open() mounts initLinkUI, which refuses to
     // mount without one. app.js always passes applySyncedState here.
@@ -80,7 +82,7 @@ function openPanel(feeds, seed = () => {}, deadlineStatus = { note: null, held: 
     accountApi: account.api,
   });
   if (open) button.click(); // host.childElementCount === 0 -> open()
-  return { host, notified, button, fetched, removed, settings, signedIn, displayPrefs, accountCalls: account.calls };
+  return { host, notified, button, fetched, removed, settings, signedIn, displayPrefs, layoutChanged, accountCalls: account.calls };
 }
 
 // A linked device: calendars refresh only with a session (accounts spec D21).
@@ -488,6 +490,7 @@ test('settings: the panel refuses to open its sync section without an applyState
     onFeedFetched: () => {},
     onSignedIn: () => {},
     onDisplayPrefsChanged: () => {},
+    onLayoutChanged: () => {},
     deadlines: { status: () => ({ note: null, held: [] }), removeHeld() {} },
   });
   assert.throws(() => button.click(), /applyState/,
@@ -542,6 +545,7 @@ test('settings: the calendar list refreshes when an adoption lands while the pan
       onFeedFetched: () => {},
       onSignedIn: () => {},
       onDisplayPrefsChanged: () => {},
+      onLayoutChanged: () => {},
       deadlines: { status: () => ({ note: null, held: [] }), removeHeld() {} },
       // Stands in for app.js's applySyncedState: the feed owner assigns a
       // real colour before saving (merge.js hands a first-seen feed
@@ -1791,4 +1795,122 @@ test('colours: every swatch is aria-hidden and every button is type=button', () 
     assert.equal(b.type, 'button', `${b.textContent} type`);
     assert.equal(swatchOf(b).getAttribute('aria-hidden'), 'true', `${b.textContent} swatch`);
   }
+});
+
+// --- desktop layout row (Release 3, Task 1) -----------------------------------
+
+const layoutRow = (host) => prefRow(host, 'Computer layout');
+
+test('layout row: follows Colours, is a labelled group with three buttons, Week planner active', () => {
+  const { host } = openPanel([]);
+  const row = layoutRow(host);
+  assert.ok(row, 'row exists');
+  assert.equal(row.getAttribute('role'), 'group');
+  assert.equal(row.getAttribute('aria-labelledby'), row.children[0].id);
+  assert.ok(row.children[0]._classes.has('settings-row-label'));
+  assert.deepEqual(rowButtons(row).map((b) => b.textContent), ['Week planner', 'Month overview', 'Everything']);
+  assert.deepEqual(activeLabels(row), ['Week planner']);
+  assert.deepEqual(rowButtons(row).map((b) => b.getAttribute('aria-pressed')), ['true', 'false', 'false']);
+  const order = [];
+  const walk = (el) => { for (const c of el.children) { order.push(c); walk(c); } };
+  walk(host);
+  assert.ok(order.indexOf(coloursRow(host)) < order.indexOf(row));
+  const ids = ['Theme', 'Time', 'Week starts', 'Colours', 'Computer layout'].map((l) => prefRow(host, l).getAttribute('aria-labelledby'));
+  assert.equal(new Set(ids).size, 5, 'ids are unique');
+});
+
+test('layout row: the stored layout is the active button', () => {
+  const { host } = openPanel([], () => { localStorage.setItem('plaenicke.layout', 'all'); });
+  assert.deepEqual(activeLabels(layoutRow(host)), ['Everything']);
+});
+
+test('layout row: a click stores, sets data-layout, moves the active button, then calls onLayoutChanged once', () => {
+  const { host, layoutChanged, displayPrefs } = openPanel([]);
+  const row = layoutRow(host);
+  findButtonByText(row, 'Month overview').click();
+  assert.equal(localStorage.getItem('plaenicke.layout'), 'month');
+  assert.equal(document.documentElement.dataset.layout, 'month');
+  assert.deepEqual(activeLabels(row), ['Month overview']);
+  assert.deepEqual(rowButtons(row).map((b) => b.getAttribute('aria-pressed')), ['false', 'true', 'false']);
+  assert.deepEqual(layoutChanged, ['month'], 'called once, after data-layout was set');
+  assert.equal(displayPrefs.length, 0, 'not the display-prefs callback');
+  assert.doesNotMatch(allText(row), /Couldn't save/);
+  findButtonByText(row, 'Week planner').click();
+  assert.equal(document.documentElement.dataset.layout, 'planner');
+  assert.deepEqual(layoutChanged, ['month', 'planner']);
+});
+
+test('layout row: a failed write applies for the session, says so, and still notifies', () => {
+  const { host, layoutChanged } = openPanel([]);
+  const row = layoutRow(host);
+  const realSet = localStorage.setItem;
+  localStorage.setItem = () => { throw new Error('QuotaExceededError'); };
+  try {
+    assert.doesNotThrow(() => findButtonByText(row, 'Everything').click());
+  } finally {
+    localStorage.setItem = realSet;
+  }
+  assert.equal(document.documentElement.dataset.layout, 'all');
+  assert.deepEqual(activeLabels(row), ['Everything']);
+  assert.match(allText(row), /Couldn't save this on this device; it will reset next time\./);
+  assert.equal(localStorage.getItem('plaenicke.layout'), null);
+  assert.deepEqual(layoutChanged, ['all']);
+});
+
+test('layout row: a setItem that silently does nothing is a failed save (read-back)', () => {
+  const { host } = openPanel([]);
+  const row = layoutRow(host);
+  const realSet = localStorage.setItem;
+  localStorage.setItem = () => {};
+  try { findButtonByText(row, 'Month overview').click(); } finally { localStorage.setItem = realSet; }
+  assert.match(allText(row), /Couldn't save this on this device; it will reset next time\./);
+  assert.equal(document.documentElement.dataset.layout, 'month');
+});
+
+test('layout row: the note shows after a failed click and hides after a later good one', () => {
+  const { host } = openPanel([]);
+  const row = layoutRow(host);
+  const note = failureNote(row);
+  assert.equal(note.hidden, true);
+  const realSet = localStorage.setItem;
+  localStorage.setItem = () => { throw new Error('Quota'); };
+  try { findButtonByText(row, 'Everything').click(); } finally { localStorage.setItem = realSet; }
+  assert.equal(note.hidden, false);
+  findButtonByText(row, 'Month overview').click();
+  assert.equal(note.hidden, true);
+  assert.equal(note.textContent, '');
+});
+
+test('layout row: refreshDisplayPrefs repaints the active button from storage', () => {
+  const { host, settings } = openPanel([]);
+  const row = layoutRow(host);
+  localStorage.setItem('plaenicke.layout', 'month');
+  settings.refreshDisplayPrefs();
+  assert.deepEqual(activeLabels(row), ['Month overview']);
+});
+
+test('layout row: every button is type=button', () => {
+  const { host } = openPanel([]);
+  for (const b of rowButtons(layoutRow(host))) assert.equal(b.type, 'button');
+});
+
+test('layout row: initSettings applies the stored layout at mount, without opening the panel', () => {
+  openPanel([], () => { localStorage.setItem('plaenicke.layout', 'all'); }, undefined, { open: false });
+  assert.equal(document.documentElement.dataset.layout, 'all');
+});
+
+test('settings: initSettings without onLayoutChanged throws, after the onDisplayPrefsChanged guard', () => {
+  globalThis.window = makeFakeWindow();
+  globalThis.document = makeFakeDocument();
+  installFakeLocalStorage();
+  const every = {
+    button: document.createElement('button'), host: document.createElement('div'),
+    onFeedsChanged() {}, onSyncedDataChanged() {}, onFeedFetched() {}, applyState: (s) => s,
+    deadlines: { status: () => ({ note: null, held: [] }), removeHeld() {} },
+    onSignedIn() {}, onDisplayPrefsChanged() {},
+  };
+  assert.throws(() => initSettings(every), /initSettings requires an onLayoutChanged callback/);
+  const { onDisplayPrefsChanged, ...noPrefs } = every;
+  assert.throws(() => initSettings(noPrefs), /onDisplayPrefsChanged/, 'the earlier guard still reports first');
+  assert.throws(() => initSettings({ ...every, onLayoutChanged: 'x' }), /onLayoutChanged/);
 });

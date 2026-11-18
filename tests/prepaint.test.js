@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { SCHEMES, resolveScheme } from '../js/prefs.js';
+import { SCHEMES, resolveScheme, LAYOUTS, resolveLayout } from '../js/prefs.js';
 import { resolveTheme } from '../js/theme.js';
 
 const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
@@ -65,7 +65,7 @@ test('pre-paint: the scheme is applied even when window.matchMedia is undefined'
 test('pre-paint: a throwing localStorage applies nothing and does not throw', () => {
   const { dataset, thrown } = run({ throwStorage: true, matchMedia: systemDark(false) });
   assert.equal(thrown, null);
-  assert.deepEqual(dataset, {});
+  assert.deepEqual(dataset, { layout: 'planner' }, 'the layout still resolves to its default');
 });
 
 test('pre-paint: the scheme logic comes before the theme logic, in its own try block', () => {
@@ -77,4 +77,32 @@ test('pre-paint: the scheme logic comes before the theme logic, in its own try b
 
 test('pre-paint stays ES5: no arrow functions, let, const or template literals', () => {
   assert.doesNotMatch(SRC, /=>|\blet\b|\bconst\b|`/);
+});
+
+test('pre-paint: the layout equals resolveLayout for every layout, bogus and null', () => {
+  for (const raw of [...LAYOUTS, 'bogus', 'ALL', '', null]) {
+    const store = raw === null ? {} : { 'plaenicke.layout': raw };
+    const { dataset } = run({ store, matchMedia: systemDark(false) });
+    assert.equal(dataset.layout, resolveLayout(raw), `stored ${JSON.stringify(raw)}`);
+  }
+});
+
+test('pre-paint: the layout is applied even when window.matchMedia is undefined', () => {
+  const { dataset } = run({ store: { 'plaenicke.layout': 'all' } });
+  assert.equal(dataset.layout, 'all');
+});
+
+test('pre-paint: the layout logic is in its own try block, before the theme logic', () => {
+  const layout = SRC.indexOf('plaenicke.layout');
+  const theme = SRC.indexOf('plaenicke.theme');
+  assert.ok(layout > -1 && layout < theme);
+  assert.ok(SRC.slice(layout, theme).includes('catch'), 'a catch closes the layout block before theme starts');
+  assert.ok(SRC.indexOf('plaenicke.scheme') < layout, 'scheme block first');
+});
+
+test('pre-paint: a throwing storage for the layout alone does not stop the scheme', () => {
+  const root = { dataset: {} };
+  const localStorage = { getItem: (k) => { if (k === 'plaenicke.layout') throw new Error('x'); return k === 'plaenicke.scheme' ? 'plum' : null; } };
+  new Function('document', 'localStorage', 'window', SRC)({ documentElement: root }, localStorage, { matchMedia: systemDark(false) });
+  assert.equal(root.dataset.scheme, 'plum');
 });

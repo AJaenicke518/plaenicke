@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { SCHEMES } from '../js/prefs.js';
+import { DESKTOP_QUERY } from '../js/layout.js';
 
 // styles.test.js — the first CSS test in this repo, and it exists for one
 // reason: the failure it guards is silent and visual, so nothing else can
@@ -1650,24 +1651,51 @@ function desktopOf(selector, prop) {
   return d.length ? d[d.length - 1].value : null;
 }
 
-test('the desktop media block gives #today-view max-width 44rem and margin-inline auto', () => {
-  assert.equal(desktopOf('#today-view', 'max-width'), '44rem');
-  assert.equal(desktopOf('#today-view', 'margin-inline'), 'auto');
-});
-
-const CENTRED = ['body > header', '#sync-indicator', '#account-banner', '#status-line', '#cal-switch',
-  '#today-view', '#day-view', '#three-day-view', '#todo-view', '#ideas-view', '.capture-box',
-  '.sheet', '.wlist'];
-test('every centred selector gets max-width 44rem and margin-inline auto', () => {
-  for (const sel of CENTRED) {
-    assert.equal(desktopOf(sel, 'max-width'), '44rem', `${sel} max-width`);
-    assert.equal(desktopOf(sel, 'margin-inline'), 'auto', `${sel} margin-inline`);
+// Desktop A's centred 44rem column is gone (Release 3 replaces it with panes).
+// The gate block stays, with only what the wrappers need until Task 3.
+test('the gate block no longer holds desktop A\'s centred-column rules', () => {
+  for (const sel of ['#today-view', '#day-view', '#three-day-view', '#todo-view', '#ideas-view', '.wlist',
+    '.capture-box', '.sheet', '.toast', '.capture-btn', '.tab-bar', '.tab-bar button', '#cal-switch button']) {
+    assert.deepEqual(desktopDecls(sel), [], `${sel} must not appear in the gate block`);
   }
+  for (const { body } of desktopRules) assert.doesNotMatch(body, /44rem|22rem/);
 });
 
-test('the desktop block leaves #week-view and #calendar-view full width', () => {
-  for (const sel of ['#week-view', '#calendar-view']) {
-    assert.deepEqual(desktopDecls(sel), [], `${sel} must not appear in the desktop block`);
+test('the gate prelude is exactly the DESKTOP_QUERY exported by js/layout.js', () => {
+  assert.equal(DESKTOP, `@media ${DESKTOP_QUERY}`);
+  assert.ok(css.replace(/\s+/g, ' ').includes(`${DESKTOP} {`), 'styles.css has a block with that exact prelude');
+});
+
+test('the gate restates [hidden] for the two pane wrappers it may later give a display', () => {
+  assert.equal(desktopOf('#pane-main[hidden]', 'display'), 'none');
+  assert.equal(desktopOf('#pane-right[hidden]', 'display'), 'none');
+  assert.equal(desktopOf('#pane-left[hidden]', 'display'), 'none');
+});
+
+// --- pane wrappers (Release 3, Task 1) ------------------------------------------
+const WRAPPERS = ['.panes', '.pane-left', '.pane-main', '.pane-right'];
+test('outside the gate the pane wrappers are display: contents', () => {
+  for (const sel of WRAPPERS) assert.equal(declOf(sel, 'display'), 'contents', sel);
+});
+
+test('the display: contents rule precedes the gate block in source order', () => {
+  const rule = css.search(/\.panes\s*,\s*\.pane-left\s*,\s*\.pane-main\s*,\s*\.pane-right\s*\{/);
+  const gate = css.search(/@media \(min-width: 46rem\)/);
+  assert.ok(rule > -1, 'the combined wrappers rule exists');
+  assert.ok(gate > -1, 'the gate exists');
+  assert.ok(rule < gate, 'a later display: contents would override the desktop grid');
+});
+
+test('.capture-dock is display: none outside the gate', () => {
+  assert.equal(declOf('.capture-dock', 'display'), 'none');
+});
+
+test('no rule outside the gate mentions data-layout or .pane-/.panes except the display: contents rule', () => {
+  for (const { at, sel } of rulesInContext(css)) {
+    if (sel === null || at === DESKTOP) continue;
+    if (/data-layout|\.pane|#pane-/.test(sel)) {
+      assert.equal(sel.replace(/\s+/g, ' '), '.panes, .pane-left, .pane-main, .pane-right', sel);
+    }
   }
 });
 
@@ -1678,21 +1706,7 @@ test('the desktop media query is the only non-reduced-motion @media, and keeps p
   assert.deepEqual([...new Set(preludes)], [DESKTOP], 'exactly one such @media: the desktop block');
   const m = DESKTOP.match(/^@media \(min-width: ([\d.]+)rem\) and \(hover: hover\) and \(pointer: fine\)$/);
   assert.ok(m, 'width gate plus hover and fine pointer, nothing else');
-  // 44rem column + 2 x 16px body gutter (2rem at 16px) = where the column is full.
-  assert.equal(Number(m[1]), 46, 'the gate sits where the column meets the gutters, so nothing jumps');
-});
-
-test('the tab bar buttons, switcher buttons, capture button and toast are placed for the column', () => {
-  assert.equal(desktopOf('.capture-btn', 'right'), 'max(16px, calc(50% - 22rem))');
-  assert.equal(desktopOf('.toast', 'left'), 'max(16px, calc(50% - 22rem))');
-  assert.equal(desktopOf('.toast', 'right'), 'calc(max(16px, calc(50% - 22rem)) + 72px)');
-  // The panel is the column's width and its right edge is the button's, so the
-  // phone's origin stays right; the block must not move it.
-  assert.equal(declOf('.capture-panel', 'transform-origin'), 'bottom right');
-  assert.equal(desktopOf('.capture-panel', 'transform-origin'), null);
-  assert.equal(desktopOf('.tab-bar', 'justify-content'), 'center');
-  assert.equal(desktopOf('.tab-bar button', 'flex'), '0 1 11rem', '4 tabs x 11rem = the 44rem column');
-  assert.equal(desktopOf('#cal-switch button', 'flex'), '0 0 auto');
+  assert.equal(Number(m[1]), 46);
 });
 
 const PAINT_PROP = /^(--|color$|.*-color$|background|border(?!-radius)|outline|box-shadow|fill|stroke)/;
@@ -1725,15 +1739,17 @@ const PHONE_AT_DESKTOP_A = {
   // These ids have no phone rule at all (they are styled by class).
   '#sync-indicator': '', '#account-banner': '', '#status-line': '', '#cal-switch': '',
   '#cal-switch button': '', '#today-view': '', '#day-view': '', '#three-day-view': '',
-  '#todo-view': '', '#ideas-view': '',
+  '#todo-view': '', '#ideas-view': '', '#pane-left': '', '#pane-main': '', '#pane-right': '',
   '.wlist': 'margin-top:var(--space-5)',
   '.sheet': 'position:fixed;left:0;right:0;bottom:0;max-height:85dvh;overflow-y:auto;background:var(--card);color:var(--ink);border-top:1px solid var(--line);border-radius:var(--radius-sheet) var(--radius-sheet) 0 0;padding:0 16px;padding-bottom:env(safe-area-inset-bottom);box-shadow:0 -4px 16px rgba(0, 0, 0, 0.2);overscroll-behavior:contain',
 };
 test('every selector the desktop block touches keeps its pinned phone value', () => {
   const sels = new Set();
-  for (const { sel } of desktopRules) for (const x of sel.split(',')) sels.add(x.trim().replace(/\s+/g, ' '));
-  assert.deepEqual([...sels].sort(), Object.keys(PHONE_AT_DESKTOP_A).sort(),
-    'the block touches a selector this table does not pin (or the table pins one it no longer touches)');
+  // Wrapper rules carry a [hidden] attribute selector; the phone value is that of the bare id.
+  for (const { sel } of desktopRules) for (const x of sel.split(',')) sels.add(x.trim().replace(/\s+/g, ' ').replace(/\[hidden\]$/, ''));
+  for (const sel of sels) {
+    assert.ok(sel in PHONE_AT_DESKTOP_A, `the block touches ${sel}, which this table does not pin`);
+  }
   for (const [sel, expected] of Object.entries(PHONE_AT_DESKTOP_A)) {
     const got = declsOf(sel).map((d) => `${d.prop}:${d.value}`).join(';');
     assert.equal(got, expected, `${sel}: phone declarations changed`);
@@ -1743,7 +1759,6 @@ test('every selector the desktop block touches keeps its pinned phone value', ()
 test('a bare #today-view rule exists only inside the desktop block and sets only width props', () => {
   const bare = rulesInContext(css).filter((r) => r.sel !== null
     && r.sel.split(',').map((x) => x.trim()).includes('#today-view'));
-  assert.ok(bare.length >= 1, 'fixture check: the desktop block styles #today-view');
   for (const r of bare) {
     assert.equal(r.at, DESKTOP, '#today-view may be styled only inside the desktop block');
     const props = r.body.split(';').map((d) => d.split(':')[0].trim().toLowerCase()).filter(Boolean);

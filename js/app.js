@@ -314,6 +314,8 @@ const settings = initSettings({
   button: els.settingsBtn,
   host: els.settingsHost,
   onDisplayPrefsChanged,
+  // Placeholder: Release 3 Task 2 wires the real handler. Needed now only to satisfy initSettings' guard.
+  onLayoutChanged: () => {},
   // The stamp is repainted too (sweep F, O5): adding, removing or hiding a
   // calendar changes what is on screen, and so what the stamp is about.
   onFeedsChanged: () => {

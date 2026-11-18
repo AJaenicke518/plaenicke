@@ -4,6 +4,7 @@ import { installFakeLocalStorage } from './fake-localstorage.js';
 import {
   TIME_FORMAT_KEY, WEEK_START_KEY, resolveTimeFormat, resolveWeekStart,
   getTimeFormat, getWeekStart, setTimeFormat, setWeekStart,
+  LAYOUT_KEY, LAYOUTS, resolveLayout, getLayout, setLayout, applyLayout,
 } from '../js/prefs.js';
 
 test('keys are the documented names', () => {
@@ -114,4 +115,54 @@ test('applyScheme sets the attribute, and removes it for classic', () => {
   assert.equal(root.dataset.scheme, 'sage');
   applyScheme('classic', root);
   assert.equal('scheme' in root.dataset, false);
+});
+
+// --- desktop layout ------------------------------------------------------------
+
+test('layout: key and list are the documented ones', () => {
+  assert.equal(LAYOUT_KEY, 'plaenicke.layout');
+  assert.deepEqual(LAYOUTS, ['planner', 'month', 'all']);
+});
+
+test('resolveLayout accepts only the three layouts, else planner', () => {
+  for (const ok of LAYOUTS) assert.equal(resolveLayout(ok), ok);
+  for (const bad of [null, undefined, '', 'Month', 'everything', 1, {}]) assert.equal(resolveLayout(bad), 'planner');
+});
+
+test('getLayout: empty store is planner; a stored value is read back', () => {
+  installFakeLocalStorage();
+  assert.equal(getLayout(), 'planner');
+  localStorage.setItem(LAYOUT_KEY, 'all');
+  assert.equal(getLayout(), 'all');
+  localStorage.setItem(LAYOUT_KEY, 'junk');
+  assert.equal(getLayout(), 'planner');
+});
+
+test('getLayout: a throwing localStorage is planner', () => {
+  installFakeLocalStorage();
+  const real = localStorage.getItem;
+  localStorage.getItem = () => { throw new Error('denied'); };
+  try { assert.equal(getLayout(), 'planner'); } finally { localStorage.getItem = real; }
+});
+
+test('setLayout stores and returns true; a bad value throws; a failed write returns false', () => {
+  installFakeLocalStorage();
+  assert.equal(setLayout('month'), true);
+  assert.equal(localStorage.getItem(LAYOUT_KEY), 'month');
+  assert.throws(() => setLayout('grid'), /bad layout/);
+  assert.equal(localStorage.getItem(LAYOUT_KEY), 'month');
+  const real = localStorage.setItem;
+  localStorage.setItem = () => { throw new Error('Quota'); };
+  try { assert.equal(setLayout('all'), false); } finally { localStorage.setItem = real; }
+});
+
+test('applyLayout sets data-layout to every layout, planner included', () => {
+  for (const l of LAYOUTS) {
+    const root = { dataset: {} };
+    applyLayout(l, root);
+    assert.equal(root.dataset.layout, l);
+  }
+  const root = { dataset: {} };
+  applyLayout('bogus', root);
+  assert.equal(root.dataset.layout, 'planner');
 });
