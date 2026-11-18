@@ -12,6 +12,7 @@
 // an id selector would outrank `[data-press].pressed` (styles.css).
 import { itemTypeClass } from './calendar.js';
 import { formatTime, formatTimeRange } from './timegrid.js';
+import { getTimeFormat } from './prefs.js';
 import { isTodoType } from './items.js';
 
 const SECTIONS = [
@@ -29,7 +30,8 @@ function el(tag, className, text) {
 
 function timeText(item) {
   if (!item.time) return null;
-  return item.endTime ? formatTimeRange(item.time, item.endTime) : formatTime(item.time);
+  const fmt = getTimeFormat();
+  return item.endTime ? formatTimeRange(item.time, item.endTime, fmt) : formatTime(item.time, fmt);
 }
 
 // tickLabel(item, onToggleDone): a row's checkbox, in its <label

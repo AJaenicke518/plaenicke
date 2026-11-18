@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { findAll } from './fake-dom.js';
 import { renderDayView } from '../js/dayview.js';
+import { installFakeLocalStorage } from './fake-localstorage.js';
 
 // --- minimal fake DOM ------------------------------------------------------
 //
@@ -275,4 +276,25 @@ test('tapping the second timed block opens the second item, not the first', () =
   assert.ok(btn, 'fixture check: the second block has its own open button');
   btn.click();
   assert.deepEqual(opened, [b]);
+});
+
+// --- time format preference ------------------------------------------------
+
+test('the hour labels and block times follow the time format, read at each render', () => {
+  const ls = installFakeLocalStorage();
+  const item = { ...timed('a', '13:30'), endTime: '14:00' };
+  const texts = (c) => ({
+    hour13: c.querySelector('.day-hours').children[13].textContent,
+    block: c.querySelector('.item-open').textContent,
+  });
+  const draw = () => {
+    const c = container();
+    renderDayView(c, '2026-08-20', [item], { onOpen() {}, onDelete() {} });
+    return texts(c);
+  };
+  assert.deepEqual(draw(), { hour13: '1:00 PM', block: '1:30–2:00 PM t-a' });
+  ls.setItem('plaenicke.timeFormat', '24h');
+  assert.deepEqual(draw(), { hour13: '13:00', block: '13:30–14:00 t-a' });
+  ls.setItem('plaenicke.timeFormat', '12h');
+  assert.deepEqual(draw(), { hour13: '1:00 PM', block: '1:30–2:00 PM t-a' });
 });

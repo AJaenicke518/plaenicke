@@ -6,7 +6,8 @@
 // and a heading through onSelectDay, and app.js acts. app.js passes the items
 // from visibleItems(), so repeating feed instances are here (the Week list,
 // which leaves them out, is a different rule).
-import { addDays, bucketDayItems, layoutDayBlocks, formatTime, formatTimeRange } from './timegrid.js';
+import { addDays, bucketDayItems, layoutDayBlocks, formatTime, formatTimeRange, hourLabel } from './timegrid.js';
+import { getTimeFormat } from './prefs.js';
 import { itemTypeClass } from './calendar.js';
 
 const HOUR_PX = 48; // as Day (js/dayview.js)
@@ -17,10 +18,15 @@ const utcOf = (iso) => { const [y, m, d] = iso.split('-').map(Number); return Da
 const WEEKDAY = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 'short' });
 const DAY_NAME = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' });
 
-// "9:25 AM" -> "9:25": a column is about 100px wide on a phone.
-const shortTime = (hhmm) => formatTime(hhmm).split(' ')[0];
-// "1 PM": the hour gutter is narrow.
-const hourLabel = (h) => `${h % 12 === 0 ? 12 : h % 12} ${h < 12 ? 'AM' : 'PM'}`;
+// "9:25 AM" -> "9:25": a column is about 100px wide on a phone. Computed, not
+// split: 12h is the hour and minute without the period, 24h is the whole
+// "09:25". Either way it is an exact prefix of the full time text, which the
+// hidden accessible span below depends on.
+const shortTime = (hhmm, fmt) => {
+  if (fmt === '24h') return formatTime(hhmm, '24h');
+  const [h, m] = hhmm.split(':').map(Number);
+  return `${h % 12 === 0 ? 12 : h % 12}:${String(m).padStart(2, '0')}`;
+};
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -71,9 +77,10 @@ export function renderThreeDayView(container, startISO, itemsByDate, todayISO, {
     container.appendChild(strip);
   }
 
+  const fmt = getTimeFormat();
   const grid = el('div', 'tday-grid');
   const hours = el('div', 'tday-hours');
-  for (let h = 0; h < 24; h++) hours.appendChild(el('div', 'tday-hour', hourLabel(h)));
+  for (let h = 0; h < 24; h++) hours.appendChild(el('div', 'tday-hour', hourLabel(h, fmt)));
   grid.appendChild(hours);
 
   for (const { timed } of days) {
@@ -91,13 +98,13 @@ export function renderThreeDayView(container, startISO, itemsByDate, todayISO, {
       block.style.height = `${((row.endMin - row.startMin) / 60) * HOUR_PX - 2}px`;
       block.style.left = `${(row.col / row.cols) * 100}%`;
       block.style.width = `calc(${100 / row.cols}% - 2px)`;
-      const when = row.item.endTime ? formatTimeRange(row.item.time, row.item.endTime) : formatTime(row.item.time);
-      const start = shortTime(row.item.time);
+      const when = row.item.endTime ? formatTimeRange(row.item.time, row.item.endTime, fmt) : formatTime(row.item.time, fmt);
+      const start = shortTime(row.item.time, fmt);
       // No ×: a column is too narrow for one, and the sheet has Delete.
       const open = el('button', 'item-open');
       open.type = 'button';
       open.setAttribute('data-item-id', row.item.id);
-      // The visible time drops AM/PM; the rest of it ("–10:15 AM") is in a
+      // In 12h the visible time drops AM/PM; the rest of it ("–10:15 AM") is in a
       // visually hidden span, so the accessible name is the full time and
       // still begins with the visible text (WCAG 2.5.3), which an aria-label
       // would not.

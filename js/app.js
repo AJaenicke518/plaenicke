@@ -16,6 +16,7 @@ import { renderIdeasView } from './ideasview.js';
 import { toISO, nowISO, localStamp } from './dateparse.js';
 import { buildMonthGrid, groupItemsByDate, monthCellSummary, chronoFirst, itemTypeClass } from './calendar.js';
 import { startOfWeek, addDays, formatTime, weekLabel } from './timegrid.js';
+import { getTimeFormat } from './prefs.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
 import { renderDayView } from './dayview.js';
 import { renderThreeDayView } from './threedayview.js';
@@ -1878,7 +1879,7 @@ function noteLaunch() {
 // A time from an earlier day names the day ("Yesterday, 9:02 AM"), so a
 // days-old fetch can never pass for this morning's.
 function clockLabel(d) {
-  const clock = formatTime(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`);
+  const clock = formatTime(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`, getTimeFormat());
   const today = toISO(new Date());
   return toISO(d) === today ? clock : `${formatDayLabel(toISO(d), today)}, ${clock}`;
 }

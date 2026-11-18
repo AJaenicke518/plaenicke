@@ -5,6 +5,7 @@ process.env.TZ = 'America/Los_Angeles';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeElement, findAll, allText } from './fake-dom.js';
+import { installFakeLocalStorage } from './fake-localstorage.js';
 import { renderThreeDayView } from '../js/threedayview.js';
 
 // The shared fake, plus a scrollTop that RECORDS THE TREE STATE when it is
@@ -290,4 +291,42 @@ test('a re-render replaces the previous drawing', () => {
   renderThreeDayView(c, START, {}, TODAY, noop);
   assert.equal(openButtons(c).length, 0);
   assert.equal(byClass(c, 'tday-grid').length, 1);
+});
+
+// --- time format preference ------------------------------------------------
+
+test('the hour gutter, short time and hidden span follow the time format, read at each render', () => {
+  const ls = installFakeLocalStorage();
+  const draw = () => {
+    const c = container();
+    renderThreeDayView(c, START, byDate([own('a', START, '13:30', '14:00')]), TODAY, noop);
+    const btn = openButtons(one(c, 'tday-grid'))[0];
+    return {
+      hour13: one(c, 'tday-hours').children[13].textContent,
+      kids: btn.children.map((s) => [s.className, s.textContent]),
+      name: nameOf(btn),
+    };
+  };
+  assert.deepEqual(draw(), {
+    hour13: '1 PM',
+    kids: [['tday-time', '1:30'], ['visually-hidden', '–2:00 PM '], ['tday-title', 't-a']],
+    name: '1:30–2:00 PM t-a',
+  });
+  ls.setItem('plaenicke.timeFormat', '24h');
+  assert.deepEqual(draw(), {
+    hour13: '13',
+    kids: [['tday-time', '13:30'], ['visually-hidden', '–14:00 '], ['tday-title', 't-a']],
+    name: '13:30–14:00 t-a',
+  });
+  ls.setItem('plaenicke.timeFormat', '12h');
+  assert.equal(draw().hour13, '1 PM');
+});
+
+test('under 24h a pin with no end time keeps its whole time visible and the hidden span empty', () => {
+  const ls = installFakeLocalStorage();
+  ls.setItem('plaenicke.timeFormat', '24h');
+  const c = container();
+  renderThreeDayView(c, START, byDate([own('p', START, '07:05')]), TODAY, noop);
+  const btn = openButtons(c)[0];
+  assert.deepEqual(btn.children.map((s) => s.textContent), ['07:05', ' ', 't-p']);
 });

@@ -21,6 +21,7 @@ import { TYPES } from './preview.js';
 import { diffPatch, quickMoves } from './edit.js';
 import { formatDayLabel } from './freshness.js';
 import { formatTime, formatTimeRange } from './timegrid.js';
+import { getTimeFormat } from './prefs.js';
 import { lock } from './scrolllock.js';
 import { tagColour } from './palette.js';
 import { followVisualViewport } from './viewport.js';
@@ -276,7 +277,8 @@ export function openItemSheet(host, item, {
     sheet.appendChild(h);
     initialFocus = h;
     let when = formatDayLabel(item.date, today());
-    if (item.time) when += ` · ${item.endTime ? formatTimeRange(item.time, item.endTime) : formatTime(item.time)}`;
+    const fmt = getTimeFormat();
+    if (item.time) when += ` · ${item.endTime ? formatTimeRange(item.time, item.endTime, fmt) : formatTime(item.time, fmt)}`;
     sheet.appendChild(el('p', 'sheet-when', when));
     // A series the heuristic guessed says so, so a wrong grouping is visible
     // (home-screen spec § 2.4). An RRULE series carries no label.

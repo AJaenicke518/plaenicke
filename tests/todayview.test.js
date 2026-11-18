@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { makeFakeDocument, allText, findAll, fire } from './fake-dom.js';
 import { buildToday } from '../js/today.js';
 import { renderTodayView, renderTally } from '../js/todayview.js';
+import { installFakeLocalStorage } from './fake-localstorage.js';
 
 // The overdue-ticked test turns a UTC updatedAt into a local day: pin Alex's
 // zone instead of trusting the machine's (in UTC-10 or UTC-11 its 08:00Z
@@ -522,4 +523,17 @@ test('the count: a re-render replaces the text, and null hides it again', () => 
   renderTally(node, null);
   assert.equal(node.hidden, true);
   assert.equal(node.children.length, 0);
+});
+
+// --- time format preference ------------------------------------------------
+
+test('Today: a timed row follows the time format, read at each render', () => {
+  const ls = installFakeLocalStorage();
+  const items = [own('t', { type: 'event', time: '13:30', endTime: '14:00', title: 'Lunch' })];
+  const timeOf = () => byClass(rowOf(draw(items).host, 'Lunch'), 'today-time')[0].textContent;
+  assert.equal(timeOf(), '1:30–2:00 PM');
+  ls.setItem('plaenicke.timeFormat', '24h');
+  assert.equal(timeOf(), '13:30–14:00');
+  ls.setItem('plaenicke.timeFormat', '12h');
+  assert.equal(timeOf(), '1:30–2:00 PM');
 });

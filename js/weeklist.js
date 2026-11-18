@@ -9,6 +9,7 @@
 // classes only: an id selector would outrank `[data-press].pressed`
 // (styles.css).
 import { addDays, formatTime } from './timegrid.js';
+import { getTimeFormat } from './prefs.js';
 import { itemTypeClass } from './calendar.js';
 import { upcomingRows } from './today.js';
 import { tickLabel, upcomingTickable } from './todayview.js';
@@ -81,6 +82,7 @@ export function renderWeekList(container, list, { onOpen, onSelectDay, onToggleD
     container.appendChild(el('p', 'today-empty', 'Nothing else this week.'));
     return;
   }
+  const fmt = getTimeFormat();
   for (const day of list.days) {
     const block = el('div', 'wlist-day');
     const label = el('button', 'wlist-label', WEEKDAY.format(utcOf(day.date)));
@@ -108,7 +110,7 @@ export function renderWeekList(container, list, { onOpen, onSelectDay, onToggleD
       open.setAttribute('data-item-id', item.id);
       open.addEventListener('click', () => onOpen(item));
       open.append(
-        el('span', 'today-time wlist-time', item.time ? formatTime(item.time) : 'All day'),
+        el('span', 'today-time wlist-time', item.time ? formatTime(item.time, fmt) : 'All day'),
         text,
       );
       li.appendChild(open);

@@ -107,6 +107,7 @@ export function errorCopy(code, extra = {}) {
     const at = Date.parse(extra && extra.retryAt);
     // No readable retry time is not "try again later": name the code.
     if (Number.isNaN(at)) return 'Unexpected error: locked';
+    // Excluded from the time-format preference on purpose: a wall-clock instant in the system locale, not an item time.
     return `Too many tries. Try again after ${new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.`;
   }
   if (Object.prototype.hasOwnProperty.call(ERROR_COPY, code)) return ERROR_COPY[code];

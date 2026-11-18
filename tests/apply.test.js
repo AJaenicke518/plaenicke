@@ -3901,6 +3901,38 @@ test('sweep D: with calendars, the stamp is the OLDEST fetch among the visible o
   resume();
 });
 
+test('time format: the Updated stamp follows the preference, with and without calendars', async (t) => {
+  const ls = installFakeLocalStorage();
+  await import('../js/app.js');
+  withSession();
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(13, 5).getTime() });
+  try {
+    // No visible calendar: a render stamps the render time.
+    unseedFeeds();
+    ls.setItem('plaenicke.timeFormat', '24h');
+    resume();
+    assert.equal(stampEl().textContent, 'Updated 13:05');
+    ls.setItem('plaenicke.timeFormat', '12h');
+    resume();
+    assert.equal(stampEl().textContent, 'Updated 1:05 PM');
+    // A fresh visible calendar: the stamp is its fetch time.
+    seedFeedsWithCache([sdFeed('tf-fa')], { 'tf-fa': cacheAt(localAt(13, 0)) });
+    ls.setItem('plaenicke.timeFormat', '24h');
+    resume();
+    await settle();
+    assert.equal(stampEl().textContent, 'Updated 13:00');
+    ls.setItem('plaenicke.timeFormat', '12h');
+    resume();
+    await settle();
+    assert.equal(stampEl().textContent, 'Updated 1:00 PM');
+  } finally {
+    t.mock.timers.reset();
+    ls.removeItem('plaenicke.timeFormat');
+    unseedFeeds();
+    resume();
+  }
+});
+
 test('sweep D: a calendar fetch that fails says so instead of a time', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');

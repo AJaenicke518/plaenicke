@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeFakeDocument, allText, findAll, fire } from './fake-dom.js';
 import { buildWeekList, renderWeekList } from '../js/weeklist.js';
+import { installFakeLocalStorage } from './fake-localstorage.js';
 
 // Dates only, but weekday names come from Intl: pin Alex's zone like
 // today.test.js. node --test runs each file in its own process.
@@ -328,4 +329,16 @@ test('renderWeekList: justTicked marks that row tick-just and wraps its title in
   assert.equal(byClass(just[0], 'tick-strike')[0].textContent, 'A done task');
   const { host: plain } = draw(TICKS(), { justTicked: 'task' });
   assert.equal(byClass(plain, 'tick-just').length, 0, 'only a row drawn done plays it');
+});
+
+// --- time format preference ------------------------------------------------
+
+test('renderWeekList: row times follow the time format, read at each render', () => {
+  const ls = installFakeLocalStorage();
+  const times = () => byClass(draw(fri()).host, 'wlist-time').map((n) => n.textContent);
+  assert.deepEqual(times(), ['All day', '9:25 AM', '5:00 PM']);
+  ls.setItem('plaenicke.timeFormat', '24h');
+  assert.deepEqual(times(), ['All day', '09:25', '17:00']);
+  ls.setItem('plaenicke.timeFormat', '12h');
+  assert.deepEqual(times(), ['All day', '9:25 AM', '5:00 PM']);
 });
