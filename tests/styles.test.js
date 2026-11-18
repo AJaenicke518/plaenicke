@@ -1590,3 +1590,23 @@ for (const s of OTHER_SCHEMES) {
     });
   }
 }
+
+// An accent that sits next to an item-type colour reads as that type (a sage
+// accent beside the green Event block): every non-classic accent keeps a
+// Euclidean RGB distance of at least 40 from EVERY --type-* of its variant.
+const ACCENT_TYPE_MIN_DISTANCE = 40;
+const hexToRgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+for (const s of OTHER_SCHEMES) {
+  for (const [variant, sel, base] of [['light', lightSel(s), ':root'], ['dark', darkSel(s), '[data-theme="dark"]']]) {
+    test(`scheme ${s} ${variant}: --accent is >= ${ACCENT_TYPE_MIN_DISTANCE} RGB distance from every --type-* colour`, () => {
+      const types = declsOf(base).filter((d) => d.prop.startsWith('--type-'));
+      assert.equal(types.length, 7, `${base} declares seven --type-* tokens`);
+      const accent = hexToRgb(declOf(sel, '--accent'));
+      for (const t of types) {
+        const c = hexToRgb(declOf(base, t.prop));
+        const dist = Math.hypot(...accent.map((v, i) => v - c[i]));
+        assert.ok(dist >= ACCENT_TYPE_MIN_DISTANCE, `${sel} --accent vs ${t.prop}: ${dist.toFixed(1)} < ${ACCENT_TYPE_MIN_DISTANCE}`);
+      }
+    });
+  }
+}
