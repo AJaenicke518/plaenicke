@@ -109,9 +109,11 @@ async function use(dev) {
 
 // The TEST applyState: app.js's applySyncedState, write for write, without
 // app.js (see the header).
-function applyState(state, now) {
+function applyState(state, now, progress) {
   const written = merge(localState(), state, now, { keepRemoteTombstones: true });
   saveItems(written.items);
+  // The js/sync.js contract: an owner that writes reports its first write.
+  progress?.wrote?.();
   applyRemoteFeeds(written.feeds);
   saveTombstones(written.tombstones);
   return written;

@@ -458,6 +458,19 @@ const FAILURE_TEXT = {
     + 'That usually means another device is busy syncing — wait a moment and try again.',
   malformed: "The account's data is incomplete — this device cannot tell what it holds, so nothing has been combined. "
     + 'A device still running an older version of plaenicke can cause this; sync from that device first.',
+  // The two LOCAL failures (sync-safety report, "Known gaps"). syncOnce marks
+  // every failure that happened on this device `local: true`, and the adoption
+  // maps it to one of these, so a full device is never described as the
+  // server returning an error or refusing the result.
+  //   'local-error'   — the save failed before anything was written (this
+  //                     entry), or after a complete one (APPLIED_FAILURE_TEXT).
+  //   'apply-partial' — the save wrote part of the combined data and then
+  //                     failed. Only reachable with applied:true, and the text
+  //                     says what happened either way, so it has one entry.
+  'local-error': 'This device could not save the combined data, so nothing has been combined yet and nothing was sent to the account. '
+    + 'This device may be out of storage space. Try again.',
+  'apply-partial': 'This device saved part of the combined data, then saving stopped part way through, so the account was not updated. '
+    + 'What you see on this device may be only partly combined. Try again to finish combining and send the result to the account.',
 };
 
 // THE SAME STATUS MEANS TWO DIFFERENT THINGS, EITHER SIDE OF applyState.
@@ -478,6 +491,10 @@ const FAILURE_TEXT = {
 // the false claim need an entry: 'unauthorized', 'undecryptable' and
 // 'malformed' describe a condition rather than an outcome and read correctly
 // either way, and everything else here is returned before any apply.
+// 'local-error' is the fourth: a complete apply whose result could not be
+// prepared for sending ('apply-partial' needs no entry here; see FAILURE_TEXT).
+// 'error' here is now only a server answer — a local 'error' is mapped away
+// by adoptionFailureStatus, so "the server refused" is true where it shows.
 const APPLIED_FAILURE_TEXT = {
   offline: 'This device has already been combined with the account, but it could not send the result back — the connection dropped part way through. '
     + 'What you see on this device is the combined data. Nothing is lost: the next successful sync sends it to the account.',
@@ -485,6 +502,8 @@ const APPLIED_FAILURE_TEXT = {
     + 'What you see on this device is the combined data. Nothing is lost: the next successful sync sends it to the account.',
   conflict: 'This device has already been combined with the account, but other devices kept changing the account while it was sending the result back, so the account does not have it yet. '
     + 'What you see on this device is the combined data, and the next sync will send it.',
+  'local-error': 'This device has already been combined with the account, but it could not prepare the result to send, so the account was not updated. '
+    + 'What you see on this device is the combined data. Try again.',
 };
 
 // EXPORTED so the "no message may claim nothing was combined on a status
@@ -502,7 +521,16 @@ export function failureText(status, applied, mode = accountModeFromStorage()) {
 
 // Statuses where the sensible next step is to try the same thing again, as
 // opposed to re-linking with a different code.
-const RETRYABLE = new Set(['offline', 'error', 'conflict', 'skipped', 'kept-changing', 'malformed']);
+const RETRYABLE = new Set(['offline', 'error', 'conflict', 'skipped', 'kept-changing', 'malformed', 'local-error', 'apply-partial']);
+
+// syncOnce's 'error' covers a server answer AND a failure on this device; its
+// `local` flag says which (and `partial`, whether the save stopped part way).
+// The panel keys its copy on the distinction. Exported so the mapping is
+// tested over syncOnce's result shapes directly.
+export function adoptionFailureStatus(res) {
+  if (res.status !== 'error' || res.local !== true) return res.status;
+  return res.partial === true ? 'apply-partial' : 'local-error';
+}
 
 // Bounded for the same reason syncOnce's CAS loop is (js/sync.js's MAX_ATTEMPTS): a
 // condition that looks transient can be permanent. An account whose version
@@ -1282,7 +1310,7 @@ export function initLinkUI(options = {}) {
     // res.applied is syncOnce's own answer to "has this device already been
     // changed?" — never inferred from the status, which means opposite things
     // either side of the apply.
-    stageData = { status: res.status, applied: res.applied === true };
+    stageData = { status: adoptionFailureStatus(res), applied: res.applied === true };
     render();
   }
 

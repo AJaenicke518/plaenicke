@@ -46,6 +46,11 @@ Known gaps, not fixed (out of scope):
   been combined yet" while the page shows the merged items. This was already in the V5
   ledger as a lone finding, and the fix makes it visible. Fixing it changes syncOnce's
   status semantics, so it needs its own review.
+  **Fixed 2026-11-12 on branch `fix-applied-partial`:** applyState takes a third argument,
+  `progress`, and applySyncedState calls `progress.wrote()` right after the items write.
+  syncOnce then returns `applied:true, partial:true`; every `'error'` carries `local`
+  (this device) vs a server answer, and linkui.js maps local failures to their own copy
+  (`local-error`, `apply-partial`). Not yet reviewed independently.
 - A newly pulled feed is fetched only on success. After a throw it waits for the next
   load-time or visibility fetch.
 - If `render()` throws inside the finally, its error replaces the storage error in lastError.
