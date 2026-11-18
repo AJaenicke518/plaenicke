@@ -20,7 +20,9 @@ export function defaultMain(layout) {
 //     unless main is today, then `lastCalendar`.
 //   - all, wide: today, a calendar view (main if it is one, else lastCalendar),
 //     todo and ideas. All, narrower than wide: as planner.
-export function paneViews({ layout, main, lastCalendar, isDesktop, isWide }) {
+//   - `lastCalendar` undefined (no calendar has been shown yet): the layout's
+//     defaultMain.
+export function paneViews({ layout, main, lastCalendar = defaultMain(layout), isDesktop, isWide }) {
   if (!isDesktop) {
     return { visible: [main], calendar: CALENDAR_VIEWS.includes(main) ? main : null };
   }

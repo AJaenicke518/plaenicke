@@ -21,49 +21,127 @@ test('defaultMain: month gives month, planner and all give week', () => {
 
 const LAYOUTS = ['planner', 'month', 'all'];
 const MAINS = ['today', 'day', '3day', 'week', 'month', 'todo', 'ideas'];
-const LASTS = ['day', 'week'];
+const LASTS = ['day', '3day', 'week', 'month', undefined];
 
-// An oracle written from the plan's rules, not from the implementation.
-function expected({ layout, main, lastCalendar, isDesktop, isWide }) {
-  const isCal = CALENDAR_VIEWS.includes(main);
-  if (!isDesktop) return { visible: [main], calendar: isCal ? main : null };
-  if (layout === 'all' && isWide) {
-    const cal = isCal ? main : lastCalendar;
-    return { visible: ['today', cal, 'todo', 'ideas'], calendar: cal };
+// Hand-written expected rows: [layout, isDesktop, isWide, main, visible, calendar],
+// lastCalendar '3day' throughout (distinct from every layout's default, so a
+// row cannot pass by reading the default). Every layout x isDesktop x isWide
+// combination, five mains each.
+const ROWS = [
+  ['planner', false, false, 'today', ['today'], null],
+  ['planner', false, false, 'week', ['week'], 'week'],
+  ['planner', false, false, 'month', ['month'], 'month'],
+  ['planner', false, false, 'todo', ['todo'], null],
+  ['planner', false, false, 'ideas', ['ideas'], null],
+  ['planner', false, true, 'today', ['today'], null],
+  ['planner', false, true, 'week', ['week'], 'week'],
+  ['planner', false, true, 'month', ['month'], 'month'],
+  ['planner', false, true, 'todo', ['todo'], null],
+  ['planner', false, true, 'ideas', ['ideas'], null],
+  ['planner', true, false, 'today', ['today', '3day'], '3day'],
+  ['planner', true, false, 'week', ['today', 'week'], 'week'],
+  ['planner', true, false, 'month', ['today', 'month'], 'month'],
+  ['planner', true, false, 'todo', ['today', 'todo'], null],
+  ['planner', true, false, 'ideas', ['today', 'ideas'], null],
+  ['planner', true, true, 'today', ['today', '3day'], '3day'],
+  ['planner', true, true, 'week', ['today', 'week'], 'week'],
+  ['planner', true, true, 'month', ['today', 'month'], 'month'],
+  ['planner', true, true, 'todo', ['today', 'todo'], null],
+  ['planner', true, true, 'ideas', ['today', 'ideas'], null],
+  ['month', false, false, 'today', ['today'], null],
+  ['month', false, false, 'week', ['week'], 'week'],
+  ['month', false, false, 'month', ['month'], 'month'],
+  ['month', false, false, 'todo', ['todo'], null],
+  ['month', false, false, 'ideas', ['ideas'], null],
+  ['month', false, true, 'today', ['today'], null],
+  ['month', false, true, 'week', ['week'], 'week'],
+  ['month', false, true, 'month', ['month'], 'month'],
+  ['month', false, true, 'todo', ['todo'], null],
+  ['month', false, true, 'ideas', ['ideas'], null],
+  ['month', true, false, 'today', ['today', '3day'], '3day'],
+  ['month', true, false, 'week', ['today', 'week'], 'week'],
+  ['month', true, false, 'month', ['today', 'month'], 'month'],
+  ['month', true, false, 'todo', ['today', 'todo'], null],
+  ['month', true, false, 'ideas', ['today', 'ideas'], null],
+  ['month', true, true, 'today', ['today', '3day'], '3day'],
+  ['month', true, true, 'week', ['today', 'week'], 'week'],
+  ['month', true, true, 'month', ['today', 'month'], 'month'],
+  ['month', true, true, 'todo', ['today', 'todo'], null],
+  ['month', true, true, 'ideas', ['today', 'ideas'], null],
+  ['all', false, false, 'today', ['today'], null],
+  ['all', false, false, 'week', ['week'], 'week'],
+  ['all', false, false, 'month', ['month'], 'month'],
+  ['all', false, false, 'todo', ['todo'], null],
+  ['all', false, false, 'ideas', ['ideas'], null],
+  ['all', false, true, 'today', ['today'], null],
+  ['all', false, true, 'week', ['week'], 'week'],
+  ['all', false, true, 'month', ['month'], 'month'],
+  ['all', false, true, 'todo', ['todo'], null],
+  ['all', false, true, 'ideas', ['ideas'], null],
+  ['all', true, false, 'today', ['today', '3day'], '3day'],
+  ['all', true, false, 'week', ['today', 'week'], 'week'],
+  ['all', true, false, 'month', ['today', 'month'], 'month'],
+  ['all', true, false, 'todo', ['today', 'todo'], null],
+  ['all', true, false, 'ideas', ['today', 'ideas'], null],
+  ['all', true, true, 'today', ['today', '3day', 'todo', 'ideas'], '3day'],
+  ['all', true, true, 'week', ['today', 'week', 'todo', 'ideas'], 'week'],
+  ['all', true, true, 'month', ['today', 'month', 'todo', 'ideas'], 'month'],
+  ['all', true, true, 'todo', ['today', '3day', 'todo', 'ideas'], '3day'],
+  ['all', true, true, 'ideas', ['today', '3day', 'todo', 'ideas'], '3day'],
+];
+
+test('paneViews: literal expected rows for every layout x desktop x wide combination', () => {
+  assert.equal(ROWS.length, 3 * 2 * 2 * 5);
+  for (const [layout, isDesktop, isWide, main, visible, calendar] of ROWS) {
+    assert.deepEqual(
+      paneViews({ layout, main, lastCalendar: '3day', isDesktop, isWide }),
+      { visible, calendar },
+      JSON.stringify({ layout, isDesktop, isWide, main }),
+    );
   }
-  const big = main !== 'today' ? main : lastCalendar;
-  return { visible: ['today', big], calendar: CALENDAR_VIEWS.includes(big) ? big : null };
-}
+});
 
-test('paneViews: the full truth table', () => {
+test('paneViews: invariants over the full cross product', () => {
   let n = 0;
   for (const layout of LAYOUTS) for (const isDesktop of [false, true]) for (const isWide of [false, true]) {
     for (const main of MAINS) for (const lastCalendar of LASTS) {
       const input = { layout, main, lastCalendar, isDesktop, isWide };
-      assert.deepEqual(paneViews(input), expected(input), JSON.stringify(input));
+      const { visible, calendar } = paneViews(input);
+      const tag = JSON.stringify(input);
       n += 1;
+      assert.ok(visible.every((v) => typeof v === 'string'), `${tag}: no undefined view`);
+      if (!isDesktop) {
+        assert.deepEqual(visible, [main], tag);
+      } else {
+        assert.equal(visible[0], 'today', tag);
+        assert.notEqual(visible[1], 'today', `${tag}: the big pane is never today`);
+        assert.equal(new Set(visible).size, visible.length, `${tag}: no view twice`);
+      }
+      assert.equal(visible.includes('ideas'),
+        (isDesktop && layout === 'all' && isWide) || main === 'ideas', `${tag}: ideas`);
+      const shownCalendars = visible.filter((v) => CALENDAR_VIEWS.includes(v));
+      assert.equal(calendar === null, shownCalendars.length === 0, `${tag}: calendar null iff none visible`);
+      if (calendar !== null) assert.deepEqual(shownCalendars, [calendar], tag);
     }
   }
-  assert.equal(n, 3 * 2 * 2 * 7 * 2);
+  assert.equal(n, 3 * 2 * 2 * 7 * 5);
 });
 
-test('paneViews: off a desktop it is always exactly [main], whatever the layout and width', () => {
-  for (const layout of LAYOUTS) for (const isWide of [false, true]) for (const main of MAINS) {
-    const r = paneViews({ layout, main, lastCalendar: 'week', isDesktop: false, isWide });
-    assert.deepEqual(r.visible, [main]);
-    assert.equal(r.calendar, CALENDAR_VIEWS.includes(main) ? main : null);
+test('paneViews: with no lastCalendar, Today beside a calendar gets the layout\'s default', () => {
+  const base = { main: 'today', lastCalendar: undefined, isDesktop: true, isWide: false };
+  assert.deepEqual(paneViews({ ...base, layout: 'planner' }), { visible: ['today', 'week'], calendar: 'week' });
+  assert.deepEqual(paneViews({ ...base, layout: 'month' }), { visible: ['today', 'month'], calendar: 'month' });
+  assert.deepEqual(paneViews({ ...base, layout: 'all', isWide: true }),
+    { visible: ['today', 'week', 'todo', 'ideas'], calendar: 'week' });
+  assert.deepEqual(paneViews({ ...base, layout: 'all', main: 'todo', isWide: true }),
+    { visible: ['today', 'week', 'todo', 'ideas'], calendar: 'week' });
+});
+
+test('paneViews: lastCalendar is used when given, for each calendar view', () => {
+  for (const last of CALENDAR_VIEWS) {
+    assert.deepEqual(paneViews({ layout: 'planner', main: 'today', lastCalendar: last, isDesktop: true, isWide: false }),
+      { visible: ['today', last], calendar: last });
   }
-});
-
-test('paneViews: spot checks of the named cases', () => {
-  assert.deepEqual(paneViews({ layout: 'planner', main: 'today', lastCalendar: 'week', isDesktop: true, isWide: false }),
-    { visible: ['today', 'week'], calendar: 'week' });
-  assert.deepEqual(paneViews({ layout: 'planner', main: 'todo', lastCalendar: 'week', isDesktop: true, isWide: false }),
-    { visible: ['today', 'todo'], calendar: null });
-  assert.deepEqual(paneViews({ layout: 'all', main: 'todo', lastCalendar: 'day', isDesktop: true, isWide: false }),
-    { visible: ['today', 'todo'], calendar: null }, 'narrow all behaves as planner');
-  assert.deepEqual(paneViews({ layout: 'all', main: 'todo', lastCalendar: 'day', isDesktop: true, isWide: true }),
-    { visible: ['today', 'day', 'todo', 'ideas'], calendar: 'day' });
 });
 
 // --- index.html structure ------------------------------------------------------
