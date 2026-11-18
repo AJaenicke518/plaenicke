@@ -1458,3 +1458,28 @@ button[data-press].pressed { opacity: 1; }
 }
 @keyframes tick-pop { 0% { transform: scale(1); } 45% { transform: scale(1.28); } 100% { transform: scale(1); } }
 @keyframes tick-draw { from { background-size: 0 1.5px; } to { background-size: 100% 1.5px; } }
+
+/* ---------- desktop layout, option A (spec 2026-11-13-desktop-layout-options) ----------
+   A centred 44rem column. hover/pointer keep a large iPhone in landscape
+   (~932px) on the phone layout. Week and Month (#week-view, #calendar-view) stay
+   full width; they need it. Nothing outside this block changes. */
+@media (min-width: 900px) and (hover: hover) and (pointer: fine) {
+  header, #sync-indicator, #account-banner, #status-line, #cal-switch,
+  #today-view, #day-view, #three-day-view, #todo-view, #ideas-view, .capture-box {
+    max-width: 44rem;
+    margin-inline: auto;
+  }
+  /* Segmented control: buttons size to their content, not a quarter each. */
+  #cal-switch button { flex: 0 0 auto; padding: 8px 20px; }
+  /* The bar stays full width; its four buttons share the column (4 x 11rem). */
+  .tab-bar { justify-content: center; }
+  .tab-bar button { flex: 0 1 11rem; }
+  /* The capture button and toast follow the column's right and left edges
+     (the column is 44rem wide, centred; 16px is the phone gutter). The box's
+     right edge is the button's, so .capture-panel's origin is unchanged. */
+  .capture-btn { right: max(16px, calc(50% - 22rem)); }
+  .toast {
+    left: max(16px, calc(50% - 22rem));
+    right: calc(max(16px, calc(50% - 22rem)) + 72px);
+  }
+}

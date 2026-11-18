@@ -944,7 +944,13 @@ test('a pressed Today row is tinted, not dimmed like a pressed button', () => {
 test('no rule styles Today through an id', () => {
   const sels = [...css.matchAll(/([^{}]+)\{/g)].map((m) => m[1].trim()).filter((sel) => /today/.test(sel));
   assert.ok(sels.length >= 10, `fixture check: found ${sels.length} Today rules`);
-  for (const sel of sels) assert.doesNotMatch(sel, /#/, sel);
+  // The bare #today-view section (desktop column, max-width/margin only) is the
+  // one allowed id: it is the container, not a row, so it cannot outrank a
+  // row's .pressed tint. Anything else naming an id still fails.
+  for (const sel of sels) {
+    const parts = sel.split(',').map((x) => x.trim()).filter((x) => x !== '#today-view' && /today/.test(x));
+    for (const part of parts) assert.doesNotMatch(part, /#/, sel);
+  }
 });
 
 test('every Today colour is a theme token, so dark mode follows', () => {
@@ -1605,3 +1611,92 @@ for (const s of OTHER_SCHEMES) {
     });
   }
 }
+
+// --- desktop layout, option A (spec 2026-11-13-desktop-layout-options.md) ----
+// One width-gated block. hover/pointer keep a large iPhone in landscape
+// (~932px) on the phone layout. rulesInContext keeps the prelude, so this reads
+// the block itself; the default helpers deliberately do not see it.
+const DESKTOP = '@media (min-width: 900px) and (hover: hover) and (pointer: fine)';
+const desktopRules = rulesInContext(css).filter((r) => r.at === DESKTOP);
+function desktopDecls(selector) {
+  const out = [];
+  for (const { sel, body } of desktopRules) {
+    if (!sel.split(',').map((x) => x.trim().replace(/\s+/g, ' ')).includes(selector)) continue;
+    for (const decl of body.split(';')) {
+      const i = decl.indexOf(':');
+      if (i >= 0) out.push({ prop: decl.slice(0, i).trim().toLowerCase(), value: decl.slice(i + 1).trim() });
+    }
+  }
+  return out;
+}
+function desktopOf(selector, prop) {
+  const d = desktopDecls(selector).filter((x) => x.prop === prop);
+  return d.length ? d[d.length - 1].value : null;
+}
+
+test('the desktop media block gives #today-view max-width 44rem and margin-inline auto', () => {
+  assert.equal(desktopOf('#today-view', 'max-width'), '44rem');
+  assert.equal(desktopOf('#today-view', 'margin-inline'), 'auto');
+});
+
+const CENTRED = ['header', '#sync-indicator', '#account-banner', '#status-line', '#cal-switch',
+  '#today-view', '#day-view', '#three-day-view', '#todo-view', '#ideas-view', '.capture-box'];
+test('every centred selector gets max-width 44rem and margin-inline auto', () => {
+  for (const sel of CENTRED) {
+    assert.equal(desktopOf(sel, 'max-width'), '44rem', `${sel} max-width`);
+    assert.equal(desktopOf(sel, 'margin-inline'), 'auto', `${sel} margin-inline`);
+  }
+});
+
+test('the desktop block leaves #week-view and #calendar-view full width', () => {
+  for (const sel of ['#week-view', '#calendar-view']) {
+    assert.deepEqual(desktopDecls(sel), [], `${sel} must not appear in the desktop block`);
+  }
+});
+
+test('the desktop media query keeps phones in landscape on the phone layout', () => {
+  assert.ok(desktopRules.length > 0, 'the desktop block exists');
+  const preludes = rulesInContext(css).map((r) => r.at).filter((a) => a && /min-width/.test(a));
+  assert.deepEqual([...new Set(preludes)], [DESKTOP], 'exactly one min-width block');
+  assert.match(DESKTOP, /hover: hover/);
+  assert.match(DESKTOP, /pointer: fine/);
+});
+
+test('the tab bar buttons, switcher buttons, capture button and toast are placed for the column', () => {
+  assert.equal(desktopOf('.capture-btn', 'right'), 'max(16px, calc(50% - 22rem))');
+  assert.equal(desktopOf('.toast', 'left'), 'max(16px, calc(50% - 22rem))');
+  assert.equal(desktopOf('.toast', 'right'), 'calc(max(16px, calc(50% - 22rem)) + 72px)');
+  // The panel is the column's width and its right edge is the button's, so the
+  // phone's origin stays right; the block must not move it.
+  assert.equal(declOf('.capture-panel', 'transform-origin'), 'bottom right');
+  assert.equal(desktopOf('.capture-panel', 'transform-origin'), null);
+  assert.equal(desktopOf('.tab-bar', 'justify-content'), 'center');
+  assert.equal(desktopOf('.tab-bar button', 'flex'), '0 1 11rem', '4 tabs x 11rem = the 44rem column');
+  assert.equal(desktopOf('#cal-switch button', 'flex'), '0 0 auto');
+});
+
+test('desktop block: no colour or background changes', () => {
+  for (const { body } of desktopRules) {
+    assert.doesNotMatch(body, /(^|[;\s])(color|background[\w-]*|border-color)\s*:/, body);
+  }
+});
+
+test("every selector the desktop block touches has main's phone value", async () => {
+  const { execFileSync } = await import('node:child_process');
+  let mainCss;
+  try {
+    mainCss = execFileSync('git', ['show', 'main:styles.css'], { cwd: new URL('..', import.meta.url), encoding: 'utf8' })
+      .replace(/\/\*[\s\S]*?\*\//g, '');
+  } catch (e) {
+    throw new Error(`cannot read main:styles.css (${e.message}); this test needs a git checkout with a main branch`);
+  }
+  // The default helpers skip min-width blocks, so this stays valid after the
+  // desktop block itself reaches main.
+  const sels = new Set();
+  for (const { sel } of desktopRules) for (const s of sel.split(',')) sels.add(s.trim().replace(/\s+/g, ' '));
+  assert.ok(sels.size >= CENTRED.length);
+  const read = (sel, source) => declsOf(sel, source).map((d) => `${d.prop}:${d.value}`).join(';');
+  for (const sel of sels) {
+    assert.equal(read(sel, css), read(sel, mainCss), `${sel}: phone declarations differ from main`);
+  }
+});
