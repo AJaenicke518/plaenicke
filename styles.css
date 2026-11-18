@@ -1477,4 +1477,81 @@ button[data-press].pressed { opacity: 1; }
    since an author display beats the UA's hidden rule. */
 @media (min-width: 46rem) and (hover: hover) and (pointer: fine) {
   #pane-left[hidden], #pane-main[hidden], #pane-right[hidden] { display: none; }
+
+  /* The page is one viewport tall and nothing scrolls but the panes: body is a
+     100dvh flex column (header block, then .panes taking what is left), so no
+     height is computed from the header's. The rail's width is the left padding;
+     the bottom-bar and capture-button reserve is gone. */
+  body {
+    box-sizing: border-box;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    padding-left: 4.5rem;
+    padding-bottom: 0;
+  }
+  .panes {
+    display: grid;
+    flex: 1;
+    min-height: 0;
+    grid-template-columns: minmax(20rem, 26rem) 1fr;
+    grid-template-rows: minmax(0, 1fr);
+    gap: var(--space-4);
+    padding-left: var(--space-4);
+  }
+  [data-layout="planner"] .panes,
+  [data-layout="month"] .panes,
+  [data-layout="all"] .panes { grid-template-columns: minmax(20rem, 26rem) 1fr; }
+  /* Today is column 1. The big pane is column 2, and the To-do/Ideas wrapper
+     shares its cell (only one of the two is ever shown) except in wide-all. */
+  .pane-left, .pane-main, .pane-right {
+    display: flex;
+    flex-direction: column;
+    overflow: auto;
+    min-width: 0;
+    min-height: 0;
+  }
+  .pane-left { grid-column: 1; grid-row: 1; }
+  .pane-main, .pane-right { grid-column: 2; grid-row: 1; }
+
+  /* Day and 3-day scroll inside their own grids (their scrollTop auto-scroll
+     and the pinned 3-day heads depend on it), so each is a flex column that
+     fills the pane and its grid takes the remaining height. */
+  #day-view, #three-day-view {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+  #day-view[hidden], #three-day-view[hidden] { display: none; }
+  #day-body, #three-day-body {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+  .day-grid, .tday-grid { flex: 1 1 auto; min-height: 0; max-height: none; }
+
+  /* The tab bar becomes a rail on the left edge. */
+  .tab-bar {
+    top: 0; bottom: 0; left: 0; right: auto;
+    width: 4.5rem;
+    height: auto;
+    flex-direction: column;
+    padding-bottom: 0;
+    border-top: 0;
+    border-right: 1px solid var(--line);
+  }
+  .tab-bar button { flex: 0 0 auto; }
+
+  /* The toast clears the rail; the capture button's 88px reserve and the
+     bottom bar's offset are gone. */
+  .toast { left: calc(4.5rem + 16px); right: 16px; bottom: 16px; }
+  .sheet { max-width: 40rem; margin-inline: auto; }
+}
+
+/* Wide: layout "all" adds To-do and Ideas as a third column. */
+@media (min-width: 46rem) and (hover: hover) and (pointer: fine) and (min-width: 80rem) {
+  [data-layout="all"] .panes { grid-template-columns: minmax(20rem, 26rem) 1fr minmax(18rem, 22rem); }
+  [data-layout="all"] .pane-right { grid-column: 3; grid-row: 1; }
 }
