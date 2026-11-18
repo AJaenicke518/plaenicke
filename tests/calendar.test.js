@@ -184,3 +184,26 @@ test('itemTypeClass returns space-separated tokens, so no caller may pass it to 
   assert.equal(done.split(' ').length, 2);
   for (const token of done.split(' ')) assert.doesNotMatch(token, /\s/);
 });
+
+test('Monday-start grid: a month whose 1st is a Sunday gets 6 leading blanks', () => {
+  const weeks = buildMonthGrid(2026, 2, 'mon'); // March 2026, 1st is a Sunday
+  assert.deepEqual(weeks[0].slice(0, 6), [null, null, null, null, null, null]);
+  assert.equal(weeks[0][6].day, 1);
+});
+
+test('Monday-start grid: a month whose 1st is a Monday gets 0 leading blanks', () => {
+  assert.equal(buildMonthGrid(2026, 5, 'mon')[0][0].day, 1); // June 2026
+});
+
+test('Monday-start grid: every week has 7 cells, Wednesday-start month gets 2 blanks', () => {
+  for (const [y, m] of [[2026, 2], [2026, 5], [2026, 6], [2026, 1]]) {
+    for (const w of buildMonthGrid(y, m, 'mon')) assert.equal(w.length, 7);
+  }
+  const w = buildMonthGrid(2026, 6, 'mon')[0]; // July 1 2026 is a Wednesday
+  assert.equal(w[0], null); assert.equal(w[1], null); assert.equal(w[2].day, 1);
+});
+
+test('default and explicit sun grid are identical', () => {
+  assert.deepEqual(buildMonthGrid(2026, 2), buildMonthGrid(2026, 2, 'sun'));
+  assert.equal(buildMonthGrid(2026, 2)[0][0].day, 1);
+});

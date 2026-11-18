@@ -15,6 +15,7 @@ import {
 } from './feeds.js';
 import { loadFeeds, saveFeeds, loadFeedCache, loadLaunches, QuotaError } from './storage.js';
 import { describeLaunches } from './freshness.js';
+import { getTimeFormat } from './prefs.js';
 import { initLinkUI } from './linkui.js';
 import { initAccountUI } from './accountui.js';
 import * as accountModule from './account.js';
@@ -244,7 +245,7 @@ export function initSettings({
     // Local-only (storage.js's launch log), never synced.
     const usage = document.createElement('p');
     usage.className = 'note usage-note';
-    usage.textContent = describeLaunches(loadLaunches(), new Date());
+    usage.textContent = describeLaunches(loadLaunches(), new Date(), getTimeFormat());
     appearance.append(ah, seg, usage);
 
     // --- Linked calendars ---------------------------------------------

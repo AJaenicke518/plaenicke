@@ -150,3 +150,10 @@ test('formatDayLabel never throws on a date it cannot read', () => {
   assert.equal(formatDayLabel('', TODAY), 'No date');
   assert.equal(formatDayLabel('garbage', TODAY), 'Unreadable date');
 });
+
+test('describeLaunches honours the time format parameter', () => {
+  const at1305 = new Date(NOW.getFullYear(), NOW.getMonth(), NOW.getDate(), 13, 5).toISOString();
+  assert.equal(describeLaunches([at1305], NOW, '24h'), 'Opened on 1 of the last 7 days. Last opened Today, 13:05.');
+  assert.equal(describeLaunches([at1305], NOW, '12h'), 'Opened on 1 of the last 7 days. Last opened Today, 1:05 PM.');
+  assert.equal(describeLaunches([at1305], NOW), 'Opened on 1 of the last 7 days. Last opened Today, 1:05 PM.');
+});

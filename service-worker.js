@@ -10,12 +10,12 @@
 // token. `activate` deletes every cache whose name isn't this one, so the
 // rename is what actually evicts them; the fetch-handler guard below only
 // stops new ones being written.
-const CACHE = 'plaenicke-v7-1';
+const CACHE = 'plaenicke-v7-2';
 const ASSETS = [
   '.', 'index.html', 'styles.css', 'manifest.json',
   'js/app.js', 'js/storage.js', 'js/items.js', 'js/dateparse.js', 'js/calendar.js',
   'js/config.js', 'js/account.js', 'js/smartadd.js', 'js/preview.js', 'js/voice.js',
-  'js/timegrid.js', 'js/theme.js', 'js/settings.js', 'js/dayview.js', 'js/weekview.js',
+  'js/timegrid.js', 'js/theme.js', 'js/prefs.js', 'js/settings.js', 'js/dayview.js', 'js/weekview.js',
   'js/ics.js', 'js/deadlines.js', 'js/tzmap.js', 'js/feeds.js', 'js/uid.js', 'js/crypto.js', 'js/keys.js', 'js/merge.js', 'js/auth.js', 'js/sync.js',
   'js/linkui.js', 'js/ideas.js', 'js/todoview.js', 'js/ideasview.js', 'js/freshness.js', 'js/edit.js', 'js/toast.js', 'js/itemsheet.js',
   'js/scrolllock.js', 'js/fetchtimeout.js', 'js/palette.js', 'js/press.js', 'js/today.js', 'js/todayview.js', 'js/weeklist.js',
