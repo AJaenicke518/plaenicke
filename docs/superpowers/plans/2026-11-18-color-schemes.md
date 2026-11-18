@@ -100,3 +100,28 @@ The implementer derives `--line`, `--chip-bg`, `--chip-ink`, `--grid-line` and `
 - Recolouring item types or calendars.
 - Syncing the choice.
 - `theme-color` meta. There is none today.
+
+## Amendments from the plan review (2026-11-18, DA adjudication — these OVERRIDE the text above)
+
+**Global Constraints, corrected**
+- Scheme tokens are 11: `--bg --card --ink --muted --accent --accent-ink --line --chip-bg --today --grid-line --tick-glow`. `--chip-ink` is dropped: nothing reads it (`var(--chip-ink)` appears nowhere).
+- Contrast pairs per variant: `--ink`, `--muted`, `--accent`, inherited `--danger`, inherited `--overdue-start` ≥ 4.5 on `--bg` AND `--card`; `--accent-ink` on `--accent` ≥ 4.5. `--today` must EQUAL `--accent` in every block (asserted).
+- Removing a scheme touches: its two CSS blocks, `SCHEMES` in `js/prefs.js`, the pre-paint list in `index.html`, the swatch map in `js/settings.js`. Tests tie all four together (below); `tests/styles.test.js` imports `SCHEMES` from `js/prefs.js` rather than keeping a copy.
+- `CACHE_ON_MAIN` must equal main's CACHE at merge time: `v7-1` if R1 and R2 merge together, `v7-2` if R1 lands first. Put that line in the merge checklist.
+
+**Task 1 additions**
+- Source order: in `rulesOf(css)`, every rule whose selector contains `data-scheme` has an index greater than the `:root` rule and the `[data-theme="dark"]` rule.
+- Every rule whose selector contains `data-scheme` is one of exactly the 2×N known selectors (no `[data-scheme="x"] .foo` rules, no `html[data-scheme]` variants).
+- Two-way tie: every non-classic entry of `SCHEMES` has both blocks; every `data-scheme="…"` value in styles.css is in `SCHEMES`.
+- Classic snapshot: for every scheme token, `declOf(':root', t)` and `declOf('[data-theme="dark"]', t)` equal their current literal (full list, not three).
+
+**Task 2 additions**
+- `initSettings` calls `applyScheme(getScheme())` next to its `applyTheme(getSetting())` re-apply (`js/settings.js:~872-874`); test it.
+- In `index.html` the scheme logic runs in its OWN try block, BEFORE the theme logic, so a theme-side throw (e.g. no `matchMedia`) cannot skip it. The prepaint test includes a case where `window.matchMedia` is undefined: the scheme is still applied.
+- Swatch: each button's swatch is a 14px circle with `border: 1px solid currentColor` (visible on the selected button whose fill is `--accent`). Test: each swatch hex in settings.js equals `declOf('[data-scheme="x"]', '--accent')` (classic: `declOf(':root','--accent')`).
+- On a failed storage write: apply the scheme for this session anyway (matching the theme row, `settings.js:236-237`) AND show a one-line note "Couldn't save this on this device; it will reset next time." Test both.
+- Row goes AFTER the theme row and R1's rows (Tab-trap tests expect 'Light' first).
+- Browser check also at 375×667 and 320×568: the four buttons fit without overflow (labels may sit under the swatch). Screenshot each.
+
+**Spec note:** `manifest.json` `theme_color`/`background_color` are classic light (`#f4f1ea`); dark mode already mismatches them; schemes don't change that. Known gap.
+**For Alex (taste):** each candidate accent sits near one item-type colour (sage≈event, ocean≈start, plum≈task); check Month view on review.
