@@ -1821,12 +1821,15 @@ test('gate: .panes is a grid that fills the space under the header and owns the 
 });
 
 test('gate: columns per [data-layout]; .pane-right is a third column only in wide-all', () => {
+  // The big pane never goes below 18.5rem: at 736px (the gate's floor plus a
+  // little) a bare 1fr left it 200px and the Week view scrolled sideways.
   const left = 'minmax(20rem, 26rem)';
-  assert.equal(desktopOf('.panes', 'grid-template-columns'), `${left} 1fr`);
+  const main = 'minmax(18.5rem, 1fr)';
+  assert.equal(desktopOf('.panes', 'grid-template-columns'), `${left} ${main}`);
   for (const l of ['planner', 'month', 'all']) {
-    assert.equal(desktopOf(`[data-layout="${l}"] .panes`, 'grid-template-columns'), `${left} 1fr`, l);
+    assert.equal(desktopOf(`[data-layout="${l}"] .panes`, 'grid-template-columns'), `${left} ${main}`, l);
   }
-  assert.equal(wideOf('[data-layout="all"] .panes', 'grid-template-columns'), `${left} 1fr minmax(18rem, 22rem)`);
+  assert.equal(wideOf('[data-layout="all"] .panes', 'grid-template-columns'), `${left} ${main} minmax(18rem, 22rem)`);
   assert.equal(wideOf('[data-layout="all"] .pane-right', 'grid-column'), '3');
   assert.equal(desktopOf('[data-layout="all"] .pane-right', 'grid-column'), null, 'below wide, all has no third column');
   // Outside wide-all, the right pane shares the big pane's cell.
@@ -1976,6 +1979,17 @@ test('gate: the box is placed from the top-left, its panel grows from there, and
   assert.equal(declOf('.capture-box', 'bottom', phoneCss), 'var(--capture-lift)');
 });
 
+test('gate: the toast is capped at 36rem, so it is not a full-width bar on a wide screen', () => {
+  assert.equal(desktopOf('.toast', 'max-width'), '36rem');
+  assert.equal(declOf('.toast', 'max-width', phoneCss), null, 'the phone toast is unchanged');
+});
+
+test('the dock mic swaps to a stop square while listening, as the round button does (phone CSS hidden dock, so stated outside the gate)', () => {
+  assert.equal(declOf('.capture-dock-mic .icon-stop', 'display'), 'none');
+  assert.equal(declOf('.capture-dock-mic.listening .icon-mic', 'display'), 'none');
+  assert.equal(declOf('.capture-dock-mic.listening .icon-stop', 'display'), 'block');
+});
+
 test('the pane headings are hidden outside the gate and shown inside it', () => {
   assert.equal(declOf('.pane-heading', 'display', phoneCss), 'none');
   assert.notEqual(desktopOf('.pane-heading', 'display'), null);
@@ -1984,8 +1998,8 @@ test('the pane headings are hidden outside the gate and shown inside it', () => 
 
 test('index.html: To-do and Ideas each carry a pane heading', () => {
   for (const [id, text] of [['todo-view', 'To-do'], ['ideas-view', 'Ideas']]) {
-    const m = indexHtml.match(new RegExp(`<section id="${id}"[^>]*>\\s*(?:<!--[\\s\\S]*?-->\\s*)?<h2 class="pane-heading">${text}</h2>`));
-    assert.ok(m, `${id} opens with <h2 class="pane-heading">${text}</h2>`);
+    const m = indexHtml.match(new RegExp(`<section id="${id}"[^>]*>\\s*(?:<!--[\\s\\S]*?-->\\s*)?<h2 id="${id}-heading" class="pane-heading">${text}</h2>`));
+    assert.ok(m, `${id} opens with <h2 id="${id}-heading" class="pane-heading">${text}</h2>`);
   }
 });
 

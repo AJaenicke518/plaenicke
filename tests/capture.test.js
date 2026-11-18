@@ -851,3 +851,73 @@ test('with no openers, behaviour is the round button\'s alone', () => {
   tap(fx.els.close);
   assert.equal(fx.els.button.getAttribute('aria-expanded'), 'false');
 });
+
+// --- Release 3 review fixes: the dock mic shows listening; openTyping's latch ----
+test('a mic opener shows the listening state: class and aria-label, as the round button does', () => {
+  const mic = new FakeElement('button');
+  const other = new FakeElement('button');
+  const fx = setup({ openers: [other, { el: mic, mic: true }] });
+  assert.equal(mic._classes.has('listening'), false);
+  fx.capture.tap();
+  assert.equal(mic._classes.has('listening'), true, 'listening class on the dock mic');
+  assert.equal(mic.getAttribute('aria-label'), 'Stop and add');
+  assert.equal(other._classes.has('listening'), false, 'a plain opener never shows listening');
+  assert.equal(other.getAttribute('aria-label'), null, 'and its label is left alone');
+  assert.equal(mic.getAttribute('aria-expanded'), 'true', 'it still mirrors aria-expanded');
+});
+
+test('a mic opener reverts when the listen stops, by every route', () => {
+  const stops = {
+    'typing in the text': (fx) => tap(fx.els.field),
+    'openTyping': (fx) => fx.capture.openTyping(),
+    'close': (fx) => tap(fx.els.close),
+    'the voice ending on its own': (fx) => fx.voice.current.opts.onEnd(),
+    'stopAndKeep': (fx) => fx.capture.stopAndKeep(),
+    'a voice error': (fx) => fx.voice.current.opts.onError('no-speech'),
+  };
+  for (const [name, stop] of Object.entries(stops)) {
+    const mic = new FakeElement('button');
+    const fx = setup({ openers: [{ el: mic, mic: true }] });
+    fx.capture.tap();
+    assert.equal(mic._classes.has('listening'), true, `${name}: fixture check`);
+    stop(fx);
+    assert.equal(mic._classes.has('listening'), false, name);
+    assert.equal(mic.getAttribute('aria-label'), 'Capture by voice', name);
+  }
+});
+
+test('a mic opener also reverts when the second tap stops and adds', async () => {
+  const mic = new FakeElement('button');
+  const fx = setup({ openers: [{ el: mic, mic: true }] });
+  fx.capture.tap();
+  fx.voice.current.opts.onText('milk');
+  fx.capture.tap();
+  await tick();
+  assert.equal(mic._classes.has('listening'), false);
+  assert.equal(mic.getAttribute('aria-label'), 'Capture by voice');
+  fx.settle('direct');
+  await tick();
+});
+
+test('a mic opener starts in the not-listening state', () => {
+  const mic = new FakeElement('button');
+  setup({ openers: [{ el: mic, mic: true }] });
+  assert.equal(mic._classes.has('listening'), false);
+  assert.equal(mic.getAttribute('aria-label'), 'Capture by voice');
+});
+
+test('openTyping while an add is pending changes nothing: no focus, no date row, no mode change', async () => {
+  const fx = setup();
+  fx.capture.openTyping();
+  fx.els.field.value = 'x';
+  tap(fx.els.add);
+  await tick();
+  assert.equal(fx.capture.state().adding, true, 'fixture check: an add is pending');
+  fx.els.when.hidden = true; // what focusField would show again
+  const before = fx.order.length;
+  fx.capture.openTyping();
+  assert.equal(fx.order.length, before, 'no blur or focus while an add is pending');
+  assert.equal(fx.els.when.hidden, true, 'the date row is not shown');
+  fx.settle('direct');
+  await tick();
+});

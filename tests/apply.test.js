@@ -9658,8 +9658,7 @@ test('r3: on a computer the dock opens capture typing, with no recognizer, no tr
     click(capEl('capture-dock-type'));
     assert.equal(box.hidden, false, 'the box opens');
     assert.equal(voice.count(), 0, 'typing: the recognizer is never created');
-    assert.ok(box.style.transform === undefined || box.style.transform === 'none' || box.style.transform === '',
-      `no viewport transform on a computer, got ${box.style.transform}`);
+    assert.equal(box.style.transform, 'none', 'desktopFollow sets transform none, so no viewport transform applies');
     assert.equal(box.style.top, '128px', 'dock bottom (120) + 8');
     assert.equal(box.style.left, '120px');
     assert.equal(box.style.width, '300px');
@@ -9736,6 +9735,83 @@ test('r3: the dock\'s mic button takes the round button\'s path: it listens', as
     voice.restore();
     leaveDesktop();
   }
+});
+
+test('r3: the dock mic shows the stop state while listening and reverts when it stops', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const vvx = withVisualViewport();
+  const timers = installManualTimers();
+  capEl('capture-dock')._rect = { top: 80, left: 120, width: 300, height: 40 };
+  globalThis.window.innerHeight = 800;
+  setMedia(true, false);
+  const mic = capEl('capture-dock-mic');
+  try {
+    assert.equal(mic.getAttribute('aria-label'), 'Capture by voice');
+    click(mic);
+    assert.equal(voice.count(), 1, 'fixture check: listening');
+    assert.ok(mic._classes.has('listening'), 'the dock mic carries the listening class');
+    assert.equal(mic.getAttribute('aria-label'), 'Stop and add');
+    assert.equal(capEl('capture-dock-type')._classes.has('listening'), false, 'the typing button does not');
+    click(capEl('capture-text')); // typing stops the listen
+    assert.equal(mic._classes.has('listening'), false);
+    assert.equal(mic.getAttribute('aria-label'), 'Capture by voice');
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    vvx.restore();
+    voice.restore();
+    leaveDesktop();
+  }
+});
+
+test('r3: a resize while the desktop box is open re-places it from the dock, and closing stops listening for it', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const vvx = withVisualViewport();
+  const timers = installManualTimers();
+  const dock = capEl('capture-dock');
+  const box = capEl('capture-box');
+  dock._rect = { top: 80, left: 120, width: 300, height: 40 };
+  globalThis.window.innerHeight = 800;
+  setMedia(true, false);
+  const resize = () => { for (const fn of [...(globalThis.window._listeners.resize || [])]) fn({ type: 'resize' }); };
+  const before = (globalThis.window._listeners.resize || []).length;
+  try {
+    click(capEl('capture-dock-type'));
+    assert.equal(box.style.left, '120px');
+    dock._rect = { top: 60, left: 200, width: 250, height: 40 };
+    globalThis.window.innerHeight = 600;
+    resize();
+    assert.equal(box.style.top, '108px', 'dock bottom (100) + 8');
+    assert.equal(box.style.left, '200px');
+    assert.equal(box.style.width, '250px');
+    assert.equal(box.style['max-height'], '476px', '600 - 108 - 16');
+    closeCapture(timers);
+    assert.equal((globalThis.window._listeners.resize || []).length, before, 'the listener is removed with the box');
+    dock._rect = { top: 0, left: 5, width: 50, height: 10 };
+    resize();
+    assert.equal(box.style.left, undefined, 'a closed box is not re-placed');
+  } finally {
+    if (!box.hidden) closeCapture(timers);
+    timers.restore();
+    vvx.restore();
+    leaveDesktop();
+  }
+});
+
+test('index.html: the dock mic is labelled and carries both icons; the pane headings have ids', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const mic = html.match(/<button id="capture-dock-mic"[\s\S]*?<\/button>/);
+  assert.ok(mic, 'the dock mic exists');
+  assert.match(mic[0], /aria-label="[^"]+"/, 'an icon-only button needs a non-empty name');
+  assert.match(mic[0], /class="icon-mic"/);
+  assert.match(mic[0], /class="icon-stop"/);
+  assert.match(html, /<h2 id="todo-view-heading" class="pane-heading">/);
+  assert.match(html, /<h2 id="ideas-view-heading" class="pane-heading">/);
 });
 
 test('r3: phone control: #capture-btn still follows the visual viewport with a non-empty transform', async () => {
@@ -11080,10 +11156,15 @@ test('r3: the rail marks the big pane, and a pane gets its name on a computer on
     assert.equal(byId('week-view').getAttribute('aria-label'), 'Calendar');
     assert.equal(byId('calendar-view').getAttribute('aria-label'), null, 'a hidden pane carries no name');
     click(byId('tab-todo'));
-    assert.equal(byId('todo-view').getAttribute('aria-label'), 'To-do');
+    // To-do and Ideas are named by their visible heading (aria-labelledby): an
+    // aria-label as well would announce the name twice.
+    assert.equal(byId('todo-view').getAttribute('aria-labelledby'), 'todo-view-heading');
+    assert.equal(byId('todo-view').getAttribute('aria-label'), null);
     assert.equal(byId('week-view').getAttribute('aria-label'), null, 'the week left the screen with its name');
     click(byId('tab-ideas'));
-    assert.equal(byId('ideas-view').getAttribute('aria-label'), 'Ideas');
+    assert.equal(byId('ideas-view').getAttribute('aria-labelledby'), 'ideas-view-heading');
+    assert.equal(byId('ideas-view').getAttribute('aria-label'), null);
+    assert.equal(byId('todo-view').getAttribute('aria-labelledby'), null, 'a hidden pane carries no name');
     // Today's own tab on a computer: the big pane is still the calendar.
     click(byId('tab-today'));
     assert.deepEqual(shownViews().length, 2);
@@ -11094,6 +11175,8 @@ test('r3: the rail marks the big pane, and a pane gets its name on a computer on
     assert.ok(byId('tab-title')._classes.has('visually-hidden'), 'even on a list');
     setMedia(false, false);
     assert.equal(byId('todo-view').getAttribute('aria-label'), null, 'no names off the computer layout');
+    assert.equal(byId('todo-view').getAttribute('aria-labelledby'), null);
+    assert.equal(byId('ideas-view').getAttribute('aria-labelledby'), null);
     assert.equal(byId('today-view').getAttribute('aria-label'), null);
     assert.equal(byId('tab-title')._classes.has('visually-hidden'), false, 'a phone shows the title on a list page');
     assert.equal(byId('tab-title').textContent, 'To-do');
