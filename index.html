@@ -19,7 +19,7 @@
       } catch (e) {}
       var t = null;
       try { t = localStorage.getItem('plaenicke.theme'); } catch (e) {}
-      var dark = t === 'dark' || ((t === null || t === 'auto') &&
+      var dark = t === 'dark' || (t !== 'light' &&
         window.matchMedia('(prefers-color-scheme: dark)').matches);
       if (dark) document.documentElement.dataset.theme = 'dark';
     })();

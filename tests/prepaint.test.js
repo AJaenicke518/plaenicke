@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { SCHEMES, resolveScheme } from '../js/prefs.js';
+import { resolveTheme } from '../js/theme.js';
 
 const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const m = html.match(/<script>([\s\S]*?)<\/script>/);
@@ -43,6 +44,17 @@ test('pre-paint: theme behaviour is unchanged', () => {
   assert.equal(run({ store: { 'plaenicke.theme': 'light' }, matchMedia: systemDark(true) }).dataset.theme, undefined);
   assert.equal(run({ matchMedia: systemDark(true) }).dataset.theme, 'dark');
   assert.equal(run({ matchMedia: systemDark(false) }).dataset.theme, undefined);
+});
+
+test('pre-paint: the theme equals resolveTheme for every stored value, known or not, with the system dark or light', () => {
+  for (const raw of ['dark', 'light', 'auto', null, 'Dark', 'bogus', '']) {
+    for (const sysDark of [true, false]) {
+      const store = raw === null ? {} : { 'plaenicke.theme': raw };
+      const { dataset } = run({ store, matchMedia: systemDark(sysDark) });
+      const want = resolveTheme(raw, sysDark);
+      assert.equal(dataset.theme, want === 'dark' ? 'dark' : undefined, `stored ${JSON.stringify(raw)}, system dark ${sysDark}`);
+    }
+  }
 });
 
 test('pre-paint: the scheme is applied even when window.matchMedia is undefined', () => {
