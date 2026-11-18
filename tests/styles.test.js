@@ -1681,22 +1681,41 @@ test('desktop block: no colour or background changes', () => {
   }
 });
 
-test("every selector the desktop block touches has main's phone value", async () => {
-  const { execFileSync } = await import('node:child_process');
-  let mainCss;
-  try {
-    mainCss = execFileSync('git', ['show', 'main:styles.css'], { cwd: new URL('..', import.meta.url), encoding: 'utf8' })
-      .replace(/\/\*[\s\S]*?\*\//g, '');
-  } catch (e) {
-    throw new Error(`cannot read main:styles.css (${e.message}); this test needs a git checkout with a main branch`);
-  }
-  // The default helpers skip min-width blocks, so this stays valid after the
-  // desktop block itself reaches main.
+// Pins the PHONE layout of every selector the desktop block touches, as it was
+// when desktop A shipped (2026-11-17). The default helpers skip min-width
+// blocks, so these are phone values. When the phone design changes on purpose,
+// update this table deliberately; a failure here means a phone rule moved.
+const PHONE_AT_DESKTOP_A = {
+  'header': 'display:flex;justify-content:space-between;align-items:center;min-height:62px',
+  '.tab-bar': 'position:fixed;left:0;right:0;bottom:0;z-index:5;display:flex;height:calc(56px + env(safe-area-inset-bottom));padding-bottom:env(safe-area-inset-bottom);background:var(--card);border-top:1px solid var(--line)',
+  '.tab-bar button': 'flex:1;min-height:44px;padding:0;border-radius:0;background:transparent;color:var(--muted);font-family:var(--sans);font-size:var(--text-label)',
+  '.toast': 'position:fixed;left:16px;right:88px;bottom:calc(56px + 12px + env(safe-area-inset-bottom));display:flex;align-items:center;justify-content:space-between;gap:12px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:8px 12px;box-shadow:0 4px 16px rgba(0, 0, 0, 0.25);z-index:20',
+  '.capture-btn': 'position:fixed;right:16px;bottom:calc(56px + 16px + env(safe-area-inset-bottom));z-index:6;width:56px;height:56px;padding:0;display:flex;align-items:center;justify-content:center;border-radius:var(--radius-round);background:var(--accent);color:var(--accent-ink)',
+  '.capture-box': '--capture-lift:calc(56px + 16px + 56px + 8px + env(safe-area-inset-bottom));position:fixed;left:16px;right:16px;bottom:var(--capture-lift);max-height:50dvh;z-index:8;display:flex;flex-direction:column',
+  // These ids have no phone rule at all (they are styled by class).
+  '#sync-indicator': '', '#account-banner': '', '#status-line': '', '#cal-switch': '',
+  '#cal-switch button': '', '#today-view': '', '#day-view': '', '#three-day-view': '',
+  '#todo-view': '', '#ideas-view': '',
+};
+test('every selector the desktop block touches keeps its pinned phone value', () => {
   const sels = new Set();
-  for (const { sel } of desktopRules) for (const s of sel.split(',')) sels.add(s.trim().replace(/\s+/g, ' '));
-  assert.ok(sels.size >= CENTRED.length);
-  const read = (sel, source) => declsOf(sel, source).map((d) => `${d.prop}:${d.value}`).join(';');
-  for (const sel of sels) {
-    assert.equal(read(sel, css), read(sel, mainCss), `${sel}: phone declarations differ from main`);
+  for (const { sel } of desktopRules) for (const x of sel.split(',')) sels.add(x.trim().replace(/\s+/g, ' '));
+  assert.deepEqual([...sels].sort(), Object.keys(PHONE_AT_DESKTOP_A).sort(),
+    'the block touches a selector this table does not pin (or the table pins one it no longer touches)');
+  for (const [sel, expected] of Object.entries(PHONE_AT_DESKTOP_A)) {
+    const got = declsOf(sel).map((d) => `${d.prop}:${d.value}`).join(';');
+    assert.equal(got, expected, `${sel}: phone declarations changed`);
+  }
+});
+
+test('a bare #today-view rule exists only inside the desktop block and sets only width props', () => {
+  const bare = rulesInContext(css).filter((r) => r.sel !== null
+    && r.sel.split(',').map((x) => x.trim()).includes('#today-view'));
+  assert.ok(bare.length >= 1, 'fixture check: the desktop block styles #today-view');
+  for (const r of bare) {
+    assert.equal(r.at, DESKTOP, '#today-view may be styled only inside the desktop block');
+    const props = r.body.split(';').map((d) => d.split(':')[0].trim().toLowerCase()).filter(Boolean);
+    assert.deepEqual([...new Set(props)].sort(), ['margin-inline', 'max-width'],
+      '#today-view may set only max-width and margin-inline (anything else inherits into Today rows)');
   }
 });
