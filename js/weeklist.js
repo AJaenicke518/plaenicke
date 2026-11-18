@@ -23,7 +23,8 @@ const DAY_NAME = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 's
 //   items         own items (app.js passes liveItems())
 //   instancesFor  (fromISO, toISO) => instancesForRange(..., fromISO, toISO, ...)
 //                 called once, for exactly the range listed
-//   weekStartISO  the Sunday of the week shown
+//   weekStartISO  the first day of the week shown (Sunday or Monday, per the
+//                 device's week-start preference)
 //   todayISO      the device's today
 // The range is the week's days: from today for the current week ("Rest of
 // this week"), all seven for any other week, past or future ("This week").

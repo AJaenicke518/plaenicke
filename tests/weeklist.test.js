@@ -76,6 +76,20 @@ test('buildWeekList: a future week shows all seven days, headed "This week"', ()
   assert.deepEqual(titlesOf(list), ['Sun', 'Sat']);
 });
 
+test('buildWeekList: a Monday-start week is its Monday .. Sunday, and "current" includes the Sunday', () => {
+  const feed = rangeFeed([]);
+  const list = buildWeekList([
+    own('mon', { date: '2026-10-19', title: 'Mon' }), own('sun', { date: '2026-10-25', title: 'Sun' }),
+    own('before', { date: '2026-10-18', title: 'Before' }), own('after', { date: '2026-10-26', title: 'After' }),
+  ], feed.fn, '2026-10-19', '2026-10-25');
+  assert.deepEqual(feed.asked, [['2026-10-25', '2026-10-25']], 'the Sunday is the last day of the current week');
+  assert.equal(list.heading, 'Rest of this week');
+  assert.deepEqual(titlesOf(list), ['Sun']);
+  const other = rangeFeed([]);
+  buildWeekList([], other.fn, '2026-10-19', '2026-10-30');
+  assert.deepEqual(other.asked, [['2026-10-19', '2026-10-25']], 'a future Monday-start week lists Monday .. Sunday');
+});
+
 test('buildWeekList: a past week shows all seven days as a plain record, headed "This week"', () => {
   const feed = rangeFeed([inst('quiz', '2026-10-16', { time: '09:00', title: 'Old quiz' })]);
   const list = buildWeekList([

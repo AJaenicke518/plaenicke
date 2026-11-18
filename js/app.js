@@ -15,8 +15,8 @@ import { renderTodoView } from './todoview.js';
 import { renderIdeasView } from './ideasview.js';
 import { toISO, nowISO, localStamp } from './dateparse.js';
 import { buildMonthGrid, groupItemsByDate, monthCellSummary, chronoFirst, itemTypeClass } from './calendar.js';
-import { startOfWeek, addDays, formatTime, weekLabel } from './timegrid.js';
-import { getTimeFormat } from './prefs.js';
+import { startOfWeek, addDays, formatTime, weekLabel, weekdayNames } from './timegrid.js';
+import { getTimeFormat, getWeekStart, TIME_FORMAT_KEY, WEEK_START_KEY } from './prefs.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
 import { renderDayView } from './dayview.js';
 import { renderThreeDayView } from './threedayview.js';
@@ -146,7 +146,7 @@ const captureLine = messageLine(els.captureMessage);
 let items = loadItems();
 let viewMonth = new Date();
 let viewDay = toISO(new Date());
-let viewWeekStart = startOfWeek(viewDay);
+let viewWeekStart = startOfWeek(viewDay, getWeekStart());
 // The 3-day view's first day: its own cursor, not Day's (option A, Alex
 // 2026-10-26). It starts on today and follows today as viewDay does; opening
 // a day in Day view does not move it.
@@ -292,9 +292,23 @@ let visit = 1;
 let deadlineImportDeferred = false;
 const importWaitsForSync = () => isLinked() && (isAdoptionPending() || !syncedSinceVisible);
 
+// A time-format or week-start change (this tab's Settings, or another tab's
+// storage event). Keeps the week on screen that holds today, else the visible
+// week's midpoint, re-anchored to the chosen first day. A plain midpoint is
+// wrong when today is the Sunday of a Sunday-start week: Mon-start would move
+// the week past it. Schedules no sync: both keys are device-local.
+function onDisplayPrefsChanged() {
+  refreshForToday();
+  const t = toISO(new Date());
+  const pivot = (t >= viewWeekStart && t <= addDays(viewWeekStart, 6)) ? t : addDays(viewWeekStart, 3);
+  viewWeekStart = startOfWeek(pivot, getWeekStart());
+  render(); stampUpdated(); stampFromFeeds();
+}
+
 const settings = initSettings({
   button: els.settingsBtn,
   host: els.settingsHost,
+  onDisplayPrefsChanged,
   // The stamp is repainted too (sweep F, O5): adding, removing or hiding a
   // calendar changes what is on screen, and so what the stamp is about.
   onFeedsChanged: () => {
@@ -1162,7 +1176,8 @@ function renderCalendar() {
   const year = viewMonth.getFullYear();
   const month = viewMonth.getMonth();
   els.calLabel.textContent = `${MONTH_NAMES[month]} ${year}`;
-  const weeks = buildMonthGrid(year, month);
+  const weekStart = getWeekStart(); // once: header and grid must agree
+  const weeks = buildMonthGrid(year, month, weekStart);
   // buildMonthGrid only ever fills cells with dates from this month (blanks
   // elsewhere), so the visible range is simply the month's own first/last day.
   const monthStart = `${year}-${String(month + 1).padStart(2, '0')}-01`;
@@ -1171,7 +1186,7 @@ function renderCalendar() {
   const byDate = groupItemsByDate(sortItemsByDate(visibleItems(monthStart, monthEnd)));
   const todayISO = toISO(new Date());
   els.calGrid.innerHTML = '';
-  for (const d of ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']) {
+  for (const d of weekdayNames(weekStart)) {
     const h = document.createElement('div');
     h.className = 'cal-head';
     h.textContent = d;
@@ -1475,7 +1490,7 @@ function showView(which) {
 function openDay(dateISO) {
   refreshForToday();
   viewDay = dateISO;
-  viewWeekStart = startOfWeek(dateISO);
+  viewWeekStart = startOfWeek(dateISO, getWeekStart());
   showView('day');
 }
 
@@ -1831,6 +1846,8 @@ window.addEventListener('storage', (e) => {
   // Series visibility is device-local, not synced data: another tab's hide is
   // shown here (render() re-reads it) and NO sync is scheduled.
   if (e.key === SERIES_VISIBILITY_KEY) { render(); return; }
+  // Display preferences are device-local too: no sync.
+  if (e.key === TIME_FORMAT_KEY || e.key === WEEK_START_KEY) { onDisplayPrefsChanged(); return; }
   if (!CROSS_TAB_KEYS.includes(e.key)) return;
   items = loadItems();
   feeds = loadFeeds();
@@ -1850,7 +1867,7 @@ function refreshForToday() {
   if (today === lastToday) return;
   viewDay = followToday(viewDay, lastToday, today);
   viewThreeDayStart = followToday(viewThreeDayStart, lastToday, today);
-  viewWeekStart = followToday(viewWeekStart, startOfWeek(lastToday), startOfWeek(today));
+  viewWeekStart = followToday(viewWeekStart, startOfWeek(lastToday, getWeekStart()), startOfWeek(today, getWeekStart()));
   const shownMonth = toISO(viewMonth).slice(0, 7);
   if (followToday(shownMonth, lastToday.slice(0, 7), today.slice(0, 7)) !== shownMonth) {
     const now = new Date();

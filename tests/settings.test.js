@@ -60,6 +60,7 @@ function openPanel(feeds, seed = () => {}, deadlineStatus = { note: null, held: 
   const fetched = [];
   const removed = [];
   const signedIn = [];
+  const displayPrefs = [];
   const account = trapAccountApi(accountImpl);
   const settings = initSettings({
     button,
@@ -69,6 +70,7 @@ function openPanel(feeds, seed = () => {}, deadlineStatus = { note: null, held: 
     // Every fetch's result, in order: [feedId, ok].
     onFeedFetched: (id, ok) => fetched.push([id, ok]),
     onSignedIn: () => signedIn.push('in'),
+    onDisplayPrefsChanged: () => displayPrefs.push('prefs'),
     // Not exercised by any test that uses this helper — they drive the theme
     // and calendar controls — but open() mounts initLinkUI, which refuses to
     // mount without one. app.js always passes applySyncedState here.
@@ -77,7 +79,7 @@ function openPanel(feeds, seed = () => {}, deadlineStatus = { note: null, held: 
     accountApi: account.api,
   });
   if (open) button.click(); // host.childElementCount === 0 -> open()
-  return { host, notified, button, fetched, removed, settings, signedIn, accountCalls: account.calls };
+  return { host, notified, button, fetched, removed, settings, signedIn, displayPrefs, accountCalls: account.calls };
 }
 
 // A linked device: calendars refresh only with a session (accounts spec D21).
@@ -484,6 +486,7 @@ test('settings: the panel refuses to open its sync section without an applyState
     onSyncedDataChanged: () => {},
     onFeedFetched: () => {},
     onSignedIn: () => {},
+    onDisplayPrefsChanged: () => {},
     deadlines: { status: () => ({ note: null, held: [] }), removeHeld() {} },
   });
   assert.throws(() => button.click(), /applyState/,
@@ -537,6 +540,7 @@ test('settings: the calendar list refreshes when an adoption lands while the pan
       onSyncedDataChanged: () => {},
       onFeedFetched: () => {},
       onSignedIn: () => {},
+      onDisplayPrefsChanged: () => {},
       deadlines: { status: () => ({ note: null, held: [] }), removeHeld() {} },
       // Stands in for app.js's applySyncedState: the feed owner assigns a
       // real colour before saving (merge.js hands a first-seen feed
@@ -1418,4 +1422,111 @@ test('W3-I5: Create your login re-mounts the Sync section as an account device (
   assert.ok(byIdIn(host, 'acct-recovery-screen'), 'fixture check: upgraded');
   assert.ok(syncButtons().includes('Sign out'), 'the Sync section follows the new mode');
   assert.ok(!syncButtons().includes('Unlink this device'));
+});
+
+// --- display preferences: Time and Week starts (R1 Task 3) -------------------
+
+// The row a label names, inside the Appearance section: "Time" / "Week starts".
+function prefRow(host, label) {
+  const found = [];
+  const walk = (el) => {
+    for (const c of el.children) {
+      if (c._classes.has('settings-row') && c.children[0] && c.children[0].textContent === label) found.push(c);
+      walk(c);
+    }
+  };
+  walk(host);
+  return found[0] || null;
+}
+const rowButtons = (row) => row.querySelectorAll('button');
+const activeLabels = (row) => rowButtons(row).filter((b) => b._classes.has('active')).map((b) => b.textContent);
+
+test('settings: the panel has a Time row and a Week starts row, current value active and aria-pressed', () => {
+  const { host } = openPanel([], () => { localStorage.setItem('plaenicke.weekStart', 'mon'); });
+  const time = prefRow(host, 'Time');
+  const week = prefRow(host, 'Week starts');
+  assert.ok(time && week, 'both rows exist');
+  assert.deepEqual(rowButtons(time).map((b) => b.textContent), ['12-hour', '24-hour']);
+  assert.deepEqual(rowButtons(week).map((b) => b.textContent), ['Sunday', 'Monday']);
+  assert.deepEqual(activeLabels(time), ['12-hour']);
+  assert.deepEqual(activeLabels(week), ['Monday']);
+  assert.deepEqual(rowButtons(time).map((b) => b.getAttribute('aria-pressed')), ['true', 'false']);
+  assert.deepEqual(rowButtons(week).map((b) => b.getAttribute('aria-pressed')), ['false', 'true']);
+});
+
+test('settings: the new rows come after the theme row, each in its own container', () => {
+  const { host } = openPanel([]);
+  const time = prefRow(host, 'Time');
+  const week = prefRow(host, 'Week starts');
+  const light = findButtonByText(host, 'Light');
+  assert.notEqual(time, week);
+  assert.equal(findButtonByText(time, 'Light'), null, 'the theme buttons are not in the Time row');
+  assert.equal(findButtonByText(week, 'Light'), null);
+  assert.equal(findButtonByText(time, 'Sunday'), null, 'the rows do not share a container');
+  const order = [];
+  const walk = (el) => { for (const c of el.children) { order.push(c); walk(c); } };
+  walk(host);
+  assert.ok(order.indexOf(light) < order.indexOf(time) && order.indexOf(time) < order.indexOf(week));
+});
+
+test('settings: clicking 24-hour stores it, marks it active, and calls onDisplayPrefsChanged once', () => {
+  const { host, displayPrefs } = openPanel([]);
+  const time = prefRow(host, 'Time');
+  findButtonByText(time, '24-hour').click();
+  assert.equal(localStorage.getItem('plaenicke.timeFormat'), '24h');
+  assert.deepEqual(activeLabels(time), ['24-hour']);
+  assert.deepEqual(rowButtons(time).map((b) => b.getAttribute('aria-pressed')), ['false', 'true']);
+  assert.equal(displayPrefs.length, 1);
+});
+
+test('settings: clicking Monday stores it, marks it active, and calls onDisplayPrefsChanged once', () => {
+  const { host, displayPrefs } = openPanel([]);
+  const week = prefRow(host, 'Week starts');
+  findButtonByText(week, 'Monday').click();
+  assert.equal(localStorage.getItem('plaenicke.weekStart'), 'mon');
+  assert.deepEqual(activeLabels(week), ['Monday']);
+  assert.equal(displayPrefs.length, 1);
+});
+
+test('settings: a successful time-format write repaints the usage line in the new format', () => {
+  const { host } = openPanel([], () => {
+    recordLaunch(new Date(2026, 10, 18, 15, 7).toISOString());
+  });
+  const usage = () => host.querySelectorAll('p').find((p) => p._classes.has('usage-note')).textContent;
+  assert.match(usage(), /3:07 PM/);
+  findButtonByText(prefRow(host, 'Time'), '24-hour').click();
+  assert.match(usage(), /15:07/);
+  assert.doesNotMatch(usage(), /PM/);
+});
+
+test('settings: a storage write that throws does not throw out of the click, says so, and leaves the old button active', () => {
+  const { host, displayPrefs } = openPanel([]);
+  const themeBefore = activeLabels(host.querySelectorAll('div').find((d) => d._classes.has('seg') && findButtonByText(d, 'Light')));
+  localStorage.setItem = () => { throw new Error('QuotaExceededError'); };
+  const time = prefRow(host, 'Time');
+  const week = prefRow(host, 'Week starts');
+  assert.doesNotThrow(() => findButtonByText(time, '24-hour').click());
+  assert.doesNotThrow(() => findButtonByText(week, 'Monday').click());
+  assert.equal(displayPrefs.length, 0, 'no callback on a failed write');
+  assert.deepEqual(activeLabels(time), ['12-hour']);
+  assert.deepEqual(activeLabels(week), ['Sunday']);
+  assert.match(allText(time), /Couldn't save this setting on this device\./);
+  assert.match(allText(week), /Couldn't save this setting on this device\./);
+  const themeAfter = activeLabels(host.querySelectorAll('div').find((d) => d._classes.has('seg') && findButtonByText(d, 'Light')));
+  assert.deepEqual(themeAfter, themeBefore, 'the theme row is unchanged');
+});
+
+test('settings: initSettings without onDisplayPrefsChanged throws, after the onSignedIn guard', () => {
+  globalThis.window = makeFakeWindow();
+  globalThis.document = makeFakeDocument();
+  installFakeLocalStorage();
+  const every = {
+    button: document.createElement('button'), host: document.createElement('div'),
+    onFeedsChanged() {}, onSyncedDataChanged() {}, onFeedFetched() {}, applyState: (s) => s,
+    deadlines: { status: () => ({ note: null, held: [] }), removeHeld() {} },
+    onSignedIn() {},
+  };
+  assert.throws(() => initSettings(every), /initSettings requires an onDisplayPrefsChanged callback/);
+  const { onSignedIn, ...noSignedIn } = every;
+  assert.throws(() => initSettings(noSignedIn), /onSignedIn/, 'the earlier guard still reports first');
 });

@@ -15,7 +15,7 @@ import {
 } from './feeds.js';
 import { loadFeeds, saveFeeds, loadFeedCache, loadLaunches, QuotaError } from './storage.js';
 import { describeLaunches } from './freshness.js';
-import { getTimeFormat } from './prefs.js';
+import { getTimeFormat, getWeekStart, setTimeFormat, setWeekStart } from './prefs.js';
 import { initLinkUI } from './linkui.js';
 import { initAccountUI } from './accountui.js';
 import * as accountModule from './account.js';
@@ -87,6 +87,7 @@ function tabStops(root) {
 // a server.
 export function initSettings({
   button, host, onFeedsChanged, onSyncedDataChanged, onFeedFetched, applyState, deadlines, onSignedIn,
+  onDisplayPrefsChanged,
   accountApi = accountModule,
 }) {
   // A missing wire here is silent data loss, not a degraded feature: without
@@ -112,6 +113,12 @@ export function initSettings({
   // launch, and the stamp would keep saying "Sign in to refresh calendars."
   if (typeof onSignedIn !== 'function') {
     throw new Error('initSettings requires an onSignedIn callback');
+  }
+  // Time format and week start change what every page draws; app.js
+  // re-anchors the visible week and re-renders. Without it a tap would save
+  // the choice and leave the screen stale until something else rendered.
+  if (typeof onDisplayPrefsChanged !== 'function') {
+    throw new Error('initSettings requires an onDisplayPrefsChanged callback');
   }
 
   // Follow the phone while in auto.
@@ -241,12 +248,59 @@ export function initSettings({
       });
       seg.appendChild(b);
     }
+    // Device-local display preferences (js/prefs.js). Each row is its own
+    // container, after the theme row. A write that fails (private mode, quota)
+    // leaves the old button active and says so in the row: no silent no-op.
+    function prefRow(label, choices, current, save) {
+      const row = document.createElement('div');
+      row.className = 'settings-row';
+      const name = document.createElement('span');
+      name.className = 'settings-row-label';
+      name.textContent = label;
+      const rowSeg = document.createElement('div');
+      rowSeg.className = 'seg';
+      const failure = document.createElement('p');
+      failure.className = 'note';
+      failure.hidden = true;
+      const buttons = [];
+      const paint = (value) => {
+        for (const x of buttons) {
+          const on = x.value === value;
+          x.el.classList.toggle('active', on);
+          x.el.setAttribute('aria-pressed', String(on));
+        }
+      };
+      for (const [value, text] of choices) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = text;
+        buttons.push({ value, el: b });
+        b.addEventListener('click', () => {
+          if (!save(value)) {
+            failure.textContent = "Couldn't save this setting on this device.";
+            failure.hidden = false;
+            return;
+          }
+          failure.textContent = '';
+          failure.hidden = true;
+          paint(value);
+          if (label === 'Time') usage.textContent = describeLaunches(loadLaunches(), new Date(), getTimeFormat());
+          onDisplayPrefsChanged();
+        });
+        rowSeg.appendChild(b);
+      }
+      paint(current);
+      row.append(name, rowSeg, failure);
+      return row;
+    }
     // Phase 0 baseline: how often this device actually opens the app.
     // Local-only (storage.js's launch log), never synced.
     const usage = document.createElement('p');
     usage.className = 'note usage-note';
     usage.textContent = describeLaunches(loadLaunches(), new Date(), getTimeFormat());
-    appearance.append(ah, seg, usage);
+    const timeRow = prefRow('Time', [['12h', '12-hour'], ['24h', '24-hour']], getTimeFormat(), setTimeFormat);
+    const weekRow = prefRow('Week starts', [['sun', 'Sunday'], ['mon', 'Monday']], getWeekStart(), setWeekStart);
+    appearance.append(ah, seg, timeRow, weekRow, usage);
 
     // --- Linked calendars ---------------------------------------------
     //
