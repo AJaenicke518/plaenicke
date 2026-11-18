@@ -1460,12 +1460,22 @@ button[data-press].pressed { opacity: 1; }
 @keyframes tick-draw { from { background-size: 0 1.5px; } to { background-size: 100% 1.5px; } }
 
 /* ---------- desktop layout, option A (spec 2026-11-13-desktop-layout-options) ----------
-   A centred 44rem column. hover/pointer keep a large iPhone in landscape
-   (~932px) on the phone layout. Week and Month (#week-view, #calendar-view) stay
-   full width; they need it. Nothing outside this block changes. */
-@media (min-width: 900px) and (hover: hover) and (pointer: fine) {
-  header, #sync-indicator, #account-banner, #status-line, #cal-switch,
-  #today-view, #day-view, #three-day-view, #todo-view, #ideas-view, .capture-box {
+   A centred 44rem column. 46rem = that column plus the body's two 16px
+   gutters, so the column is already full width where the block begins and the
+   layout does not jump. hover/pointer keep a large iPhone in landscape
+   (~932px) on the phone layout. Week and Month (#week-view, #calendar-view)
+   stay full width; they need it, but Week's list (.wlist, a class, never
+   #week-list) is a column like the others. The sheet's backdrop stays full
+   width. Nothing outside this block changes. */
+@media (min-width: 46rem) and (hover: hover) and (pointer: fine) {
+  /* Alone on purpose: a rule naming #today-view with anything else in its
+     selector list would trip the "no id styles Today" test. */
+  #today-view {
+    max-width: 44rem;
+    margin-inline: auto;
+  }
+  body > header, #sync-indicator, #account-banner, #status-line, #cal-switch,
+  #day-view, #three-day-view, #todo-view, #ideas-view, .wlist, .capture-box, .sheet {
     max-width: 44rem;
     margin-inline: auto;
   }

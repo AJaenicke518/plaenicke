@@ -28,6 +28,12 @@ import { SCHEMES } from '../js/prefs.js';
 const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8')
   .replace(/\/\*[\s\S]*?\*\//g, '');
 
+// The one desktop layout block (option A). Defined up here because rulesOf
+// skips exactly this prelude. 46rem = the 44rem column plus the body's two
+// 16px gutters, so the column is already full width where the block starts and
+// nothing jumps.
+const DESKTOP = '@media (min-width: 46rem) and (hover: hover) and (pointer: fine)';
+
 // --- reading the WINNING declaration (sweep S-11) --------------------------
 //
 // Every declaration of every rule whose selector list contains `selector`
@@ -42,12 +48,13 @@ const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8')
 // selector was the prelude, so nothing inside an @media was ever checked.
 // Braces that do not balance throw rather than yield a partial parse.
 //
-// Width-gated blocks (`@media (min-width: …)`, the desktop layout) are SKIPPED:
-// every caller here asks what the PHONE gets, and a desktop value would be read
-// as the phone's (last declaration wins). The desktop block is read through
-// rulesInContext, which keeps the prelude. prefers-reduced-motion blocks are
-// still read as before.
-function rulesOf(source) {
+// The desktop block (exactly the DESKTOP prelude) is SKIPPED by default: callers
+// that ask what the PHONE gets would otherwise read a desktop value as the
+// phone's (last declaration wins). A guard of the form "no rule ANYWHERE does
+// X" must see that block too: pass `all = true`. The desktop block itself is
+// read through rulesInContext, which keeps the prelude. prefers-reduced-motion
+// blocks are always read.
+function rulesOf(source, all = false) {
   const out = [];
   let depth = 0;
   let start = 0;
@@ -63,7 +70,7 @@ function rulesOf(source) {
       if (depth === 0) {
         const body = source.slice(bodyStart, i);
         if (prelude.startsWith('@')) {
-          if (!/min-width/.test(prelude)) out.push(...rulesOf(body));
+          if (all || prelude.replace(/\s+/g, ' ') !== DESKTOP) out.push(...rulesOf(body, all));
         } else out.push({ sel: prelude, body });
         start = i + 1;
       }
@@ -132,12 +139,20 @@ function lineHeightOf(selector) {
   return v === null ? null : parseFloat(v);
 }
 
-test('a min-width @media block does not leak into declOf (desktop values are not phone values)', () => {
-  const src = '.a { max-width: none; } @media (min-width: 900px) and (hover: hover) { .a { max-width: 44rem; } } '
+test('the desktop @media block does not leak into declOf (desktop values are not phone values)', () => {
+  const src = `.a { max-width: none; } ${DESKTOP} { .a { max-width: 44rem; } } `
     + '@media (prefers-reduced-motion: reduce) { .a { color: red; } }';
   assert.equal(declOf('.a', 'max-width', src), 'none');
   assert.equal(declOf('.a', 'color', src), 'red', 'a reduced-motion block is still read');
-  assert.equal(declOf('.b', 'max-width', '@media (min-width: 900px) { .b { max-width: 44rem; } }'), null);
+  assert.equal(declOf('.b', 'max-width', `${DESKTOP} { .b { max-width: 44rem; } }`), null);
+});
+
+test('rulesOf skips the desktop block by default and sees it with all = true', () => {
+  const src = `.a { color: red; } ${DESKTOP} { input { font-size: 14px; } }`;
+  assert.deepEqual(rulesOf(src).map((r) => r.sel), ['.a']);
+  assert.deepEqual(rulesOf(src, true).map((r) => r.sel), ['.a', 'input']);
+  assert.deepEqual(rulesOf('@media (min-width: 30rem) { .b { color: red; } }').map((r) => r.sel), ['.b'],
+    'only the exact desktop prelude is skipped, not any min-width block');
 });
 
 test('declOf reads the winning declaration, shorthands included (S-11)', () => {
@@ -589,7 +604,7 @@ test('fontShorthandSize reads the size out of a font shorthand', () => {
 test('no rule that targets a form control sets a font-size under 16px', () => {
   const offenders = [];
   let seen = 0;
-  for (const { sel, body } of rulesOf(css)) { // opens @media blocks (review 2026-10-27)
+  for (const { sel, body } of rulesOf(css, true)) { // opens @media blocks (review 2026-10-27)
     const selectors = sel.split(',').map((x) => x.trim().replace(/\s+/g, ' '));
     if (!selectors.some((s) => CONTROL_SELECTOR.test(s))) continue;
     seen += 1;
@@ -944,18 +959,20 @@ test('a pressed Today row is tinted, not dimmed like a pressed button', () => {
 test('no rule styles Today through an id', () => {
   const sels = [...css.matchAll(/([^{}]+)\{/g)].map((m) => m[1].trim()).filter((sel) => /today/.test(sel));
   assert.ok(sels.length >= 10, `fixture check: found ${sels.length} Today rules`);
-  // The bare #today-view section (desktop column, max-width/margin only) is the
-  // one allowed id: it is the container, not a row, so it cannot outrank a
-  // row's .pressed tint. Anything else naming an id still fails.
+  // The bare #today-view container (desktop column, width props only; pinned
+  // by its own test at the end of this file) is the one allowed id: it is not
+  // a row, so it cannot outrank a row's .pressed tint. Only an exact
+  // `#today-view` selector part is removed before the whole selector is
+  // checked; any other part in the list still fails.
   for (const sel of sels) {
-    const parts = sel.split(',').map((x) => x.trim()).filter((x) => x !== '#today-view' && /today/.test(x));
-    for (const part of parts) assert.doesNotMatch(part, /#/, sel);
+    const rest = sel.split(',').map((x) => x.trim()).filter((x) => x !== '#today-view').join(',');
+    assert.doesNotMatch(rest, /#/, sel);
   }
 });
 
 test('every Today colour is a theme token, so dark mode follows', () => {
   let seen = 0;
-  for (const { sel, body } of rulesOf(css)) {
+  for (const { sel, body } of rulesOf(css, true)) {
     if (!/\.today-/.test(sel)) continue;
     for (const decl of body.split(';')) {
       const i = decl.indexOf(':');
@@ -1024,7 +1041,7 @@ test('a Week list row stays on one line, its time leading in a 64px column', () 
 
 test('every Week list colour is a token', () => {
   let seen = 0;
-  for (const { sel, body } of rulesOf(css)) {
+  for (const { sel, body } of rulesOf(css, true)) {
     if (!/\.wlist/.test(sel)) continue;
     for (const decl of body.split(';')) {
       const i = decl.indexOf(':');
@@ -1392,7 +1409,7 @@ test('3-day: the hour labels and blocks keep Day\'s compact sizes', () => {
 
 test('every 3-day colour is a token', () => {
   let seen = 0;
-  for (const { sel, body } of rulesOf(css)) {
+  for (const { sel, body } of rulesOf(css, true)) {
     if (!/\.tday/.test(sel)) continue;
     for (const decl of body.split(';')) {
       const i = decl.indexOf(':');
@@ -1616,7 +1633,6 @@ for (const s of OTHER_SCHEMES) {
 // One width-gated block. hover/pointer keep a large iPhone in landscape
 // (~932px) on the phone layout. rulesInContext keeps the prelude, so this reads
 // the block itself; the default helpers deliberately do not see it.
-const DESKTOP = '@media (min-width: 900px) and (hover: hover) and (pointer: fine)';
 const desktopRules = rulesInContext(css).filter((r) => r.at === DESKTOP);
 function desktopDecls(selector) {
   const out = [];
@@ -1639,8 +1655,9 @@ test('the desktop media block gives #today-view max-width 44rem and margin-inlin
   assert.equal(desktopOf('#today-view', 'margin-inline'), 'auto');
 });
 
-const CENTRED = ['header', '#sync-indicator', '#account-banner', '#status-line', '#cal-switch',
-  '#today-view', '#day-view', '#three-day-view', '#todo-view', '#ideas-view', '.capture-box'];
+const CENTRED = ['body > header', '#sync-indicator', '#account-banner', '#status-line', '#cal-switch',
+  '#today-view', '#day-view', '#three-day-view', '#todo-view', '#ideas-view', '.capture-box',
+  '.sheet', '.wlist'];
 test('every centred selector gets max-width 44rem and margin-inline auto', () => {
   for (const sel of CENTRED) {
     assert.equal(desktopOf(sel, 'max-width'), '44rem', `${sel} max-width`);
@@ -1654,12 +1671,15 @@ test('the desktop block leaves #week-view and #calendar-view full width', () => 
   }
 });
 
-test('the desktop media query keeps phones in landscape on the phone layout', () => {
+test('the desktop media query is the only non-reduced-motion @media, and keeps phones on the phone layout', () => {
   assert.ok(desktopRules.length > 0, 'the desktop block exists');
-  const preludes = rulesInContext(css).map((r) => r.at).filter((a) => a && /min-width/.test(a));
-  assert.deepEqual([...new Set(preludes)], [DESKTOP], 'exactly one min-width block');
-  assert.match(DESKTOP, /hover: hover/);
-  assert.match(DESKTOP, /pointer: fine/);
+  const preludes = rulesInContext(css).map((r) => r.at)
+    .filter((a) => a && a.startsWith('@media') && !/prefers-reduced-motion/.test(a));
+  assert.deepEqual([...new Set(preludes)], [DESKTOP], 'exactly one such @media: the desktop block');
+  const m = DESKTOP.match(/^@media \(min-width: ([\d.]+)rem\) and \(hover: hover\) and \(pointer: fine\)$/);
+  assert.ok(m, 'width gate plus hover and fine pointer, nothing else');
+  // 44rem column + 2 x 16px body gutter (2rem at 16px) = where the column is full.
+  assert.equal(Number(m[1]), 46, 'the gate sits where the column meets the gutters, so nothing jumps');
 });
 
 test('the tab bar buttons, switcher buttons, capture button and toast are placed for the column', () => {
@@ -1675,9 +1695,18 @@ test('the tab bar buttons, switcher buttons, capture button and toast are placed
   assert.equal(desktopOf('#cal-switch button', 'flex'), '0 0 auto');
 });
 
-test('desktop block: no colour or background changes', () => {
-  for (const { body } of desktopRules) {
-    assert.doesNotMatch(body, /(^|[;\s])(color|background[\w-]*|border-color)\s*:/, body);
+const PAINT_PROP = /^(--|color$|.*-color$|background|border(?!-radius)|outline|box-shadow|fill|stroke)/;
+test('desktop block: no colour, background, border, outline, shadow or custom-property changes', () => {
+  assert.ok(PAINT_PROP.test('--card') && PAINT_PROP.test('accent-color') && PAINT_PROP.test('box-shadow')
+    && PAINT_PROP.test('border-top') && !PAINT_PROP.test('border-radius') && !PAINT_PROP.test('max-width'),
+    'fixture check: the ban matches what it should');
+  for (const { sel, body } of desktopRules) {
+    for (const decl of body.split(';')) {
+      const i = decl.indexOf(':');
+      if (i < 0) continue;
+      const prop = decl.slice(0, i).trim().toLowerCase();
+      assert.doesNotMatch(prop, PAINT_PROP, `${sel}: ${prop}`);
+    }
   }
 });
 
@@ -1686,7 +1715,8 @@ test('desktop block: no colour or background changes', () => {
 // blocks, so these are phone values. When the phone design changes on purpose,
 // update this table deliberately; a failure here means a phone rule moved.
 const PHONE_AT_DESKTOP_A = {
-  'header': 'display:flex;justify-content:space-between;align-items:center;min-height:62px',
+  // `header` itself is untouched by the block now (body > header is).
+  'body > header': '',
   '.tab-bar': 'position:fixed;left:0;right:0;bottom:0;z-index:5;display:flex;height:calc(56px + env(safe-area-inset-bottom));padding-bottom:env(safe-area-inset-bottom);background:var(--card);border-top:1px solid var(--line)',
   '.tab-bar button': 'flex:1;min-height:44px;padding:0;border-radius:0;background:transparent;color:var(--muted);font-family:var(--sans);font-size:var(--text-label)',
   '.toast': 'position:fixed;left:16px;right:88px;bottom:calc(56px + 12px + env(safe-area-inset-bottom));display:flex;align-items:center;justify-content:space-between;gap:12px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:8px 12px;box-shadow:0 4px 16px rgba(0, 0, 0, 0.25);z-index:20',
@@ -1696,6 +1726,8 @@ const PHONE_AT_DESKTOP_A = {
   '#sync-indicator': '', '#account-banner': '', '#status-line': '', '#cal-switch': '',
   '#cal-switch button': '', '#today-view': '', '#day-view': '', '#three-day-view': '',
   '#todo-view': '', '#ideas-view': '',
+  '.wlist': 'margin-top:var(--space-5)',
+  '.sheet': 'position:fixed;left:0;right:0;bottom:0;max-height:85dvh;overflow-y:auto;background:var(--card);color:var(--ink);border-top:1px solid var(--line);border-radius:var(--radius-sheet) var(--radius-sheet) 0 0;padding:0 16px;padding-bottom:env(safe-area-inset-bottom);box-shadow:0 -4px 16px rgba(0, 0, 0, 0.2);overscroll-behavior:contain',
 };
 test('every selector the desktop block touches keeps its pinned phone value', () => {
   const sels = new Set();
