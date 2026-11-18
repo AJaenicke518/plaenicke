@@ -2153,9 +2153,14 @@ document.addEventListener('visibilitychange', () => {
   // A scheme chosen in another tab while this one was away (its storage
   // event is not guaranteed to have reached a suspended page).
   applyScheme(getScheme());
-  // The same for a layout chosen in another tab while this one was away.
-  applyLayout(getLayout());
-  onLayoutApplied();
+  // The same for a layout chosen in another tab while this one was away. Only
+  // when it differs from the applied one: onLayoutApplied resets Coming up to
+  // the layout's default on a computer, so every resume would reopen a
+  // Coming up the user had closed.
+  if (document.documentElement.dataset.layout !== getLayout()) {
+    applyLayout(getLayout());
+    onLayoutApplied();
+  }
   syncedSinceVisible = false;
   visit += 1;
   noteLaunch();

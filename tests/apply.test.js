@@ -11461,6 +11461,48 @@ test('r3: on a phone a layout change (Settings or another tab) leaves an open Co
   }
 });
 
+test('r3: a resume leaves a closed Coming up closed in Month overview', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const today = localISO(new Date());
+  seed([record({ id: 'r3-rs-far', type: 'event', title: 'r3 resume far', date: addDays(today, 13), time: '09:00' })]);
+  setMedia(true, false);
+  try {
+    setStoredLayout('month');
+    assert.equal(moreButton().textContent, 'Show less', 'fixture check: Month overview opens Coming up');
+    click(moreButton());
+    assert.equal(moreButton().textContent, 'Show the next 30 days', 'fixture check: the user closed it');
+    globalThis.document.visibilityState = 'hidden';
+    resume();
+    globalThis.document.visibilityState = 'visible';
+    resume();
+    assert.equal(moreButton().textContent, 'Show the next 30 days', 'a resume with the same layout keeps it closed');
+  } finally {
+    globalThis.document.visibilityState = 'visible';
+    leaveDesktop();
+    seed([]);
+  }
+});
+
+test('r3: a layout changed in storage while hidden (no storage event) is applied on resume', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, true);
+  try {
+    assert.equal(globalThis.document.documentElement.dataset.layout, 'planner', 'fixture check');
+    globalThis.document.visibilityState = 'hidden';
+    resume();
+    localStorage.setItem('plaenicke.layout', 'all');
+    globalThis.document.visibilityState = 'visible';
+    resume();
+    assert.equal(globalThis.document.documentElement.dataset.layout, 'all', 'data-layout follows the stored layout');
+    assert.deepEqual(shownViews(), ['today-view', 'week-view', 'todo-view', 'ideas-view'], 'and the panes');
+  } finally {
+    globalThis.document.visibilityState = 'visible';
+    leaveDesktop();
+  }
+});
+
 test('r3: on a computer, Ideas puts the right-hand pane on screen', async () => {
   installFakeLocalStorage();
   await import('../js/app.js');
