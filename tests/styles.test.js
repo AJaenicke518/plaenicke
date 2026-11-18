@@ -41,6 +41,12 @@ const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8')
 // fixes 2, C7): the old regex read `@media (…) { .x { … } }` as one rule whose
 // selector was the prelude, so nothing inside an @media was ever checked.
 // Braces that do not balance throw rather than yield a partial parse.
+//
+// Width-gated blocks (`@media (min-width: …)`, the desktop layout) are SKIPPED:
+// every caller here asks what the PHONE gets, and a desktop value would be read
+// as the phone's (last declaration wins). The desktop block is read through
+// rulesInContext, which keeps the prelude. prefers-reduced-motion blocks are
+// still read as before.
 function rulesOf(source) {
   const out = [];
   let depth = 0;
@@ -56,8 +62,9 @@ function rulesOf(source) {
       if (depth < 0) throw new Error(`unbalanced braces at ${i}`);
       if (depth === 0) {
         const body = source.slice(bodyStart, i);
-        if (prelude.startsWith('@')) out.push(...rulesOf(body));
-        else out.push({ sel: prelude, body });
+        if (prelude.startsWith('@')) {
+          if (!/min-width/.test(prelude)) out.push(...rulesOf(body));
+        } else out.push({ sel: prelude, body });
         start = i + 1;
       }
     }
@@ -124,6 +131,14 @@ function lineHeightOf(selector) {
   const v = declOf(selector, 'line-height');
   return v === null ? null : parseFloat(v);
 }
+
+test('a min-width @media block does not leak into declOf (desktop values are not phone values)', () => {
+  const src = '.a { max-width: none; } @media (min-width: 900px) and (hover: hover) { .a { max-width: 44rem; } } '
+    + '@media (prefers-reduced-motion: reduce) { .a { color: red; } }';
+  assert.equal(declOf('.a', 'max-width', src), 'none');
+  assert.equal(declOf('.a', 'color', src), 'red', 'a reduced-motion block is still read');
+  assert.equal(declOf('.b', 'max-width', '@media (min-width: 900px) { .b { max-width: 44rem; } }'), null);
+});
 
 test('declOf reads the winning declaration, shorthands included (S-11)', () => {
   assert.equal(declOf('.a', 'padding-bottom', '.a { padding-bottom: 5px; padding: 1px 2px 3px; }'), '3px',
