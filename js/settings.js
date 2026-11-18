@@ -148,6 +148,9 @@ export function initSettings({
   // the open panel draws its rows again AFTER it: drawn only before, they
   // showed the previous round's note and "Remove them".
   let repaintRows = null; // the open panel's renderCalendars, or null
+  // The open panel's pref rows and usage line, or null. Repainted when another
+  // tab changes a display preference (refreshDisplayPrefs, below).
+  let repaintPrefs = null;
   function notifyViewChanged() {
     if (onFeedsChanged) onFeedsChanged();
     if (repaintRows) repaintRows();
@@ -199,6 +202,7 @@ export function initSettings({
   // scrolling, for the same reason.
   function close() {
     repaintRows = null;
+    repaintPrefs = null;
     if (accountHandle) accountHandle.detach();
     accountHandle = null;
     host.innerHTML = '';
@@ -232,8 +236,24 @@ export function initSettings({
     appearance.className = 'settings-section';
     const ah = document.createElement('h3');
     ah.textContent = 'Appearance';
+    // Each of the three rows is a labelled group: the label span is the first
+    // child (the tests find a row by it), and the group is named by it.
+    function labelledRow(label, idSuffix) {
+      const row = document.createElement('div');
+      row.className = 'settings-row';
+      row.setAttribute('role', 'group');
+      const name = document.createElement('span');
+      name.className = 'settings-row-label';
+      name.id = `pref-label-${idSuffix}`;
+      name.textContent = label;
+      row.setAttribute('aria-labelledby', name.id);
+      row.appendChild(name);
+      return row;
+    }
+    const themeRow = labelledRow('Theme', 'theme');
     const seg = document.createElement('div');
     seg.className = 'seg';
+    themeRow.appendChild(seg);
     const current = getSetting();
     for (const choice of CHOICES) {
       const b = document.createElement('button');
@@ -251,12 +271,11 @@ export function initSettings({
     // Device-local display preferences (js/prefs.js). Each row is its own
     // container, after the theme row. A write that fails (private mode, quota)
     // leaves the old button active and says so in the row: no silent no-op.
-    function prefRow(label, choices, current, save) {
-      const row = document.createElement('div');
-      row.className = 'settings-row';
-      const name = document.createElement('span');
-      name.className = 'settings-row-label';
-      name.textContent = label;
+    // `read` resolves the stored value; a write that reports success is read
+    // back and must match, or it counts as a failure (a store that accepts
+    // setItem and keeps nothing). `onSaved` runs after a good write.
+    function prefRow(label, idSuffix, choices, read, save, onSaved) {
+      const row = labelledRow(label, idSuffix);
       const rowSeg = document.createElement('div');
       rowSeg.className = 'seg';
       const failure = document.createElement('p');
@@ -276,7 +295,7 @@ export function initSettings({
         b.textContent = text;
         buttons.push({ value, el: b });
         b.addEventListener('click', () => {
-          if (!save(value)) {
+          if (!save(value) || read() !== value) {
             failure.textContent = "Couldn't save this setting on this device.";
             failure.hidden = false;
             return;
@@ -284,23 +303,27 @@ export function initSettings({
           failure.textContent = '';
           failure.hidden = true;
           paint(value);
-          if (label === 'Time') usage.textContent = describeLaunches(loadLaunches(), new Date(), getTimeFormat());
+          onSaved();
           onDisplayPrefsChanged();
         });
         rowSeg.appendChild(b);
       }
-      paint(current);
-      row.append(name, rowSeg, failure);
-      return row;
+      paint(read());
+      row.append(rowSeg, failure);
+      return { row, repaint: () => paint(read()) };
     }
     // Phase 0 baseline: how often this device actually opens the app.
     // Local-only (storage.js's launch log), never synced.
     const usage = document.createElement('p');
     usage.className = 'note usage-note';
     usage.textContent = describeLaunches(loadLaunches(), new Date(), getTimeFormat());
-    const timeRow = prefRow('Time', [['12h', '12-hour'], ['24h', '24-hour']], getTimeFormat(), setTimeFormat);
-    const weekRow = prefRow('Week starts', [['sun', 'Sunday'], ['mon', 'Monday']], getWeekStart(), setWeekStart);
-    appearance.append(ah, seg, timeRow, weekRow, usage);
+    const paintUsage = () => {
+      usage.textContent = describeLaunches(loadLaunches(), new Date(), getTimeFormat());
+    };
+    const time = prefRow('Time', 'time', [['12h', '12-hour'], ['24h', '24-hour']], getTimeFormat, setTimeFormat, paintUsage);
+    const week = prefRow('Week starts', 'week', [['sun', 'Sunday'], ['mon', 'Monday']], getWeekStart, setWeekStart, () => {});
+    repaintPrefs = () => { time.repaint(); week.repaint(); paintUsage(); };
+    appearance.append(ah, themeRow, time.row, week.row, usage);
 
     // --- Linked calendars ---------------------------------------------
     //
@@ -933,6 +956,11 @@ export function initSettings({
     open(intent = null) {
       if (host.childElementCount) close();
       open(intent);
+    },
+    // Another tab changed a display preference: repaint the open panel's
+    // rows and usage line from storage. A no-op when the panel is closed.
+    refreshDisplayPrefs() {
+      if (repaintPrefs) repaintPrefs();
     },
   };
 }

@@ -669,6 +669,7 @@ button[data-press].pressed { opacity: 1; }
 .settings-row { margin-top: 10px; }
 .settings-row-label { display: block; margin-bottom: 4px; }
 .settings-row .note { margin-top: 4px; }
+.settings-section .usage-note { margin-top: 12px; }
 .seg button {
   flex: 1;
   background: var(--card);

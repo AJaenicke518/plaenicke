@@ -298,9 +298,14 @@ const importWaitsForSync = () => isLinked() && (isAdoptionPending() || !syncedSi
 // wrong when today is the Sunday of a Sunday-start week: Mon-start would move
 // the week past it. Schedules no sync: both keys are device-local.
 function onDisplayPrefsChanged() {
+  // Asked BEFORE refreshForToday: with a day rollover pending, it re-derives
+  // the old anchor with the NEW week start, so followToday would not match and
+  // today could be left off screen. The week that held the old today is the
+  // week that was on today.
+  const wasOnToday = lastToday >= viewWeekStart && lastToday <= addDays(viewWeekStart, 6);
   refreshForToday();
   const t = toISO(new Date());
-  const pivot = (t >= viewWeekStart && t <= addDays(viewWeekStart, 6)) ? t : addDays(viewWeekStart, 3);
+  const pivot = (wasOnToday || (t >= viewWeekStart && t <= addDays(viewWeekStart, 6))) ? t : addDays(viewWeekStart, 3);
   viewWeekStart = startOfWeek(pivot, getWeekStart());
   render(); stampUpdated(); stampFromFeeds();
 }
@@ -1847,7 +1852,11 @@ window.addEventListener('storage', (e) => {
   // shown here (render() re-reads it) and NO sync is scheduled.
   if (e.key === SERIES_VISIBILITY_KEY) { render(); return; }
   // Display preferences are device-local too: no sync.
-  if (e.key === TIME_FORMAT_KEY || e.key === WEEK_START_KEY) { onDisplayPrefsChanged(); return; }
+  if (e.key === TIME_FORMAT_KEY || e.key === WEEK_START_KEY) {
+    settings.refreshDisplayPrefs(); // an open panel shows this tab's old choice otherwise
+    onDisplayPrefsChanged();
+    return;
+  }
   if (!CROSS_TAB_KEYS.includes(e.key)) return;
   items = loadItems();
   feeds = loadFeeds();
