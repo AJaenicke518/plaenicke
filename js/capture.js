@@ -377,6 +377,13 @@ export function createCapture({
     openTyping,
     // The layout changed under an open box (app.js): close it.
     close,
+    // The window crossed the desktop gate under an open box: swap in the
+    // follower that suits the new layout. The text and mode are untouched.
+    replace() {
+      if (mode === 'closed' || els.box.hidden || !stopFollow) return;
+      stopFollow();
+      stopFollow = follow(els.box, { maxShare: CAPTURE_MAX_SHARE, transform: CAPTURE_TRANSFORM });
+    },
     // The round button's own tap, for the dock's mic button.
     tap: tapButton,
     // Stop a listen and keep its text (page hidden, a sheet or Settings opening).

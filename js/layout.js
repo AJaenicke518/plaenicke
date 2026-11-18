@@ -8,6 +8,11 @@ export const DESKTOP_QUERY = '(min-width: 46rem) and (hover: hover) and (pointer
 export const WIDE_QUERY = `${DESKTOP_QUERY} and (min-width: 80rem)`;
 export const CALENDAR_VIEWS = ['day', '3day', 'week', 'month'];
 
+// Whether the calendar view was picked by hand (a segment or the Calendar
+// tab). Until it is, the calendar follows the layout's default on a computer.
+// An object, so app.js holds it by reference and a test can reset it.
+export const calendarChoice = { chosen: false };
+
 // The calendar view a layout starts on. `all` shows a week beside the lists.
 export function defaultMain(layout) {
   return layout === 'month' ? 'month' : 'week';

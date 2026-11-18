@@ -1525,7 +1525,13 @@ button[data-press].pressed { opacity: 1; }
     align-items: center;
     gap: var(--space-2);
     flex: 0 0 auto;
-    margin-bottom: var(--space-3);
+    padding-bottom: var(--space-3);
+    /* Stays at the top of the left pane while the Today list scrolls under
+       it; opaque, so the rows do not show through. */
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--bg);
   }
   .capture-box { bottom: auto; right: auto; }
   .capture-panel { transform-origin: top left; }

@@ -20,7 +20,7 @@ import {
   getTimeFormat, getWeekStart, getLayout, applyLayout, TIME_FORMAT_KEY, WEEK_START_KEY, LAYOUT_KEY,
   SCHEME_KEY, getScheme, applyScheme,
 } from './prefs.js';
-import { DESKTOP_QUERY, WIDE_QUERY, defaultMain, paneViews, onMediaChange } from './layout.js';
+import { DESKTOP_QUERY, WIDE_QUERY, defaultMain, paneViews, onMediaChange, calendarChoice } from './layout.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
 import { renderDayView } from './dayview.js';
 import { renderThreeDayView } from './threedayview.js';
@@ -1474,9 +1474,8 @@ function render() {
 // view").
 const CALENDAR_VIEWS = ['day', '3day', 'week', 'month'];
 const TAB_TITLES = { today: 'Today', calendar: 'Calendar', todo: 'To-do', ideas: 'Ideas' };
-const PANE_NAMES = { today: 'Today', todo: 'To-do', ideas: 'Ideas' };
-// Panes whose section opens with a .pane-heading (index.html, id `<section id>-heading`).
-const HEADED_PANES = ['todo', 'ideas'];
+// Panes named by a visible heading in their section (index.html, id `<section id>-heading`).
+const HEADED_PANES = ['today', 'todo', 'ideas'];
 
 // THE PANES (Release 3, js/layout.js). Being visible is only the `hidden`
 // attribute, and every view re-renders on every change, so showView is the one
@@ -1492,14 +1491,8 @@ function defaultLaterOpen() { return getLayout() === 'month' && isDesktop(); }
 
 let mainView = 'today';
 let lastCalendarView = 'day';
-// A calendar view picked by hand (a segment or the Calendar tab) is kept
-// across layout changes; until then the calendar follows the layout's default.
-let calendarChosenByUser = false;
-// Test hook: tests/apply.test.js shares one module instance, and the flag is
-// otherwise never cleared, so the two places that set it cannot be told apart.
-export function resetCalendarChoiceForTests() { calendarChosenByUser = false; }
 function seedCalendar() {
-  if (!calendarChosenByUser && isDesktop()) lastCalendarView = defaultMain(getLayout());
+  if (!calendarChoice.chosen && isDesktop()) lastCalendarView = defaultMain(getLayout());
 }
 
 function showView(which) {
@@ -1520,12 +1513,12 @@ function showView(which) {
     el.hidden = !visible.includes(name);
     // A pane is named for assistive tech on a computer only; the phone shows
     // one page under its own heading.
-    // To-do and Ideas are named by their visible heading: an aria-label too
-    // would announce the name twice. The others have no heading to point at.
+    // Today, To-do and Ideas are named by their visible heading: an aria-label
+    // too would announce the name twice. The calendar views have no heading.
     const named = desktop && !el.hidden;
     if (named && HEADED_PANES.includes(name)) el.setAttribute('aria-labelledby', `${el.id}-heading`);
     else el.removeAttribute('aria-labelledby');
-    if (named && !HEADED_PANES.includes(name)) el.setAttribute('aria-label', CALENDAR_VIEWS.includes(name) ? 'Calendar' : PANE_NAMES[name]);
+    if (named && CALENDAR_VIEWS.includes(name)) el.setAttribute('aria-label', 'Calendar');
     else el.removeAttribute('aria-label');
   }
   // A wrapper with nothing visible in it is hidden, so an empty column takes
@@ -1535,7 +1528,7 @@ function showView(which) {
   els.paneRight.hidden = !(visible.includes('todo') || visible.includes('ideas'));
   // The rail marks the BIG pane's view: the calendar in wide Everything, else
   // the one beside Today. Off a computer it is the page showing.
-  const big = !desktop ? which : (layout === 'all' && isWide() ? calendar : visible[1]);
+  const big = !desktop ? which : visible[1];
   const tab = CALENDAR_VIEWS.includes(big) ? 'calendar' : big;
   // The markup says which page is showing to assistive tech, which does not
   // read the class; index.html carries the load-time values. A tab is
@@ -1601,7 +1594,7 @@ els.tabToday.addEventListener('click', () => {
   switchTab('today');
   if (isDesktop()) focusPane(els.todayView);
 });
-els.tabCalendar.addEventListener('click', () => { calendarChosenByUser = true; switchTab(lastCalendarView); });
+els.tabCalendar.addEventListener('click', () => { calendarChoice.chosen = true; switchTab(lastCalendarView); });
 // In wide Everything the lists are already on screen: the tap takes you to
 // the pane, and changes no view.
 function listTab(view, section) {
@@ -1610,7 +1603,7 @@ function listTab(view, section) {
 }
 els.tabTodo.addEventListener('click', () => listTab('todo', els.todoView));
 els.tabIdeas.addEventListener('click', () => listTab('ideas', els.ideasView));
-function chooseCalendar(view) { calendarChosenByUser = true; showView(view); }
+function chooseCalendar(view) { calendarChoice.chosen = true; showView(view); }
 els.showMonth.addEventListener('click', () => chooseCalendar('month'));
 els.showWeek.addEventListener('click', () => chooseCalendar('week'));
 els.showDay.addEventListener('click', () => chooseCalendar('day'));
@@ -1637,8 +1630,11 @@ function desktopFollow(el) {
   place();
   // A resize inside the gate moves the dock, so the open box is placed again.
   window.addEventListener('resize', place);
+  // The left pane scrolling moves what the dock is stuck against.
+  els.paneLeft.addEventListener('scroll', place);
   return () => {
     window.removeEventListener('resize', place);
+    els.paneLeft.removeEventListener('scroll', place);
     for (const prop of DESKTOP_PLACED) el.style.removeProperty(prop);
   };
 }
@@ -1697,9 +1693,12 @@ showView(mainView);
 // Crossing either gate (resize, rotate, a keyboard or mouse appearing) shows
 // the panes of the new situation. Entering the gate re-seeds the calendar.
 onMediaChange(window.matchMedia(DESKTOP_QUERY), () => {
-  // An open box is placed for the layout it opened in (the phone's button, or
-  // the desktop's dock): close it rather than leave it misplaced.
-  capture.close();
+  // An open box was placed for the layout it opened in (the phone's button, or
+  // the desktop's dock): it is placed again for this one, keeping its text.
+  capture.replace();
+  // Leaving the gate with no calendar picked by hand: the phone's Calendar
+  // tab opens Day, not the Week or Month the layout seeded.
+  if (!isDesktop() && !calendarChoice.chosen) lastCalendarView = 'day';
   seedCalendar();
   showView(mainView);
 });
@@ -1998,11 +1997,12 @@ window.addEventListener('storage', (e) => {
   if (e.key === SERIES_VISIBILITY_KEY) { render(); return; }
   // The layout is device-local too: data-layout, the seed and the panes
   // follow, and no sync is scheduled. Before the CROSS_TAB_KEYS return below.
-  if (e.key === LAYOUT_KEY) {
+  // A clear (key null) resets it too; the scheme check below then runs.
+  if (e.key === LAYOUT_KEY || e.key === null) {
     applyLayout(getLayout());
     settings.refreshDisplayPrefs(); // an open panel shows this tab's old choice otherwise
     onLayoutApplied();
-    return;
+    if (e.key === LAYOUT_KEY) return;
   }
   // Display preferences are device-local too: no sync.
   if (e.key === TIME_FORMAT_KEY || e.key === WEEK_START_KEY) {
@@ -2142,6 +2142,9 @@ document.addEventListener('visibilitychange', () => {
   // A scheme chosen in another tab while this one was away (its storage
   // event is not guaranteed to have reached a suspended page).
   applyScheme(getScheme());
+  // The same for a layout chosen in another tab while this one was away.
+  applyLayout(getLayout());
+  onLayoutApplied();
   syncedSinceVisible = false;
   visit += 1;
   noteLaunch();
