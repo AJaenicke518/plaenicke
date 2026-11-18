@@ -772,6 +772,17 @@ button[data-press].pressed { opacity: 1; }
   padding: 6px 0;
 }
 .seg button.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+/* Colours row: the swatch sits above its label, so four buttons fit at 320px. */
+.seg-schemes button { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0; }
+.swatch {
+  order: -1;
+  display: block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  box-sizing: border-box;
+}
 
 /* ---------- linked calendars (Task 8) ---------- */
 .feed-empty { color: var(--muted); font-size: 0.8rem; font-style: italic; margin: 0 0 10px; }

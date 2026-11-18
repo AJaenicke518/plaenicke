@@ -6,9 +6,17 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <script>
-    // Apply the saved theme before first paint so dark mode doesn't flash light.
-    // Mirrors resolveTheme() in js/theme.js — that module is the spec; keep in sync.
+    // Apply the saved colour scheme and theme before first paint so neither
+    // flashes. Mirrors resolveScheme() in js/prefs.js and resolveTheme() in
+    // js/theme.js — those modules are the spec; keep in sync (the scheme list
+    // below is tied to SCHEMES by tests/prepaint.test.js). ES5 only.
     (function () {
+      // Scheme first, in its own try: a throw in the theme logic below (no
+      // matchMedia) must not skip it.
+      try {
+        var s = localStorage.getItem('plaenicke.scheme');
+        if (s === 'sage' || s === 'ocean' || s === 'plum') document.documentElement.dataset.scheme = s;
+      } catch (e) {}
       var t = null;
       try { t = localStorage.getItem('plaenicke.theme'); } catch (e) {}
       var dark = t === 'dark' || ((t === null || t === 'auto') &&
