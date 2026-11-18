@@ -19,8 +19,9 @@
       } catch (e) {}
       var t = null;
       try { t = localStorage.getItem('plaenicke.theme'); } catch (e) {}
-      var dark = t === 'dark' || (t !== 'light' &&
-        window.matchMedia('(prefers-color-scheme: dark)').matches);
+      // No matchMedia (an old or locked-down browser): auto resolves to light.
+      var mm = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)');
+      var dark = t === 'dark' || (t !== 'light' && !!mm && mm.matches);
       if (dark) document.documentElement.dataset.theme = 'dark';
     })();
   </script>
