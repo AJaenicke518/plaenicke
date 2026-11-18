@@ -64,9 +64,11 @@ export function createCapture({
   later = (fn, ms) => setTimeout(fn, ms),
   clearLater = (handle) => clearTimeout(handle),
   follow = followVisualViewport,
-  // Extra controls that open this box (the desktop dock's buttons). They
-  // mirror the round button's aria-expanded and disabled state; nothing else.
-  openers = [],
+  // Extra controls that open this box (the desktop dock's buttons). Each is an
+  // element or { el, mic: true }. They mirror the round button's aria-expanded
+  // and disabled state; a mic one also mirrors its listening state (class and
+  // label). Nothing else.
+  openers: openerSpecs = [],
 } = {}) {
   // A missing wire would be a dead button, found only on the phone.
   for (const name of REQUIRED_ELS) {
@@ -79,6 +81,8 @@ export function createCapture({
   for (const [name, fn] of Object.entries({ isStandalone, submit, cancelSubmit, closePreviews, clearWhen, whenPicked, lockWhen })) {
     if (typeof fn !== 'function') throw new Error(`createCapture: ${name} must be a function`);
   }
+
+  const openers = openerSpecs.map((o) => (o && o.el ? o : { el: o, mic: false }));
 
   let mode = 'closed';
   let session = null; // voice.js's session while listening
@@ -97,7 +101,12 @@ export function createCapture({
     els.button.classList.toggle('listening', next === 'listening');
     els.button.setAttribute('aria-label', next === 'listening' ? 'Stop and add' : 'Capture by voice');
     els.button.setAttribute('aria-expanded', String(next !== 'closed'));
-    for (const o of openers) o.setAttribute('aria-expanded', String(next !== 'closed'));
+    for (const o of openers) {
+      o.el.setAttribute('aria-expanded', String(next !== 'closed'));
+      if (!o.mic) continue;
+      o.el.classList.toggle('listening', next === 'listening');
+      o.el.setAttribute('aria-label', next === 'listening' ? 'Stop and add' : 'Capture by voice');
+    }
     // Read-only while listening, so a tap on the text does not raise the
     // keyboard by itself; the tap's handler decides (spec § 3 step 3).
     els.field.readOnly = next === 'listening';
@@ -169,7 +178,7 @@ export function createCapture({
 
   function setAdding(on) {
     els.button.disabled = on;
-    for (const o of openers) o.disabled = on;
+    for (const o of openers) o.el.disabled = on;
     els.add.disabled = on;
     els.add.hidden = on || previewOpen;
     els.cancel.hidden = !on;

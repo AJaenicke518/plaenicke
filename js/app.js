@@ -1475,6 +1475,8 @@ function render() {
 const CALENDAR_VIEWS = ['day', '3day', 'week', 'month'];
 const TAB_TITLES = { today: 'Today', calendar: 'Calendar', todo: 'To-do', ideas: 'Ideas' };
 const PANE_NAMES = { today: 'Today', todo: 'To-do', ideas: 'Ideas' };
+// Panes whose section opens with a .pane-heading (index.html, id `<section id>-heading`).
+const HEADED_PANES = ['todo', 'ideas'];
 
 // THE PANES (Release 3, js/layout.js). Being visible is only the `hidden`
 // attribute, and every view re-renders on every change, so showView is the one
@@ -1518,7 +1520,12 @@ function showView(which) {
     el.hidden = !visible.includes(name);
     // A pane is named for assistive tech on a computer only; the phone shows
     // one page under its own heading.
-    if (desktop && !el.hidden) el.setAttribute('aria-label', CALENDAR_VIEWS.includes(name) ? 'Calendar' : PANE_NAMES[name]);
+    // To-do and Ideas are named by their visible heading: an aria-label too
+    // would announce the name twice. The others have no heading to point at.
+    const named = desktop && !el.hidden;
+    if (named && HEADED_PANES.includes(name)) el.setAttribute('aria-labelledby', `${el.id}-heading`);
+    else el.removeAttribute('aria-labelledby');
+    if (named && !HEADED_PANES.includes(name)) el.setAttribute('aria-label', CALENDAR_VIEWS.includes(name) ? 'Calendar' : PANE_NAMES[name]);
     else el.removeAttribute('aria-label');
   }
   // A wrapper with nothing visible in it is hidden, so an empty column takes
@@ -1616,16 +1623,24 @@ els.ideaAdd.addEventListener('click', handleIdeaAdd);
 // ones too; the returned cleanup clears them.
 const DESKTOP_PLACED = ['top', 'left', 'width', 'max-height', 'bottom', 'right', 'transform'];
 function desktopFollow(el) {
-  const r = els.captureDock.getBoundingClientRect();
-  const top = r.bottom + 8;
-  el.style.setProperty('top', `${top}px`);
-  el.style.setProperty('left', `${r.left}px`);
-  el.style.setProperty('width', `${r.width}px`);
-  el.style.setProperty('max-height', `${Math.max(0, window.innerHeight - top - 16)}px`);
-  el.style.setProperty('bottom', 'auto');
-  el.style.setProperty('right', 'auto');
-  el.style.setProperty('transform', 'none');
-  return () => { for (const prop of DESKTOP_PLACED) el.style.removeProperty(prop); };
+  const place = () => {
+    const r = els.captureDock.getBoundingClientRect();
+    const top = r.bottom + 8;
+    el.style.setProperty('top', `${top}px`);
+    el.style.setProperty('left', `${r.left}px`);
+    el.style.setProperty('width', `${r.width}px`);
+    el.style.setProperty('max-height', `${Math.max(0, window.innerHeight - top - 16)}px`);
+    el.style.setProperty('bottom', 'auto');
+    el.style.setProperty('right', 'auto');
+    el.style.setProperty('transform', 'none');
+  };
+  place();
+  // A resize inside the gate moves the dock, so the open box is placed again.
+  window.addEventListener('resize', place);
+  return () => {
+    window.removeEventListener('resize', place);
+    for (const prop of DESKTOP_PLACED) el.style.removeProperty(prop);
+  };
 }
 
 // The capture button and its box (home-screen spec § 3, js/capture.js). It
@@ -1650,8 +1665,8 @@ const capture = createCapture({
   // picked time, so handleAdd refuses it for want of a date (review 2026-11-09).
   whenPicked: () => Boolean(els.captureDate.value || els.captureTime.value),
   lockWhen: (on) => { els.captureDate.disabled = on; els.captureTime.disabled = on; },
-  // The desktop dock's two buttons mirror the box's open and disabled state.
-  openers: [els.captureDockType, els.captureDockMic],
+  // The desktop dock's two buttons mirror the box's open and disabled state; the mic also its listening state.
+  openers: [els.captureDockType, { el: els.captureDockMic, mic: true }],
   follow: (el, o) => (window.matchMedia(DESKTOP_QUERY).matches ? desktopFollow(el) : followVisualViewport(el, o)),
 });
 els.captureDockType.addEventListener('click', () => capture.openTyping());

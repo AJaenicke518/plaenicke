@@ -1498,6 +1498,10 @@ button[data-press].pressed { opacity: 1; }
   color: var(--accent-ink);
 }
 .capture-dock-type:disabled, .capture-dock-mic:disabled { opacity: 0.5; }
+/* The mic, or while listening a stop square (as the round button's). */
+.capture-dock-mic .icon-stop { display: none; }
+.capture-dock-mic.listening .icon-mic { display: none; }
+.capture-dock-mic.listening .icon-stop { display: block; }
 /* The headings that name the To-do and Ideas panes show on a computer only
    (the phone's tab bar and page title name them). */
 .pane-heading { display: none; }
@@ -1543,14 +1547,14 @@ button[data-press].pressed { opacity: 1; }
     display: grid;
     flex: 1;
     min-height: 0;
-    grid-template-columns: minmax(20rem, 26rem) 1fr;
+    grid-template-columns: minmax(20rem, 26rem) minmax(18.5rem, 1fr);
     grid-template-rows: minmax(0, 1fr);
     gap: var(--space-4);
     padding-left: var(--space-4);
   }
   [data-layout="planner"] .panes,
   [data-layout="month"] .panes,
-  [data-layout="all"] .panes { grid-template-columns: minmax(20rem, 26rem) 1fr; }
+  [data-layout="all"] .panes { grid-template-columns: minmax(20rem, 26rem) minmax(18.5rem, 1fr); }
   /* Today is column 1. The big pane is column 2, and the To-do/Ideas wrapper
      shares its cell (only one of the two is ever shown) except in wide-all. */
   .pane-left, .pane-main, .pane-right {
@@ -1595,12 +1599,12 @@ button[data-press].pressed { opacity: 1; }
 
   /* The toast clears the rail; the capture button's 88px reserve and the
      bottom bar's offset are gone. */
-  .toast { left: calc(4.5rem + 16px); right: 16px; bottom: 16px; }
+  .toast { left: calc(4.5rem + 16px); right: 16px; bottom: 16px; max-width: 36rem; }
   .sheet { max-width: 40rem; margin-inline: auto; }
 }
 
 /* Wide: layout "all" adds To-do and Ideas as a third column. */
 @media (min-width: 46rem) and (hover: hover) and (pointer: fine) and (min-width: 80rem) {
-  [data-layout="all"] .panes { grid-template-columns: minmax(20rem, 26rem) 1fr minmax(18rem, 22rem); }
+  [data-layout="all"] .panes { grid-template-columns: minmax(20rem, 26rem) minmax(18.5rem, 1fr) minmax(18rem, 22rem); }
   [data-layout="all"] .pane-right { grid-column: 3; grid-row: 1; }
 }
