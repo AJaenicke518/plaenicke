@@ -1530,3 +1530,13 @@ test('settings: initSettings without onDisplayPrefsChanged throws, after the onS
   const { onSignedIn, ...noSignedIn } = every;
   assert.throws(() => initSettings(noSignedIn), /onSignedIn/, 'the earlier guard still reports first');
 });
+
+test('settings: the initial usage line follows a stored 24-hour format', () => {
+  const { host } = openPanel([], () => {
+    localStorage.setItem('plaenicke.timeFormat', '24h');
+    recordLaunch(new Date(2026, 10, 18, 13, 5).toISOString());
+  });
+  const text = host.querySelectorAll('p').find((p) => p._classes.has('usage-note')).textContent;
+  assert.match(text, /13:05/);
+  assert.doesNotMatch(text, /PM/);
+});

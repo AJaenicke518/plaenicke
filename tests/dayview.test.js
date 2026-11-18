@@ -298,3 +298,11 @@ test('the hour labels and block times follow the time format, read at each rende
   ls.setItem('plaenicke.timeFormat', '12h');
   assert.deepEqual(draw(), { hour13: '1:00 PM', block: '1:30–2:00 PM t-a' });
 });
+
+test('day view: a timed block with no end time follows the time format', () => {
+  const ls = installFakeLocalStorage();
+  ls.setItem('plaenicke.timeFormat', '24h');
+  const c = container();
+  renderDayView(c, '2026-08-20', [timed('a', '13:30')], { onOpen() {}, onDelete() {} });
+  assert.equal(c.querySelector('.item-open').textContent, '13:30 t-a');
+});

@@ -537,3 +537,10 @@ test('Today: a timed row follows the time format, read at each render', () => {
   ls.setItem('plaenicke.timeFormat', '12h');
   assert.equal(timeOf(), '1:30–2:00 PM');
 });
+
+test('Today: a timed row with no end time follows the time format', () => {
+  const ls = installFakeLocalStorage();
+  ls.setItem('plaenicke.timeFormat', '24h');
+  const items = [own('t', { type: 'event', time: '13:30', title: 'Lunch' })];
+  assert.equal(byClass(rowOf(draw(items).host, 'Lunch'), 'today-time')[0].textContent, '13:30');
+});

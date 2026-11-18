@@ -23,7 +23,7 @@ const DAY_NAME = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 's
 // "09:25". Either way it is an exact prefix of the full time text, which the
 // hidden accessible span below depends on.
 const shortTime = (hhmm, fmt) => {
-  if (fmt === '24h') return formatTime(hhmm, '24h');
+  if (fmt === '24h') return formatTime(hhmm, fmt);
   const [h, m] = hhmm.split(':').map(Number);
   return `${h % 12 === 0 ? 12 : h % 12}:${String(m).padStart(2, '0')}`;
 };
