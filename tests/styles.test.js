@@ -467,6 +467,35 @@ test('contrast() reproduces the spec\'s computed ratios (fixture check on the he
   assert.equal(contrast('#e39a52', '#1e2126').toFixed(2), '6.93');
 });
 
+// --on-type text sits on every --type-* colour and on every --feed-palette-*
+// colour (.type-external). Small text (0.7-0.75rem) needs 4.5:1 in both themes,
+// measured with the EFFECTIVE text colour: .tday-time draws --on-type at a
+// declared opacity inside the block, so it is alpha-composited over the block
+// background first.
+function blend(fgHex, bgHex, alpha) {
+  const ch = (h, i) => parseInt(h.slice(1 + i, 3 + i), 16);
+  return '#' + [0, 2, 4].map((i) => Math.round(alpha * ch(fgHex, i) + (1 - alpha) * ch(bgHex, i))
+    .toString(16).padStart(2, '0')).join('');
+}
+const TYPE_TOKENS = ['due', 'start', 'milestone', 'event', 'general', 'task', 'idea'].map((n) => `--type-${n}`);
+const PALETTE_TOKENS = [1, 2, 3, 4, 5, 6].map((n) => `--feed-palette-${n}`);
+for (const theme of [':root', '[data-theme="dark"]']) {
+  test(`${theme}: --on-type text reads at WCAG AA (4.5:1) on every type and palette colour, plain and at .tday-time opacity`, () => {
+    const on = declOf(theme, '--on-type');
+    const opacity = parseFloat(declOf('.tday-time', 'opacity'));
+    assert.ok(opacity > 0 && opacity < 1, '.tday-time opacity is declared');
+    const fails = [];
+    for (const token of [...TYPE_TOKENS, ...PALETTE_TOKENS]) {
+      const bg = declOf(theme, token);
+      const plain = contrast(on, bg);
+      const eff = contrast(blend(on, bg, opacity), bg);
+      if (plain < 4.5) fails.push(`${token} ${bg} plain ${plain.toFixed(2)}`);
+      if (eff < 4.5) fails.push(`${token} ${bg} at opacity ${opacity}: ${eff.toFixed(2)}`);
+    }
+    assert.deepEqual(fails, [], `below 4.5:1 -> ${fails.join('; ')}`);
+  });
+}
+
 // --- home-screen stage 2: spacing and radii (spec § 5) ----------------------
 const SPACING = { '--space-1': '4px', '--space-2': '8px', '--space-3': '12px', '--space-4': '16px', '--space-5': '24px', '--space-6': '32px' };
 const RADII = { '--radius-control': '8px', '--radius-sheet': '14px', '--radius-round': '50%' };
