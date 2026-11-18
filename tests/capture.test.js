@@ -950,3 +950,25 @@ test('replace() on a closed box, or one that is closing, does nothing', () => {
   fx.capture.replace();
   assert.equal(fx.follows.length, 1, 'a closing box keeps the follower it is closing with');
 });
+
+// --- focus returns when the box closes (desktop, wired by app.js) ------------
+test('close() calls restoreFocus once, after the field blurs, and not for a box that is already closed', () => {
+  const calls = [];
+  const fx = setup();
+  // setup() builds its own controller; build another with the hook.
+  const els = fx.els;
+  const capture = createCapture({
+    els, line: { set() {} },
+    voice: { isVoiceSupported: () => false, listen: () => null, errorKind },
+    isStandalone: () => false, submit: () => Promise.resolve(), cancelSubmit() {}, closePreviews() {},
+    clearWhen() {}, whenPicked: () => false, lockWhen() {},
+    later: () => ({}), clearLater() {}, follow: () => () => {},
+    restoreFocus: () => { calls.push(fx.order.slice()); },
+  });
+  capture.close();
+  assert.equal(calls.length, 0, 'closed already: nothing to restore');
+  capture.openTyping();
+  capture.close();
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].includes('blur'), 'the field had blurred by then');
+});

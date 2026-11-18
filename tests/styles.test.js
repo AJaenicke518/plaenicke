@@ -1787,7 +1787,7 @@ const PHONE_AT_DESKTOP_A = {
   '.capture-panel': 'min-height:0;overflow-y:auto;overscroll-behavior:contain;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:var(--radius-sheet);padding:var(--space-3) var(--space-3) 0;box-shadow:0 4px 16px var(--shade);transform-origin:bottom right',
   '.day-grid': 'display:flex;background:var(--card);border:1px solid var(--line);border-radius:6px;max-height:60vh;overflow-y:auto',
   '.tday-grid': 'display:grid;grid-template-columns:36px repeat(3, minmax(0, 1fr));background:var(--card);border:1px solid var(--line);border-top:none;border-radius:0 0 6px 6px;max-height:60vh;overflow-y:auto',
-  '[data-layout="planner"] .panes': '', '[data-layout="month"] .panes': '', '[data-layout="all"] .panes': '', '[data-layout="all"] .pane-right': '',
+  '[data-layout="planner"] .panes': '', '[data-layout="month"] .panes': '', '[data-layout="all"] .panes': '', '[data-layout="all"] .pane-right': '', '[data-layout="all"] #todo-view': '', '[data-layout="all"] #ideas-view': '',
   'body': 'margin:0;font-family:var(--serif);background:var(--bg);color:var(--ink);padding:env(safe-area-inset-top) 16px 40px;padding-bottom:calc(56px + 80px + env(safe-area-inset-bottom));line-height:1.5',
   '.sheet': 'position:fixed;left:0;right:0;bottom:0;max-height:85dvh;overflow-y:auto;background:var(--card);color:var(--ink);border-top:1px solid var(--line);border-radius:var(--radius-sheet) var(--radius-sheet) 0 0;padding:0 16px;padding-bottom:env(safe-area-inset-bottom);box-shadow:0 -4px 16px rgba(0, 0, 0, 0.2);overscroll-behavior:contain',
 };
@@ -1832,17 +1832,40 @@ test('gate: .panes is a grid that fills the space under the header and owns the 
   assert.equal(desktopOf('.panes', 'grid-template-rows'), 'minmax(0, 1fr)');
 });
 
+// At the gate's floor (46rem) with classic 15px scrollbars nothing may overflow
+// sideways: rail + gutters + the two column minimums + a 1rem allowance fit.
+test('gate: the column minimums, rail and gutters fit the 46rem floor with a 1rem allowance', () => {
+  const rem = (v) => { const m = /^([\d.]+)rem$/.exec(v); assert.ok(m, `${v} is in rem`); return Number(m[1]); };
+  const space4 = Number(/--space-4:\s*(\d+)px/.exec(css)[1]) / 16;
+  const [leftMin, mainMin] = [...desktopOf('.panes', 'grid-template-columns').matchAll(/minmax\(([\d.]+rem)/g)].map((m) => rem(m[1]));
+  assert.equal(desktopOf('.panes', 'padding-left'), 'var(--space-4)');
+  assert.equal(desktopOf('.panes', 'gap'), 'var(--space-4)');
+  assert.equal(Number(/\nbody \{[^}]*?padding: env\(safe-area-inset-top\) (\d+)px/.exec(css)[1]) / 16, space4, 'the body\'s right gutter is one --space-4');
+  const rail = rem(desktopOf('body', 'padding-left'));
+  const total = rail + space4 /* panes padding */ + leftMin + space4 /* gap */ + mainMin + space4 /* right gutter */ + 1;
+  assert.ok(total <= 46, `${total}rem must fit in 46rem`);
+});
+
 test('gate: columns per [data-layout]; .pane-right is a third column only in wide-all', () => {
-  // The big pane never goes below 18.5rem: at 736px (the gate's floor plus a
-  // little) a bare 1fr left it 200px and the Week view scrolled sideways.
-  const left = 'minmax(20rem, 26rem)';
-  const main = 'minmax(18.5rem, 1fr)';
+  // The big pane never goes below 20rem: at 736px (the gate's floor plus a
+  // little) a bare 1fr left it 200px and the Week view scrolled sideways, and
+  // at 18.5rem its own 15px scrollbar still left it 1px short.
+  const left = 'minmax(17rem, 26rem)';
+  const main = 'minmax(20rem, 1fr)';
   assert.equal(desktopOf('.panes', 'grid-template-columns'), `${left} ${main}`);
   for (const l of ['planner', 'month', 'all']) {
     assert.equal(desktopOf(`[data-layout="${l}"] .panes`, 'grid-template-columns'), `${left} ${main}`, l);
   }
   assert.equal(wideOf('[data-layout="all"] .panes', 'grid-template-columns'), `${left} ${main} minmax(18rem, 22rem)`);
   assert.equal(wideOf('[data-layout="all"] .pane-right', 'grid-column'), '3');
+  // To-do and Ideas share the wide right column as two rows, each its own scroller.
+  assert.equal(wideOf('[data-layout="all"] .pane-right', 'display'), 'grid');
+  assert.equal(wideOf('[data-layout="all"] .pane-right', 'grid-template-rows'), 'minmax(0, 3fr) minmax(0, 2fr)');
+  assert.equal(wideOf('[data-layout="all"] .pane-right[hidden]', 'display'), 'none', 'the display above must restate [hidden]');
+  for (const sel of ['[data-layout="all"] #todo-view', '[data-layout="all"] #ideas-view']) {
+    assert.equal(wideOf(sel, 'overflow'), 'auto', sel);
+    assert.equal(wideOf(sel, 'min-height'), '0', sel);
+  }
   assert.equal(desktopOf('[data-layout="all"] .pane-right', 'grid-column'), null, 'below wide, all has no third column');
   // Outside wide-all, the right pane shares the big pane's cell.
   for (const sel of ['.pane-main', '.pane-right']) {

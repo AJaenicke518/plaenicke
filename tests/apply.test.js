@@ -11740,3 +11740,71 @@ test('r3: a list tap in wide Everything clears the status line', async () => {
     leaveDesktop();
   }
 });
+
+// --- browser sweep: focus on close, Escape (desktop only) --------------------
+
+test('r3: closing the desktop box returns focus to the dock button that opened it; the phone is unchanged', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const vvx = withVisualViewport();
+  const timers = installManualTimers();
+  capEl('capture-dock')._rect = { top: 80, left: 120, width: 300, height: 40 };
+  globalThis.window.innerHeight = 800;
+  setMedia(true, false);
+  try {
+    click(capEl('capture-dock-type'));
+    closeCapture(timers);
+    assert.equal(globalThis.document.activeElement, capEl('capture-dock-type'), 'typing button');
+    click(capEl('capture-dock-mic'));
+    closeCapture(timers);
+    assert.equal(globalThis.document.activeElement, capEl('capture-dock-mic'), 'mic button');
+    setMedia(false, false);
+    click(capEl('capture-btn'));
+    closeCapture(timers);
+    assert.notEqual(globalThis.document.activeElement, capEl('capture-dock-mic'), 'the phone does not move focus to the dock');
+    assert.notEqual(globalThis.document.activeElement, capEl('capture-dock-type'));
+  } finally {
+    if (!capEl('capture-box').hidden) closeCapture(timers);
+    timers.restore();
+    vvx.restore();
+    voice.restore();
+    leaveDesktop();
+  }
+});
+
+test('r3: Escape closes the open desktop box and returns focus to the dock; elsewhere it does nothing', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const vvx = withVisualViewport();
+  const timers = installManualTimers();
+  const box = capEl('capture-box');
+  capEl('capture-dock')._rect = { top: 80, left: 120, width: 300, height: 40 };
+  globalThis.window.innerHeight = 800;
+  try {
+    // The phone: Escape leaves the box alone.
+    click(capEl('capture-btn'));
+    keydown(box, 'Escape');
+    assert.equal(box._classes.has('closing'), false, 'the phone ignores Escape');
+    closeCapture(timers);
+    setMedia(true, false);
+    click(capEl('capture-dock-type'));
+    keydown(box, 'a');
+    assert.equal(box._classes.has('closing'), false, 'another key does nothing');
+    const prevented = keydown(box, 'Escape');
+    assert.equal(prevented, true);
+    assert.equal(box._classes.has('closing'), true, 'Escape closes it');
+    timers.fire(250);
+    assert.equal(box.hidden, true);
+    assert.equal(globalThis.document.activeElement, capEl('capture-dock-type'));
+  } finally {
+    if (!box.hidden) closeCapture(timers);
+    timers.restore();
+    vvx.restore();
+    voice.restore();
+    leaveDesktop();
+  }
+});
