@@ -1592,7 +1592,7 @@ for (const button of ['Merge']) {
       saveItems([it('local')]);
       saveFeeds([fd('existing')]);
     });
-    assert.match(allText(host), /1 calendar\b/, 'fixture check: the dialog shows one calendar');
+    assert.match(allText(host), /1 calendar\b/, `fixture check: the dialog shows one calendar (it showed: ${JSON.stringify(allText(host))})`);
 
     saveFeeds([fd('existing'), fd('justAdded')]);
     findButton(host, button).click();
