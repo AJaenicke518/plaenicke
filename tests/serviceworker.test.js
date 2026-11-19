@@ -45,7 +45,7 @@ test('every ASSETS entry actually exists — cache.addAll is all-or-nothing', ()
 // already shipped 'plaenicke-v5-2', so `got > base` was satisfied forever and
 // the assertion could not fail for V6 — the exact vacuity the comment above it
 // was written to prevent. RE-PIN THIS TO main's VALUE ON EVERY RELEASE.
-const CACHE_ON_MAIN = 'plaenicke-v7-2';
+const CACHE_ON_MAIN = 'plaenicke-v7-3';
 
 // AND COMPARE THE WHOLE VERSION, not just the trailing integer. The original
 // read only the last number, so the legitimate v5-2 -> v6-1 bump would have
@@ -95,9 +95,11 @@ function loadWorker({ fetchImpl, cacheKeys = [] } = {}) {
     clients: { claim: async () => { log.claimed += 1; } },
   };
   const fetchCalls = [];
-  const fakeFetch = async (req) => { fetchCalls.push(req); return fetchImpl(req); };
+  const fetchInits = [];
+  const fakeFetch = async (req, init) => { fetchCalls.push(req); fetchInits.push(init); return fetchImpl(req); };
+  class FakeRequest { constructor(url, init) { this.url = url; this.init = init; } }
   // eslint-disable-next-line no-new-func
-  new Function('self', 'caches', 'fetch', read())(self, caches, fakeFetch);
+  new Function('self', 'caches', 'fetch', 'Request', read())(self, caches, fakeFetch, FakeRequest);
   const dispatch = (type, extra = {}) => {
     const event = { ...extra, waits: [], responded: null };
     event.waitUntil = (p) => { event.waits.push(p); };
@@ -105,7 +107,7 @@ function loadWorker({ fetchImpl, cacheKeys = [] } = {}) {
     listeners[type](event);
     return event;
   };
-  return { dispatch, log, fetchCalls, listeners };
+  return { dispatch, log, fetchCalls, fetchInits, listeners };
 }
 
 const request = (url, method = 'GET') => ({ url, method });
@@ -125,6 +127,29 @@ test('fetch: a same-origin GET goes to the network first, and a copy is cached',
   assert.deepEqual(sw.log.put[0][1], { copyOf: response }, 'a CLONE is cached, not the body the page consumes');
   assert.deepEqual(sw.log.opened, [read().match(/const CACHE = '([^']+)'/)[1]], 'into the current cache');
   assert.deepEqual(sw.log.matched, [], 'the cache is not consulted while online');
+});
+
+// 2026-11-18: GitHub Pages sends `cache-control: max-age=600`, and a plain
+// fetch() from the service worker still accepts the browser's HTTP-cached copy
+// until it is 10 minutes old. After a deploy the phone kept running the old
+// settings.js for those 10 minutes (Release 2: no Colours row until 16:30), and
+// could mix old and new modules. `no-cache` revalidates every app-shell GET
+// with the server (an unchanged file is a cheap 304); install uses `reload` so
+// a new version is never precached from stale HTTP-cached files.
+test('fetch: a same-origin GET revalidates with the server (cache: no-cache), never the 10-minute HTTP cache', async () => {
+  const response = { ok: true, clone() { return {}; } };
+  const sw = loadWorker({ fetchImpl: async () => response });
+  const ev = sw.dispatch('fetch', { request: request(`${ORIGIN}/js/settings.js`) });
+  await ev.responded;
+  assert.deepEqual(sw.fetchInits, [{ cache: 'no-cache' }]);
+});
+
+test('install precaches each asset with cache: reload, bypassing the HTTP cache', async () => {
+  const sw = loadWorker({ fetchImpl: async () => ({}) });
+  const ev = sw.dispatch('install');
+  await Promise.all(ev.waits);
+  assert.ok(sw.log.added.length > 0);
+  for (const r of sw.log.added) assert.deepEqual(r.init, { cache: 'reload' }, r.url);
 });
 
 test('fetch: offline, a same-origin GET falls back to the cached copy', async () => {
@@ -163,7 +188,7 @@ test('install precaches exactly ASSETS into the current cache and skips waiting'
   const ev = sw.dispatch('install');
   await Promise.all(ev.waits);
   assert.equal(sw.log.skipWaiting, 1);
-  assert.deepEqual(sw.log.added, assets(read()));
+  assert.deepEqual(sw.log.added.map((r) => r.url), assets(read()));
   assert.deepEqual(sw.log.opened, [read().match(/const CACHE = '([^']+)'/)[1]]);
 });
 

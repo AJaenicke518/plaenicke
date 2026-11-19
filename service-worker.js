@@ -10,7 +10,7 @@
 // token. `activate` deletes every cache whose name isn't this one, so the
 // rename is what actually evicts them; the fetch-handler guard below only
 // stops new ones being written.
-const CACHE = 'plaenicke-v7-3';
+const CACHE = 'plaenicke-v7-4';
 const ASSETS = [
   '.', 'index.html', 'styles.css', 'manifest.json',
   'js/app.js', 'js/storage.js', 'js/items.js', 'js/dateparse.js', 'js/calendar.js',
@@ -26,7 +26,7 @@ const ASSETS = [
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();
-  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)));
+  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS.map((url) => new Request(url, { cache: 'reload' })))));
 });
 
 self.addEventListener('activate', (event) => {
@@ -48,7 +48,9 @@ self.addEventListener('fetch', (event) => {
   // cache in js/feeds.js, not Cache Storage.
   if (new URL(event.request.url).origin !== self.location.origin) return;
   event.respondWith(
-    fetch(event.request)
+    // no-cache: revalidate with the server instead of trusting GitHub Pages'
+    // 10-minute max-age, so a deploy reaches the phone on its next open.
+    fetch(event.request, { cache: 'no-cache' })
       .then((response) => {
         const copy = response.clone();
         caches.open(CACHE).then((c) => c.put(event.request, copy));
