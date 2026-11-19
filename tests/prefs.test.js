@@ -74,3 +74,44 @@ test('a missing localStorage global also gives defaults', () => {
     installFakeLocalStorage();
   }
 });
+
+// --- colour scheme ---------------------------------------------------------
+import {
+  SCHEME_KEY, SCHEMES, resolveScheme, getScheme, setScheme, applyScheme,
+} from '../js/prefs.js';
+
+test('scheme key and list', () => {
+  assert.equal(SCHEME_KEY, 'plaenicke.scheme');
+  assert.deepEqual(SCHEMES, ['classic', 'sage', 'ocean', 'plum']);
+});
+
+test('resolveScheme accepts only known schemes, else classic', () => {
+  for (const s of SCHEMES) assert.equal(resolveScheme(s), s);
+  for (const bad of [null, undefined, '', 'Sage', 'bogus', 3]) assert.equal(resolveScheme(bad), 'classic');
+});
+
+test('getScheme / setScheme round trip and reject bad values', () => {
+  const ls = installFakeLocalStorage();
+  assert.equal(getScheme(), 'classic');
+  assert.equal(setScheme('ocean'), true);
+  assert.equal(ls.getItem('plaenicke.scheme'), 'ocean');
+  assert.equal(getScheme(), 'ocean');
+  assert.throws(() => setScheme('bogus'), /bad scheme/);
+  assert.equal(ls.getItem('plaenicke.scheme'), 'ocean');
+});
+
+test('scheme storage that throws: get gives classic, set returns false', () => {
+  const ls = installFakeLocalStorage();
+  ls.getItem = () => { throw new Error('denied'); };
+  ls.setItem = () => { throw new Error('denied'); };
+  assert.equal(getScheme(), 'classic');
+  assert.equal(setScheme('sage'), false);
+});
+
+test('applyScheme sets the attribute, and removes it for classic', () => {
+  const root = { dataset: {} };
+  applyScheme('sage', root);
+  assert.equal(root.dataset.scheme, 'sage');
+  applyScheme('classic', root);
+  assert.equal('scheme' in root.dataset, false);
+});

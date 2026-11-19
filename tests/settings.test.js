@@ -10,6 +10,7 @@ import { initSettings } from '../js/settings.js';
 import { linkWithCode } from '../js/auth.js';
 import { bytesToBase64url, generateEncKey, encryptBlob, composeLinkCode } from '../js/crypto.js';
 import { SCHEMA_VERSION } from '../js/merge.js';
+import { SCHEMES } from '../js/prefs.js';
 
 // --- fake DOM: tests/fake-dom.js ---------------------------------------------
 //
@@ -1655,4 +1656,161 @@ test('settings: the three rows are labelled groups: Theme, Time, Week starts', (
   }
   const ids = ['Theme', 'Time', 'Week starts'].map((l) => prefRow(host, l).getAttribute('aria-labelledby'));
   assert.equal(new Set(ids).size, 3, 'ids are unique');
+});
+
+// --- colour scheme row (R2 Task 2) -------------------------------------------
+
+const styleCss = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+// --accent of a scheme block for a variant, read straight from styles.css.
+function accentOf(scheme, variant) {
+  const sel = scheme === 'classic'
+    ? (variant === 'dark' ? '[data-theme="dark"]' : ':root')
+    : `[data-scheme="${scheme}"]${variant === 'dark' ? '[data-theme="dark"]' : ''}`;
+  const re = new RegExp(`(?:^|\\n)${sel.replace(/[[\]".:]/g, '\\$&')}\\s*\\{([^}]*)\\}`);
+  const body = styleCss.match(re)[1];
+  return body.match(/--accent:\s*([^;]+);/)[1].trim();
+}
+const lightAccent = (scheme) => accentOf(scheme, 'light');
+const coloursRow = (host) => prefRow(host, 'Colours');
+const swatchOf = (btn) => btn.children.find((c) => c._classes.has('swatch'));
+
+test('colours: the row follows Theme, Time and Week starts and has four labelled buttons', () => {
+  const { host } = openPanel([]);
+  const row = coloursRow(host);
+  assert.ok(row, 'row exists');
+  assert.equal(row.getAttribute('role'), 'group');
+  assert.equal(row.getAttribute('aria-labelledby'), row.children[0].id);
+  assert.deepEqual(rowButtons(row).map((b) => b.textContent), ['Classic', 'Sage', 'Ocean', 'Plum']);
+  assert.deepEqual(activeLabels(row), ['Classic']);
+  assert.deepEqual(rowButtons(row).map((b) => b.getAttribute('aria-pressed')), ['true', 'false', 'false', 'false']);
+  const order = [];
+  const walk = (el) => { for (const c of el.children) { order.push(c); walk(c); } };
+  walk(host);
+  assert.ok(order.indexOf(prefRow(host, 'Week starts')) < order.indexOf(row));
+});
+
+test('colours: the stored scheme is the active button', () => {
+  const { host } = openPanel([], () => { localStorage.setItem('plaenicke.scheme', 'plum'); });
+  assert.deepEqual(activeLabels(coloursRow(host)), ['Plum']);
+});
+
+test('colours: a click stores, applies the attribute, and moves the active button', () => {
+  const { host } = openPanel([]);
+  const row = coloursRow(host);
+  findButtonByText(row, 'Sage').click();
+  assert.equal(localStorage.getItem('plaenicke.scheme'), 'sage');
+  assert.equal(document.documentElement.dataset.scheme, 'sage');
+  assert.deepEqual(activeLabels(row), ['Sage']);
+  assert.deepEqual(rowButtons(row).map((b) => b.getAttribute('aria-pressed')), ['false', 'true', 'false', 'false']);
+  findButtonByText(row, 'Classic').click();
+  assert.equal('scheme' in document.documentElement.dataset, false);
+  assert.doesNotMatch(allText(row), /Couldn't save/);
+});
+
+test('colours: each swatch is a 14px circle with a currentColor border and its scheme\'s light accent', () => {
+  const { host } = openPanel([]);
+  const btns = rowButtons(coloursRow(host));
+  assert.equal(btns.length, SCHEMES.length);
+  SCHEMES.forEach((scheme, i) => {
+    const sw = swatchOf(btns[i]);
+    assert.ok(sw, `${scheme} has a swatch`);
+    assert.equal(sw.style.background, lightAccent(scheme), `${scheme} swatch literal equals its light --accent`);
+  });
+  assert.match(styleCss, /\.swatch\s*\{[^}]*width:\s*14px[^}]*height:\s*14px[^}]*border-radius:\s*50%[^}]*border:\s*1px solid currentColor/);
+});
+
+test('colours: when the resolved theme is dark at open, each swatch is its scheme\'s dark accent', () => {
+  const { host } = openPanel([], () => { localStorage.setItem('plaenicke.theme', 'dark'); });
+  assert.equal(document.documentElement.dataset.theme, 'dark');
+  const btns = rowButtons(coloursRow(host));
+  SCHEMES.forEach((scheme, i) => {
+    assert.equal(swatchOf(btns[i]).style.background, accentOf(scheme, 'dark'), `${scheme} dark swatch`);
+  });
+});
+
+test('colours: clicking a Theme button repaints the swatches for the resolved theme', () => {
+  const { host } = openPanel([]);
+  const row = coloursRow(host);
+  const swatches = () => rowButtons(row).map((b) => swatchOf(b).style.background);
+  findButtonByText(prefRow(host, 'Theme'), 'Dark').click();
+  assert.deepEqual(swatches(), SCHEMES.map((x) => accentOf(x, 'dark')));
+  findButtonByText(prefRow(host, 'Theme'), 'Light').click();
+  assert.deepEqual(swatches(), SCHEMES.map((x) => accentOf(x, 'light')));
+});
+
+test('colours: a failed write still applies for the session and says it will reset', () => {
+  const { host } = openPanel([]);
+  const row = coloursRow(host);
+  const realSet = localStorage.setItem;
+  localStorage.setItem = () => { throw new Error('QuotaExceededError'); };
+  try {
+    assert.doesNotThrow(() => findButtonByText(row, 'Ocean').click());
+  } finally {
+    localStorage.setItem = realSet;
+  }
+  assert.equal(document.documentElement.dataset.scheme, 'ocean', 'applied for this session');
+  assert.deepEqual(activeLabels(row), ['Ocean']);
+  assert.match(allText(row), /Couldn't save this on this device; it will reset next time\./);
+  assert.equal(localStorage.getItem('plaenicke.scheme'), null);
+});
+
+test('colours: initSettings re-applies the stored scheme', () => {
+  openPanel([], () => { localStorage.setItem('plaenicke.scheme', 'plum'); }, undefined, { open: false });
+  assert.equal(document.documentElement.dataset.scheme, 'plum');
+});
+
+// --- colour scheme row: review hardening ---------------------------------------
+
+test('colours: a setItem that silently does nothing is a failed save (read-back), not stored', () => {
+  const { host } = openPanel([]);
+  const row = coloursRow(host);
+  const realSet = localStorage.setItem;
+  localStorage.setItem = () => {}; // no throw, no write: getItem keeps the old value
+  try {
+    findButtonByText(row, 'Sage').click();
+  } finally {
+    localStorage.setItem = realSet;
+  }
+  assert.match(allText(row), /Couldn't save this on this device; it will reset next time\./);
+  assert.equal(localStorage.getItem('plaenicke.scheme'), null, 'Sage was not stored');
+  assert.equal(document.documentElement.dataset.scheme, 'sage', 'still applied for the session');
+});
+
+test('colours: the note is shown after a failed click and hidden again after a later successful one', () => {
+  const { host } = openPanel([]);
+  const row = coloursRow(host);
+  const note = failureNote(row);
+  assert.equal(note.hidden, true, 'hidden initially');
+  const realSet = localStorage.setItem;
+  localStorage.setItem = () => { throw new Error('QuotaExceededError'); };
+  try {
+    findButtonByText(row, 'Ocean').click();
+  } finally {
+    localStorage.setItem = realSet;
+  }
+  assert.equal(note.hidden, false);
+  findButtonByText(row, 'Plum').click();
+  assert.equal(note.hidden, true);
+  assert.equal(note.textContent, '');
+  assert.equal(localStorage.getItem('plaenicke.scheme'), 'plum');
+});
+
+test('colours: refreshDisplayPrefs moves the active button to the stored scheme', () => {
+  const { host, settings } = openPanel([]);
+  const row = coloursRow(host);
+  assert.deepEqual(activeLabels(row), ['Classic']);
+  localStorage.setItem('plaenicke.scheme', 'ocean');
+  settings.refreshDisplayPrefs();
+  assert.deepEqual(activeLabels(row), ['Ocean']);
+  assert.deepEqual(rowButtons(row).map((b) => b.getAttribute('aria-pressed')), ['false', 'false', 'true', 'false']);
+});
+
+test('colours: every swatch is aria-hidden and every button is type=button', () => {
+  const { host } = openPanel([]);
+  const btns = rowButtons(coloursRow(host));
+  assert.equal(btns.length, SCHEMES.length);
+  for (const b of btns) {
+    assert.equal(b.type, 'button', `${b.textContent} type`);
+    assert.equal(swatchOf(b).getAttribute('aria-hidden'), 'true', `${b.textContent} swatch`);
+  }
 });

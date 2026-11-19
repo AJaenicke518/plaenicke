@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { SCHEMES } from '../js/prefs.js';
 
 // styles.test.js — the first CSS test in this repo, and it exists for one
 // reason: the failure it guards is silent and visual, so nothing else can
@@ -1476,3 +1477,136 @@ test('account: the recovery banner uses the control radius token, not a literal'
 test('the Settings usage note has a clear gap above it so it does not read as part of the Week row', () => {
   assert.equal(declOf('.settings-section .usage-note', 'margin-top'), '12px');
 });
+
+// --- colour schemes (Release 2, Task 1) --------------------------------------
+// A scheme is a pair of blocks keyed on data-scheme on <html>: light
+// `[data-scheme="x"]` and dark `[data-scheme="x"][data-theme="dark"]`. They
+// redefine surface and accent tokens only. SCHEMES comes from js/prefs.js so
+// the CSS, the store, the pre-paint list and the swatches cannot drift apart.
+const SCHEME_TOKENS = ['--bg', '--card', '--ink', '--muted', '--accent', '--accent-ink',
+  '--line', '--chip-bg', '--today', '--grid-line', '--tick-glow'];
+const OTHER_SCHEMES = SCHEMES.filter((s) => s !== 'classic');
+const lightSel = (s) => `[data-scheme="${s}"]`;
+const darkSel = (s) => `[data-scheme="${s}"][data-theme="dark"]`;
+const KNOWN_SCHEME_SELECTORS = OTHER_SCHEMES.flatMap((s) => [lightSel(s), darkSel(s)]);
+// Classic's literals as they stood before schemes existed (full list).
+const CLASSIC = {
+  ':root': {
+    '--bg': '#f4f1ea', '--card': '#fffdf8', '--ink': '#2b2620', '--muted': '#766d5f',
+    '--accent': '#8a5a3b', '--accent-ink': '#fffdf8', '--line': '#e0d8c8',
+    '--chip-bg': '#efe9dc', '--today': '#8a5a3b', '--grid-line': '#e9e2d4',
+    '--tick-glow': 'rgba(138, 90, 59, 0.14)',
+  },
+  '[data-theme="dark"]': {
+    '--bg': '#14161a', '--card': '#1e2126', '--ink': '#e2e5ea', '--muted': '#838891',
+    '--accent': '#8fa7c8', '--accent-ink': '#14161a', '--line': '#33373f',
+    '--chip-bg': '#262a31', '--today': '#8fa7c8', '--grid-line': '#23262d',
+    '--tick-glow': 'rgba(143, 167, 200, 0.18)',
+  },
+};
+
+test('schemes: classic is first in SCHEMES and its tokens are unchanged (full snapshot)', () => {
+  assert.equal(SCHEMES[0], 'classic');
+  for (const [sel, tokens] of Object.entries(CLASSIC)) {
+    for (const t of SCHEME_TOKENS) assert.equal(declOf(sel, t), tokens[t], `${sel} ${t}`);
+  }
+});
+
+test('schemes: every non-classic scheme has both blocks, and every data-scheme value in styles.css is in SCHEMES', () => {
+  assert.ok(OTHER_SCHEMES.length > 0);
+  for (const s of OTHER_SCHEMES) {
+    for (const sel of [lightSel(s), darkSel(s)]) {
+      assert.ok(rulesOf(css).some((r) => r.sel === sel), `missing block ${sel}`);
+    }
+  }
+  const used = new Set([...css.matchAll(/data-scheme="([^"]*)"/g)].map((m) => m[1]));
+  for (const v of used) assert.ok(SCHEMES.includes(v) && v !== 'classic', `data-scheme="${v}" is not a non-classic SCHEMES entry`);
+});
+
+test('schemes: the only rules mentioning data-scheme are the 2xN known selectors, once each', () => {
+  const found = rulesOf(css).filter((r) => r.sel.includes('data-scheme')).map((r) => r.sel);
+  assert.deepEqual([...found].sort(), [...KNOWN_SCHEME_SELECTORS].sort());
+});
+
+test('schemes: every data-scheme rule comes after the :root and [data-theme="dark"] rules', () => {
+  const rules = rulesOf(css);
+  const root = rules.findIndex((r) => r.sel === ':root');
+  const dark = rules.findIndex((r) => r.sel === '[data-theme="dark"]');
+  assert.ok(root >= 0 && dark >= 0);
+  rules.forEach((r, i) => {
+    if (!r.sel.includes('data-scheme')) return;
+    assert.ok(i > root && i > dark, `${r.sel} (rule ${i}) must follow :root (${root}) and [data-theme="dark"] (${dark})`);
+  });
+});
+
+test('schemes: every dark selector carries both attributes (two attributes beat [data-theme="dark"])', () => {
+  for (const s of OTHER_SCHEMES) {
+    assert.ok(darkSel(s).includes('[data-scheme=') && darkSel(s).includes('[data-theme="dark"]'));
+    assert.ok(rulesOf(css).some((r) => r.sel === darkSel(s)));
+  }
+});
+
+for (const s of OTHER_SCHEMES) {
+  for (const [variant, sel, base] of [['light', lightSel(s), ':root'], ['dark', darkSel(s), '[data-theme="dark"]']]) {
+    test(`scheme ${s} ${variant}: declares all ${SCHEME_TOKENS.length} tokens and no other custom property`, () => {
+      for (const t of SCHEME_TOKENS) assert.notEqual(declOf(sel, t), null, `${sel} lacks ${t}`);
+      const names = declsOf(sel).map((d) => d.prop).filter((p) => p.startsWith('--'));
+      for (const n of names) assert.ok(SCHEME_TOKENS.includes(n), `${sel} declares ${n}`);
+    });
+    test(`scheme ${s} ${variant}: --today equals --accent`, () => {
+      assert.equal(declOf(sel, '--today'), declOf(sel, '--accent'));
+    });
+    test(`scheme ${s} ${variant}: ink, muted, accent, danger, overdue-start >= 4.5 on --bg and --card; accent-ink on accent`, () => {
+      for (const fgTok of ['--ink', '--muted', '--accent', '--danger', '--overdue-start']) {
+        const fg = SCHEME_TOKENS.includes(fgTok) ? declOf(sel, fgTok) : declOf(base, fgTok);
+        for (const surface of ['--bg', '--card']) {
+          const ratio = contrast(fg, declOf(sel, surface));
+          assert.ok(ratio >= 4.5, `${sel} ${fgTok} on ${surface}: ${ratio.toFixed(2)} < 4.5`);
+        }
+      }
+      const r = contrast(declOf(sel, '--accent-ink'), declOf(sel, '--accent'));
+      assert.ok(r >= 4.5, `${sel} --accent-ink on --accent: ${r.toFixed(2)} < 4.5`);
+    });
+  }
+}
+
+// Hardening: derived tokens stay derived, and the surface tokens stay distinct.
+for (const s of OTHER_SCHEMES) {
+  for (const [variant, sel, alpha] of [['light', lightSel(s), '0.14'], ['dark', darkSel(s), '0.18']]) {
+    test(`scheme ${s} ${variant}: --tick-glow is --accent at alpha ${alpha}`, () => {
+      const hex = declOf(sel, '--accent');
+      const m = /^#([0-9a-f]{6})$/i.exec(hex || '');
+      assert.ok(m, `${sel} --accent is ${hex}`);
+      const [r, g, b] = [0, 2, 4].map((i) => parseInt(m[1].slice(i, i + 2), 16));
+      assert.equal(declOf(sel, '--tick-glow'), `rgba(${r}, ${g}, ${b}, ${alpha})`);
+    });
+    test(`scheme ${s} ${variant}: --ink >= 4.5 on --chip-bg; line, grid-line, chip-bg and card differ from bg`, () => {
+      const ratio = contrast(declOf(sel, '--ink'), declOf(sel, '--chip-bg'));
+      assert.ok(ratio >= 4.5, `${sel} --ink on --chip-bg: ${ratio.toFixed(2)} < 4.5`);
+      const bg = declOf(sel, '--bg').toLowerCase();
+      for (const t of ['--line', '--grid-line', '--chip-bg', '--card']) {
+        assert.notEqual(declOf(sel, t).toLowerCase(), bg, `${sel} ${t} equals --bg`);
+      }
+    });
+  }
+}
+
+// An accent that sits next to an item-type colour reads as that type (a sage
+// accent beside the green Event block): every non-classic accent keeps a
+// Euclidean RGB distance of at least 40 from EVERY --type-* of its variant.
+const ACCENT_TYPE_MIN_DISTANCE = 40;
+const hexToRgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+for (const s of OTHER_SCHEMES) {
+  for (const [variant, sel, base] of [['light', lightSel(s), ':root'], ['dark', darkSel(s), '[data-theme="dark"]']]) {
+    test(`scheme ${s} ${variant}: --accent is >= ${ACCENT_TYPE_MIN_DISTANCE} RGB distance from every --type-* colour`, () => {
+      const types = declsOf(base).filter((d) => d.prop.startsWith('--type-'));
+      assert.equal(types.length, 7, `${base} declares seven --type-* tokens`);
+      const accent = hexToRgb(declOf(sel, '--accent'));
+      for (const t of types) {
+        const c = hexToRgb(declOf(base, t.prop));
+        const dist = Math.hypot(...accent.map((v, i) => v - c[i]));
+        assert.ok(dist >= ACCENT_TYPE_MIN_DISTANCE, `${sel} --accent vs ${t.prop}: ${dist.toFixed(1)} < ${ACCENT_TYPE_MIN_DISTANCE}`);
+      }
+    });
+  }
+}

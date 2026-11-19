@@ -15,7 +15,10 @@ import {
 } from './feeds.js';
 import { loadFeeds, saveFeeds, loadFeedCache, loadLaunches, QuotaError } from './storage.js';
 import { describeLaunches } from './freshness.js';
-import { getTimeFormat, getWeekStart, setTimeFormat, setWeekStart } from './prefs.js';
+import {
+  getTimeFormat, getWeekStart, setTimeFormat, setWeekStart,
+  SCHEMES, getScheme, setScheme, applyScheme,
+} from './prefs.js';
 import { initLinkUI } from './linkui.js';
 import { initAccountUI } from './accountui.js';
 import * as accountModule from './account.js';
@@ -32,6 +35,17 @@ import {
 } from './visibility.js';
 
 const CHOICES = ['light', 'dark', 'auto'];
+
+// Each scheme's --accent in the light and the dark theme, as the swatch colour
+// (the swatch shows what the scheme looks like NOW). tests/settings.test.js
+// ties every literal to styles.css; a new scheme needs an entry here.
+const SCHEME_SWATCH = {
+  classic: { light: '#8a5a3b', dark: '#8fa7c8' },
+  sage: { light: '#1f5149', dark: '#86b897' },
+  ocean: { light: '#1d4b87', dark: '#89c2e6' },
+  plum: { light: '#7d4075', dark: '#d69fcb' },
+};
+const SCHEME_LABEL = { classic: 'Classic', sage: 'Sage', ocean: 'Ocean', plum: 'Plum' };
 
 // Calendars are auto-assigned from FEED_PALETTE (js/palette.js) and cycle
 // through it on a tap of the colour dot.
@@ -263,6 +277,7 @@ export function initSettings({
       b.addEventListener('click', () => {
         try { localStorage.setItem(THEME_KEY, choice); } catch { /* private mode */ }
         applyTheme(choice);
+        paintSwatches();
         seg.querySelectorAll('button').forEach((x) => x.classList.remove('active'));
         b.classList.add('active');
       });
@@ -322,8 +337,51 @@ export function initSettings({
     };
     const time = prefRow('Time', 'time', [['12h', '12-hour'], ['24h', '24-hour']], getTimeFormat, setTimeFormat, paintUsage);
     const week = prefRow('Week starts', 'week', [['sun', 'Sunday'], ['mon', 'Monday']], getWeekStart, setWeekStart, () => {});
-    repaintPrefs = () => { time.repaint(); week.repaint(); paintUsage(); };
-    appearance.append(ah, themeRow, time.row, week.row, usage);
+    // Colours: same group/segmented-button shape as the rows above, but a
+    // failed write still applies the scheme for this session (as the theme row
+    // does) and says it will reset. Not wired to onDisplayPrefsChanged: no view
+    // reads a scheme, the stylesheet does.
+    const coloursRow = labelledRow('Colours', 'scheme');
+    const coloursSeg = document.createElement('div');
+    coloursSeg.className = 'seg seg-schemes';
+    const coloursNote = document.createElement('p');
+    coloursNote.className = 'note';
+    coloursNote.hidden = true;
+    const schemeButtons = [];
+    const paintSwatches = () => {
+      const variant = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+      for (const x of schemeButtons) x.swatch.style.background = SCHEME_SWATCH[x.value][variant];
+    };
+    const paintScheme = (value) => {
+      for (const x of schemeButtons) {
+        const on = x.value === value;
+        x.el.classList.toggle('active', on);
+        x.el.setAttribute('aria-pressed', String(on));
+      }
+    };
+    for (const scheme of SCHEMES) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = SCHEME_LABEL[scheme];
+      const swatch = document.createElement('span');
+      swatch.className = 'swatch';
+      swatch.setAttribute('aria-hidden', 'true');
+            b.appendChild(swatch);
+      schemeButtons.push({ value: scheme, el: b, swatch });
+      b.addEventListener('click', () => {
+        const saved = setScheme(scheme) && getScheme() === scheme;
+        applyScheme(scheme);
+        paintScheme(scheme);
+        coloursNote.textContent = saved ? '' : "Couldn't save this on this device; it will reset next time.";
+        coloursNote.hidden = saved;
+      });
+      coloursSeg.appendChild(b);
+    }
+    paintScheme(getScheme());
+    paintSwatches();
+    coloursRow.append(coloursSeg, coloursNote);
+    repaintPrefs = () => { time.repaint(); week.repaint(); paintScheme(getScheme()); paintSwatches(); paintUsage(); };
+    appearance.append(ah, themeRow, time.row, week.row, coloursRow, usage);
 
     // --- Linked calendars ---------------------------------------------
     //
@@ -950,6 +1008,7 @@ export function initSettings({
   // The inline pre-paint script already applied a theme from its own copy of this
   // logic; re-apply through resolveTheme() so js/theme.js is the source of truth.
   applyTheme(getSetting());
+  applyScheme(getScheme());
 
   return {
     // Renders the panel (re-rendered if already open), then the intent's form.

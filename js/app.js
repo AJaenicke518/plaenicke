@@ -16,7 +16,9 @@ import { renderIdeasView } from './ideasview.js';
 import { toISO, nowISO, localStamp } from './dateparse.js';
 import { buildMonthGrid, groupItemsByDate, monthCellSummary, chronoFirst, itemTypeClass } from './calendar.js';
 import { startOfWeek, addDays, formatTime, weekLabel, weekdayNames } from './timegrid.js';
-import { getTimeFormat, getWeekStart, TIME_FORMAT_KEY, WEEK_START_KEY } from './prefs.js';
+import {
+  getTimeFormat, getWeekStart, TIME_FORMAT_KEY, WEEK_START_KEY, SCHEME_KEY, getScheme, applyScheme,
+} from './prefs.js';
 import { parseViaWorker, decideFlow } from './smartadd.js';
 import { renderDayView } from './dayview.js';
 import { renderThreeDayView } from './threedayview.js';
@@ -1857,6 +1859,15 @@ window.addEventListener('storage', (e) => {
     onDisplayPrefsChanged();
     return;
   }
+  // The colour scheme is device-local too: another tab's choice (or a
+  // localStorage.clear(), key null) is applied here and an open panel
+  // repainted. No sync; null then falls through to the checks below, which
+  // ignore it.
+  if (e.key === SCHEME_KEY || e.key === null) {
+    applyScheme(getScheme());
+    settings.refreshDisplayPrefs();
+    if (e.key === SCHEME_KEY) return;
+  }
   if (!CROSS_TAB_KEYS.includes(e.key)) return;
   items = loadItems();
   feeds = loadFeeds();
@@ -1977,6 +1988,9 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
   // The other device may have written while this one was away: the deadline
   // import waits for this visit's first successful sync (C2, above).
+  // A scheme chosen in another tab while this one was away (its storage
+  // event is not guaranteed to have reached a suspended page).
+  applyScheme(getScheme());
   syncedSinceVisible = false;
   visit += 1;
   noteLaunch();
