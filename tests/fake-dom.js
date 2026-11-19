@@ -121,6 +121,13 @@ export class FakeElement {
     return walk(this);
   }
 
+  // Harness only: a layout box a test sets with `el._rect = {...}`; zeros otherwise.
+  getBoundingClientRect() {
+    const r = this._rect || {};
+    const top = r.top ?? 0; const left = r.left ?? 0; const width = r.width ?? 0; const height = r.height ?? 0;
+    return { top, left, width, height, bottom: top + height, right: left + width, x: left, y: top };
+  }
+
   click() { (this._listeners.click || []).forEach((fn) => fn({ target: this })); }
 
   // Harness only: records focus the way a browser reports it, so a test can

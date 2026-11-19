@@ -64,6 +64,13 @@ export function createCapture({
   later = (fn, ms) => setTimeout(fn, ms),
   clearLater = (handle) => clearTimeout(handle),
   follow = followVisualViewport,
+  // Called as a box closes, after its field blurs (app.js returns focus to the desktop dock).
+  restoreFocus = () => {},
+  // Extra controls that open this box (the desktop dock's buttons). Each is an
+  // element or { el, mic: true }. They mirror the round button's aria-expanded
+  // and disabled state; a mic one also mirrors its listening state (class and
+  // label). Nothing else.
+  openers: openerSpecs = [],
 } = {}) {
   // A missing wire would be a dead button, found only on the phone.
   for (const name of REQUIRED_ELS) {
@@ -76,6 +83,8 @@ export function createCapture({
   for (const [name, fn] of Object.entries({ isStandalone, submit, cancelSubmit, closePreviews, clearWhen, whenPicked, lockWhen })) {
     if (typeof fn !== 'function') throw new Error(`createCapture: ${name} must be a function`);
   }
+
+  const openers = openerSpecs.map((o) => (o && o.el ? o : { el: o, mic: false }));
 
   let mode = 'closed';
   let session = null; // voice.js's session while listening
@@ -94,6 +103,12 @@ export function createCapture({
     els.button.classList.toggle('listening', next === 'listening');
     els.button.setAttribute('aria-label', next === 'listening' ? 'Stop and add' : 'Capture by voice');
     els.button.setAttribute('aria-expanded', String(next !== 'closed'));
+    for (const o of openers) {
+      o.el.setAttribute('aria-expanded', String(next !== 'closed'));
+      if (!o.mic) continue;
+      o.el.classList.toggle('listening', next === 'listening');
+      o.el.setAttribute('aria-label', next === 'listening' ? 'Stop and add' : 'Capture by voice');
+    }
     // Read-only while listening, so a tap on the text does not raise the
     // keyboard by itself; the tap's handler decides (spec § 3 step 3).
     els.field.readOnly = next === 'listening';
@@ -165,6 +180,7 @@ export function createCapture({
 
   function setAdding(on) {
     els.button.disabled = on;
+    for (const o of openers) o.el.disabled = on;
     els.add.disabled = on;
     els.add.hidden = on || previewOpen;
     els.cancel.hidden = !on;
@@ -257,6 +273,7 @@ export function createCapture({
     if (els.box.classList.contains('typing')) els.box.classList.add('fade');
     els.box.classList.add('closing');
     els.field.blur();
+    restoreFocus();
     els.field.value = '';
     els.field.style.height = '';
     line.set('');
@@ -296,6 +313,17 @@ export function createCapture({
       return;
     }
     startListening();
+  }
+
+  // The dock's typing button (desktop): open in typing mode and never start
+  // voice, so a keyboard user on a computer gets no microphone prompt. A listen
+  // already running is stopped and its text kept.
+  function openTyping() {
+    if (adding !== null) return;
+    stopListening();
+    open();
+    setMode('typing');
+    focusField();
   }
 
   els.button.addEventListener('click', tapButton);
@@ -349,6 +377,18 @@ export function createCapture({
   setMode('closed');
 
   return {
+    openTyping,
+    // The layout changed under an open box (app.js): close it.
+    close,
+    // The window crossed the desktop gate under an open box: swap in the
+    // follower that suits the new layout. The text and mode are untouched.
+    replace() {
+      if (mode === 'closed' || els.box.hidden || !stopFollow) return;
+      stopFollow();
+      stopFollow = follow(els.box, { maxShare: CAPTURE_MAX_SHARE, transform: CAPTURE_TRANSFORM });
+    },
+    // The round button's own tap, for the dock's mic button.
+    tap: tapButton,
     // Stop a listen and keep its text (page hidden, a sheet or Settings opening).
     stopAndKeep() { if (stopListening()) line.set(M.stopped); },
     // This box's preview closed without being confirmed: a newer Add, its

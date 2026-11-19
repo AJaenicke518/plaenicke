@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { SCHEMES } from '../js/prefs.js';
+import { DESKTOP_QUERY, WIDE_QUERY } from '../js/layout.js';
 
 // styles.test.js — the first CSS test in this repo, and it exists for one
 // reason: the failure it guards is silent and visual, so nothing else can
@@ -28,6 +29,24 @@ import { SCHEMES } from '../js/prefs.js';
 const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8')
   .replace(/\/\*[\s\S]*?\*\//g, '');
 
+// The one desktop layout block (option A). Defined up here because rulesOf
+// skips exactly this prelude. 46rem = the 44rem column plus the body's two
+// 16px gutters, so the column is already full width where the block starts and
+// nothing jumps.
+const DESKTOP = '@media (min-width: 46rem) and (hover: hover) and (pointer: fine)';
+// The wide block: a SIBLING of the gate (not nested), carrying the full WIDE_QUERY string.
+const WIDE = `@media ${WIDE_QUERY}`;
+
+
+// The PHONE stylesheet: only rules outside every @media (at === null). The
+// default helpers skip the desktop gate but still read reduced-motion blocks;
+// the pins that Release 3's gate rules could shadow read this instead, so a gate
+// value can never be mistaken for the phone's (Task 3, amendment I-9).
+function phoneRules() {
+  return rulesInContext(css).filter((r) => r.at === null && r.sel !== null);
+}
+const phoneCss = phoneRules().map((r) => `${r.sel} {${r.body}}`).join('\n');
+
 // --- reading the WINNING declaration (sweep S-11) --------------------------
 //
 // Every declaration of every rule whose selector list contains `selector`
@@ -41,7 +60,14 @@ const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8')
 // fixes 2, C7): the old regex read `@media (…) { .x { … } }` as one rule whose
 // selector was the prelude, so nothing inside an @media was ever checked.
 // Braces that do not balance throw rather than yield a partial parse.
-function rulesOf(source) {
+//
+// The desktop block (exactly the DESKTOP prelude) is SKIPPED by default: callers
+// that ask what the PHONE gets would otherwise read a desktop value as the
+// phone's (last declaration wins). A guard of the form "no rule ANYWHERE does
+// X" must see that block too: pass `all = true`. The desktop block itself is
+// read through rulesInContext, which keeps the prelude. prefers-reduced-motion
+// blocks are always read.
+function rulesOf(source, all = false) {
   const out = [];
   let depth = 0;
   let start = 0;
@@ -56,8 +82,9 @@ function rulesOf(source) {
       if (depth < 0) throw new Error(`unbalanced braces at ${i}`);
       if (depth === 0) {
         const body = source.slice(bodyStart, i);
-        if (prelude.startsWith('@')) out.push(...rulesOf(body));
-        else out.push({ sel: prelude, body });
+        if (prelude.startsWith('@')) {
+          if (all || ![DESKTOP, WIDE].includes(prelude.replace(/\s+/g, ' '))) out.push(...rulesOf(body, all));
+        } else out.push({ sel: prelude, body });
         start = i + 1;
       }
     }
@@ -124,6 +151,22 @@ function lineHeightOf(selector) {
   const v = declOf(selector, 'line-height');
   return v === null ? null : parseFloat(v);
 }
+
+test('the desktop @media block does not leak into declOf (desktop values are not phone values)', () => {
+  const src = `.a { max-width: none; } ${DESKTOP} { .a { max-width: 44rem; } } `
+    + '@media (prefers-reduced-motion: reduce) { .a { color: red; } }';
+  assert.equal(declOf('.a', 'max-width', src), 'none');
+  assert.equal(declOf('.a', 'color', src), 'red', 'a reduced-motion block is still read');
+  assert.equal(declOf('.b', 'max-width', `${DESKTOP} { .b { max-width: 44rem; } }`), null);
+});
+
+test('rulesOf skips the desktop block by default and sees it with all = true', () => {
+  const src = `.a { color: red; } ${DESKTOP} { input { font-size: 14px; } }`;
+  assert.deepEqual(rulesOf(src).map((r) => r.sel), ['.a']);
+  assert.deepEqual(rulesOf(src, true).map((r) => r.sel), ['.a', 'input']);
+  assert.deepEqual(rulesOf('@media (min-width: 30rem) { .b { color: red; } }').map((r) => r.sel), ['.b'],
+    'only the exact desktop prelude is skipped, not any min-width block');
+});
 
 test('declOf reads the winning declaration, shorthands included (S-11)', () => {
   assert.equal(declOf('.a', 'padding-bottom', '.a { padding-bottom: 5px; padding: 1px 2px 3px; }'), '3px',
@@ -206,9 +249,9 @@ test('.sheet button is at least 44px tall', () => {
 });
 
 test('.sheet scrolls inside itself and clears the home indicator', () => {
-  assert.equal(declOf('.sheet', 'max-height'), '85dvh');
-  assert.equal(declOf('.sheet', 'overflow-y'), 'auto');
-  assert.equal(declOf('.sheet', 'padding-bottom'), 'env(safe-area-inset-bottom)');
+  assert.equal(declOf('.sheet', 'max-height', phoneCss), '85dvh');
+  assert.equal(declOf('.sheet', 'overflow-y', phoneCss), 'auto');
+  assert.equal(declOf('.sheet', 'padding-bottom', phoneCss), 'env(safe-area-inset-bottom)');
 });
 
 // --- the open control (edit-items plan, Task 4a) ---------------------------
@@ -271,7 +314,7 @@ test('the sheet top bar is sticky, so Save stays reachable while the form scroll
 // styles.css, the toast's top is 130-134px up, so it can still cover the
 // last 2-6px of the last row (see the comment on body's padding-bottom).
 test('body leaves room at the bottom for the tab bar, the capture button and the toast', () => {
-  assert.equal(declOf('body', 'padding-bottom'), 'calc(56px + 80px + env(safe-area-inset-bottom))');
+  assert.equal(declOf('body', 'padding-bottom', phoneCss), 'calc(56px + 80px + env(safe-area-inset-bottom))');
 });
 
 // 2026-10-26 (Alex approved): the band grew 72px -> 80px so the toast clears
@@ -281,8 +324,8 @@ test('body leaves room at the bottom for the tab bar, the capture button and the
 // (56 + 80 = 136px) must be at least that.
 test('the body padding clears the toast\'s top edge (computed from styles.css)', () => {
   const sum = (v) => [...v.matchAll(/(\d+)px/g)].reduce((n, m) => n + Number(m[1]), 0);
-  const pad = sum(declOf('body', 'padding-bottom'));
-  const toastBottom = sum(declOf('.toast', 'bottom'));
+  const pad = sum(declOf('body', 'padding-bottom', phoneCss));
+  const toastBottom = sum(declOf('.toast', 'bottom', phoneCss));
   for (const toastHeight of [62, 66]) {
     assert.ok(pad >= toastBottom + toastHeight, `${pad}px < ${toastBottom + toastHeight}px`);
   }
@@ -358,7 +401,7 @@ test('dark mode sets color-scheme and a darker scrim', () => {
 
 // U5
 test('the sheet contains its own overscroll', () => {
-  assert.equal(declOf('.sheet', 'overscroll-behavior'), 'contain');
+  assert.equal(declOf('.sheet', 'overscroll-behavior', phoneCss), 'contain');
 });
 
 // U9: a Day block's title sits at the top-left, not centred in the button.
@@ -528,7 +571,7 @@ for (const sel of CONTROL_RULES) {
 }
 
 test('the item sheet uses the sheet radius on its top corners', () => {
-  assert.equal(declOf('.sheet', 'border-radius'), 'var(--radius-sheet) var(--radius-sheet) 0 0');
+  assert.equal(declOf('.sheet', 'border-radius', phoneCss), 'var(--radius-sheet) var(--radius-sheet) 0 0');
 });
 
 // --- home-screen stage 2: 16px on every input (spec § 5) --------------------
@@ -574,7 +617,7 @@ test('fontShorthandSize reads the size out of a font shorthand', () => {
 test('no rule that targets a form control sets a font-size under 16px', () => {
   const offenders = [];
   let seen = 0;
-  for (const { sel, body } of rulesOf(css)) { // opens @media blocks (review 2026-10-27)
+  for (const { sel, body } of rulesOf(css, true)) { // opens @media blocks (review 2026-10-27)
     const selectors = sel.split(',').map((x) => x.trim().replace(/\s+/g, ' '));
     if (!selectors.some((s) => CONTROL_SELECTOR.test(s))) continue;
     seen += 1;
@@ -636,7 +679,7 @@ for (const [sel, size] of Object.entries(CALENDAR_SIZES)) {
 const NEW_SCREEN = /\.(today-|tab-|cal-switch|wlist-|capture-|cap-(when|field)|status-line|tday-head(?![\w-])|tday-allday-label(?![\w-])|sheet-tags?(?![\w-]))/;
 test('only the new screens read the new type scale', () => {
   const readers = [];
-  for (const [, sel, body] of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+  for (const { sel, body } of rulesOf(css, true)) {
     if (/var\(--(text-label|text-row|text-title|text-hero|label-tracking|sans)\)/.test(body)) readers.push(sel.trim());
   }
   assert.ok(readers.length >= 3, `fixture check: found ${readers.length} readers`);
@@ -929,12 +972,20 @@ test('a pressed Today row is tinted, not dimmed like a pressed button', () => {
 test('no rule styles Today through an id', () => {
   const sels = [...css.matchAll(/([^{}]+)\{/g)].map((m) => m[1].trim()).filter((sel) => /today/.test(sel));
   assert.ok(sels.length >= 10, `fixture check: found ${sels.length} Today rules`);
-  for (const sel of sels) assert.doesNotMatch(sel, /#/, sel);
+  // The bare #today-view container (desktop column, width props only; pinned
+  // by its own test at the end of this file) is the one allowed id: it is not
+  // a row, so it cannot outrank a row's .pressed tint. Only an exact
+  // `#today-view` selector part is removed before the whole selector is
+  // checked; any other part in the list still fails.
+  for (const sel of sels) {
+    const rest = sel.split(',').map((x) => x.trim()).filter((x) => x !== '#today-view').join(',');
+    assert.doesNotMatch(rest, /#/, sel);
+  }
 });
 
 test('every Today colour is a theme token, so dark mode follows', () => {
   let seen = 0;
-  for (const { sel, body } of rulesOf(css)) {
+  for (const { sel, body } of rulesOf(css, true)) {
     if (!/\.today-/.test(sel)) continue;
     for (const decl of body.split(';')) {
       const i = decl.indexOf(':');
@@ -1003,7 +1054,7 @@ test('a Week list row stays on one line, its time leading in a 64px column', () 
 
 test('every Week list colour is a token', () => {
   let seen = 0;
-  for (const { sel, body } of rulesOf(css)) {
+  for (const { sel, body } of rulesOf(css, true)) {
     if (!/\.wlist/.test(sel)) continue;
     for (const decl of body.split(';')) {
       const i = decl.indexOf(':');
@@ -1021,14 +1072,14 @@ test('every Week list colour is a token', () => {
 
 // --- home-screen stage 3c: the tab bar and the switcher (spec § 4) ----------
 test('the tab bar is fixed at the bottom, 56px plus the home-indicator inset', () => {
-  assert.equal(declOf('.tab-bar', 'position'), 'fixed');
-  assert.equal(declOf('.tab-bar', 'bottom'), '0');
-  assert.equal(declOf('.tab-bar', 'left'), '0');
-  assert.equal(declOf('.tab-bar', 'right'), '0');
-  assert.equal(declOf('.tab-bar', 'height'), 'calc(56px + env(safe-area-inset-bottom))');
-  assert.equal(declOf('.tab-bar', 'padding-bottom'), 'env(safe-area-inset-bottom)');
-  assert.equal(declOf('.tab-bar', 'background'), 'var(--card)');
-  assert.equal(declOf('.tab-bar', 'border-top'), '1px solid var(--line)');
+  assert.equal(declOf('.tab-bar', 'position', phoneCss), 'fixed');
+  assert.equal(declOf('.tab-bar', 'bottom', phoneCss), '0');
+  assert.equal(declOf('.tab-bar', 'left', phoneCss), '0');
+  assert.equal(declOf('.tab-bar', 'right', phoneCss), '0');
+  assert.equal(declOf('.tab-bar', 'height', phoneCss), 'calc(56px + env(safe-area-inset-bottom))');
+  assert.equal(declOf('.tab-bar', 'padding-bottom', phoneCss), 'env(safe-area-inset-bottom)');
+  assert.equal(declOf('.tab-bar', 'background', phoneCss), 'var(--card)');
+  assert.equal(declOf('.tab-bar', 'border-top', phoneCss), '1px solid var(--line)');
 });
 
 test('layers: tab bar 5 < capture button 6 < capture box 8 < settings 10 < item sheet 15 < toast 20 (spec § 4)', () => {
@@ -1069,15 +1120,15 @@ test('the Settings backdrop can be fitted to the visual viewport by an inline to
 });
 
 test('the toast sits above the tab bar and clears the capture button\'s corner', () => {
-  assert.equal(declOf('.toast', 'bottom'), 'calc(56px + 12px + env(safe-area-inset-bottom))');
-  assert.equal(declOf('.toast', 'right'), '88px');
-  assert.equal(declOf('.toast', 'left'), '16px');
+  assert.equal(declOf('.toast', 'bottom', phoneCss), 'calc(56px + 12px + env(safe-area-inset-bottom))');
+  assert.equal(declOf('.toast', 'right', phoneCss), '88px');
+  assert.equal(declOf('.toast', 'left', phoneCss), '16px');
 });
 
 test('a tab is a 44px target; the active one is in the accent', () => {
-  assert.ok(px(declOf('.tab-bar button', 'min-height')) >= 44);
-  assert.equal(declOf('.tab-bar button', 'font-size'), 'var(--text-label)');
-  assert.equal(declOf('.tab-bar button.active', 'color'), 'var(--accent)');
+  assert.ok(px(declOf('.tab-bar button', 'min-height', phoneCss)) >= 44);
+  assert.equal(declOf('.tab-bar button', 'font-size', phoneCss), 'var(--text-label)');
+  assert.equal(declOf('.tab-bar button.active', 'color', phoneCss), 'var(--accent)');
 });
 
 test('the tab title is 20px; Today\'s own heading stays 28px', () => {
@@ -1211,14 +1262,14 @@ test('index.html puts the capture button after both hosts, as siblings in body',
 });
 
 test('the capture box sits just above the button, and 8px above the keyboard while typing', () => {
-  assert.equal(declOf('.capture-box', '--capture-lift'), 'calc(56px + 16px + 56px + 8px + env(safe-area-inset-bottom))');
-  assert.equal(declOf('.capture-box', 'bottom'), 'var(--capture-lift)');
-  assert.equal(declOf('.capture-box.typing', '--capture-lift'), '8px');
-  assert.equal(declOf('.capture-box', 'position'), 'fixed');
-  assert.equal(declOf('.capture-box', 'left'), '16px');
-  assert.equal(declOf('.capture-box', 'right'), '16px');
-  assert.equal(declOf('.capture-box', 'max-height'), '50dvh');
-  assert.equal(declOf('.capture-box[hidden]', 'display'), 'none');
+  assert.equal(declOf('.capture-box', '--capture-lift', phoneCss), 'calc(56px + 16px + 56px + 8px + env(safe-area-inset-bottom))');
+  assert.equal(declOf('.capture-box', 'bottom', phoneCss), 'var(--capture-lift)');
+  assert.equal(declOf('.capture-box.typing', '--capture-lift', phoneCss), '8px');
+  assert.equal(declOf('.capture-box', 'position', phoneCss), 'fixed');
+  assert.equal(declOf('.capture-box', 'left', phoneCss), '16px');
+  assert.equal(declOf('.capture-box', 'right', phoneCss), '16px');
+  assert.equal(declOf('.capture-box', 'max-height', phoneCss), '50dvh');
+  assert.equal(declOf('.capture-box[hidden]', 'display', phoneCss), 'none');
 });
 
 test('the capture panel has the sheet radius and a shadow, and scrolls inside itself', () => {
@@ -1326,8 +1377,8 @@ test('3-day: headings, All-day strip and grid share one column template: a gutte
 });
 
 test('3-day: the grid scrolls inside itself, as Day\'s does', () => {
-  assert.equal(declOf('.tday-grid', 'max-height'), declOf('.day-grid', 'max-height'));
-  assert.equal(declOf('.tday-grid', 'overflow-y'), 'auto');
+  assert.equal(declOf('.tday-grid', 'max-height', phoneCss), declOf('.day-grid', 'max-height', phoneCss));
+  assert.equal(declOf('.tday-grid', 'overflow-y', phoneCss), 'auto');
   assert.equal(declOf('.tday-col', 'position'), 'relative');
   assert.equal(declOf('.tday-col', 'min-width'), '0');
 });
@@ -1371,7 +1422,7 @@ test('3-day: the hour labels and blocks keep Day\'s compact sizes', () => {
 
 test('every 3-day colour is a token', () => {
   let seen = 0;
-  for (const { sel, body } of rulesOf(css)) {
+  for (const { sel, body } of rulesOf(css, true)) {
     if (!/\.tday/.test(sel)) continue;
     for (const decl of body.split(';')) {
       const i = decl.indexOf(':');
@@ -1590,6 +1641,402 @@ for (const s of OTHER_SCHEMES) {
     });
   }
 }
+
+// --- desktop layout, option A (spec 2026-11-13-desktop-layout-options.md) ----
+// One width-gated block. hover/pointer keep a large iPhone in landscape
+// (~932px) on the phone layout. rulesInContext keeps the prelude, so this reads
+// the block itself; the default helpers deliberately do not see it.
+const desktopRules = rulesInContext(css).filter((r) => r.at === DESKTOP);
+const wideRules = rulesInContext(css).filter((r) => r.at === WIDE);
+function desktopDecls(selector, rules = desktopRules) {
+  const out = [];
+  for (const { sel, body } of rules) {
+    if (!sel.split(',').map((x) => x.trim().replace(/\s+/g, ' ')).includes(selector)) continue;
+    for (const decl of body.split(';')) {
+      const i = decl.indexOf(':');
+      if (i >= 0) out.push({ prop: decl.slice(0, i).trim().toLowerCase(), value: decl.slice(i + 1).trim() });
+    }
+  }
+  return out;
+}
+function desktopOf(selector, prop, rules = desktopRules) {
+  const d = desktopDecls(selector, rules).filter((x) => x.prop === prop);
+  return d.length ? d[d.length - 1].value : null;
+}
+const wideOf = (selector, prop) => desktopOf(selector, prop, wideRules);
+
+// Desktop A's centred 44rem column is gone (Release 3 replaces it with panes).
+// The gate block stays, with only what the wrappers need until Task 3.
+test('the gate block no longer holds desktop A\'s centred-column rules', () => {
+  // .sheet, .toast, .tab-bar and .tab-bar button now belong to the gate (Task 3, rail and chrome).
+  for (const sel of ['#today-view', '#todo-view', '#ideas-view', '.wlist',
+    '#cal-switch button']) {
+    assert.deepEqual(desktopDecls(sel), [], `${sel} must not appear in the gate block`);
+  }
+  for (const { body } of desktopRules) assert.doesNotMatch(body, /44rem|22rem/);
+});
+
+test('the gate prelude is exactly the DESKTOP_QUERY exported by js/layout.js', () => {
+  assert.equal(DESKTOP, `@media ${DESKTOP_QUERY}`);
+  assert.ok(css.replace(/\s+/g, ' ').includes(`${DESKTOP} {`), 'styles.css has a block with that exact prelude');
+});
+
+test('the gate restates [hidden] for the two pane wrappers it may later give a display', () => {
+  assert.equal(desktopOf('#pane-main[hidden]', 'display'), 'none');
+  assert.equal(desktopOf('#pane-right[hidden]', 'display'), 'none');
+  assert.equal(desktopOf('#pane-left[hidden]', 'display'), 'none');
+});
+
+// The Computer layout row means nothing on a phone: hidden outside the gate,
+// shown (restated, not removed) inside it.
+test('the Computer layout row is hidden outside the gate and shown inside it', () => {
+  assert.equal(declOf('.settings-row-desktop-only', 'display'), 'none');
+  assert.equal(desktopOf('.settings-row-desktop-only', 'display'), 'block');
+});
+
+// --- pane wrappers (Release 3, Task 1) ------------------------------------------
+const WRAPPERS = ['.panes', '.pane-left', '.pane-main', '.pane-right'];
+test('outside the gate the pane wrappers are display: contents', () => {
+  for (const sel of WRAPPERS) assert.equal(declOf(sel, 'display'), 'contents', sel);
+});
+
+test('the display: contents rule precedes the gate block in source order', () => {
+  const rule = css.search(/\.panes\s*,\s*\.pane-left\s*,\s*\.pane-main\s*,\s*\.pane-right\s*\{/);
+  const gate = css.search(/@media \(min-width: 46rem\)/);
+  assert.ok(rule > -1, 'the combined wrappers rule exists');
+  assert.ok(gate > -1, 'the gate exists');
+  assert.ok(rule < gate, 'a later display: contents would override the desktop grid');
+});
+
+test('the docked capture row is sticky at the top of the left pane inside the gate only, opaque over the rows', () => {
+  assert.equal(desktopOf('.capture-dock', 'position'), 'sticky');
+  assert.equal(desktopOf('.capture-dock', 'top'), '0');
+  assert.ok(Number(desktopOf('.capture-dock', 'z-index')) >= 1, 'above the Today rows');
+  assert.equal(desktopOf('.capture-dock', 'background'), 'var(--bg)', 'rows do not show through');
+  assert.notEqual(desktopOf('.capture-dock', 'padding-bottom'), null, 'its gap is padding, so the background covers it');
+  assert.equal(desktopOf('.capture-dock', 'margin-bottom'), null, 'a margin would let rows show through the gap');
+  assert.notEqual(declOf('.capture-dock', 'position'), 'sticky', 'not outside the gate');
+});
+
+test('.capture-dock is display: none outside the gate', () => {
+  assert.equal(declOf('.capture-dock', 'display'), 'none');
+});
+
+test('no rule outside the gate mentions data-layout or .pane-/.panes except the display: contents rule', () => {
+  for (const { at, sel } of rulesInContext(css)) {
+    if (sel === null || at === DESKTOP || at === WIDE) continue;
+    if (/data-layout|\.pane|#pane-/.test(sel)) {
+      if (sel === '.pane-heading') continue; // hidden outside the gate (Task 4)
+      assert.equal(sel.replace(/\s+/g, ' '), '.panes, .pane-left, .pane-main, .pane-right', sel);
+    }
+  }
+});
+
+test('the desktop media query is the only non-reduced-motion @media, and keeps phones on the phone layout', () => {
+  assert.ok(desktopRules.length > 0, 'the desktop block exists');
+  const preludes = rulesInContext(css).map((r) => r.at)
+    .filter((a) => a && a.startsWith('@media') && !/prefers-reduced-motion/.test(a));
+  assert.deepEqual([...new Set(preludes)], [DESKTOP, WIDE], 'exactly two such @media: the desktop block and the wide block');
+  const m = DESKTOP.match(/^@media \(min-width: ([\d.]+)rem\) and \(hover: hover\) and \(pointer: fine\)$/);
+  assert.ok(m, 'width gate plus hover and fine pointer, nothing else');
+  assert.equal(Number(m[1]), 46);
+});
+
+const PAINT_PROP = /^(--|color$|.*-color$|background|border(?!-radius)|outline|box-shadow|fill|stroke)/;
+test('desktop block: no colour, background, border, outline, shadow or custom-property changes', () => {
+  assert.ok(PAINT_PROP.test('--card') && PAINT_PROP.test('accent-color') && PAINT_PROP.test('box-shadow')
+    && PAINT_PROP.test('border-top') && !PAINT_PROP.test('border-radius') && !PAINT_PROP.test('max-width'),
+    'fixture check: the ban matches what it should');
+  for (const { sel, body } of [...desktopRules, ...wideRules]) {
+    for (const decl of body.split(';')) {
+      const i = decl.indexOf(':');
+      if (i < 0) continue;
+      const prop = decl.slice(0, i).trim().toLowerCase();
+      // The rail's one structural exception: its divider moves from the top edge to the right edge.
+      if (sel === '.tab-bar' && (prop === 'border-top' || prop === 'border-right')) continue;
+      // The sticky dock's one exception: it needs the page background so the Today rows scrolling under it do not show through.
+      if (sel === '.capture-dock' && prop === 'background' && /^var\(--bg\)$/.test(decl.slice(decl.indexOf(':') + 1).trim())) continue;
+      assert.doesNotMatch(prop, PAINT_PROP, `${sel}: ${prop}`);
+    }
+  }
+});
+
+// Pins the PHONE layout of every selector the desktop block touches, as it was
+// when desktop A shipped (2026-11-17). The default helpers skip min-width
+// blocks, so these are phone values. When the phone design changes on purpose,
+// update this table deliberately; a failure here means a phone rule moved.
+const PHONE_AT_DESKTOP_A = {
+  // `header` itself is untouched by the block now (body > header is).
+  'body > header': '',
+  '.tab-bar': 'position:fixed;left:0;right:0;bottom:0;z-index:5;display:flex;height:calc(56px + env(safe-area-inset-bottom));padding-bottom:env(safe-area-inset-bottom);background:var(--card);border-top:1px solid var(--line)',
+  '.tab-bar button': 'flex:1;min-height:44px;padding:0;border-radius:0;background:transparent;color:var(--muted);font-family:var(--sans);font-size:var(--text-label)',
+  '.toast': 'position:fixed;left:16px;right:88px;bottom:calc(56px + 12px + env(safe-area-inset-bottom));display:flex;align-items:center;justify-content:space-between;gap:12px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:8px 12px;box-shadow:0 4px 16px rgba(0, 0, 0, 0.25);z-index:20',
+  '.capture-btn': 'position:fixed;right:16px;bottom:calc(56px + 16px + env(safe-area-inset-bottom));z-index:6;width:56px;height:56px;padding:0;display:flex;align-items:center;justify-content:center;border-radius:var(--radius-round);background:var(--accent);color:var(--accent-ink)',
+  '.capture-box': '--capture-lift:calc(56px + 16px + 56px + 8px + env(safe-area-inset-bottom));position:fixed;left:16px;right:16px;bottom:var(--capture-lift);max-height:50dvh;z-index:8;display:flex;flex-direction:column',
+  // These ids have no phone rule at all (they are styled by class).
+  '#sync-indicator': '', '#account-banner': '', '#status-line': '', '#cal-switch': '',
+  '#cal-switch button': '', '#today-view': '', '#day-view': '', '#three-day-view': '',
+  '#todo-view': '', '#ideas-view': '', '#pane-left': '', '#pane-main': '', '#pane-right': '',
+  '.wlist': 'margin-top:var(--space-5)',
+  '.settings-row-desktop-only': 'display:none',
+  // Pane wrappers and the Day/3-day scroll containers (Task 3).
+  '.panes': 'display:contents', '.pane-left': 'display:contents', '.pane-main': 'display:contents', '.pane-right': 'display:contents',
+  '#day-body': '', '#three-day-body': '',
+  // The docked capture row and the pane headings are display: none on the phone (Task 4).
+  '.capture-dock': 'display:none', '.pane-heading': 'display:none',
+  '.capture-panel': 'min-height:0;overflow-y:auto;overscroll-behavior:contain;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:var(--radius-sheet);padding:var(--space-3) var(--space-3) 0;box-shadow:0 4px 16px var(--shade);transform-origin:bottom right',
+  '.day-grid': 'display:flex;background:var(--card);border:1px solid var(--line);border-radius:6px;max-height:60vh;overflow-y:auto',
+  '.tday-grid': 'display:grid;grid-template-columns:36px repeat(3, minmax(0, 1fr));background:var(--card);border:1px solid var(--line);border-top:none;border-radius:0 0 6px 6px;max-height:60vh;overflow-y:auto',
+  '[data-layout="planner"] .panes': '', '[data-layout="month"] .panes': '', '[data-layout="all"] .panes': '', '[data-layout="all"] .pane-right': '', '[data-layout="all"] #todo-view': '', '[data-layout="all"] #ideas-view': '',
+  'body': 'margin:0;font-family:var(--serif);background:var(--bg);color:var(--ink);padding:env(safe-area-inset-top) 16px 40px;padding-bottom:calc(56px + 80px + env(safe-area-inset-bottom));line-height:1.5',
+  '.sheet': 'position:fixed;left:0;right:0;bottom:0;max-height:85dvh;overflow-y:auto;background:var(--card);color:var(--ink);border-top:1px solid var(--line);border-radius:var(--radius-sheet) var(--radius-sheet) 0 0;padding:0 16px;padding-bottom:env(safe-area-inset-bottom);box-shadow:0 -4px 16px rgba(0, 0, 0, 0.2);overscroll-behavior:contain',
+};
+test('every selector the desktop block touches keeps its pinned phone value', () => {
+  const sels = new Set();
+  // Wrapper rules carry a [hidden] attribute selector; the phone value is that of the bare id.
+  for (const { sel } of [...desktopRules, ...wideRules]) for (const x of sel.split(',')) sels.add(x.trim().replace(/\s+/g, ' ').replace(/\[hidden\]$/, ''));
+  for (const sel of sels) {
+    assert.ok(sel in PHONE_AT_DESKTOP_A, `the block touches ${sel}, which this table does not pin`);
+  }
+  for (const [sel, expected] of Object.entries(PHONE_AT_DESKTOP_A)) {
+    const got = declsOf(sel, phoneCss).map((d) => `${d.prop}:${d.value}`).join(';');
+    assert.equal(got, expected, `${sel}: phone declarations changed`);
+  }
+});
+
+test('a bare #today-view rule exists only inside the desktop block and sets only width props', () => {
+  const bare = rulesInContext(css).filter((r) => r.sel !== null
+    && r.sel.split(',').map((x) => x.trim()).includes('#today-view'));
+  for (const r of bare) {
+    assert.equal(r.at, DESKTOP, '#today-view may be styled only inside the desktop block');
+    const props = r.body.split(';').map((d) => d.split(':')[0].trim().toLowerCase()).filter(Boolean);
+    assert.deepEqual([...new Set(props)].sort(), ['margin-inline', 'max-width'],
+      '#today-view may set only max-width and margin-inline (anything else inherits into Today rows)');
+  }
+});
+
+// --- Task 3: grid, rail and desktop chrome (gate only) --------------------------
+const RAIL = '4.5rem';
+const SECTION_IDS = ['#today-view', '#calendar-view', '#week-view', '#three-day-view', '#day-view', '#todo-view', '#ideas-view'];
+
+test('the wide block is a sibling of the gate with the exact WIDE_QUERY prelude', () => {
+  assert.equal(WIDE, `@media ${WIDE_QUERY}`);
+  assert.ok(wideRules.length > 0, 'the wide block exists');
+  assert.ok(css.replace(/\s+/g, ' ').includes(`${WIDE} {`));
+});
+
+test('gate: .panes is a grid that fills the space under the header and owns the only scroll', () => {
+  assert.equal(desktopOf('.panes', 'display'), 'grid');
+  assert.equal(desktopOf('.panes', 'flex'), '1');
+  assert.equal(desktopOf('.panes', 'min-height'), '0');
+  assert.equal(desktopOf('.panes', 'grid-template-rows'), 'minmax(0, 1fr)');
+});
+
+// At the gate's floor (46rem) with classic 15px scrollbars nothing may overflow
+// sideways: rail + gutters + the two column minimums + a 1rem allowance fit.
+test('gate: the column minimums, rail and gutters fit the 46rem floor with a 1rem allowance', () => {
+  const rem = (v) => { const m = /^([\d.]+)rem$/.exec(v); assert.ok(m, `${v} is in rem`); return Number(m[1]); };
+  const space4 = Number(/--space-4:\s*(\d+)px/.exec(css)[1]) / 16;
+  const [leftMin, mainMin] = [...desktopOf('.panes', 'grid-template-columns').matchAll(/minmax\(([\d.]+rem)/g)].map((m) => rem(m[1]));
+  assert.equal(desktopOf('.panes', 'padding-left'), 'var(--space-4)');
+  assert.equal(desktopOf('.panes', 'gap'), 'var(--space-4)');
+  assert.equal(Number(/\nbody \{[^}]*?padding: env\(safe-area-inset-top\) (\d+)px/.exec(css)[1]) / 16, space4, 'the body\'s right gutter is one --space-4');
+  const rail = rem(desktopOf('body', 'padding-left'));
+  const total = rail + space4 /* panes padding */ + leftMin + space4 /* gap */ + mainMin + space4 /* right gutter */ + 1;
+  assert.ok(total <= 46, `${total}rem must fit in 46rem`);
+});
+
+test('gate: columns per [data-layout]; .pane-right is a third column only in wide-all', () => {
+  // The big pane never goes below 20rem: at 736px (the gate's floor plus a
+  // little) a bare 1fr left it 200px and the Week view scrolled sideways, and
+  // at 18.5rem its own 15px scrollbar still left it 1px short.
+  const left = 'minmax(17rem, 26rem)';
+  const main = 'minmax(20rem, 1fr)';
+  assert.equal(desktopOf('.panes', 'grid-template-columns'), `${left} ${main}`);
+  for (const l of ['planner', 'month', 'all']) {
+    assert.equal(desktopOf(`[data-layout="${l}"] .panes`, 'grid-template-columns'), `${left} ${main}`, l);
+  }
+  assert.equal(wideOf('[data-layout="all"] .panes', 'grid-template-columns'), `${left} ${main} minmax(18rem, 22rem)`);
+  assert.equal(wideOf('[data-layout="all"] .pane-right', 'grid-column'), '3');
+  // To-do and Ideas share the wide right column as two rows, each its own scroller.
+  assert.equal(wideOf('[data-layout="all"] .pane-right', 'display'), 'grid');
+  assert.equal(wideOf('[data-layout="all"] .pane-right', 'grid-template-rows'), 'minmax(0, 3fr) minmax(0, 2fr)');
+  assert.equal(wideOf('[data-layout="all"] .pane-right[hidden]', 'display'), 'none', 'the display above must restate [hidden]');
+  for (const sel of ['[data-layout="all"] #todo-view', '[data-layout="all"] #ideas-view']) {
+    assert.equal(wideOf(sel, 'overflow'), 'auto', sel);
+    assert.equal(wideOf(sel, 'min-height'), '0', sel);
+  }
+  assert.equal(desktopOf('[data-layout="all"] .pane-right', 'grid-column'), null, 'below wide, all has no third column');
+  // Outside wide-all, the right pane shares the big pane's cell.
+  for (const sel of ['.pane-main', '.pane-right']) {
+    assert.equal(desktopOf(sel, 'grid-column'), '2', sel);
+    assert.equal(desktopOf(sel, 'grid-row'), '1', sel);
+  }
+  assert.equal(desktopOf('.pane-left', 'grid-column'), '1');
+  assert.equal(desktopOf('.pane-left', 'grid-row'), '1');
+  assert.equal(wideOf('[data-layout="all"] .pane-right', 'grid-row'), '1');
+});
+
+test('gate: each pane is a flex column with its own scroll and no min-size trap', () => {
+  for (const sel of ['.pane-left', '.pane-main', '.pane-right']) {
+    assert.equal(desktopOf(sel, 'display'), 'flex', sel);
+    assert.equal(desktopOf(sel, 'flex-direction'), 'column', sel);
+    assert.equal(desktopOf(sel, 'overflow'), 'auto', sel);
+    assert.equal(desktopOf(sel, 'min-width'), '0', sel);
+    assert.equal(desktopOf(sel, 'min-height'), '0', sel);
+  }
+});
+
+test('gate: body is a 100dvh flex column, padded by the rail, with no bottom-bar reserve', () => {
+  assert.equal(desktopOf('body', 'height'), '100dvh');
+  assert.equal(desktopOf('body', 'display'), 'flex');
+  assert.equal(desktopOf('body', 'flex-direction'), 'column');
+  assert.equal(desktopOf('body', 'padding-left'), RAIL);
+  assert.equal(desktopOf('body', 'padding-bottom'), '0');
+  assert.equal(desktopOf('body', 'box-sizing'), 'border-box');
+});
+
+test('gate: Day and 3-day keep scrolling inside their own grids (scrollTop auto-scroll, pinned heads)', () => {
+  for (const sel of ['#day-view', '#three-day-view']) {
+    assert.equal(desktopOf(sel, 'display'), 'flex', sel);
+    assert.equal(desktopOf(sel, 'flex-direction'), 'column', sel);
+    assert.equal(desktopOf(sel, 'flex'), '1 1 auto', sel);
+    assert.equal(desktopOf(sel, 'min-height'), '0', sel);
+    assert.equal(desktopOf(`${sel}[hidden]`, 'display'), 'none', sel);
+  }
+  for (const sel of ['#day-body', '#three-day-body']) {
+    assert.equal(desktopOf(sel, 'display'), 'flex', sel);
+    assert.equal(desktopOf(sel, 'flex-direction'), 'column', sel);
+    assert.equal(desktopOf(sel, 'flex'), '1 1 auto', sel);
+    assert.equal(desktopOf(sel, 'min-height'), '0', sel);
+  }
+  for (const sel of ['.day-grid', '.tday-grid']) {
+    assert.equal(desktopOf(sel, 'flex'), '1 1 auto', sel);
+    assert.equal(desktopOf(sel, 'min-height'), '0', sel);
+    assert.equal(desktopOf(sel, 'max-height'), 'none', sel);
+    assert.equal(declOf(sel, 'overflow-y', phoneCss), 'auto', `${sel} still scrolls itself on the phone`);
+  }
+});
+
+test('gate: the rail is the tab bar fixed to the left edge', () => {
+  const t = (p) => desktopOf('.tab-bar', p);
+  assert.equal(t('top'), '0');
+  assert.equal(t('bottom'), '0');
+  assert.equal(t('left'), '0');
+  assert.equal(t('right'), 'auto');
+  assert.equal(t('width'), RAIL);
+  assert.equal(t('height'), 'auto');
+  assert.equal(t('flex-direction'), 'column');
+  assert.equal(t('padding-bottom'), '0');
+  assert.equal(t('border-top'), '0');
+  assert.equal(t('border-right'), '1px solid var(--line)');
+  assert.equal(desktopOf('.tab-bar button', 'flex'), '0 0 auto', 'buttons keep their height; they do not each take a quarter of the rail');
+});
+
+test('gate: the toast clears the rail and drops the capture-button reservation and the bottom-bar offset', () => {
+  assert.equal(desktopOf('.toast', 'left'), `calc(${RAIL} + 16px)`);
+  assert.equal(desktopOf('.toast', 'right'), '16px');
+  assert.equal(desktopOf('.toast', 'bottom'), '16px');
+});
+
+test('gate: the sheet is a bounded, centred panel, not a full-width bar', () => {
+  assert.equal(desktopOf('.sheet', 'max-width'), '40rem');
+  assert.equal(desktopOf('.sheet', 'margin-inline'), 'auto');
+});
+
+test('gate: a rule that gives a section a display restates [hidden] for that selector (O3)', () => {
+  const sectionSel = (x) => SECTION_IDS.includes(x) || /^\.pane-(left|main|right) > section$/.test(x);
+  let seen = 0;
+  for (const { sel, body } of [...desktopRules, ...wideRules]) {
+    if (!/(^|;)\s*display\s*:/.test(body)) continue;
+    for (const x of sel.split(',').map((y) => y.trim().replace(/\s+/g, ' '))) {
+      if (!sectionSel(x)) continue;
+      seen += 1;
+      assert.equal(desktopOf(`${x}[hidden]`, 'display'), 'none', `${x} sets display in the gate without [hidden]`);
+    }
+  }
+  assert.ok(seen >= 2, `fixture check: ${seen} section display rules`);
+});
+
+test('gate: no bare section selector (O4)', () => {
+  for (const { sel } of [...desktopRules, ...wideRules]) {
+    for (const x of sel.split(',')) assert.doesNotMatch(x.trim(), /(^|[\s>+~])section(?![\w-])/, x);
+  }
+});
+
+test('gate: the phone is unchanged by this task (the converted pins read at === null)', () => {
+  assert.equal(declOf('.tab-bar', 'height', phoneCss), 'calc(56px + env(safe-area-inset-bottom))');
+  assert.equal(declOf('body', 'padding-bottom', phoneCss), 'calc(56px + 80px + env(safe-area-inset-bottom))');
+  assert.equal(declOf('.toast', 'right', phoneCss), '88px');
+  assert.equal(declOf('.sheet', 'max-width', phoneCss), null);
+  assert.equal(declOf('.day-grid', 'max-height', phoneCss), '60vh');
+});
+
+test('the #tab-title class toggle: app.js hides it visually on desktop, and the class does that', () => {
+  assert.match(readFileSync(new URL('../js/app.js', import.meta.url), 'utf8'),
+    /els\.tabTitle\.classList\.toggle\('visually-hidden', tab === 'today' \|\| desktop\)/);
+  assert.equal(declOf('.visually-hidden', 'clip-path', phoneCss), 'inset(50%)');
+  assert.equal(declOf('.visually-hidden', 'position', phoneCss), 'absolute');
+});
+
+test('gate: the panes keep a gutter off the rail (found in the browser check: Today touched it)', () => {
+  assert.equal(desktopOf('.panes', 'padding-left'), 'var(--space-4)');
+});
+
+// --- Task 4: the docked capture line (gate only) ---------------------------------
+test('gate: the round capture button is hidden and the dock is a visible row', () => {
+  assert.equal(desktopOf('.capture-btn', 'display'), 'none');
+  assert.equal(declOf('.capture-btn', 'display', phoneCss), 'flex', 'the phone button still shows');
+  assert.equal(declOf('.capture-dock', 'display', phoneCss), 'none', 'the dock is hidden on the phone');
+  assert.equal(desktopOf('.capture-dock', 'display'), 'flex');
+});
+
+test('the dock buttons: the typing button is a full-width input-like row, the mic a round icon button', () => {
+  assert.equal(declOf('.capture-dock-type', 'flex'), '1 1 auto');
+  assert.equal(declOf('.capture-dock-type', 'text-align'), 'left');
+  assert.match(declOf('.capture-dock-type', 'border'), /1px solid/);
+  assert.equal(declOf('.capture-dock-type', 'background'), 'var(--card)');
+  assert.equal(declOf('.capture-dock-mic', 'border-radius'), 'var(--radius-round)');
+  assert.equal(declOf('.capture-dock-mic', 'width'), '44px');
+  assert.equal(declOf('.capture-dock-mic', 'height'), '44px');
+  assert.equal(declOf('.capture-dock-mic', 'background'), 'var(--accent)');
+  assert.equal(declOf('.capture-dock-mic', 'color'), 'var(--accent-ink)');
+  assert.equal(declOf('.capture-dock-mic:disabled', 'opacity'), '0.5');
+  assert.equal(declOf('.capture-dock-type:disabled', 'opacity'), '0.5');
+});
+
+test('gate: the box is placed from the top-left, its panel grows from there, and CSS sets no transform on the box', () => {
+  assert.equal(desktopOf('.capture-box', 'bottom'), 'auto');
+  assert.equal(desktopOf('.capture-box', 'right'), 'auto');
+  assert.equal(desktopOf('.capture-panel', 'transform-origin'), 'top left');
+  assert.equal(desktopOf('.capture-box', 'transform'), null);
+  assert.equal(declOf('.capture-panel', 'transform-origin', phoneCss), 'bottom right', 'phone unchanged');
+  assert.equal(declOf('.capture-box', 'bottom', phoneCss), 'var(--capture-lift)');
+});
+
+test('gate: the toast is capped at 36rem, so it is not a full-width bar on a wide screen', () => {
+  assert.equal(desktopOf('.toast', 'max-width'), '36rem');
+  assert.equal(declOf('.toast', 'max-width', phoneCss), null, 'the phone toast is unchanged');
+});
+
+test('the dock mic swaps to a stop square while listening, as the round button does (phone CSS hidden dock, so stated outside the gate)', () => {
+  assert.equal(declOf('.capture-dock-mic .icon-stop', 'display'), 'none');
+  assert.equal(declOf('.capture-dock-mic.listening .icon-mic', 'display'), 'none');
+  assert.equal(declOf('.capture-dock-mic.listening .icon-stop', 'display'), 'block');
+});
+
+test('the pane headings are hidden outside the gate and shown inside it', () => {
+  assert.equal(declOf('.pane-heading', 'display', phoneCss), 'none');
+  assert.notEqual(desktopOf('.pane-heading', 'display'), null);
+  assert.notEqual(desktopOf('.pane-heading', 'display'), 'none');
+});
+
+test('index.html: To-do and Ideas each carry a pane heading', () => {
+  for (const [id, text] of [['todo-view', 'To-do'], ['ideas-view', 'Ideas']]) {
+    const m = indexHtml.match(new RegExp(`<section id="${id}"[^>]*>\\s*(?:<!--[\\s\\S]*?-->\\s*)?<h2 id="${id}-heading" class="pane-heading">${text}</h2>`));
+    assert.ok(m, `${id} opens with <h2 id="${id}-heading" class="pane-heading">${text}</h2>`);
+  }
+});
 
 // An accent that sits next to an item-type colour reads as that type (a sage
 // accent beside the green Event block): every non-classic accent keeps a

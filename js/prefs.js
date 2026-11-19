@@ -1,4 +1,4 @@
-// prefs.js — device-local display preferences: time format, week start and colour scheme.
+// prefs.js — device-local display preferences: time format, week start, colour scheme and desktop layout.
 // Pure resolvers plus storage wrapped in try/catch (mirrors theme.js). Never
 // synced: nothing here touches the sync blob. A missing key, an unknown value,
 // or a throwing/missing localStorage resolves to today's behaviour.
@@ -7,6 +7,8 @@ export const TIME_FORMAT_KEY = 'plaenicke.timeFormat';
 export const WEEK_START_KEY = 'plaenicke.weekStart';
 export const SCHEME_KEY = 'plaenicke.scheme';
 export const SCHEMES = ['classic', 'sage', 'ocean', 'plum'];
+export const LAYOUT_KEY = 'plaenicke.layout';
+export const LAYOUTS = ['planner', 'month', 'all'];
 
 export function resolveTimeFormat(raw) {
   return raw === '24h' ? '24h' : '12h';
@@ -18,6 +20,10 @@ export function resolveWeekStart(raw) {
 
 export function resolveScheme(raw) {
   return SCHEMES.includes(raw) ? raw : 'classic';
+}
+
+export function resolveLayout(raw) {
+  return LAYOUTS.includes(raw) ? raw : 'planner';
 }
 
 function read(key) {
@@ -48,6 +54,19 @@ export function getScheme() { return resolveScheme(read(SCHEME_KEY)); }
 export function setScheme(v) {
   if (!SCHEMES.includes(v)) throw new Error('bad scheme');
   return write(SCHEME_KEY, v);
+}
+
+export function getLayout() { return resolveLayout(read(LAYOUT_KEY)); }
+
+export function setLayout(v) {
+  if (!LAYOUTS.includes(v)) throw new Error('bad layout');
+  return write(LAYOUT_KEY, v);
+}
+
+// Unlike the scheme, planner is written too: the desktop CSS keys on the
+// attribute. index.html's pre-paint script holds a copy of the list.
+export function applyLayout(layout, root = document.documentElement) {
+  root.dataset.layout = resolveLayout(layout);
 }
 
 // classic is the absence of the attribute: :root and [data-theme="dark"] carry

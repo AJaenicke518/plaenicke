@@ -38,7 +38,7 @@ function fakeVoice(order) {
   return v;
 }
 
-function setup({ standalone = false } = {}) {
+function setup({ standalone = false, openers } = {}) {
   globalThis.document.activeElement = null;
   const make = (tag) => new FakeElement(tag);
   const els = {
@@ -75,6 +75,7 @@ function setup({ standalone = false } = {}) {
     lockWhen: (on) => { fx.locks.push(on); },
     later: (fn, ms) => { const h = { fn, ms, cleared: false }; fx.timers.push(h); return h; },
     clearLater: (h) => { h.cleared = true; },
+    ...(openers ? { openers } : {}),
     follow: (target, opts) => {
       const f = { target, opts, stops: 0 };
       fx.follows.push(f);
@@ -779,4 +780,195 @@ test('date row: locked while an add is latched, unlocked on Cancel and when it s
   fx.settle('failed');
   await new Promise((r) => setImmediate(r));
   assert.deepEqual(fx.locks.slice(-1), [false], 'unlocked when the add settles');
+});
+
+// --- Release 3, Task 4: openers and openTyping -----------------------------------
+test('openTyping opens the box in typing mode, focuses the field, and never calls the recognizer even when voice is supported', () => {
+  const fx = setup();
+  assert.equal(fx.voice.supported, true, 'fixture check: voice is supported');
+  fx.capture.openTyping();
+  assert.equal(fx.els.box.hidden, false);
+  assert.equal(fx.follows.length, 1);
+  assert.equal(fx.voice.listens.length, 0, 'typing never starts voice');
+  assert.equal(fx.capture.state().mode, 'typing');
+  assert.equal(fx.els.field.readOnly, false);
+  assert.equal(globalThis.document.activeElement, fx.els.field);
+  assert.equal(fx.els.when.hidden, false, 'a typing tap shows the date row');
+});
+
+test('openTyping during a listen stops it (keeping the text) and types; during an add it does nothing', async () => {
+  const fx = setup();
+  listening(fx, 'half a thought');
+  fx.capture.openTyping();
+  assert.equal(fx.voice.current.stops, 1, 'the listen was stopped');
+  assert.equal(fx.capture.state().mode, 'typing');
+  assert.equal(fx.els.field.value, 'half a thought');
+  const add = tap(fx.els.add);
+  await tick();
+  assert.equal(fx.capture.state().adding, true, 'fixture check: an add is in flight');
+  const follows = fx.follows.length;
+  fx.capture.openTyping();
+  assert.equal(fx.capture.state().mode, 'typing');
+  assert.equal(fx.follows.length, follows);
+  assert.equal(fx.voice.listens.length, 1, 'still only the first listen');
+  fx.settle('done');
+  await tick();
+  void add;
+});
+
+test('openers mirror aria-expanded through open and close, and disabled through an add', async () => {
+  const a = new FakeElement('button');
+  const b = new FakeElement('button');
+  const fx = setup({ openers: [a, b] });
+  for (const o of [a, b]) assert.equal(o.getAttribute('aria-expanded'), 'false', 'closed at start');
+  fx.capture.openTyping();
+  for (const o of [a, b]) assert.equal(o.getAttribute('aria-expanded'), 'true');
+  fx.els.field.value = 'x';
+  tap(fx.els.add);
+  await tick();
+  for (const o of [a, b]) assert.equal(o.disabled, true, 'disabled while adding');
+  assert.equal(fx.els.button.disabled, true);
+  fx.settle('direct');
+  await tick();
+  for (const o of [a, b]) assert.equal(o.disabled, false, 'enabled when the add settles');
+  tap(fx.els.close);
+  for (const o of [a, b]) assert.equal(o.getAttribute('aria-expanded'), 'false');
+});
+
+test('the tap path (tap) is the round button\'s: it listens, and openers follow it', () => {
+  const a = new FakeElement('button');
+  const fx = setup({ openers: [a] });
+  fx.capture.tap();
+  assert.equal(fx.voice.listens.length, 1);
+  assert.equal(a.getAttribute('aria-expanded'), 'true');
+});
+
+test('with no openers, behaviour is the round button\'s alone', () => {
+  const fx = setup();
+  tap(fx.els.button);
+  assert.equal(fx.els.button.getAttribute('aria-expanded'), 'true');
+  assert.equal(fx.voice.listens.length, 1);
+  tap(fx.els.close);
+  assert.equal(fx.els.button.getAttribute('aria-expanded'), 'false');
+});
+
+// --- Release 3 review fixes: the dock mic shows listening; openTyping's latch ----
+test('a mic opener shows the listening state: class and aria-label, as the round button does', () => {
+  const mic = new FakeElement('button');
+  const other = new FakeElement('button');
+  const fx = setup({ openers: [other, { el: mic, mic: true }] });
+  assert.equal(mic._classes.has('listening'), false);
+  fx.capture.tap();
+  assert.equal(mic._classes.has('listening'), true, 'listening class on the dock mic');
+  assert.equal(mic.getAttribute('aria-label'), 'Stop and add');
+  assert.equal(other._classes.has('listening'), false, 'a plain opener never shows listening');
+  assert.equal(other.getAttribute('aria-label'), null, 'and its label is left alone');
+  assert.equal(mic.getAttribute('aria-expanded'), 'true', 'it still mirrors aria-expanded');
+});
+
+test('a mic opener reverts when the listen stops, by every route', () => {
+  const stops = {
+    'typing in the text': (fx) => tap(fx.els.field),
+    'openTyping': (fx) => fx.capture.openTyping(),
+    'close': (fx) => tap(fx.els.close),
+    'the voice ending on its own': (fx) => fx.voice.current.opts.onEnd(),
+    'stopAndKeep': (fx) => fx.capture.stopAndKeep(),
+    'a voice error': (fx) => fx.voice.current.opts.onError('no-speech'),
+  };
+  for (const [name, stop] of Object.entries(stops)) {
+    const mic = new FakeElement('button');
+    const fx = setup({ openers: [{ el: mic, mic: true }] });
+    fx.capture.tap();
+    assert.equal(mic._classes.has('listening'), true, `${name}: fixture check`);
+    stop(fx);
+    assert.equal(mic._classes.has('listening'), false, name);
+    assert.equal(mic.getAttribute('aria-label'), 'Capture by voice', name);
+  }
+});
+
+test('a mic opener also reverts when the second tap stops and adds', async () => {
+  const mic = new FakeElement('button');
+  const fx = setup({ openers: [{ el: mic, mic: true }] });
+  fx.capture.tap();
+  fx.voice.current.opts.onText('milk');
+  fx.capture.tap();
+  await tick();
+  assert.equal(mic._classes.has('listening'), false);
+  assert.equal(mic.getAttribute('aria-label'), 'Capture by voice');
+  fx.settle('direct');
+  await tick();
+});
+
+test('a mic opener starts in the not-listening state', () => {
+  const mic = new FakeElement('button');
+  setup({ openers: [{ el: mic, mic: true }] });
+  assert.equal(mic._classes.has('listening'), false);
+  assert.equal(mic.getAttribute('aria-label'), 'Capture by voice');
+});
+
+test('openTyping while an add is pending changes nothing: no focus, no date row, no mode change', async () => {
+  const fx = setup();
+  fx.capture.openTyping();
+  fx.els.field.value = 'x';
+  tap(fx.els.add);
+  await tick();
+  assert.equal(fx.capture.state().adding, true, 'fixture check: an add is pending');
+  fx.els.when.hidden = true; // what focusField would show again
+  const before = fx.order.length;
+  fx.capture.openTyping();
+  assert.equal(fx.order.length, before, 'no blur or focus while an add is pending');
+  assert.equal(fx.els.when.hidden, true, 'the date row is not shown');
+  fx.settle('direct');
+  await tick();
+});
+
+// --- end-of-branch review: crossing the desktop gate keeps the text ----------
+test('replace() swaps the follower of an open box and keeps its text and mode', () => {
+  const fx = setup();
+  fx.capture.openTyping();
+  fx.els.field.value = 'keep me';
+  assert.equal(fx.follows.length, 1);
+  fx.capture.replace();
+  assert.equal(fx.follows[0].stops, 1, 'the old follower is stopped');
+  assert.equal(fx.follows.length, 2, 'a new one is attached');
+  assert.equal(fx.follows[1].target, fx.els.box);
+  assert.equal(fx.els.field.value, 'keep me');
+  assert.equal(fx.capture.state().mode, 'typing');
+  assert.equal(fx.els.box.hidden, false);
+  fx.capture.close();
+  fx.timers[fx.timers.length - 1].fn();
+  assert.equal(fx.follows[1].stops, 1, 'closing stops the new follower, once');
+  assert.equal(fx.follows[0].stops, 1, 'and not the old one again');
+});
+
+test('replace() on a closed box, or one that is closing, does nothing', () => {
+  const fx = setup();
+  fx.capture.replace();
+  assert.equal(fx.follows.length, 0);
+  fx.capture.openTyping();
+  fx.capture.close();
+  fx.capture.replace();
+  assert.equal(fx.follows.length, 1, 'a closing box keeps the follower it is closing with');
+});
+
+// --- focus returns when the box closes (desktop, wired by app.js) ------------
+test('close() calls restoreFocus once, after the field blurs, and not for a box that is already closed', () => {
+  const calls = [];
+  const fx = setup();
+  // setup() builds its own controller; build another with the hook.
+  const els = fx.els;
+  const capture = createCapture({
+    els, line: { set() {} },
+    voice: { isVoiceSupported: () => false, listen: () => null, errorKind },
+    isStandalone: () => false, submit: () => Promise.resolve(), cancelSubmit() {}, closePreviews() {},
+    clearWhen() {}, whenPicked: () => false, lockWhen() {},
+    later: () => ({}), clearLater() {}, follow: () => () => {},
+    restoreFocus: () => { calls.push(fx.order.slice()); },
+  });
+  capture.close();
+  assert.equal(calls.length, 0, 'closed already: nothing to restore');
+  capture.openTyping();
+  capture.close();
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].includes('blur'), 'the field had blurred by then');
 });

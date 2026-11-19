@@ -33,6 +33,7 @@ import { SYNC_STATUS_ID, SHELL_SYNC_STATUS_ID, SLOW_WRITE_MS } from '../js/linku
 import { addDays, startOfWeek, weekLabel } from '../js/timegrid.js';
 import { formatDayLabel } from '../js/freshness.js';
 import { parseICS } from '../js/ics.js';
+import { DESKTOP_QUERY, WIDE_QUERY, calendarChoice } from '../js/layout.js';
 
 // INTERVALS ARE RECORDED, NEVER SCHEDULED, in this file. app.js's Today tick
 // is a 60 s setInterval (home-screen spec § 2.3), armed while Today is shown,
@@ -268,6 +269,47 @@ globalThis.window = makeFakeWindow();
 globalThis.document = makeFakeDocument();
 mountIds(globalThis.document, indexHtmlIds(readFileSync(new URL('../index.html', import.meta.url), 'utf8')));
 
+// THE matchMedia STUB (Release 3, Task 2). Installed on window BEFORE app.js's
+// first import, because app.js asks which panes to show at load. It replaces
+// window.matchMedia (never a bare global), hands back the SAME
+// MediaQueryList-like object for a query string every time (as a browser does,
+// and settings.js and app.js each hold the one they asked for), answers the
+// dark-scheme query settings.js reads, and dispatches `change` to whoever
+// registered. Default: nothing matches, which is the phone and the default
+// every test but the desktop ones relies on. setMedia() flips it and fires
+// `change` on each query whose answer moved; a test that flips it restores it
+// in `finally` (setMedia(false, false)), and sets its layout back to planner.
+const mediaState = { desktop: false, wide: false, dark: false };
+const mediaLists = new Map();
+const mediaMatches = (q) => (q === DESKTOP_QUERY ? mediaState.desktop : q === WIDE_QUERY ? mediaState.wide
+  : q === '(prefers-color-scheme: dark)' ? mediaState.dark : false);
+function mediaList(query) {
+  if (!mediaLists.has(query)) {
+    const fns = [];
+    mediaLists.set(query, {
+      media: query,
+      get matches() { return mediaMatches(query); },
+      addEventListener(type, fn) { if (type === 'change') fns.push({ fn, via: 'addEventListener' }); },
+      removeEventListener(type, fn) { const i = fns.findIndex((f) => f.fn === fn); if (i >= 0) fns.splice(i, 1); },
+      addListener(fn) { fns.push({ fn, via: 'addListener' }); },
+      removeListener(fn) { const i = fns.findIndex((f) => f.fn === fn); if (i >= 0) fns.splice(i, 1); },
+      _fns: fns,
+    });
+  }
+  return mediaLists.get(query);
+}
+globalThis.window.matchMedia = (query) => mediaList(query);
+function setMedia(desktop, wide = false) {
+  const before = { [DESKTOP_QUERY]: mediaState.desktop, [WIDE_QUERY]: mediaState.wide };
+  mediaState.desktop = desktop;
+  mediaState.wide = wide;
+  for (const q of [DESKTOP_QUERY, WIDE_QUERY]) {
+    if (before[q] === mediaMatches(q)) continue;
+    const mql = mediaList(q);
+    for (const { fn } of [...mql._fns]) fn({ matches: mql.matches, media: q });
+  }
+}
+
 // EVERY TEST ENDS WITH NO REAL SYNC TIMER ARMED. app.js's scheduleSync arms a
 // real setTimeout(runSync, 2000) whenever a test writes under real timers (a
 // tick, a capture, an add). Left pending, it fires 2 s later inside whatever
@@ -338,39 +380,93 @@ test('app.js paints the shell sync indicator at load, so a stuck adoption is vis
   const loadRequests = [];
   const offline = globalThis.fetch;
   globalThis.fetch = (url, opts) => { loadRequests.push(String(url)); return offline(url, opts); };
+  // Release 3: this first load runs ON A COMPUTER with the planner layout (the
+  // stub is installed above, before this import), and the test flips to a
+  // phone further down. The shell never sets a layout here: the default is
+  // planner.
+  setMedia(true, false);
   try {
     await import('../js/app.js');
   } finally {
     globalThis.fetch = offline;
   }
-  assert.equal(shell.hidden, false,
-    'a device sitting at adoptionPending syncs nothing at all — the app shell must say so without opening Settings');
-  assert.match(shell.textContent, /\S/);
-  // The load-time syncTodayTick() (final review A11c): the app opens on Today,
-  // so the tick is armed before anything is clicked — in its first phase, a
-  // timeout to the next minute boundary.
-  assert.equal(liveAligns().length, 1, 'the Today tick is armed at load');
-  assert.ok(liveAligns()[0].ms > 0 && liveAligns()[0].ms <= 60000, `to the next minute: ${liveAligns()[0].ms} ms`);
-  assert.equal(liveIntervals(60000).length, 0, 'not yet the interval');
-  // Phase 0 baseline: a cold load is an open, and it is logged. Asserted here
-  // because this is the only test that sees app.js's module-scope code run.
-  assert.equal(loadLaunches().length, 1, 'loading the app must record one launch');
-  // The boot fragment: stripped at once, and Settings opened on it. This device
-  // is a linked LEGACY device (sweep W3 #19): the reset form keeps the code
-  // and says to unlink in Sync first; its submit stays refused (D17).
-  assert.deepEqual(globalThis.window.history.calls, [[null, '', '/plaenicke/']], 'the fragment is stripped');
-  const settingsHost = globalThis.document.getElementById('settings-host');
-  assert.ok(settingsHost.childElementCount > 0, 'Settings opened for the boot link');
-  assert.match(allText(settingsHost), /This device is linked to Alex's legacy account — unlink it in Sync first\./);
-  // The load-time GET /account (an offline one, here): asked, and on failure
-  // the banner keeps its last painted state — hidden.
-  assert.ok(loadRequests.some((u) => u.endsWith('/account')), 'the load asks the account for its recovery state');
-  assert.ok(!loadRequests.some((u) => u.includes('/auth/')), 'and never anything that changes the account');
-  assert.equal(globalThis.document.getElementById('account-banner').hidden, true);
-  // Close the panel: every later test opens Settings from closed.
-  for (const fn of globalThis.document._listeners.keydown || []) fn({ key: 'Escape' });
-  assert.equal(settingsHost.childElementCount, 0, 'fixture check: Settings closed');
-  globalThis.window.location.hash = '';
+  // A failing assertion below must not leave the stub on a computer for the
+  // tests after this one: the phone is the default every other test relies on.
+  try {
+    const docLoad = globalThis.document;
+    const shown = () => ['today-view', 'calendar-view', 'week-view', 'three-day-view', 'day-view', 'todo-view', 'ideas-view']
+      .filter((id) => !docLoad.getElementById(id).hidden);
+    assert.deepEqual(shown(), ['today-view', 'week-view'], 'first load on a computer shows Today and the week planner [C1]');
+    assert.equal(docLoad.getElementById('pane-left').hidden, false);
+    assert.equal(docLoad.getElementById('pane-main').hidden, false);
+    assert.equal(docLoad.getElementById('pane-right').hidden, true, 'no list is showing, so its wrapper is hidden');
+    assert.equal(docLoad.getElementById('cal-switch').hidden, false, 'a calendar pane is showing');
+    assert.equal(docLoad.getElementById('tab-calendar').getAttribute('aria-current'), 'page',
+      'the rail marks the big pane (the week, so Calendar)');
+    assert.equal(liveAligns().length, 1, 'the Today tick is armed while Today is a side pane');
+    // Nothing has been picked by hand yet, so the calendar follows the layout:
+    // a layout change to Month overview moves the big pane to the month grid.
+    localStorage.setItem('plaenicke.layout', 'month');
+    for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.layout' });
+    assert.deepEqual(shown(), ['today-view', 'calendar-view'], 'month layout seeds the month grid when no calendar was chosen');
+    localStorage.setItem('plaenicke.layout', 'planner');
+    for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.layout' });
+    assert.deepEqual(shown(), ['today-view', 'week-view'], 'and the planner seeds the week again');
+  // Entering the gate seeds the calendar again while nothing was picked by hand:
+  // the layout changed to Month overview while off the gate (no seed there).
+  localStorage.setItem('plaenicke.layout', 'month');
+  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.layout' });
+  assert.deepEqual(shown(), ['today-view', 'calendar-view'], 'fixture check: month seeded');
+  setMedia(false, false);
+  localStorage.setItem('plaenicke.layout', 'planner');
+  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.layout' });
+  setMedia(true, false);
+  assert.deepEqual(shown(), ['today-view', 'week-view'], 're-entering the gate re-seeds the calendar for the layout');
+  // Coming up was opened by the Month layout above; settle it for later tests.
+  localStorage.setItem('plaenicke.layout', 'planner');
+  for (const fn of globalThis.window._listeners.storage) fn({ key: 'plaenicke.layout' });
+    // Both queries were listened to, through addEventListener (a function here).
+    for (const q of [DESKTOP_QUERY, WIDE_QUERY]) {
+      assert.ok(mediaList(q)._fns.some((f) => f.via === 'addEventListener'), `app.js listens for ${q}`);
+    }
+    // Now the phone: a change event on the gate leaves only Today, and the
+    // assertions below carry on exactly as before.
+    setMedia(false, false);
+    assert.deepEqual(shown(), ['today-view'], 'leaving the gate leaves one page');
+    assert.equal(docLoad.getElementById('pane-main').hidden, true);
+    assert.equal(docLoad.getElementById('cal-switch').hidden, true);
+    assert.equal(liveAligns().length, 1, 'still one tick');
+    assert.equal(shell.hidden, false,
+      'a device sitting at adoptionPending syncs nothing at all — the app shell must say so without opening Settings');
+    assert.match(shell.textContent, /\S/);
+    // The load-time syncTodayTick() (final review A11c): the app opens on Today,
+    // so the tick is armed before anything is clicked — in its first phase, a
+    // timeout to the next minute boundary.
+    assert.equal(liveAligns().length, 1, 'the Today tick is armed at load');
+    assert.ok(liveAligns()[0].ms > 0 && liveAligns()[0].ms <= 60000, `to the next minute: ${liveAligns()[0].ms} ms`);
+    assert.equal(liveIntervals(60000).length, 0, 'not yet the interval');
+    // Phase 0 baseline: a cold load is an open, and it is logged. Asserted here
+    // because this is the only test that sees app.js's module-scope code run.
+    assert.equal(loadLaunches().length, 1, 'loading the app must record one launch');
+    // The boot fragment: stripped at once, and Settings opened on it. This device
+    // is a linked LEGACY device (sweep W3 #19): the reset form keeps the code
+    // and says to unlink in Sync first; its submit stays refused (D17).
+    assert.deepEqual(globalThis.window.history.calls, [[null, '', '/plaenicke/']], 'the fragment is stripped');
+    const settingsHost = globalThis.document.getElementById('settings-host');
+    assert.ok(settingsHost.childElementCount > 0, 'Settings opened for the boot link');
+    assert.match(allText(settingsHost), /This device is linked to Alex's legacy account — unlink it in Sync first\./);
+    // The load-time GET /account (an offline one, here): asked, and on failure
+    // the banner keeps its last painted state — hidden.
+    assert.ok(loadRequests.some((u) => u.endsWith('/account')), 'the load asks the account for its recovery state');
+    assert.ok(!loadRequests.some((u) => u.includes('/auth/')), 'and never anything that changes the account');
+    assert.equal(globalThis.document.getElementById('account-banner').hidden, true);
+    // Close the panel: every later test opens Settings from closed.
+    for (const fn of globalThis.document._listeners.keydown || []) fn({ key: 'Escape' });
+    assert.equal(settingsHost.childElementCount, 0, 'fixture check: Settings closed');
+    globalThis.window.location.hash = '';
+  } finally {
+    setMedia(false, false);
+  }
 });
 
 // applySyncedState must re-merge against live storage. Between the merge that
@@ -9531,6 +9627,331 @@ test('capture: every landed add says "Added." on the status line, which outlives
   seed([]);
 });
 
+// Release 3, Task 4 — the docked capture line. Placed BEFORE the refusal test:
+// a refusal lasts the session and every later mic tap would go straight to typing.
+
+// A fake visualViewport (read as globalThis.visualViewport by js/viewport.js).
+function withVisualViewport() {
+  const fns = { resize: [], scroll: [] };
+  const vv = {
+    offsetTop: 0, height: 700,
+    addEventListener(type, fn) { fns[type].push(fn); },
+    removeEventListener(type, fn) { fns[type] = fns[type].filter((f) => f !== fn); },
+  };
+  globalThis.visualViewport = vv;
+  return { vv, restore: () => { delete globalThis.visualViewport; } };
+}
+
+test('r3: on a computer the dock opens capture typing, with no recognizer, no transform, placed under the dock', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const vvx = withVisualViewport();
+  const timers = installManualTimers();
+  const dock = capEl('capture-dock');
+  const box = capEl('capture-box');
+  dock._rect = { top: 80, left: 120, width: 300, height: 40 };
+  globalThis.window.innerHeight = 800;
+  setMedia(true, false);
+  try {
+    click(capEl('capture-dock-type'));
+    assert.equal(box.hidden, false, 'the box opens');
+    assert.equal(voice.count(), 0, 'typing: the recognizer is never created');
+    assert.equal(box.style.transform, 'none', 'desktopFollow sets transform none, so no viewport transform applies');
+    assert.equal(box.style.top, '128px', 'dock bottom (120) + 8');
+    assert.equal(box.style.left, '120px');
+    assert.equal(box.style.width, '300px');
+    assert.equal(box.style['max-height'], '656px', '800 - 128 - 16');
+    assert.equal(box.style.bottom, 'auto');
+    assert.equal(box.style.right, 'auto');
+    for (const id of ['capture-dock-type', 'capture-dock-mic', 'capture-btn']) {
+      assert.equal(capEl(id).getAttribute('aria-expanded'), 'true', `${id} mirrors the open box`);
+    }
+    assert.equal(globalThis.document.activeElement, capEl('capture-text'), 'the field has focus');
+    assert.equal(capEl('capture-when').hidden, false);
+    closeCapture(timers);
+    assert.equal(box.hidden, true);
+    assert.equal(box.style.top, undefined, 'the placement is cleared with the box');
+    assert.equal(box.style.left, undefined);
+    for (const prop of ['width', 'max-height', 'bottom', 'right', 'transform']) {
+      assert.equal(box.style[prop], undefined, `${prop} is cleared with the box`);
+    }
+    assert.equal(capEl('capture-dock-type').getAttribute('aria-expanded'), 'false');
+  } finally {
+    if (!box.hidden) closeCapture(timers);
+    timers.restore();
+    vvx.restore();
+    voice.restore();
+    leaveDesktop();
+  }
+});
+
+test('r3: the dock\'s typed text adds through the same flow as the phone', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const timers = installManualTimers();
+  const vvx = withVisualViewport();
+  setMedia(true, false);
+  try {
+    click(capEl('capture-dock-type'));
+    assert.equal(capEl('capture-box').hidden, false, 'the dock opened the box');
+    const field = capEl('capture-text');
+    field.value = 'r3 dock note';
+    fire(field, 'input');
+    pickDate('2099-06-02');
+    const net = smartAddFetch(async () => smartReply([{ title: 'r3 dock note', date: '2099-06-02', type: 'event' }]));
+    click(capEl('capture-add'));
+    await settle();
+    void net;
+    assert.ok(loadItems().some((it) => it.title === 'r3 dock note'), 'the add landed');
+  } finally {
+    if (!capEl('capture-box').hidden) closeCapture(timers);
+    timers.restore();
+    vvx.restore();
+    leaveDesktop();
+    seed([]);
+  }
+});
+
+test('r3: the dock\'s mic button takes the round button\'s path: it listens', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const vvx = withVisualViewport();
+  const timers = installManualTimers();
+  capEl('capture-dock')._rect = { top: 80, left: 120, width: 300, height: 40 };
+  globalThis.window.innerHeight = 800;
+  setMedia(true, false);
+  try {
+    click(capEl('capture-dock-mic'));
+    assert.equal(capEl('capture-box').hidden, false);
+    assert.equal(voice.count(), 1, 'the mic button starts the recognizer');
+    assert.equal(capEl('capture-box').style.top, '128px', 'and the box is under the dock');
+    assert.equal(capEl('capture-dock-mic').getAttribute('aria-expanded'), 'true');
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    vvx.restore();
+    voice.restore();
+    leaveDesktop();
+  }
+});
+
+test('r3: the dock mic shows the stop state while listening and reverts when it stops', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const vvx = withVisualViewport();
+  const timers = installManualTimers();
+  capEl('capture-dock')._rect = { top: 80, left: 120, width: 300, height: 40 };
+  globalThis.window.innerHeight = 800;
+  setMedia(true, false);
+  const mic = capEl('capture-dock-mic');
+  try {
+    assert.equal(mic.getAttribute('aria-label'), 'Capture by voice');
+    click(mic);
+    assert.equal(voice.count(), 1, 'fixture check: listening');
+    assert.ok(mic._classes.has('listening'), 'the dock mic carries the listening class');
+    assert.equal(mic.getAttribute('aria-label'), 'Stop and add');
+    assert.equal(capEl('capture-dock-type')._classes.has('listening'), false, 'the typing button does not');
+    click(capEl('capture-text')); // typing stops the listen
+    assert.equal(mic._classes.has('listening'), false);
+    assert.equal(mic.getAttribute('aria-label'), 'Capture by voice');
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    vvx.restore();
+    voice.restore();
+    leaveDesktop();
+  }
+});
+
+test('r3: a resize while the desktop box is open re-places it from the dock, and closing stops listening for it', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const vvx = withVisualViewport();
+  const timers = installManualTimers();
+  const dock = capEl('capture-dock');
+  const box = capEl('capture-box');
+  dock._rect = { top: 80, left: 120, width: 300, height: 40 };
+  globalThis.window.innerHeight = 800;
+  setMedia(true, false);
+  const resize = () => { for (const fn of [...(globalThis.window._listeners.resize || [])]) fn({ type: 'resize' }); };
+  const before = (globalThis.window._listeners.resize || []).length;
+  try {
+    click(capEl('capture-dock-type'));
+    assert.equal(box.style.left, '120px');
+    dock._rect = { top: 60, left: 200, width: 250, height: 40 };
+    globalThis.window.innerHeight = 600;
+    resize();
+    assert.equal(box.style.top, '108px', 'dock bottom (100) + 8');
+    assert.equal(box.style.left, '200px');
+    assert.equal(box.style.width, '250px');
+    assert.equal(box.style['max-height'], '476px', '600 - 108 - 16');
+    closeCapture(timers);
+    assert.equal((globalThis.window._listeners.resize || []).length, before, 'the listener is removed with the box');
+    dock._rect = { top: 0, left: 5, width: 50, height: 10 };
+    resize();
+    assert.equal(box.style.left, undefined, 'a closed box is not re-placed');
+  } finally {
+    if (!box.hidden) closeCapture(timers);
+    timers.restore();
+    vvx.restore();
+    leaveDesktop();
+  }
+});
+
+test('index.html: the dock mic is labelled and carries both icons; the pane headings have ids', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const mic = html.match(/<button id="capture-dock-mic"[\s\S]*?<\/button>/);
+  assert.ok(mic, 'the dock mic exists');
+  assert.match(mic[0], /aria-label="[^"]+"/, 'an icon-only button needs a non-empty name');
+  assert.match(mic[0], /class="icon-mic"/);
+  assert.match(mic[0], /class="icon-stop"/);
+  assert.match(html, /<h2 id="today-view-heading" class="today-title">/);
+  assert.match(html, /<h2 id="todo-view-heading" class="pane-heading">/);
+  assert.match(html, /<h2 id="ideas-view-heading" class="pane-heading">/);
+});
+
+test('r3: phone control: #capture-btn still follows the visual viewport with a non-empty transform', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const vvx = withVisualViewport();
+  const timers = installManualTimers();
+  try {
+    click(capEl('capture-btn'));
+    assert.equal(capEl('capture-box').hidden, false);
+    const tr = capEl('capture-box').style.transform;
+    assert.ok(typeof tr === 'string' && tr.length > 0 && tr !== 'none', `phone transform is set, got ${tr}`);
+    assert.equal(capEl('capture-box').style.top, `${vvx.vv.offsetTop + vvx.vv.height}px`);
+  } finally {
+    closeCapture(timers);
+    timers.restore();
+    vvx.restore();
+    voice.restore();
+  }
+});
+
+test('r3: a box opened on the phone layout stays open, with its text, and is placed under the dock when the window crosses into the gate', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const vvx = withVisualViewport();
+  const timers = installManualTimers();
+  capEl('capture-dock')._rect = { top: 80, left: 120, width: 300, height: 40 };
+  globalThis.window.innerHeight = 800;
+  try {
+    click(capEl('capture-btn'));
+    assert.equal(capEl('capture-box').hidden, false, 'fixture check: open below the gate');
+    click(capEl('capture-text')); // typing stops the listen
+    capEl('capture-text').value = 'typed on the phone';
+    setMedia(true, false);
+    assert.equal(capEl('capture-box').hidden, false, 'crossing into the gate keeps it open');
+    assert.equal(capEl('capture-box')._classes.has('closing'), false);
+    assert.equal(capEl('capture-text').value, 'typed on the phone', 'and keeps what was typed');
+    assert.equal(capEl('capture-box').style.top, '128px', 'placed under the dock now');
+    assert.equal(capEl('capture-box').style.transform, 'none', 'the phone transform is gone');
+  } finally {
+    if (!capEl('capture-box').hidden) closeCapture(timers);
+    timers.restore();
+    vvx.restore();
+    voice.restore();
+    leaveDesktop();
+  }
+});
+
+test('r3: a desktop box keeps its text when the window leaves the gate, is placed for the phone, and clears everything on close', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const vvx = withVisualViewport();
+  const timers = installManualTimers();
+  const box = capEl('capture-box');
+  capEl('capture-dock')._rect = { top: 80, left: 120, width: 300, height: 40 };
+  globalThis.window.innerHeight = 800;
+  setMedia(true, false);
+  try {
+    click(capEl('capture-dock-type'));
+    capEl('capture-text').value = 'typed on the desktop';
+    setMedia(false, false);
+    assert.equal(box.hidden, false, 'leaving the gate keeps it open');
+    assert.equal(capEl('capture-text').value, 'typed on the desktop');
+    assert.notEqual(box.style.transform, 'none', 'the phone follower placed it');
+    assert.equal(box.style.top, `${vvx.vv.offsetTop + vvx.vv.height}px`);
+    assert.equal(box.style.left, undefined, 'the desktop-only placement is gone after the flip');
+    assert.equal(box.style.width, undefined);
+    assert.equal(box.style.right, undefined);
+    closeCapture(timers);
+    for (const prop of ['top', 'left', 'width', 'max-height', 'bottom', 'right', 'transform']) {
+      assert.equal(box.style[prop], undefined, `${prop} is cleared after close`);
+    }
+  } finally {
+    if (!box.hidden) closeCapture(timers);
+    timers.restore();
+    vvx.restore();
+    leaveDesktop();
+  }
+});
+
+test('r3: a window shorter than the box\'s top gives the box a max-height of 0, never negative', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const vvx = withVisualViewport();
+  const timers = installManualTimers();
+  const box = capEl('capture-box');
+  capEl('capture-dock')._rect = { top: 80, left: 120, width: 300, height: 40 };
+  globalThis.window.innerHeight = 100;
+  setMedia(true, false);
+  try {
+    click(capEl('capture-dock-type'));
+    assert.equal(box.style['max-height'], '0px');
+  } finally {
+    if (!box.hidden) closeCapture(timers);
+    timers.restore();
+    vvx.restore();
+    leaveDesktop();
+  }
+});
+
+test('r3: scrolling the left pane re-places the open desktop box, and closing stops listening for it', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const vvx = withVisualViewport();
+  const timers = installManualTimers();
+  const box = capEl('capture-box');
+  const dock = capEl('capture-dock');
+  const pane = byId('pane-left');
+  dock._rect = { top: 80, left: 120, width: 300, height: 40 };
+  globalThis.window.innerHeight = 800;
+  setMedia(true, false);
+  const count = () => (pane._listeners.scroll || []).length;
+  const before = count();
+  try {
+    click(capEl('capture-dock-type'));
+    assert.equal(box.style.top, '128px', 'fixture check');
+    dock._rect = { top: 20, left: 120, width: 300, height: 40 };
+    fire(pane, 'scroll');
+    assert.equal(box.style.top, '68px', 'dock bottom (60) + 8');
+    closeCapture(timers);
+    assert.equal(count(), before, 'the scroll listener is removed with the box');
+  } finally {
+    if (!box.hidden) closeCapture(timers);
+    timers.restore();
+    vvx.restore();
+    leaveDesktop();
+  }
+});
+
 // LAST of the capture tests: a refusal lasts the session (js/capture.js).
 test('capture: a refusal in the home-screen app points to Settings and offers Type instead', async () => {
   installFakeLocalStorage();
@@ -10758,5 +11179,674 @@ test('prefs: another tab changing a display pref repaints an open Settings panel
     localStorage.removeItem('plaenicke.timeFormat');
     localStorage.setItem('plaenicke.weekStart', 'sun');
     reloadFromStorage('plaenicke.weekStart');
+  }
+});
+
+// =========================================================================
+// Release 3, Task 2 — app.js applies the template's panes everywhere
+// =========================================================================
+//
+// Ids are prefixed `r3-`. Every test ends with the matchMedia stub back at
+// "nothing matches" (the phone), the layout back at planner, and the phone's
+// Today page showing: leaveDesktop().
+
+const VIEW_IDS = ['today-view', 'calendar-view', 'week-view', 'three-day-view', 'day-view', 'todo-view', 'ideas-view'];
+const shownViews = () => VIEW_IDS.filter((id) => !globalThis.document.getElementById(id).hidden);
+const byId = (id) => globalThis.document.getElementById(id);
+function setStoredLayout(layout) {
+  localStorage.setItem('plaenicke.layout', layout);
+  storageEvent('plaenicke.layout');
+}
+function leaveDesktop() {
+  calendarChoice.chosen = false; // so a subset run does not inherit another test's hand pick
+  // The layout goes back first, while the gate still matches: a layout change
+  // on a phone leaves Coming up alone, so it would keep Month overview's open.
+  localStorage.setItem('plaenicke.layout', 'planner');
+  storageEvent('plaenicke.layout');
+  setMedia(false, false);
+  click(byId('tab-today'));
+}
+
+test('r3: in planner a To-do tap shows Today and To-do, hides the calendar pane; a phone change leaves one page', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, false);
+  try {
+    click(byId('tab-todo'));
+    assert.deepEqual(shownViews(), ['today-view', 'todo-view']);
+    assert.equal(byId('pane-left').hidden, false);
+    assert.equal(byId('pane-main').hidden, true, 'no calendar view is showing: its wrapper is hidden');
+    assert.equal(byId('pane-right').hidden, false);
+    assert.equal(byId('cal-switch').hidden, true, 'the switcher is hidden with no calendar pane');
+    assert.equal(byId('tab-todo').getAttribute('aria-current'), 'page');
+    assert.equal(byId('tab-calendar').getAttribute('aria-current'), null);
+    assert.equal(byId('tab-today').getAttribute('aria-current'), null);
+    click(byId('tab-calendar'));
+    assert.equal(byId('cal-switch').hidden, false, 'the switcher shows with a calendar pane');
+    assert.equal(byId('pane-main').hidden, false);
+    assert.equal(byId('pane-right').hidden, true);
+    click(byId('tab-todo'));
+    setMedia(false, false);
+    assert.deepEqual(shownViews(), ['todo-view'], 'a phone shows the one page, whatever was beside it');
+    assert.equal(byId('pane-left').hidden, true);
+    assert.equal(byId('pane-main').hidden, true);
+    assert.equal(byId('pane-right').hidden, false);
+  } finally {
+    leaveDesktop();
+  }
+  assert.deepEqual(shownViews(), ['today-view']);
+});
+
+test('r3: the rail marks the big pane, and a pane gets its name on a computer only', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, false);
+  try {
+    click(byId('show-week'));
+    assert.deepEqual(shownViews(), ['today-view', 'week-view']);
+    assert.equal(byId('tab-calendar').getAttribute('aria-current'), 'page');
+    assert.equal(byId('tab-today').getAttribute('aria-current'), null, 'Today is a side pane, not the big one');
+    // Today is named by its visible heading, like To-do and Ideas: an aria-label too would announce it twice.
+    assert.equal(byId('today-view').getAttribute('aria-labelledby'), 'today-view-heading');
+    assert.equal(byId('today-view').getAttribute('aria-label'), null);
+    assert.equal(byId('week-view').getAttribute('aria-label'), 'Calendar');
+    assert.equal(byId('calendar-view').getAttribute('aria-label'), null, 'a hidden pane carries no name');
+    click(byId('tab-todo'));
+    // To-do and Ideas are named by their visible heading (aria-labelledby): an
+    // aria-label as well would announce the name twice.
+    assert.equal(byId('todo-view').getAttribute('aria-labelledby'), 'todo-view-heading');
+    assert.equal(byId('todo-view').getAttribute('aria-label'), null);
+    assert.equal(byId('week-view').getAttribute('aria-label'), null, 'the week left the screen with its name');
+    click(byId('tab-ideas'));
+    assert.equal(byId('ideas-view').getAttribute('aria-labelledby'), 'ideas-view-heading');
+    assert.equal(byId('ideas-view').getAttribute('aria-label'), null);
+    assert.equal(byId('todo-view').getAttribute('aria-labelledby'), null, 'a hidden pane carries no name');
+    // Today's own tab on a computer: the big pane is still the calendar.
+    click(byId('tab-today'));
+    assert.deepEqual(shownViews().length, 2);
+    assert.equal(byId('tab-calendar').getAttribute('aria-current'), 'page', 'the big pane is the calendar again');
+    // The page title stays for assistive tech and is visually hidden here.
+    assert.ok(byId('tab-title')._classes.has('visually-hidden'), 'hidden on a computer');
+    click(byId('tab-todo'));
+    assert.ok(byId('tab-title')._classes.has('visually-hidden'), 'even on a list');
+    setMedia(false, false);
+    assert.equal(byId('todo-view').getAttribute('aria-label'), null, 'no names off the computer layout');
+    assert.equal(byId('todo-view').getAttribute('aria-labelledby'), null);
+    assert.equal(byId('ideas-view').getAttribute('aria-labelledby'), null);
+    assert.equal(byId('today-view').getAttribute('aria-label'), null);
+    assert.equal(byId('today-view').getAttribute('aria-labelledby'), null, 'no names off the computer layout');
+    assert.equal(byId('tab-title')._classes.has('visually-hidden'), false, 'a phone shows the title on a list page');
+    assert.equal(byId('tab-title').textContent, 'To-do');
+  } finally {
+    leaveDesktop();
+  }
+});
+
+test('r3: Today on a computer focuses its pane, and in wide Everything the lists focus theirs with no view change', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, false);
+  try {
+    click(byId('show-week'));
+    click(byId('tab-today'));
+    assert.equal(globalThis.document.activeElement, byId('today-view'), 'Today moves focus to its pane');
+    assert.equal(byId('today-view').getAttribute('tabindex'), '-1', 'focusable by script, not a tab stop');
+    setStoredLayout('all');
+    assert.deepEqual(shownViews(), ['today-view', 'week-view'], 'Everything narrower than wide behaves as planner');
+    click(byId('tab-todo'));
+    assert.deepEqual(shownViews(), ['today-view', 'todo-view'], 'below wide, To-do is a view change');
+    click(byId('show-week'));
+    setMedia(true, true);
+    assert.deepEqual(shownViews(), ['today-view', 'week-view', 'todo-view', 'ideas-view'], 'wide adds both lists');
+    assert.equal(byId('pane-right').hidden, false);
+    byId('today-view').focus();
+    click(byId('tab-todo'));
+    assert.equal(globalThis.document.activeElement, byId('todo-view'), 'To-do focuses its pane');
+    assert.deepEqual(shownViews(), ['today-view', 'week-view', 'todo-view', 'ideas-view'], 'and nothing else changed');
+    click(byId('tab-ideas'));
+    assert.equal(globalThis.document.activeElement, byId('ideas-view'), 'Ideas focuses its pane');
+    assert.equal(byId('tab-calendar').getAttribute('aria-current'), 'page', 'the rail still marks the calendar');
+    setMedia(true, false);
+    assert.deepEqual(shownViews(), ['today-view', 'week-view'], 'wide off: back to the planner');
+  } finally {
+    leaveDesktop();
+  }
+});
+
+test('r3: Settings\' layout buttons change the panes and data-layout together', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, true);
+  const panel = settingsPanel();
+  try {
+    const tap = (label) => click(panel.host.querySelectorAll('button').find((b) => b.textContent === label));
+    assert.deepEqual(shownViews(), ['today-view', 'week-view'], 'fixture check: planner');
+    tap('Everything');
+    assert.equal(globalThis.document.documentElement.dataset.layout, 'all');
+    assert.deepEqual(shownViews(), ['today-view', 'week-view', 'todo-view', 'ideas-view'], 'the panes followed the tap [C2]');
+    tap('Week planner');
+    assert.equal(globalThis.document.documentElement.dataset.layout, 'planner');
+    assert.deepEqual(shownViews(), ['today-view', 'week-view']);
+  } finally {
+    panel.close();
+    leaveDesktop();
+  }
+  assert.equal(globalThis.document.documentElement.dataset.layout, 'planner');
+});
+
+test('r3: another tab changing the layout applies it, repaints Settings, and schedules no sync', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, true);
+  const panel = settingsPanel();
+  try {
+    assert.deepEqual(shownViews(), ['today-view', 'week-view'], 'fixture check: planner');
+    assert.equal(pendingRealSyncTimers().length, 0, 'fixture check: no sync pending');
+    setStoredLayout('all');
+    assert.equal(globalThis.document.documentElement.dataset.layout, 'all', 'data-layout follows [C3]');
+    assert.deepEqual(shownViews(), ['today-view', 'week-view', 'todo-view', 'ideas-view'], 'and the panes');
+    assert.equal(pendingRealSyncTimers().length, 0, 'the layout is device-local: no sync');
+    const active = panel.host.querySelectorAll('button').filter((b) => b._classes.has('active')).map((b) => b.textContent);
+    assert.ok(active.includes('Everything'), `the open panel repainted: ${active}`);
+  } finally {
+    panel.close();
+    leaveDesktop();
+  }
+});
+
+test('r3: a calendar picked by hand survives a layout change and re-entering the gate', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, false);
+  try {
+    click(byId('show-day'));
+    click(byId('tab-today')); // Today is the main view now: the calendar beside it is lastCalendarView
+    assert.deepEqual(shownViews(), ['today-view', 'day-view'], 'fixture check: the Day the user picked');
+    setStoredLayout('month');
+    assert.deepEqual(shownViews(), ['today-view', 'day-view'], 'a layout change keeps the Day the user picked');
+    setMedia(false, false);
+    setMedia(true, false);
+    assert.deepEqual(shownViews(), ['today-view', 'day-view'], 'so does re-entering the gate');
+  } finally {
+    leaveDesktop();
+  }
+});
+
+test('r3: a to-do due today, opened from the To-do list, returns focus to that list; from Today, to Today', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const today = localISO(new Date());
+  seed([record({ id: 'r3-focus', type: 'task', title: 'r3 focus task', date: today })]);
+  // Control: the phone has Today alone, then the tick is off while Calendar shows.
+  click(byId('tab-calendar'));
+  assert.equal(todayTicks(), 0, 'fixture check: no tick off the Today page');
+  enableMockTimers(t, { apis: ['setTimeout'] });
+  setMedia(true, false);
+  try {
+    assert.equal(todayTicks(), 1, 'the tick is armed while Today is a side pane, whatever the main view is');
+    click(byId('tab-todo'));
+    assert.deepEqual(shownViews(), ['today-view', 'todo-view'], 'fixture check: the item is in two panes');
+    const fromTodo = openControlFor(todoList(), 'r3 focus task');
+    assert.ok(fromTodo, 'fixture check: the To-do list holds it');
+    click(fromTodo);
+    closeSheet();
+    assert.ok(isUnder(todoList(), globalThis.document.activeElement), 'focus returns to the To-do list');
+    assert.equal(globalThis.document.activeElement.getAttribute('data-item-id'), 'r3-focus');
+    const fromToday = openControlFor(todayBody(), 'r3 focus task');
+    assert.ok(fromToday, 'fixture check: Today holds it too');
+    click(fromToday);
+    closeSheet();
+    assert.ok(isUnder(todayBody(), globalThis.document.activeElement), 'focus returns to Today when opened there');
+  } finally {
+    forceCloseSheet();
+    t.mock.timers.tick(5000);
+    await resetMockTimers(t);
+    leaveDesktop();
+    seed([]);
+  }
+});
+
+test('r3: Month overview on a computer opens Coming up; "Show less" keeps it closed through a re-render', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const today = localISO(new Date());
+  const soon = record({ id: 'r3-far', type: 'event', title: 'r3 Far event', date: addDays(today, 13), time: '09:00' });
+  const dueToday = record({ id: 'r3-due', type: 'due', title: 'r3 Due today', date: today });
+  seed([soon, dueToday]);
+  setMedia(true, false);
+  try {
+    click(byId('tab-today'));
+    assert.equal(moreButton().textContent, 'Show the next 30 days', 'fixture check: planner starts closed');
+    setStoredLayout('month');
+    assert.equal(moreButton().textContent, 'Show less', 'Month overview opens Coming up');
+    click(moreButton());
+    assert.equal(moreButton().textContent, 'Show the next 30 days', '"Show less" closes it');
+    seed([soon, dueToday, record({ id: 'r3-more', type: 'event', title: 'r3 Another', date: addDays(today, 14) })]);
+    assert.equal(moreButton().textContent, 'Show the next 30 days', 'and a re-render keeps it closed');
+    setStoredLayout('planner');
+    assert.equal(moreButton().textContent, 'Show the next 30 days', 'planner closes it by default');
+    // Off a computer, Month overview does not open it.
+    setMedia(false, false);
+    setStoredLayout('month');
+    assert.equal(moreButton().textContent, 'Show the next 30 days', 'a phone is unchanged by the layout');
+  } finally {
+    leaveDesktop();
+    seed([]);
+  }
+});
+
+// =========================================================================
+// Release 3 review fixes (plan 2026-11-18-desktop-templates, findings A-E)
+// =========================================================================
+
+test('r3: on a phone a layout change (Settings or another tab) leaves an open Coming up open', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const today = localISO(new Date());
+  seed([record({ id: 'r3-ph-far', type: 'event', title: 'r3 phone far', date: addDays(today, 13), time: '09:00' })]);
+  setMedia(false, false);
+  const panel = settingsPanel();
+  try {
+    click(byId('tab-today'));
+    click(moreButton());
+    assert.equal(moreButton().textContent, 'Show less', 'fixture check: Coming up is open');
+    click(panel.host.querySelectorAll('button').find((b) => b.textContent === 'Everything'));
+    assert.equal(moreButton().textContent, 'Show less', 'a Settings layout tap on a phone keeps it open');
+    setStoredLayout('month');
+    assert.equal(moreButton().textContent, 'Show less', 'another tab\'s layout change keeps it open');
+  } finally {
+    panel.close();
+    leaveDesktop();
+    seed([]);
+  }
+});
+
+test('r3: a resume leaves a closed Coming up closed in Month overview', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const today = localISO(new Date());
+  seed([record({ id: 'r3-rs-far', type: 'event', title: 'r3 resume far', date: addDays(today, 13), time: '09:00' })]);
+  setMedia(true, false);
+  try {
+    setStoredLayout('month');
+    assert.equal(moreButton().textContent, 'Show less', 'fixture check: Month overview opens Coming up');
+    click(moreButton());
+    assert.equal(moreButton().textContent, 'Show the next 30 days', 'fixture check: the user closed it');
+    globalThis.document.visibilityState = 'hidden';
+    resume();
+    globalThis.document.visibilityState = 'visible';
+    resume();
+    assert.equal(moreButton().textContent, 'Show the next 30 days', 'a resume with the same layout keeps it closed');
+  } finally {
+    globalThis.document.visibilityState = 'visible';
+    leaveDesktop();
+    seed([]);
+  }
+});
+
+test('r3: a layout changed in storage while hidden (no storage event) is applied on resume', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, true);
+  try {
+    assert.equal(globalThis.document.documentElement.dataset.layout, 'planner', 'fixture check');
+    globalThis.document.visibilityState = 'hidden';
+    resume();
+    localStorage.setItem('plaenicke.layout', 'all');
+    globalThis.document.visibilityState = 'visible';
+    resume();
+    assert.equal(globalThis.document.documentElement.dataset.layout, 'all', 'data-layout follows the stored layout');
+    assert.deepEqual(shownViews(), ['today-view', 'week-view', 'todo-view', 'ideas-view'], 'and the panes');
+  } finally {
+    globalThis.document.visibilityState = 'visible';
+    leaveDesktop();
+  }
+});
+
+test('r3: on a computer, Ideas puts the right-hand pane on screen', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, false);
+  try {
+    assert.equal(byId('pane-right').hidden, true, 'fixture check: no list showing');
+    click(byId('tab-ideas'));
+    assert.deepEqual(shownViews(), ['today-view', 'ideas-view']);
+    assert.equal(byId('pane-right').hidden, false, 'Ideas alone makes #pane-right visible');
+  } finally {
+    leaveDesktop();
+  }
+});
+
+test('r3: the segments mark the calendar showing, even with Today as the main view', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, false);
+  try {
+    click(byId('show-week'));
+    click(byId('tab-today'));
+    assert.deepEqual(shownViews(), ['today-view', 'week-view'], 'fixture check');
+    assert.equal(byId('show-week').getAttribute('aria-pressed'), 'true');
+    assert.ok(byId('show-week')._classes.has('active'));
+    for (const id of ['show-day', 'show-3day', 'show-month']) {
+      assert.equal(byId(id).getAttribute('aria-pressed'), 'false', id);
+      assert.equal(byId(id)._classes.has('active'), false, id);
+    }
+  } finally {
+    leaveDesktop();
+  }
+});
+
+test('r3: in planner at wide width a To-do tap changes the view (only wide Everything just focuses)', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, true);
+  try {
+    click(byId('show-week'));
+    assert.deepEqual(shownViews(), ['today-view', 'week-view'], 'fixture check: planner, wide');
+    click(byId('tab-todo'));
+    assert.deepEqual(shownViews(), ['today-view', 'todo-view'], 'the view changed');
+    click(byId('tab-ideas'));
+    assert.deepEqual(shownViews(), ['today-view', 'ideas-view'], 'and again for Ideas');
+  } finally {
+    leaveDesktop();
+  }
+});
+
+test('r3: Everything narrower than wide with To-do: the rail and the title say To-do', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, false);
+  try {
+    setStoredLayout('all');
+    click(byId('tab-todo'));
+    assert.deepEqual(shownViews(), ['today-view', 'todo-view']);
+    assert.equal(byId('tab-todo').getAttribute('aria-current'), 'page');
+    assert.ok(byId('tab-todo')._classes.has('active'));
+    assert.equal(byId('tab-calendar').getAttribute('aria-current'), null);
+    assert.equal(byId('tab-title').textContent, 'To-do');
+  } finally {
+    leaveDesktop();
+  }
+});
+
+test('r3: on a phone the Today tap does not move focus', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(false, false);
+  try {
+    click(byId('tab-todo'));
+    byId('tab-todo').focus();
+    click(byId('tab-today'));
+    assert.deepEqual(shownViews(), ['today-view']);
+    assert.notEqual(globalThis.document.activeElement, byId('today-view'), 'focus stays put on a phone');
+    assert.equal(globalThis.document.activeElement, byId('tab-todo'));
+  } finally {
+    leaveDesktop();
+  }
+});
+
+test('r3: Month overview on a computer re-opens Coming up when a new day renders', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 9, 21, 23, 50).getTime() });
+  seed([record({ id: 'r3nd-far', type: 'event', title: 'r3nd far', date: '2026-11-03', time: '09:00' }),
+    record({ id: 'r3nd-due', type: 'due', title: 'r3nd form', date: '2026-10-21' })]);
+  setMedia(true, false);
+  try {
+    setStoredLayout('month');
+    assert.equal(moreButton().textContent, 'Show less', 'fixture check: Month overview opens it');
+    click(moreButton());
+    assert.equal(moreButton().textContent, 'Show the next 30 days', 'fixture check: closed by hand');
+    const tick = todayInterval();
+    t.mock.timers.tick(20 * 60 * 1000);
+    tick.fn();
+    assert.equal(labelText('today-date'), 'Thursday, October 22', 'fixture check: the new day rendered');
+    assert.equal(moreButton().textContent, 'Show less', 'a new day takes the layout\'s default: open');
+  } finally {
+    t.mock.timers.reset();
+    leaveDesktop();
+    seed([]);
+  }
+  resume();
+});
+
+test('r3: the calendar tab and a segment each mark a calendar as picked by hand', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, false);
+  try {
+    // A segment alone.
+    calendarChoice.chosen = false;
+    setStoredLayout('planner');
+    click(byId('tab-today'));
+    click(byId('show-day'));
+    click(byId('tab-today'));
+    setStoredLayout('month');
+    assert.deepEqual(shownViews(), ['today-view', 'day-view'], 'a segment pick survives a layout change');
+    // The Calendar tab alone.
+    calendarChoice.chosen = false;
+    setStoredLayout('planner');
+    click(byId('tab-today'));
+    click(byId('tab-calendar'));
+    assert.deepEqual(shownViews(), ['today-view', 'week-view'], 'fixture check: the tab opened the planner\'s week');
+    click(byId('tab-today'));
+    setStoredLayout('month');
+    assert.deepEqual(shownViews(), ['today-view', 'week-view'], 'a Calendar-tab pick survives a layout change');
+    // Control: with nothing picked the layout seeds.
+    calendarChoice.chosen = false;
+    setStoredLayout('planner');
+    setStoredLayout('month');
+    assert.deepEqual(shownViews(), ['today-view', 'calendar-view'], 'control: no pick, the layout seeds');
+  } finally {
+    leaveDesktop();
+  }
+});
+
+// The pane an item was opened from gets focus back, not the first visible pane
+// that lists it (Today comes first in document order). Each render site passes
+// its own body as the origin.
+for (const [name, segment, body] of [
+  ['week list', 'show-week', weekList],
+  ['3-day', 'show-3day', threeDayBody],
+  ['day', 'show-day', dayBody],
+]) {
+  test(`r3: an item opened from the ${name} returns focus to the ${name}, not Today`, async () => {
+    installFakeLocalStorage();
+    await import('../js/app.js');
+    const today = localISO(new Date());
+    seed([record({ id: 'r3-origin', type: 'event', title: 'r3 origin item', date: today, time: '10:00' })]);
+    setMedia(true, false);
+    try {
+      click(byId(segment));
+      assert.ok(openControlFor(todayBody(), 'r3 origin item'), 'fixture check: Today lists it');
+      const opener = openControlFor(body(), 'r3 origin item');
+      assert.ok(opener, `fixture check: the ${name} lists it`);
+      click(opener);
+      closeSheet();
+      assert.ok(isUnder(body(), globalThis.document.activeElement), `focus is back in the ${name}`);
+      assert.equal(isUnder(todayBody(), globalThis.document.activeElement), false, 'not in Today');
+    } finally {
+      forceCloseSheet();
+      leaveDesktop();
+      seed([]);
+    }
+  });
+}
+
+test('r3: an idea opened from Ideas, and an item opened from Today, return focus to that pane', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const today = localISO(new Date());
+  seed([record({ id: 'r3-idea', type: 'idea', title: 'r3 origin idea', date: today }),
+    record({ id: 'r3-tday', type: 'event', title: 'r3 today item', date: today, time: '10:00' })]);
+  setMedia(true, true);
+  try {
+    setStoredLayout('all');
+    const fromIdeas = openControlFor(ideaList(), 'r3 origin idea');
+    assert.ok(fromIdeas, 'fixture check');
+    click(fromIdeas);
+    closeSheet();
+    assert.ok(isUnder(ideaList(), globalThis.document.activeElement), 'focus is back in Ideas');
+    const fromToday = openControlFor(todayBody(), 'r3 today item');
+    assert.ok(fromToday, 'fixture check');
+    click(fromToday);
+    closeSheet();
+    assert.ok(isUnder(todayBody(), globalThis.document.activeElement), 'focus is back in Today');
+  } finally {
+    forceCloseSheet();
+    leaveDesktop();
+    seed([]);
+  }
+});
+
+// --- end-of-branch review fixes (layout) ------------------------------------
+
+test('r3: after the app has been at desktop size, the phone Calendar tab opens Day', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  calendarChoice.chosen = false;
+  setMedia(true, false);
+  try {
+    click(byId('tab-today'));
+    assert.deepEqual(shownViews(), ['today-view', 'week-view'], 'fixture check: the desktop seeded Week');
+    setMedia(false, false);
+    click(byId('tab-calendar'));
+    assert.deepEqual(shownViews(), ['day-view'], 'the phone opens Day, as it did before the panes');
+  } finally {
+    leaveDesktop();
+  }
+});
+
+test('r3: a calendar picked by hand at desktop size is still what the phone Calendar tab opens', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  calendarChoice.chosen = false;
+  setMedia(true, false);
+  try {
+    click(byId('show-week'));
+    setMedia(false, false);
+    click(byId('tab-today'));
+    click(byId('tab-calendar'));
+    assert.deepEqual(shownViews(), ['week-view']);
+  } finally {
+    leaveDesktop();
+  }
+});
+
+test('r3: localStorage.clear() in another tab (storage key null) re-applies the layout', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, false);
+  try {
+    setStoredLayout('month');
+    assert.deepEqual(shownViews(), ['today-view', 'calendar-view'], 'fixture check');
+    localStorage.removeItem('plaenicke.layout'); // what a clear did to it
+    storageEvent(null);
+    assert.equal(globalThis.document.documentElement.dataset.layout, 'planner', 'data-layout follows');
+    assert.deepEqual(shownViews(), ['today-view', 'week-view'], 'and so do the panes');
+  } finally {
+    leaveDesktop();
+  }
+});
+
+test('r3: returning to the visible tab applies a layout another tab chose while this one was away', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, false);
+  try {
+    setVisibility('hidden');
+    localStorage.setItem('plaenicke.layout', 'month'); // its storage event never reached the suspended page
+    setVisibility('visible');
+    resume();
+    assert.equal(globalThis.document.documentElement.dataset.layout, 'month');
+    assert.deepEqual(shownViews(), ['today-view', 'calendar-view']);
+  } finally {
+    setVisibility(undefined);
+    leaveDesktop();
+  }
+});
+
+test('r3: a list tap in wide Everything clears the status line', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  setMedia(true, true);
+  try {
+    setStoredLayout('all');
+    globalThis.document.getElementById('status-line').textContent = 'Added.';
+    click(byId('tab-todo'));
+    assert.equal(messageText(), '');
+    globalThis.document.getElementById('status-line').textContent = 'Added.';
+    click(byId('tab-ideas'));
+    assert.equal(messageText(), '');
+  } finally {
+    leaveDesktop();
+  }
+});
+
+// --- browser sweep: focus on close, Escape (desktop only) --------------------
+
+test('r3: closing the desktop box returns focus to the dock button that opened it; the phone is unchanged', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const vvx = withVisualViewport();
+  const timers = installManualTimers();
+  capEl('capture-dock')._rect = { top: 80, left: 120, width: 300, height: 40 };
+  globalThis.window.innerHeight = 800;
+  setMedia(true, false);
+  try {
+    click(capEl('capture-dock-type'));
+    closeCapture(timers);
+    assert.equal(globalThis.document.activeElement, capEl('capture-dock-type'), 'typing button');
+    click(capEl('capture-dock-mic'));
+    closeCapture(timers);
+    assert.equal(globalThis.document.activeElement, capEl('capture-dock-mic'), 'mic button');
+    setMedia(false, false);
+    click(capEl('capture-btn'));
+    closeCapture(timers);
+    assert.notEqual(globalThis.document.activeElement, capEl('capture-dock-mic'), 'the phone does not move focus to the dock');
+    assert.notEqual(globalThis.document.activeElement, capEl('capture-dock-type'));
+  } finally {
+    if (!capEl('capture-box').hidden) closeCapture(timers);
+    timers.restore();
+    vvx.restore();
+    voice.restore();
+    leaveDesktop();
+  }
+});
+
+test('r3: Escape closes the open desktop box and returns focus to the dock; elsewhere it does nothing', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  seed([]);
+  const voice = withVoice();
+  const vvx = withVisualViewport();
+  const timers = installManualTimers();
+  const box = capEl('capture-box');
+  capEl('capture-dock')._rect = { top: 80, left: 120, width: 300, height: 40 };
+  globalThis.window.innerHeight = 800;
+  try {
+    // The phone: Escape leaves the box alone.
+    click(capEl('capture-btn'));
+    keydown(box, 'Escape');
+    assert.equal(box._classes.has('closing'), false, 'the phone ignores Escape');
+    closeCapture(timers);
+    setMedia(true, false);
+    click(capEl('capture-dock-type'));
+    keydown(box, 'a');
+    assert.equal(box._classes.has('closing'), false, 'another key does nothing');
+    const prevented = keydown(box, 'Escape');
+    assert.equal(prevented, true);
+    assert.equal(box._classes.has('closing'), true, 'Escape closes it');
+    timers.fire(250);
+    assert.equal(box.hidden, true);
+    assert.equal(globalThis.document.activeElement, capEl('capture-dock-type'));
+  } finally {
+    if (!box.hidden) closeCapture(timers);
+    timers.restore();
+    vvx.restore();
+    voice.restore();
+    leaveDesktop();
   }
 });

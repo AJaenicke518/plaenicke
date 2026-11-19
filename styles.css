@@ -762,6 +762,8 @@ button[data-press].pressed { opacity: 1; }
 .settings-row { margin-top: 10px; }
 .settings-row-label { display: block; margin-bottom: 4px; }
 .settings-row .note { margin-top: 4px; }
+/* The Computer layout row means nothing on a phone; the gate shows it. */
+.settings-row-desktop-only { display: none; }
 .settings-section .usage-note { margin-top: 12px; }
 .seg button {
   flex: 1;
@@ -1458,3 +1460,166 @@ button[data-press].pressed { opacity: 1; }
 }
 @keyframes tick-pop { 0% { transform: scale(1); } 45% { transform: scale(1.28); } 100% { transform: scale(1); } }
 @keyframes tick-draw { from { background-size: 0 1.5px; } to { background-size: 100% 1.5px; } }
+
+/* ---------- pane wrappers (Release 3) ----------
+   index.html wraps the panes in .panes > #pane-left/#pane-main/#pane-right.
+   Outside the desktop gate they are inert: display: contents removes their
+   boxes, so the phone lays out exactly as it did without them. This rule MUST
+   come before the gate block below (equal specificity: a later copy would
+   override the desktop grid; tests/styles.test.js pins the order). */
+.panes, .pane-left, .pane-main, .pane-right { display: contents; }
+/* The docked capture row is desktop-only; the gate shows it (a later task). */
+.capture-dock { display: none; }
+/* The dock's look is stated here, outside the gate, where the row is hidden;
+   the gate only turns it on and lays it out (the gate block carries no paint). */
+.capture-dock-type {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 var(--space-3);
+  text-align: left;
+  background: var(--card);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sheet);
+  font-family: var(--sans);
+  font-size: var(--text-row);
+}
+.capture-dock-mic {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-round);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.capture-dock-type:disabled, .capture-dock-mic:disabled { opacity: 0.5; }
+/* The mic, or while listening a stop square (as the round button's). */
+.capture-dock-mic .icon-stop { display: none; }
+.capture-dock-mic.listening .icon-mic { display: none; }
+.capture-dock-mic.listening .icon-stop { display: block; }
+/* The headings that name the To-do and Ideas panes show on a computer only
+   (the phone's tab bar and page title name them). */
+.pane-heading { display: none; }
+
+/* ---------- desktop gate (Release 3) ----------
+   Desktop A's centred 44rem column is gone; the panes replace it. The gate is
+   (min-width: 46rem) and (hover: hover) and (pointer: fine), DESKTOP_QUERY in
+   js/layout.js; hover/pointer keep a large iPhone in landscape (~932px) on
+   the phone layout. A wrapper that gets a display here must restate [hidden],
+   since an author display beats the UA's hidden rule. */
+@media (min-width: 46rem) and (hover: hover) and (pointer: fine) {
+  #pane-left[hidden], #pane-main[hidden], #pane-right[hidden] { display: none; }
+  .settings-row-desktop-only { display: block; }
+
+  /* The docked capture line replaces the round button. Its box opens under
+     it: js/app.js places the box inline (top, left, width, max-height) and the
+     panel grows from the top-left. CSS sets no transform on the box. */
+  .capture-btn { display: none; }
+  .capture-dock {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: 0 0 auto;
+    padding-bottom: var(--space-3);
+    /* Stays at the top of the left pane while the Today list scrolls under
+       it; opaque, so the rows do not show through. */
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--bg);
+  }
+  .capture-box { bottom: auto; right: auto; }
+  .capture-panel { transform-origin: top left; }
+  .pane-heading { display: block; }
+
+  /* The page is one viewport tall and nothing scrolls but the panes: body is a
+     100dvh flex column (header block, then .panes taking what is left), so no
+     height is computed from the header's. The rail's width is the left padding;
+     the bottom-bar and capture-button reserve is gone. */
+  body {
+    box-sizing: border-box;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    padding-left: 4.5rem;
+    padding-bottom: 0;
+  }
+  .panes {
+    display: grid;
+    flex: 1;
+    min-height: 0;
+    grid-template-columns: minmax(17rem, 26rem) minmax(20rem, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    gap: var(--space-4);
+    padding-left: var(--space-4);
+  }
+  [data-layout="planner"] .panes,
+  [data-layout="month"] .panes,
+  [data-layout="all"] .panes { grid-template-columns: minmax(17rem, 26rem) minmax(20rem, 1fr); }
+  /* Today is column 1. The big pane is column 2, and the To-do/Ideas wrapper
+     shares its cell (only one of the two is ever shown) except in wide-all. */
+  .pane-left, .pane-main, .pane-right {
+    display: flex;
+    flex-direction: column;
+    overflow: auto;
+    min-width: 0;
+    min-height: 0;
+  }
+  .pane-left { grid-column: 1; grid-row: 1; }
+  .pane-main, .pane-right { grid-column: 2; grid-row: 1; }
+
+  /* Day and 3-day scroll inside their own grids (their scrollTop auto-scroll
+     and the pinned 3-day heads depend on it), so each is a flex column that
+     fills the pane and its grid takes the remaining height. */
+  #day-view, #three-day-view {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+  #day-view[hidden], #three-day-view[hidden] { display: none; }
+  #day-body, #three-day-body {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+  .day-grid, .tday-grid { flex: 1 1 auto; min-height: 0; max-height: none; }
+
+  /* The tab bar becomes a rail on the left edge. */
+  .tab-bar {
+    top: 0; bottom: 0; left: 0; right: auto;
+    width: 4.5rem;
+    height: auto;
+    flex-direction: column;
+    padding-bottom: 0;
+    border-top: 0;
+    border-right: 1px solid var(--line);
+  }
+  .tab-bar button { flex: 0 0 auto; }
+
+  /* The toast clears the rail; the capture button's 88px reserve and the
+     bottom bar's offset are gone. */
+  .toast { left: calc(4.5rem + 16px); right: 16px; bottom: 16px; max-width: 36rem; }
+  .sheet { max-width: 40rem; margin-inline: auto; }
+}
+
+/* Wide: layout "all" adds To-do and Ideas as a third column. */
+@media (min-width: 46rem) and (hover: hover) and (pointer: fine) and (min-width: 80rem) {
+  [data-layout="all"] .panes { grid-template-columns: minmax(17rem, 26rem) minmax(20rem, 1fr) minmax(18rem, 22rem); }
+  [data-layout="all"] .pane-right { grid-column: 3; grid-row: 1; }
+  /* To-do above Ideas, each its own scroller, so Ideas is never pushed down
+     past a long To-do list. */
+  [data-layout="all"] .pane-right {
+    display: grid;
+    grid-template-rows: minmax(0, 3fr) minmax(0, 2fr);
+    overflow: hidden;
+  }
+  [data-layout="all"] .pane-right[hidden] { display: none; }
+  [data-layout="all"] #todo-view, [data-layout="all"] #ideas-view { overflow: auto; min-height: 0; }
+}
