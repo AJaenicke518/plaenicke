@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { minutesOf, formatTime, formatTimeRange, addDays, startOfWeek,
-  bucketDayItems, layoutDayBlocks, weekLabel } from '../js/timegrid.js';
+  bucketDayItems, layoutDayBlocks, weekLabel, weekdayNames, hourLabel } from '../js/timegrid.js';
 
 test('minutesOf converts HH:MM to minutes since midnight', () => {
   assert.equal(minutesOf('00:00'), 0);
@@ -76,4 +76,54 @@ test('weekLabel omits the year inside one year and names both across a year boun
   assert.equal(weekLabel('2026-10-18', '2026-10-24'), '10/18 – 10/24');
   assert.equal(weekLabel('2026-11-29', '2026-12-05'), '11/29 – 12/05', 'a month boundary is not a year boundary');
   assert.equal(weekLabel('2026-12-27', '2027-01-02'), '12/27/2026 – 01/02/2027');
+});
+
+test('formatTime 24h is zero-padded HH:MM', () => {
+  assert.equal(formatTime('00:00', '24h'), '00:00');
+  assert.equal(formatTime('07:05', '24h'), '07:05');
+  assert.equal(formatTime('12:00', '24h'), '12:00');
+  assert.equal(formatTime('23:59', '24h'), '23:59');
+});
+
+test('formatTime 12h is unchanged, explicit or default', () => {
+  assert.equal(formatTime('00:00'), '12:00 AM');
+  assert.equal(formatTime('12:00'), '12:00 PM');
+  assert.equal(formatTime('00:00', '12h'), '12:00 AM');
+  assert.equal(formatTime('13:05', '12h'), '1:05 PM');
+});
+
+test('formatTimeRange 24h has no period suffix', () => {
+  assert.equal(formatTimeRange('07:00', '09:15', '24h'), '07:00–09:15');
+  assert.equal(formatTimeRange('11:00', '13:00', '24h'), '11:00–13:00');
+  assert.equal(formatTimeRange('07:00', '09:15'), '7:00–9:15 AM');
+});
+
+test('startOfWeek with a Monday start', () => {
+  assert.equal(startOfWeek('2026-11-18', 'mon'), '2026-11-16');
+  assert.equal(startOfWeek('2026-11-22', 'mon'), '2026-11-16'); // Sunday goes back 6
+  assert.equal(startOfWeek('2026-11-16', 'mon'), '2026-11-16');
+  assert.equal(startOfWeek('2027-01-01', 'mon'), '2026-12-28');
+  assert.equal(startOfWeek('2026-11-22', 'sun'), '2026-11-22');
+  assert.equal(startOfWeek('2026-11-18'), '2026-11-15');
+});
+
+test('a Monday-start week across New Year shows both years in its label', () => {
+  const s = startOfWeek('2027-01-01', 'mon');
+  assert.equal(weekLabel(s, addDays(s, 6)), '12/28/2026 – 01/03/2027');
+});
+
+test('weekdayNames', () => {
+  assert.deepEqual(weekdayNames('mon'), ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']);
+  assert.deepEqual(weekdayNames('sun'), ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']);
+  assert.equal(weekdayNames()[0], 'Sun');
+});
+
+test('hourLabel', () => {
+  assert.equal(hourLabel(0), '12 AM');
+  assert.equal(hourLabel(7), '7 AM');
+  assert.equal(hourLabel(12), '12 PM');
+  assert.equal(hourLabel(13), '1 PM');
+  assert.equal(hourLabel(0, '24h'), '00');
+  assert.equal(hourLabel(7, '24h'), '07');
+  assert.equal(hourLabel(13, '24h'), '13');
 });

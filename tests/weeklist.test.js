@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeFakeDocument, allText, findAll, fire } from './fake-dom.js';
 import { buildWeekList, renderWeekList } from '../js/weeklist.js';
+import { installFakeLocalStorage } from './fake-localstorage.js';
 
 // Dates only, but weekday names come from Intl: pin Alex's zone like
 // today.test.js. node --test runs each file in its own process.
@@ -73,6 +74,20 @@ test('buildWeekList: a future week shows all seven days, headed "This week"', ()
   assert.deepEqual(feed.asked, [['2026-10-25', '2026-10-31']]);
   assert.equal(list.heading, 'This week');
   assert.deepEqual(titlesOf(list), ['Sun', 'Sat']);
+});
+
+test('buildWeekList: pins date-agnostic behaviour: given a Monday start it lists Monday .. Sunday, and "current" includes the Sunday', () => {
+  const feed = rangeFeed([]);
+  const list = buildWeekList([
+    own('mon', { date: '2026-10-19', title: 'Mon' }), own('sun', { date: '2026-10-25', title: 'Sun' }),
+    own('before', { date: '2026-10-18', title: 'Before' }), own('after', { date: '2026-10-26', title: 'After' }),
+  ], feed.fn, '2026-10-19', '2026-10-25');
+  assert.deepEqual(feed.asked, [['2026-10-25', '2026-10-25']], 'the Sunday is the last day of the current week');
+  assert.equal(list.heading, 'Rest of this week');
+  assert.deepEqual(titlesOf(list), ['Sun']);
+  const other = rangeFeed([]);
+  buildWeekList([], other.fn, '2026-10-19', '2026-10-30');
+  assert.deepEqual(other.asked, [['2026-10-19', '2026-10-25']], 'a future Monday-start week lists Monday .. Sunday');
 });
 
 test('buildWeekList: a past week shows all seven days as a plain record, headed "This week"', () => {
@@ -328,4 +343,20 @@ test('renderWeekList: justTicked marks that row tick-just and wraps its title in
   assert.equal(byClass(just[0], 'tick-strike')[0].textContent, 'A done task');
   const { host: plain } = draw(TICKS(), { justTicked: 'task' });
   assert.equal(byClass(plain, 'tick-just').length, 0, 'only a row drawn done plays it');
+});
+
+// --- time format preference ------------------------------------------------
+
+test('renderWeekList: row times follow the time format, read at each render', () => {
+  const ls = installFakeLocalStorage();
+  try {
+    const times = () => byClass(draw(fri()).host, 'wlist-time').map((n) => n.textContent);
+    assert.deepEqual(times(), ['All day', '9:25 AM', '5:00 PM']);
+    ls.setItem('plaenicke.timeFormat', '24h');
+    assert.deepEqual(times(), ['All day', '09:25', '17:00']);
+    ls.setItem('plaenicke.timeFormat', '12h');
+    assert.deepEqual(times(), ['All day', '9:25 AM', '5:00 PM']);
+  } finally {
+    ls.removeItem('plaenicke.timeFormat');
+  }
 });

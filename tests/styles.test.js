@@ -1472,3 +1472,7 @@ test('account: the banner hides when [hidden], and its buttons and checkboxes ar
 test('account: the recovery banner uses the control radius token, not a literal', () => {
   assert.equal(declOf('.account-banner', 'border-radius'), 'var(--radius-control)');
 });
+
+test('the Settings usage note has a clear gap above it so it does not read as part of the Week row', () => {
+  assert.equal(declOf('.settings-section .usage-note', 'margin-top'), '12px');
+});

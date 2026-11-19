@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { allText } from './fake-dom.js';
 import { openItemSheet } from '../js/itemsheet.js';
+import { installFakeLocalStorage } from './fake-localstorage.js';
 import { TYPES } from '../js/preview.js';
 import { tagColour } from '../js/palette.js';
 
@@ -1225,4 +1226,21 @@ test('vis: no visibility given, no switches; visibility without a callback refus
 test('vis: an own item never draws the switches, even if given them', () => {
   const { host } = open(task(), { visibility: { calendar: true, list: true, every: true }, onVisibilityChange: () => ({ ok: true }) });
   assert.equal(byClass(host, 'sheet-vis').length, 0);
+});
+
+// --- time format preference ------------------------------------------------
+
+test('the sheet\'s "when" line follows the time format, read at each open', () => {
+  const ls = installFakeLocalStorage();
+  try {
+    const when = (item) => allText(open(item).host);
+    assert.match(when(external({ time: '13:30', endTime: '14:00' })), /Today · 1:30–2:00 PM/);
+    ls.setItem('plaenicke.timeFormat', '24h');
+    assert.match(when(external({ time: '13:30', endTime: '14:00' })), /Today · 13:30–14:00/);
+    assert.match(when(external({ time: '13:30', endTime: null })), /Today · 13:30/);
+    ls.setItem('plaenicke.timeFormat', '12h');
+    assert.match(when(external({ time: '13:30', endTime: '14:00' })), /Today · 1:30–2:00 PM/);
+  } finally {
+    ls.removeItem('plaenicke.timeFormat');
+  }
 });

@@ -2,6 +2,7 @@
 // timed items. (V6 § 4 moved the untimed block above the grid; before that it
 // was appended below.)
 import { bucketDayItems, layoutDayBlocks, formatTime, formatTimeRange } from './timegrid.js';
+import { getTimeFormat } from './prefs.js';
 import { itemTypeClass } from './calendar.js';
 
 const HOUR_PX = 48;
@@ -13,6 +14,7 @@ export function renderDayView(container, dateISO, dayItems, { onOpen, onDelete, 
   const prev = container.querySelector('.day-grid')?.scrollTop ?? 0;
   container.innerHTML = '';
   const { untimed, timed } = bucketDayItems(dayItems);
+  const fmt = getTimeFormat();
 
   const grid = document.createElement('div');
   grid.className = 'day-grid';
@@ -26,7 +28,7 @@ export function renderDayView(container, dateISO, dayItems, { onOpen, onDelete, 
   for (let h = 0; h < 24; h++) {
     const label = document.createElement('div');
     label.className = 'day-hour';
-    label.textContent = formatTime(`${String(h).padStart(2, '0')}:00`);
+    label.textContent = formatTime(`${String(h).padStart(2, '0')}:00`, fmt);
     hours.appendChild(label);
     const line = document.createElement('div');
     line.className = 'hour-line';
@@ -43,8 +45,8 @@ export function renderDayView(container, dateISO, dayItems, { onOpen, onDelete, 
     el.style.left = `${(row.col / row.cols) * 100}%`;
     el.style.width = `calc(${100 / row.cols}% - 4px)`;
     const when = row.item.endTime
-      ? formatTimeRange(row.item.time, row.item.endTime)
-      : formatTime(row.item.time);
+      ? formatTimeRange(row.item.time, row.item.endTime, fmt)
+      : formatTime(row.item.time, fmt);
     // The block itself carries NO click handler: it contains the ×, and a tap
     // on the × must not also open the sheet. The open control is a button
     // inside the block, and the × is its sibling.

@@ -1,7 +1,8 @@
 // calendar.js — pure month-grid math and item bucketing.
 
-export function buildMonthGrid(year, month) {
-  const startDow = new Date(year, month, 1).getDay(); // 0 = Sunday
+export function buildMonthGrid(year, month, weekStart = 'sun') {
+  // Leading blanks: the 1st's weekday, counted from the first column's day.
+  const startDow = (new Date(year, month, 1).getDay() - (weekStart === 'mon' ? 1 : 0) + 7) % 7;
   const daysInMonth = new Date(year, month + 1, 0).getDate();
 
   const cells = [];

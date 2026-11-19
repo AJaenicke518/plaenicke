@@ -52,8 +52,8 @@ export function formatDayLabel(iso, todayISO) {
 
 const WINDOW_DAYS = 7;
 
-function localClock(d) {
-  return formatTime(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`);
+function localClock(d, fmt = '12h') {
+  return formatTime(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`, fmt);
 }
 
 // The Phase 0 baseline: is the app actually being opened? Local-only; see
@@ -63,7 +63,7 @@ function localClock(d) {
 // date of each timestamp, and the window is the last WINDOW_DAYS local dates
 // (today and the six before). Day arithmetic is on YYYY-MM-DD strings, so a
 // 23- or 25-hour DST day cannot move the window's edge.
-export function describeLaunches(launches, now) {
+export function describeLaunches(launches, now, fmt = '12h') {
   const today = toISO(now);
   const first = addDays(today, -(WINDOW_DAYS - 1));
   const times = launches.map((iso) => Date.parse(iso)).filter(Number.isFinite);
@@ -73,5 +73,5 @@ export function describeLaunches(launches, now) {
     : `Opened on ${days.size} of the last ${WINDOW_DAYS} days.`;
   if (times.length === 0) return head;
   const last = new Date(Math.max(...times));
-  return `${head} Last opened ${formatDayLabel(toISO(last), today)}, ${localClock(last)}.`;
+  return `${head} Last opened ${formatDayLabel(toISO(last), today)}, ${localClock(last, fmt)}.`;
 }

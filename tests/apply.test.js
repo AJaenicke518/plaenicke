@@ -3901,6 +3901,38 @@ test('sweep D: with calendars, the stamp is the OLDEST fetch among the visible o
   resume();
 });
 
+test('time format: the Updated stamp follows the preference, with and without calendars', async (t) => {
+  const ls = installFakeLocalStorage();
+  await import('../js/app.js');
+  withSession();
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(13, 5).getTime() });
+  try {
+    // No visible calendar: a render stamps the render time.
+    unseedFeeds();
+    ls.setItem('plaenicke.timeFormat', '24h');
+    resume();
+    assert.equal(stampEl().textContent, 'Updated 13:05');
+    ls.setItem('plaenicke.timeFormat', '12h');
+    resume();
+    assert.equal(stampEl().textContent, 'Updated 1:05 PM');
+    // A fresh visible calendar: the stamp is its fetch time.
+    seedFeedsWithCache([sdFeed('tf-fa')], { 'tf-fa': cacheAt(localAt(13, 0)) });
+    ls.setItem('plaenicke.timeFormat', '24h');
+    resume();
+    await settle();
+    assert.equal(stampEl().textContent, 'Updated 13:00');
+    ls.setItem('plaenicke.timeFormat', '12h');
+    resume();
+    await settle();
+    assert.equal(stampEl().textContent, 'Updated 1:00 PM');
+  } finally {
+    t.mock.timers.reset();
+    ls.removeItem('plaenicke.timeFormat');
+    unseedFeeds();
+    resume();
+  }
+});
+
 test('sweep D: a calendar fetch that fails says so instead of a time', async (t) => {
   installFakeLocalStorage();
   await import('../js/app.js');
@@ -5827,7 +5859,8 @@ test('cross-tab sync: a storage event for a key that is not synced schedules not
   const timers = installManualTimers();
   try {
     setVisibility('visible');
-    for (const key of ['plaenicke.feedCache', 'plaenicke.launches', 'plaenicke.syncState', 'plaenicke.auth', null]) {
+    for (const key of ['plaenicke.feedCache', 'plaenicke.launches', 'plaenicke.syncState', 'plaenicke.auth',
+      'plaenicke.timeFormat', 'plaenicke.weekStart', null]) {
       storageEvent(key);
     }
     assert.equal(timers.live(2000), 0, 'no sync is scheduled for a device-local key');
@@ -10350,3 +10383,316 @@ for (const [label, settleOld] of [
     seed([]);
   });
 }
+
+// --- R1 Task 3: week start ---------------------------------------------------
+//
+// The Settings callback and the storage listener share one handler: refresh
+// today, keep the week on screen that holds today (else the visible week's
+// midpoint), re-anchor it to the chosen first day, re-render. Module-scope
+// view state survives between tests here, so each test below ends with the
+// pref back on 'sun' and the week cursor back on today's week.
+const prefButton = (host, label) => {
+  const b = host.querySelectorAll('button').find((x) => x.textContent === label);
+  assert.ok(b, `fixture check: a ${label} button in Settings`);
+  return b;
+};
+
+test('prefs: on a Sunday, switching week start keeps today on screen, in both directions', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  // 2026-11-22 is a Sunday. A plain midpoint of the Sunday-start week
+  // (11/22..11/28) is 11/25, whose Monday-start week (11/23..) loses today.
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 10, 22, 12, 0).getTime() });
+  let panel = null;
+  try {
+    resume();
+    assert.equal(labelText('week-label'), weekLabelFor('2026-11-22'), 'fixture check: Sunday-start week on a Sunday');
+    panel = settingsPanel();
+    click(prefButton(panel.host, 'Monday'));
+    assert.equal(labelText('week-label'), weekLabelFor('2026-11-16'), 'sun -> mon: the week holding Sunday 11/22 stays');
+    click(prefButton(panel.host, 'Sunday'));
+    assert.equal(labelText('week-label'), weekLabelFor('2026-11-22'), 'mon -> sun: today stays on screen');
+  } finally {
+    if (panel) panel.close();
+    localStorage.setItem('plaenicke.weekStart', 'sun');
+    t.mock.timers.reset();
+    resume();
+  }
+  assert.equal(labelText('week-label'), weekLabelFor(startOfWeek(localISO(new Date()))), 'restored for later tests');
+});
+
+test('prefs: switching week start on a week that is not the current one keeps that week, not today', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const thisSun = startOfWeek(localISO(new Date()));
+  assert.equal(labelText('week-label'), weekLabelFor(thisSun), 'fixture check: on the current week');
+  const shown = addDays(thisSun, 21); // three weeks on, relative to now
+  let steps = 0;
+  let panel = null;
+  try {
+    for (; steps < 3; steps += 1) click(doc.getElementById('next-week'));
+    assert.equal(labelText('week-label'), weekLabelFor(shown), 'fixture check');
+    panel = settingsPanel();
+    click(prefButton(panel.host, 'Monday'));
+    assert.equal(labelText('week-label'), weekLabelFor(addDays(shown, 1)),
+      'the Monday-start week around the shown week\'s midpoint, not a jump to today');
+    click(prefButton(panel.host, 'Sunday'));
+    assert.equal(labelText('week-label'), weekLabelFor(shown));
+  } finally {
+    if (panel) panel.close();
+    localStorage.setItem('plaenicke.weekStart', 'sun');
+    for (; steps > 0; steps -= 1) click(doc.getElementById('prev-week'));
+  }
+  assert.equal(labelText('week-label'), weekLabelFor(thisSun), 'restored for later tests');
+});
+
+test('prefs: the Month header follows the week start, and Nov 2026 (1st a Sunday) puts day 1 in column 7 on Monday', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const doc = globalThis.document;
+  const grid = doc.getElementById('calendar-grid');
+  const heads = () => grid.children.filter((c) => c._classes.has('cal-head')).map((c) => c.textContent);
+  const cells = () => grid.children.filter((c) => c._classes.has('cal-cell'));
+  const shownMonth = () => {
+    const [name, year] = doc.getElementById('calendar-label').textContent.split(' ');
+    return Number(year) * 12 + MONTH_NAMES.indexOf(name);
+  };
+  const goto = (target) => {
+    for (let n = 0; shownMonth() !== target; n += 1) {
+      assert.ok(n < 1200, 'fixture check: the month arrows reach the target');
+      click(doc.getElementById(shownMonth() < target ? 'next-month' : 'prev-month'));
+    }
+  };
+  const origin = shownMonth();
+  try {
+    assert.deepEqual(heads(), ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'], 'fixture check: default is Sunday first');
+    localStorage.setItem('plaenicke.weekStart', 'mon');
+    reloadFromStorage('plaenicke.weekStart');
+    assert.deepEqual(heads(), ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']);
+    goto(2026 * 12 + 10); // November 2026
+    assert.equal(heads()[0], 'Mon');
+    const c = cells();
+    assert.ok(c.slice(0, 6).every((x) => x._classes.has('blank')), 'six leading blanks');
+    assert.equal(String(c[6].children[0].textContent), '1', 'day 1 is in the 7th column');
+  } finally {
+    localStorage.setItem('plaenicke.weekStart', 'sun');
+    reloadFromStorage('plaenicke.weekStart');
+    goto(origin);
+  }
+  assert.deepEqual(heads(), ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'], 'restored for later tests');
+});
+
+test('prefs: another tab changing week start re-anchors the week here, and neither pref key schedules a sync', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  await linkWithCode(bytesToBase64url(crypto.getRandomValues(new Uint8Array(TOKEN_BYTES))));
+  clearAdoptionPending();
+  const net = captureAccountRequests();
+  const timers = installManualTimers();
+  try {
+    setVisibility('visible');
+    const today = localISO(new Date());
+    localStorage.setItem('plaenicke.weekStart', 'mon');
+    storageEvent('plaenicke.weekStart');
+    assert.equal(labelText('week-label'), weekLabelFor(startOfWeek(today, 'mon')), 'the week re-anchors to Monday around today');
+    localStorage.setItem('plaenicke.timeFormat', '24h');
+    storageEvent('plaenicke.timeFormat');
+    assert.equal(timers.live(2000), 0, 'neither key schedules a sync');
+    localStorage.setItem('plaenicke.weekStart', 'sun');
+    storageEvent('plaenicke.weekStart');
+    assert.equal(labelText('week-label'), weekLabelFor(startOfWeek(today)), 'restored for later tests');
+    timers.fire(2000);
+    await drain();
+    assert.deepEqual(net.requests, [], 'no request went out');
+  } finally {
+    setVisibility('visible');
+    timers.restore();
+    net.restore();
+    localStorage.removeItem('plaenicke.timeFormat');
+    localStorage.setItem('plaenicke.weekStart', 'sun');
+    unlink();
+  }
+});
+
+// --- R1 Task 3 review: mutants that survived --------------------------------
+
+test('prefs: a Monday-start week on screen follows the clock across Sunday midnight, and one on Tuesday does not move', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  // Date only: no setTimeout is mocked, so the timer-id trap does not apply.
+  // 2026-11-22 is a Sunday.
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 10, 22, 23, 59).getTime() });
+  try {
+    resume();
+    assert.equal(labelText('week-label'), weekLabelFor('2026-11-22'), 'fixture check: the Sunday-start week on that Sunday');
+    localStorage.setItem('plaenicke.weekStart', 'mon');
+    reloadFromStorage('plaenicke.weekStart');
+    assert.equal(labelText('week-label'), weekLabelFor('2026-11-16'), 'fixture check: the Monday-start week holding Sunday 11/22');
+    t.mock.timers.tick(2 * 60 * 1000); // Monday 11/23, 00:01
+    resume();
+    assert.equal(labelText('week-label'), weekLabelFor('2026-11-23'),
+      'a Monday-start week that was showing today follows today into the new week');
+    t.mock.timers.tick(24 * 60 * 60 * 1000); // Tuesday 11/24
+    resume();
+    assert.equal(labelText('week-label'), weekLabelFor('2026-11-23'), 'Monday to Tuesday stays in the same week');
+  } finally {
+    localStorage.setItem('plaenicke.weekStart', 'sun');
+    reloadFromStorage('plaenicke.weekStart');
+    t.mock.timers.reset();
+    resume();
+  }
+  assert.equal(labelText('week-label'), weekLabelFor(startOfWeek(localISO(new Date()))), 'restored for later tests');
+});
+
+test('prefs: opening a day from the Month grid anchors the Week view to the chosen first day', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  try {
+    localStorage.setItem('plaenicke.weekStart', 'mon');
+    reloadFromStorage('plaenicke.weekStart');
+    dayOf('2026-11-22'); // a Sunday: Monday-start week begins 11/16, Sunday-start 11/22
+    assert.equal(labelText('week-label'), weekLabelFor('2026-11-16'));
+  } finally {
+    localStorage.setItem('plaenicke.weekStart', 'sun');
+    reloadFromStorage('plaenicke.weekStart');
+    // dayOf left the Week view on 11/16; step back to the current week.
+    const doc = globalThis.document;
+    const thisSun = startOfWeek(localISO(new Date()));
+    for (let n = 0; labelText('week-label') !== weekLabelFor(thisSun) && n < 200; n += 1) {
+      click(doc.getElementById(labelText('week-label') < weekLabelFor(thisSun) ? 'next-week' : 'prev-week'));
+    }
+  }
+  assert.equal(labelText('week-label'), weekLabelFor(startOfWeek(localISO(new Date()))), 'restored for later tests');
+});
+
+test('prefs: another tab switching time format repaints rendered times and the Updated stamp in 24-hour', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  unseedFeeds();
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(15, 7).getTime() });
+  try {
+    seed([record({ id: 'tf-evt', type: 'event', title: 'tf Seminar', date: localISO(localAt(15, 7)), time: '15:07' })]);
+    resume();
+    const body = dayOf(localISO(localAt(15, 7)));
+    assert.match(allText(body), /3:07 PM/, 'fixture check: 12-hour by default');
+    assert.equal(stampEl().textContent, 'Updated 3:07 PM', 'fixture check');
+    localStorage.setItem('plaenicke.timeFormat', '24h');
+    reloadFromStorage('plaenicke.timeFormat');
+    assert.match(allText(dayBody()), /15:07/, 'a rendered time is 24-hour');
+    assert.doesNotMatch(allText(dayBody()), /PM/);
+    assert.equal(stampEl().textContent, 'Updated 15:07', 'and so is the stamp');
+  } finally {
+    localStorage.removeItem('plaenicke.timeFormat');
+    reloadFromStorage('plaenicke.timeFormat');
+    t.mock.timers.reset();
+    seed([]);
+  }
+  resume();
+});
+
+test('prefs: switching time format in Settings repaints the Updated stamp with no calendars', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  unseedFeeds();
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(13, 5).getTime() });
+  let panel = null;
+  try {
+    resume();
+    assert.equal(stampEl().textContent, 'Updated 1:05 PM', 'fixture check');
+    panel = settingsPanel();
+    click(prefButton(panel.host, '24-hour'));
+    assert.equal(stampEl().textContent, 'Updated 13:05');
+  } finally {
+    if (panel) panel.close();
+    localStorage.removeItem('plaenicke.timeFormat');
+    t.mock.timers.reset();
+    resume();
+  }
+});
+
+test('prefs: switching time format in Settings repaints the Updated stamp from calendar fetch times', async (t) => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  withSession();
+  t.mock.timers.enable({ apis: ['Date'], now: localAt(13, 5).getTime() });
+  let panel = null;
+  try {
+    seedFeedsWithCache([sdFeed('tf-fb')], { 'tf-fb': cacheAt(localAt(13, 0)) });
+    resume();
+    await settle();
+    assert.equal(stampEl().textContent, 'Updated 1:00 PM', 'fixture check');
+    panel = settingsPanel();
+    click(prefButton(panel.host, '24-hour'));
+    assert.equal(stampEl().textContent, 'Updated 13:00');
+  } finally {
+    if (panel) panel.close();
+    localStorage.removeItem('plaenicke.timeFormat');
+    t.mock.timers.reset();
+    unseedFeeds();
+    resume();
+  }
+});
+
+// --- end-of-branch review: pending rollover + week-start flip -----------------
+
+// Sunday 2026-11-22 23:59, Sunday-start week on screen, then Monday-start
+// (lastToday = Sunday 11/22), then the clock passes midnight with NO resume,
+// and the week start flips back to Sunday through `flip`. Today (Mon 11/23)
+// must be on screen: the Sunday-start week 11/22..11/28.
+async function rolloverThenFlip(t, flip) {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 10, 22, 23, 59).getTime() });
+  let panel = null;
+  try {
+    resume();
+    localStorage.setItem('plaenicke.weekStart', 'mon');
+    reloadFromStorage('plaenicke.weekStart');
+    assert.equal(labelText('week-label'), weekLabelFor('2026-11-16'), 'fixture check: Monday-start week holding Sunday 11/22');
+    panel = settingsPanel();
+    t.mock.timers.tick(2 * 60 * 1000); // Monday 11/23 00:01, no resume
+    flip(panel);
+    assert.equal(labelText('week-label'), weekLabelFor('2026-11-22'), 'the week holding Monday 11/23 is on screen');
+    assert.equal(labelText('day-label'), labelFor(new Date(2026, 10, 23)), 'the Day view moved to the new day');
+    assert.equal(labelText('three-day-label'), threeDayLabelFor('2026-11-23'), 'and so did the 3-day view');
+  } finally {
+    if (panel) panel.close();
+    localStorage.setItem('plaenicke.weekStart', 'sun');
+    t.mock.timers.reset();
+    resume();
+  }
+  assert.equal(labelText('week-label'), weekLabelFor(startOfWeek(localISO(new Date()))), 'restored for later tests');
+}
+
+test('prefs: with a day rollover pending, flipping week start in Settings keeps the new today on screen', async (t) => {
+  await rolloverThenFlip(t, (panel) => click(prefButton(panel.host, 'Sunday')));
+});
+
+test('prefs: with a day rollover pending, another tab flipping week start keeps the new today on screen', async (t) => {
+  await rolloverThenFlip(t, () => {
+    localStorage.setItem('plaenicke.weekStart', 'sun');
+    storageEvent('plaenicke.weekStart');
+  });
+});
+
+test('prefs: another tab changing a display pref repaints an open Settings panel', async () => {
+  installFakeLocalStorage();
+  await import('../js/app.js');
+  const panel = settingsPanel();
+  try {
+    const active = () => panel.host.querySelectorAll('button').filter((b) => b._classes.has('active')).map((b) => b.textContent);
+    assert.ok(active().includes('12-hour') && active().includes('Sunday'), 'fixture check');
+    localStorage.setItem('plaenicke.timeFormat', '24h');
+    reloadFromStorage('plaenicke.timeFormat');
+    localStorage.setItem('plaenicke.weekStart', 'mon');
+    reloadFromStorage('plaenicke.weekStart');
+    assert.ok(active().includes('24-hour') && !active().includes('12-hour'), 'Time row follows the other tab');
+    assert.ok(active().includes('Monday') && !active().includes('Sunday'), 'Week row follows the other tab');
+  } finally {
+    panel.close();
+    localStorage.removeItem('plaenicke.timeFormat');
+    localStorage.setItem('plaenicke.weekStart', 'sun');
+    reloadFromStorage('plaenicke.weekStart');
+  }
+});

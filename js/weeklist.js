@@ -9,6 +9,7 @@
 // classes only: an id selector would outrank `[data-press].pressed`
 // (styles.css).
 import { addDays, formatTime } from './timegrid.js';
+import { getTimeFormat } from './prefs.js';
 import { itemTypeClass } from './calendar.js';
 import { upcomingRows } from './today.js';
 import { tickLabel, upcomingTickable } from './todayview.js';
@@ -22,7 +23,8 @@ const DAY_NAME = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 's
 //   items         own items (app.js passes liveItems())
 //   instancesFor  (fromISO, toISO) => instancesForRange(..., fromISO, toISO, ...)
 //                 called once, for exactly the range listed
-//   weekStartISO  the Sunday of the week shown
+//   weekStartISO  the first day of the week shown (Sunday or Monday, per the
+//                 device's week-start preference)
 //   todayISO      the device's today
 // The range is the week's days: from today for the current week ("Rest of
 // this week"), all seven for any other week, past or future ("This week").
@@ -81,6 +83,7 @@ export function renderWeekList(container, list, { onOpen, onSelectDay, onToggleD
     container.appendChild(el('p', 'today-empty', 'Nothing else this week.'));
     return;
   }
+  const fmt = getTimeFormat();
   for (const day of list.days) {
     const block = el('div', 'wlist-day');
     const label = el('button', 'wlist-label', WEEKDAY.format(utcOf(day.date)));
@@ -108,7 +111,7 @@ export function renderWeekList(container, list, { onOpen, onSelectDay, onToggleD
       open.setAttribute('data-item-id', item.id);
       open.addEventListener('click', () => onOpen(item));
       open.append(
-        el('span', 'today-time wlist-time', item.time ? formatTime(item.time) : 'All day'),
+        el('span', 'today-time wlist-time', item.time ? formatTime(item.time, fmt) : 'All day'),
         text,
       );
       li.appendChild(open);

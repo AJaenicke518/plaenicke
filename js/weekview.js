@@ -1,9 +1,12 @@
 // weekview.js — 7 squeezed columns of colored blocks; the "shape of your week".
 // Columns cap at 8 blocks + a "+N" marker so one busy day can't stretch the row.
-import { addDays } from './timegrid.js';
+import { addDays, weekdayNames } from './timegrid.js';
 import { chronoFirst, itemTypeClass } from './calendar.js';
 
-const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+// The head name comes from the date itself (Sunday-indexed), not from the
+// column index, so a Monday-start week reads Mon..Sun.
+const DOW = weekdayNames('sun');
+const dowOf = (iso) => { const [y, m, d] = iso.split('-').map(Number); return new Date(y, m - 1, d).getDay(); };
 
 export function renderWeekView(container, weekStartISO, itemsByDate, todayISO, { onSelectDay }) {
   container.innerHTML = '';
@@ -15,7 +18,7 @@ export function renderWeekView(container, weekStartISO, itemsByDate, todayISO, {
 
     const head = document.createElement('div');
     head.className = 'week-head';
-    head.textContent = DOW[i];
+    head.textContent = DOW[dowOf(dateISO)];
     const num = document.createElement('b');
     num.textContent = String(Number(dateISO.slice(8)));
     head.appendChild(num);
